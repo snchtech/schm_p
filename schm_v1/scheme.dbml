@@ -1,0 +1,315 @@
+Table ALBUM {
+    id int [primary key]
+    name varchar
+    depart_id int
+    unit_id int
+    description varchar
+    date_create datetime
+    date_update datetime
+    version int
+    stable boolean
+}
+
+Table ALBUM_DOCUMENTS {
+    id int [primary key]
+    album_id int [ref: > ALBUM.id]
+    document_id int
+    date_confirm datetime
+}
+
+Table SCHEME {
+    id int [primary key]
+    album_id int [ref: > ALBUM.id]
+    name varchar
+    depart_id int
+    unit_id int
+    description varchar
+    date_create datetime
+    date_update datetime
+    stable boolean
+    format varchar
+    page_number int
+    system varchar
+    shifr varchar
+}
+
+Table SCHEME_DOCUMENTS {
+    id int [primary key]
+    scheme_id int [ref: > SCHEME.id]
+    file_name varchar
+    file_id blob
+    date_update datetime
+    editor_number int
+}
+
+Table SCHEME_VERSION {
+    id int [primary key]
+    scheme_id int [ref: > SCHEME.id]
+    scheme_data text
+    date_update datetime
+    stable boolean
+}
+
+Table SCHEME_NOTE {
+    id int [primary key]
+    note_text text
+}
+
+Table NOTE_SCHEME {
+    id int [primary key]
+    scheme_id int [ref: > SCHEME.id]
+    note_id int [ref: > SCHEME_NOTE.id]
+}
+
+Table SCHEME_TABLE_INFO {
+    id int [primary key]
+    position int
+    label varchar
+    name varchar
+    count int
+    info varchar
+}
+
+Table TABLE_SCHEME {
+    id int [primary key]
+    id_scheme int [ref: > SCHEME.id]
+    id_table_info int [ref: > SCHEME_TABLE_INFO.id]
+}
+
+
+Table ELEMENT {
+    id int [primary key]
+    scheme_id int [ref: > SCHEME.id]
+    album_id int [ref: > ALBUM.id]
+    name varchar
+    status_id int [ref: > ELEMENT_STATUS.id]
+    department_id int
+    unit_id int
+    date_update datetime
+    group_id int
+    element_type int [ref: > ELEMENT_TYPE.id]
+    x_position float
+    y_position float
+    width float
+    height float
+    radius float
+    fill_color varchar
+    created_at datetime
+    element_blob blob
+    show_status boolean
+}
+
+Table ELEMENT_STATUS {
+    id int [primary key]
+    name varchar
+    color_id int
+}
+
+Table ELEMENT_TYPE {
+    id int [primary key]
+    name varchar
+}
+
+Table ELEMENT_TEXT {
+    id int [primary key]
+    text_element_id int
+    element_id int [ref: > ELEMENT.id]
+}
+
+Table UBDN_ELEMENT {
+    id int [primary key]
+    elem_id int [ref: > ELEMENT.id]
+    ubdn_id int
+}
+
+Table UBDN_STATUS_LOG {
+    id int [primary key]
+    ubdn_id int
+    status varchar
+    date_update datetime
+    system_id int [ref: > SYSTEMS.id]
+    source_id int
+}
+
+Table SYSTEMS {
+    id int [primary key]
+    name varchar
+    description varchar
+    type varchar
+    status boolean
+}
+
+Table SYSTEM_SOURCE {
+    id int [primary key]
+    system_id int [ref: > SYSTEMS.id]
+    source varchar
+}
+
+Table PLACE_ELEMENT {
+    id int [primary key]
+    elem_id int [ref: > ELEMENT.id]
+    place_id int
+}
+
+Table GROUP_ELEMENT {
+    id int [primary key]
+    name varchar
+    type_id int [ref: > GROUP_TYPE.id]
+}
+
+Table GROUP_TYPE {
+    id int [primary key]
+    name varchar
+    description varchar
+}
+
+Table ELEMENT_OPTION {
+    id int [primary key]
+    element_id int [ref: > ELEMENT.id]
+    option_id int [ref: > ELEMENT_OPTION_LIBRARY.id]
+    option_value varchar
+}
+
+Table ELEMENT_OPTION_LIBRARY {
+    id int [primary key]
+    name varchar
+    description varchar
+    unit_measurement varchar
+}
+
+Table ELEMENT_MARK {
+    id int [primary key]
+    element_id int [ref: > ELEMENT.id]
+    mark_id int [ref: > MARK.id]
+}
+
+Table MARK {
+    id int [primary key]
+    name varchar
+    type varchar
+    mark_blob blob
+}
+
+Table ZVT {
+    id int [primary key]
+    param_type_id int [ref: > ZVT_PARAMETR.id]
+    location_id int [ref: > ZVT_LOCATION.id]
+    indicator_id int [ref: > ZVT_INDICATOR.id]
+    ios_status boolean
+}
+
+Table ZVT_PARAMETR {
+    id int [primary key]
+    type varchar
+    name varchar
+    mark varchar
+    icon_file blob
+}
+
+Table ZVT_LOCATION {
+    id int [primary key]
+    mark varchar
+    info varchar
+    place_id int
+}
+
+Table ZVT_INDICATOR {
+    id int [primary key]
+    mark varchar
+    info varchar
+}
+
+Table ZVT_IOS {
+    id int [primary key]
+    zvt_id int [ref: > ZVT.id]
+    ios_signal_id int [ref: > IOS_SIGNAL.id]
+}
+
+Table IOS_SIGNAL_TYPE {
+    id int [primary key]
+    mark varchar
+    info varchar
+}
+
+Table IOS_SIGNAL {
+    id int [primary key]
+    name varchar
+    description varchar
+    ios_signal_type_id int [ref: > IOS_SIGNAL_TYPE.id]
+}
+
+Table ZVT_UBDN {
+    id int [primary key]
+    zvt_id int [ref: > ZVT.id]
+    ubdn_id int [ref: > UBDN_ELEMENT.id]
+    place_id int
+}
+
+Table ZVT_KV {
+    id int [primary key]
+    zvt_id int [ref: > ZVT.id]
+    element_id int [ref: > ELEMENT.id]
+}
+
+Table REFERENCE_TYPE {
+    id int [primary key]
+    type varchar
+}
+
+Table REF_ELEMENT {
+    id int [primary key]
+    reference_type int [ref: > REFERENCE_TYPE.id]
+    element_id int [ref: > ELEMENT.id]
+    name varchar
+    point_from float
+    point_to float
+    coordinate_x float
+    coordinate_y float
+    image_src varchar
+    file_blob blob
+    date_update datetime
+    scheme_id int [ref: > SCHEME.id]
+    album_id int [ref: > ALBUM.id]
+    color_id int [ref: > SCHEME_COLORS.id]
+}
+
+Table SWITCHING_FORM {
+    id int [primary key]
+    date_create datetime
+}
+
+Table SWITCHING_ELEMENTS {
+    id int [primary key]
+    switching_id int [ref: > SWITCHING_FORM.id]
+    element_id int [ref: > ELEMENT.id]
+    status boolean
+    color_id int [ref: > SCHEME_COLORS.id]
+}
+
+Table WORK_ORDER {
+    id int [primary key]
+    date_create datetime
+    status boolean
+    work_order_type_id int [ref: > WORK_ORDER_TYPE.id]
+    work_order_actions_id int [ref: > WORK_ORDER_ACTIONS.id]
+}
+
+Table WORK_ORDER_TYPE {
+    id int [primary key]
+    type varchar
+    color_id int [ref: > SCHEME_COLORS.id]
+}
+
+Table WORK_ORDER_ACTIONS {
+    id int [primary key]
+    name varchar
+    description varchar
+    element_color int [ref: > SCHEME_COLORS.id]
+    text_element_color int [ref: > SCHEME_COLORS.id]
+}
+
+Table SCHEME_COLORS {
+    id int [primary key]
+    color_code varchar
+    color_text varchar
+}
