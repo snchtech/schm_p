@@ -1,0 +1,159 @@
+Ось робочий приклад для **Konva.js**, який дає:
+
+* **Zoom + / -** кнопками
+* **Zoom колесиком миші** (зум до курсора)
+* **Reset** (повернення 1:1 і в (0,0))
+* При **scale = 1** елементи мають **рівно ті самі розміри**, що й у вихідних координатах (1:1)
+
+> Важливо: ми зумимо **контейнер (Layer або Group)** через `scale`, а не “перемальовуємо” елементи.
+
+```js
+import Konva from "konva";
+
+/**
+ * Ініціалізація zoom/pan для схеми Konva.
+ * stage — Konva.Stage
+ * options.layer — Konva.Layer або Konva.Group (краще окремий "viewport" group)
+ */
+export function setupZoomControls(stage, {
+  layer,
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 4,
+  // якщо хочеш, щоб Ctrl+wheel теж працювало (як у багатьох редакторах)
+  requireCtrlForWheel = false,
+} = {}) {
+  if (!stage) throw new Error("stage is required");
+  if (!layer) throw new Error("layer (Layer або Group) is required");
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+  function getScale() {
+    // Konva scaleX == scaleY у цьому кейсі
+    return layer.scaleX() || 1;
+  }
+
+  function setScale(nextScale, anchorPointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    // Якщо не передали anchor — зум відносно центру вікна stage
+    const anchor = anchorPointOnStage ?? {
+      x: stage.width() / 2,
+      y: stage.height() / 2,
+    };
+
+    // Позиція "світу" (layer) в координатах сцени до зміни масштабу
+    const layerPos = layer.position();
+
+    // Переводимо anchor (в координатах сцени) у "світові" координати layer
+    // worldPoint = (anchor - layerPos) / oldScale
+    const worldPoint = {
+      x: (anchor.x - layerPos.x) / oldScale,
+      y: (anchor.y - layerPos.y) / oldScale,
+    };
+
+    // Ставимо scale
+    layer.scale({ x: newScale, y: newScale });
+
+    // Перераховуємо позицію layer так, щоб worldPoint лишився під курсором
+    // newLayerPos = anchor - worldPoint * newScale
+    const newLayerPos = {
+      x: anchor.x - worldPoint.x * newScale,
+      y: anchor.y - worldPoint.y * newScale,
+    };
+
+    layer.position(newLayerPos);
+    layer.batchDraw();
+  }
+
+  // --- Wheel zoom (до курсора) ---
+  function onWheel(e) {
+    // Konva event: e.evt — native wheel event
+    e.evt.preventDefault();
+
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1; // deltaY вниз -> zoom out
+    const oldScale = getScale();
+
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+    setScale(oldScale * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // --- Кнопки + / - / reset ---
+  function zoomIn() {
+    setScale(getScale() * zoomStep);
+  }
+
+  function zoomOut() {
+    setScale(getScale() / zoomStep);
+  }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+  }
+
+  // Корисно: API для зовнішніх кнопок
+  return {
+    zoomIn,
+    zoomOut,
+    reset,
+    getScale,
+    setScale,
+    destroy() {
+      stage.off("wheel", onWheel);
+    },
+  };
+}
+```
+
+### Як підключити (приклад)
+
+```js
+const stage = new Konva.Stage({
+  container: "container",
+  width: 1200,
+  height: 800,
+});
+
+const layer = new Konva.Layer();
+stage.add(layer);
+
+// Малювання схеми (елементи, групи, лінії...)
+layer.add(new Konva.Rect({ x: 50, y: 50, width: 200, height: 100, stroke: "black" }));
+layer.draw();
+
+const zoomApi = setupZoomControls(stage, { layer });
+
+// Кнопки панелі
+document.getElementById("btnZoomIn").addEventListener("click", zoomApi.zoomIn);
+document.getElementById("btnZoomOut").addEventListener("click", zoomApi.zoomOut);
+document.getElementById("btnReset").addEventListener("click", zoomApi.reset);
+```
+
+### Мінімальна HTML-панель
+
+```html
+<div style="display:flex; gap:8px; margin-bottom:8px;">
+  <button id="btnZoomOut">-</button>
+  <button id="btnZoomIn">+</button>
+  <button id="btnReset">Reset</button>
+</div>
+<div id="container"></div>
+```
+
+---
+
+#### Нотатка про “розміри елементів не повинні змінюватись при 1:1”
+
+Це автоматично виконується: при `scale = 1` — **елементи мають оригінальні розміри** (бо ми не змінюємо їх width/height, лише scale контейнера).
+
+Якщо хочеш ще й **обмежити зум так, щоб лінії (stroke) не товстішали** при збільшенні — це окрема опція (`strokeScaleEnabled: false` на Shape), скажеш — додам приклад під твої типи елементів (Rect/Line/Text/Arrow/Group).

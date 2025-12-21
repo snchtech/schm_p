@@ -1,0 +1,216 @@
+Ок — тоді робимо “як у редакторах” так:
+
+* **Stage** = вікно
+* **Layer** = “камера/viewport”, ми міняємо **layer.scale()** і **layer.position()**
+* **Zoom**: колесико до курсора + кнопки + reset
+* **Pan**: перетягування **середньою кнопкою миші** або **Space + LMB** (як у багатьох редакторах)
+
+Нижче готовий модуль.
+
+```js
+/**
+ * Konva editor-like zoom & pan:
+ * - Zoom by wheel (to cursor) + buttons +/- + reset
+ * - Pan by MMB drag OR Space+LMB drag
+ *
+ * Важливо: зум/пан застосовуються до LAYER (контейнер схеми).
+ * При scale=1 схема 1:1 (без зміни "оригінальних" розмірів елементів).
+ */
+export function setupLayerZoomPan(stage, layer, {
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 6,
+  requireCtrlForWheel = false,
+  panMode = "mmb_or_space", // "mmb" | "space" | "mmb_or_space"
+} = {}) {
+  if (!stage) throw new Error("stage is required");
+  if (!layer) throw new Error("layer is required");
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+
+  // ---------- ZOOM ----------
+  const getScale = () => layer.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? { x: stage.width() / 2, y: stage.height() / 2 };
+    const layerPos = layer.position();
+
+    // worldPoint = (stagePoint - layerPos) / oldScale
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    // scale
+    layer.scale({ x: newScale, y: newScale });
+
+    // keep worldPoint under cursor
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+  }
+
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    // deltaY вниз -> zoom out
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // ---------- PAN ----------
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const keyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      // щоб при Space сторінка не скролилась
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const keyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  // підпишемось на вікно, щоб Space ловився навіть коли фокус не на canvas
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+
+    if (!canStartPan(evt)) return;
+
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    container.style.cursor = "grabbing";
+
+    // щоб не стартувався drag елементів/selection
+    evt.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({
+      x: layer.x() + dx,
+      y: layer.y() + dy,
+    });
+
+    lastClient = { x: evt.clientX, y: evt.clientY };
+    layer.batchDraw();
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    lastClient = null;
+
+    // якщо пробіл затиснутий — залишаємо "grab"
+    container.style.cursor = spaceDown ? "grab" : "default";
+  }
+
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  // ---------- API ----------
+  function zoomIn() {
+    zoomToPoint(getScale() * zoomStep);
+  }
+
+  function zoomOut() {
+    zoomToPoint(getScale() / zoomStep);
+  }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+  }
+
+  function destroy() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mousemove", onMouseMove);
+    stage.off("mouseup", stopPan);
+    stage.off("mouseleave", stopPan);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+
+    container.style.cursor = "default";
+  }
+
+  return {
+    zoomIn,
+    zoomOut,
+    reset,
+    getScale,
+    setScale: (s) => zoomToPoint(s),
+    destroy,
+  };
+}
+```
+
+### Як використати
+
+```js
+const zoomPan = setupLayerZoomPan(stage, layer, {
+  panMode: "mmb_or_space",      // MMB або Space+LMB
+  requireCtrlForWheel: false,   // true якщо хочеш Ctrl+wheel
+});
+
+// кнопки
+btnPlus.onclick  = zoomPan.zoomIn;
+btnMinus.onclick = zoomPan.zoomOut;
+btnReset.onclick = zoomPan.reset;
+
+// при демонтажі (React/Next) обов’язково:
+ // zoomPan.destroy();
+```
+
+---
+
+### Дрібна порада для UX (щоб елементи не “чіплялись” під час панорамування)
+
+Якщо в тебе є draggable елементи, то при пані **Space+LMB** інколи може стартувати drag шейпів. Найпростіше рішення: під час `isPanning=true` тимчасово вимикати їх draggable (або ставити `stage.draggable(false)` і рухати layer як вище). Якщо скажеш, чи елементи draggable — дам акуратний хук, який тимчасово вимикає drag тільки на час панорамування.
+
+Хочеш ще “профі-фічу” як у редакторах: **подвійний клік = zoom to fit (вписати схему в екран)**?

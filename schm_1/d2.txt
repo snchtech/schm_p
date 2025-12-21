@@ -1,0 +1,193 @@
+Зрозумів. У “графічних редакторах” зазвичай зум/пан робиться так:
+
+* **Stage** лишається “вікном/viewport” (його розмір = контейнер на екрані)
+* А **весь контент** сидить у **одному Group (або Layer)** всередині stage
+* Ми масштабуємо/рухаємо **саме цей Group/Layer**, а не окремі елементи
+
+Konva **технічно дозволяє** `stage.scale()`, але це часто створює проблеми з координатами, drag&drop, hit detection і т.д. Тому “редакторний” підхід у Konva — зумити **контентний контейнер** (Group), який містить всю схему.
+
+Нижче — код саме під це: `viewport` group = “контейнер схеми”.
+
+---
+
+## 1) Структура: Stage → Layer → Viewport(Group) → ваші елементи
+
+```js
+import Konva from "konva";
+
+const stage = new Konva.Stage({
+  container: "container",
+  width: 1200,
+  height: 800,
+});
+
+const layer = new Konva.Layer();
+stage.add(layer);
+
+// ВАЖЛИВО: сюди додаєш ВСЮ схему
+const viewport = new Konva.Group({
+  x: 0,
+  y: 0,
+  scaleX: 1,
+  scaleY: 1,
+  draggable: false, // за потреби можна ввімкнути панорамування
+});
+
+layer.add(viewport);
+
+// приклад елемента
+viewport.add(new Konva.Rect({ x: 50, y: 50, width: 200, height: 100, stroke: "black" }));
+
+layer.draw();
+```
+
+---
+
+## 2) Zoom як у редакторах: wheel зум до курсора + кнопки + reset
+
+```js
+function setupEditorZoom(stage, viewport, {
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 6,
+  requireCtrlForWheel = false, // якщо хочеш Ctrl+wheel як у Figma/PS
+} = {}) {
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+  const getScale = () => viewport.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? { x: stage.width() / 2, y: stage.height() / 2 };
+
+    // поточна позиція viewport
+    const vpPos = viewport.position();
+
+    // worldPoint = (stagePoint - viewportPos) / oldScale
+    const worldPoint = {
+      x: (p.x - vpPos.x) / oldScale,
+      y: (p.y - vpPos.y) / oldScale,
+    };
+
+    // ставимо scale
+    viewport.scale({ x: newScale, y: newScale });
+
+    // newPos = stagePoint - worldPoint * newScale
+    viewport.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    viewport.getLayer()?.batchDraw();
+  }
+
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1; // вниз = zoom out
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  return {
+    zoomIn: () => zoomToPoint(getScale() * zoomStep),
+    zoomOut: () => zoomToPoint(getScale() / zoomStep),
+    reset: () => {
+      viewport.position({ x: 0, y: 0 });
+      viewport.scale({ x: 1, y: 1 });
+      viewport.getLayer()?.batchDraw();
+    },
+    setScale: (scale) => zoomToPoint(scale),
+    getScale,
+    destroy: () => stage.off("wheel", onWheel),
+  };
+}
+```
+
+### Підключення кнопок
+
+```js
+const zoomApi = setupEditorZoom(stage, viewport, { requireCtrlForWheel: false });
+
+document.getElementById("btnZoomIn").addEventListener("click", zoomApi.zoomIn);
+document.getElementById("btnZoomOut").addEventListener("click", zoomApi.zoomOut);
+document.getElementById("btnReset").addEventListener("click", zoomApi.reset);
+```
+
+---
+
+## 3) (Опційно) Панорамування “рукою” як у редакторах (Space + Drag / Middle mouse)
+
+Ось простий варіант: **середня кнопка миші** перетягує viewport.
+
+```js
+function setupPan(stage, viewport) {
+  let isPanning = false;
+  let last = null;
+
+  function down(e) {
+    const evt = e.evt;
+    // middle button
+    if (evt.button === 1) {
+      isPanning = true;
+      last = { x: evt.clientX, y: evt.clientY };
+      stage.container().style.cursor = "grab";
+    }
+  }
+
+  function move(e) {
+    if (!isPanning || !last) return;
+    const evt = e.evt;
+
+    const dx = evt.clientX - last.x;
+    const dy = evt.clientY - last.y;
+
+    viewport.x(viewport.x() + dx);
+    viewport.y(viewport.y() + dy);
+
+    last = { x: evt.clientX, y: evt.clientY };
+    viewport.getLayer()?.batchDraw();
+  }
+
+  function up() {
+    if (!isPanning) return;
+    isPanning = false;
+    last = null;
+    stage.container().style.cursor = "default";
+  }
+
+  stage.on("mousedown", down);
+  stage.on("mousemove", move);
+  stage.on("mouseup", up);
+
+  return () => {
+    stage.off("mousedown", down);
+    stage.off("mousemove", move);
+    stage.off("mouseup", up);
+  };
+}
+```
+
+---
+
+### Чому це “як у редакторах”
+
+Бо:
+
+* Stage = “вікно” (екран/viewport), не змінюється
+* Вся схема — в одному контейнері `viewport`
+* Зум прив’язаний до курсора (wheel zoom to pointer)
+* Reset повертає до 1:1
+
+---
+
+Якщо ти скажеш, **де саме ти тримаєш схему** (Layer чи Group), і чи треба **панорамування** (drag сцени рукою), я піджену код під твою структуру Next.js + Konva (включно з React refs і clean-up в `useEffect`).

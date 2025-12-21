@@ -1,0 +1,240 @@
+Так — **цей код майже такий самий** і в `react-konva` він **працюватиме без змін**, якщо ти:
+
+1. передаси в нього **реальні інстанси Konva**:
+
+* `stage = stageRef.current.getStage()`
+* `layer = layerRef.current` (це вже Konva.Layer)
+
+2. викличеш його в `useEffect` і зробиш `destroy()` у cleanup.
+
+Є 2 нюанси, які я б одразу допрацював під “редактор”:
+
+### Нюанс №1: щоб Space не скролив сторінку
+
+Ти вже поставив `{ passive: false }` — ок 👍
+Але інколи браузер скролить сторінку ще й на `wheel`. Якщо canvas в скрол-контейнері — ок, якщо ні — можна додатково блокувати скрол тільки коли курсор над stage (не обов’язково).
+
+### Нюанс №2: draggable конфлікт під час панорамування
+
+Твій код панорамування **не вимикає draggable**, тому елементи можуть “чіплятись”. Для цього і потрібен lock/unlock.
+
+Нижче — **твій код**, але з мінімальною вставкою draggable-lock (і з коректним unlock в destroy).
+
+---
+
+## ✅ Твій `setupLayerZoomPan`, але з draggable lock
+
+```js
+function createDraggableLock(layer) {
+  const prev = new Map();
+  let locked = false;
+
+  function lock() {
+    if (locked) return;
+    locked = true;
+    prev.clear();
+
+    layer.find("*").each((node) => {
+      if (typeof node.draggable === "function") {
+        prev.set(node._id, node.draggable());
+        node.draggable(false);
+      }
+    });
+  }
+
+  function unlock() {
+    if (!locked) return;
+    locked = false;
+
+    layer.find("*").each((node) => {
+      if (prev.has(node._id)) node.draggable(prev.get(node._id));
+    });
+
+    prev.clear();
+  }
+
+  return { lock, unlock };
+}
+
+/**
+ * Konva editor-like zoom & pan (Layer as viewport).
+ */
+export function setupLayerZoomPan(stage, layer, {
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 6,
+  requireCtrlForWheel = false,
+  panMode = "mmb_or_space",
+} = {}) {
+  if (!stage) throw new Error("stage is required");
+  if (!layer) throw new Error("layer is required");
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+  const dragLock = createDraggableLock(layer);
+
+  // ---------- ZOOM ----------
+  const getScale = () => layer.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? { x: stage.width() / 2, y: stage.height() / 2 };
+    const layerPos = layer.position();
+
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    layer.scale({ x: newScale, y: newScale });
+
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+  }
+
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // ---------- PAN ----------
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const keyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const keyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+    if (!canStartPan(evt)) return;
+
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    dragLock.lock();                 // 🔒 вимикаємо draggable
+    container.style.cursor = "grabbing";
+    evt.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({ x: layer.x() + dx, y: layer.y() + dy });
+
+    lastClient = { x: evt.clientX, y: evt.clientY };
+    layer.batchDraw();
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    lastClient = null;
+
+    dragLock.unlock();               // 🔓 повертаємо draggable
+    container.style.cursor = spaceDown ? "grab" : "default";
+  }
+
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  // ---------- API ----------
+  function zoomIn() { zoomToPoint(getScale() * zoomStep); }
+  function zoomOut() { zoomToPoint(getScale() / zoomStep); }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+  }
+
+  function destroy() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mousemove", onMouseMove);
+    stage.off("mouseup", stopPan);
+    stage.off("mouseleave", stopPan);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+
+    // на всяк випадок
+    dragLock.unlock();
+    container.style.cursor = "default";
+  }
+
+  return { zoomIn, zoomOut, reset, getScale, setScale: (s) => zoomToPoint(s), destroy };
+}
+```
+
+---
+
+## Як це викликати в react-konva
+
+```jsx
+const stage = stageRef.current.getStage();
+const layer = layerRef.current;
+
+useEffect(() => {
+  if (!stage || !layer) return;
+
+  const api = setupLayerZoomPan(stage, layer, { panMode: "mmb_or_space" });
+  return () => api.destroy();
+}, []);
+```
+
+---
+
+### Висновок
+
+* **Так**, твій код **буде таким самим** у react-konva.
+* Різниця лише в **refs + useEffect cleanup**.
+* Для “редакторного” UX я б **обов’язково** додав draggable-lock (як вище).
+
+Якщо скажеш: ти хочеш панорамувати **тільки коли Space затиснуто** (без MMB) чи залишаємо обидва — піджену під твою UX-логіку.

@@ -1,0 +1,215 @@
+Добре, тоді покажу **як саме інтегрувати multi-select + group drag у твою існуючу `LineElement`**, без абстракцій.
+
+Нижче — **мінімально інвазивний**, але **правильний** підхід для редактора схем (Konva-style).
+
+---
+
+## 1️⃣ LineElement — робимо selectable + group-drag ready
+
+### 🔹 Що додаємо:
+
+* `id`
+* `name="selectable"`
+* `onDragStart`, `onDragMove`
+* передаємо `evt`, а не просто `id`
+
+```jsx
+// app/component/graph/LineElement.js
+import React from 'react';
+import { Line } from 'react-konva';
+
+const LineElement = ({
+  el,
+  isSelected,
+  onSelect,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  onTransformEnd
+}) => {
+  return (
+    <Line
+      id={el.id}
+      name="selectable"
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      stroke={isSelected ? '#1e90ff' : 'black'}
+      strokeWidth={2}
+      rotation={el.rotation}
+      draggable
+      onClick={(e) => onSelect(el.id, e)}
+      onTap={(e) => onSelect(el.id, e)}
+      onDragStart={(e) => onDragStart(el.id, e)}
+      onDragMove={(e) => onDragMove(el.id, e)}
+      onDragEnd={(e) => onDragEnd(el.id, e)}
+      onTransformEnd={(e) => onTransformEnd(el.id, e)}
+    />
+  );
+};
+
+export default LineElement;
+```
+
+---
+
+## 2️⃣ Сцена (Stage + Layer) — логіка multi-select
+
+Це **головний компонент редактора**, де зберігається state.
+
+### Основні ідеї:
+
+* `selectedIds` — масив виділених елементів
+* `Shift / Ctrl / Cmd` → multi-select
+* Drag одного → рух усіх виділених
+
+---
+
+### 🔹 State та refs
+
+```jsx
+const [elements, setElements] = useState(linesFromDB);
+const [selectedIds, setSelectedIds] = useState([]);
+
+const stageRef = useRef(null);
+const layerRef = useRef(null);
+
+// збереження стартових позицій при груповому drag
+const dragGroupRef = useRef(null);
+```
+
+---
+
+### 🔹 Select (single / multi)
+
+```js
+const handleSelect = (id, evt) => {
+  const multi =
+    evt.evt.shiftKey ||
+    evt.evt.ctrlKey ||
+    evt.evt.metaKey;
+
+  setSelectedIds((prev) => {
+    if (!multi) return [id];
+    if (prev.includes(id)) {
+      return prev.filter((x) => x !== id);
+    }
+    return [...prev, id];
+  });
+};
+```
+
+---
+
+### 🔹 Drag START — фіксуємо старт
+
+```js
+const handleDragStart = (id, evt) => {
+  if (!selectedIds.includes(id)) {
+    setSelectedIds([id]);
+  }
+
+  const pointer = stageRef.current.getPointerPosition();
+
+  const startPositions = {};
+  elements.forEach((el) => {
+    if (selectedIds.includes(el.id) || el.id === id) {
+      startPositions[el.id] = { x: el.x, y: el.y };
+    }
+  });
+
+  dragGroupRef.current = {
+    startPointer: pointer,
+    startPositions
+  };
+};
+```
+
+---
+
+### 🔹 Drag MOVE — рухаємо ВСІ вибрані
+
+```js
+const handleDragMove = (id, evt) => {
+  const ctx = dragGroupRef.current;
+  if (!ctx) return;
+
+  const pointer = stageRef.current.getPointerPosition();
+  const dx = pointer.x - ctx.startPointer.x;
+  const dy = pointer.y - ctx.startPointer.y;
+
+  setElements((prev) =>
+    prev.map((el) => {
+      if (!ctx.startPositions[el.id]) return el;
+
+      const base = ctx.startPositions[el.id];
+      return {
+        ...el,
+        x: base.x + dx,
+        y: base.y + dy
+      };
+    })
+  );
+};
+```
+
+---
+
+### 🔹 Drag END
+
+```js
+const handleDragEnd = () => {
+  dragGroupRef.current = null;
+};
+```
+
+---
+
+## 3️⃣ Рендер ліній
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1200}
+  height={800}
+>
+  <Layer ref={layerRef}>
+    {elements.map((el) => (
+      <LineElement
+        key={el.id}
+        el={el}
+        isSelected={selectedIds.includes(el.id)}
+        onSelect={handleSelect}
+        onDragStart={handleDragStart}
+        onDragMove={handleDragMove}
+        onDragEnd={handleDragEnd}
+        onTransformEnd={() => {}}
+      />
+    ))}
+  </Layer>
+</Stage>
+```
+
+---
+
+## 4️⃣ Що ти отримуєш 💡
+
+✅ Клік — вибір
+✅ Shift/Ctrl — multi-select
+✅ Drag будь-якої лінії → рух усіх виділених
+✅ Без Group (елементи залишаються незалежними)
+✅ Готово для збереження в БД (`x/y/points`)
+
+---
+
+## 5️⃣ Наступні логічні кроки (рекомендую)
+
+1. 🔲 **Selection rectangle (drag-area)**
+2. 🔗 **Multi-select Rect + Line разом**
+3. 📦 **Temporary Group wrapper** (для масштабування)
+4. 💾 **Undo / Redo stack**
+5. 🧠 **Snap / align (grid, angles)**
+
+Якщо хочеш — наступним кроком:
+👉 додамо **рамку виділення мишею**
+👉 або **іконку “⋮ → Видалити” для multi-select**

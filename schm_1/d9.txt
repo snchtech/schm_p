@@ -1,0 +1,261 @@
+Ось робочий приклад для **React + react-konva**, який дає:
+
+* **рамку виділення** (drag-to-select)
+* **multi-select** (Shift/Ctrl/Cmd додає/знімає елемент)
+* **перетягування групи**: тягнеш будь-який з виділених — рухаються всі виділені
+* **Transformer** на кілька елементів (показує рамку/ручки)
+
+> Ідея: виділяємо через `selectedIds`, а під час drag одного елемента — зсуваємо всі інші на той самий `dx/dy`.
+
+```jsx
+import React, { useMemo, useRef, useState, useEffect } from "react";
+import { Stage, Layer, Rect, Line, Transformer } from "react-konva";
+
+function rectsIntersect(a, b) {
+  return !(
+    a.x > b.x + b.width ||
+    a.x + a.width < b.x ||
+    a.y > b.y + b.height ||
+    a.y + a.height < b.y
+  );
+}
+
+function normalizeRect(r) {
+  const x = Math.min(r.x, r.x + r.width);
+  const y = Math.min(r.y, r.y + r.height);
+  const width = Math.abs(r.width);
+  const height = Math.abs(r.height);
+  return { x, y, width, height };
+}
+
+export default function MultiSelectCanvas() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+  const trRef = useRef(null);
+
+  // DEMO elements (підстав свої з БД / стану редактора)
+  const [elements, setElements] = useState([
+    { id: "r1", type: "rect", x: 60, y: 60, width: 120, height: 70 },
+    { id: "r2", type: "rect", x: 240, y: 90, width: 140, height: 90 },
+    { id: "r3", type: "rect", x: 140, y: 220, width: 160, height: 80 },
+  ]);
+
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [selection, setSelection] = useState({
+    visible: false,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+  });
+
+  // Для групового drag: стартові позиції всіх виділених + старт мишки
+  const dragGroupRef = useRef(null);
+
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  // ----- Transformer attach -----
+  useEffect(() => {
+    const tr = trRef.current;
+    const layer = layerRef.current;
+    if (!tr || !layer) return;
+
+    const nodes = selectedIds
+      .map((id) => layer.findOne(`#${id}`))
+      .filter(Boolean);
+
+    tr.nodes(nodes);
+    tr.getLayer()?.batchDraw();
+  }, [selectedIds, elements]);
+
+  // ----- Selection rectangle: Stage handlers -----
+  const onStageMouseDown = (e) => {
+    // клік по пустому місцю -> починаємо рамку виділення
+    const stage = stageRef.current;
+    const clickedOnEmpty = e.target === stage;
+    if (!clickedOnEmpty) return;
+
+    const p = stage.getPointerPosition();
+    setSelection({
+      visible: true,
+      x: p.x,
+      y: p.y,
+      width: 0,
+      height: 0,
+    });
+
+    // без модифікатора — знімаємо виділення одразу
+    const evt = e.evt;
+    const multiKey = evt.shiftKey || evt.ctrlKey || evt.metaKey;
+    if (!multiKey) setSelectedIds([]);
+  };
+
+  const onStageMouseMove = () => {
+    if (!selection.visible) return;
+    const stage = stageRef.current;
+    const p = stage.getPointerPosition();
+
+    setSelection((s) => ({
+      ...s,
+      width: p.x - s.x,
+      height: p.y - s.y,
+    }));
+  };
+
+  const onStageMouseUp = () => {
+    if (!selection.visible) return;
+
+    const normSel = normalizeRect(selection);
+
+    // беремо Konva-ноди й перевіряємо перетин рамки з їх bounding box
+    const layer = layerRef.current;
+    const nodes = layer.find(".selectable");
+    const hitIds = [];
+
+    nodes.forEach((n) => {
+      const box = n.getClientRect({ relativeTo: layer });
+      if (rectsIntersect(normSel, box)) {
+        hitIds.push(n.id());
+      }
+    });
+
+    setSelectedIds((prev) => {
+      // якщо рамкою виділяємо — це зазвичай “новий сет”
+      // але якщо треба “додати рамкою” при Shift/Ctrl — можна розширити логіку
+      return hitIds;
+    });
+
+    setSelection((s) => ({ ...s, visible: false, width: 0, height: 0 }));
+  };
+
+  // ----- Click select on element -----
+  const onSelectElement = (id, evt) => {
+    const e = evt.evt;
+    const multiKey = e.shiftKey || e.ctrlKey || e.metaKey;
+
+    setSelectedIds((prev) => {
+      if (!multiKey) return [id];
+      // toggle
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      return [...prev, id];
+    });
+  };
+
+  // ----- Drag group logic -----
+  const onDragStartElement = (id, evt) => {
+    // якщо тягнемо елемент не з виділення — спочатку виділяємо його
+    if (!selectedSet.has(id)) setSelectedIds([id]);
+
+    const stage = stageRef.current;
+    const pointer = stage.getPointerPosition();
+
+    // зберігаємо стартові позиції всіх виділених
+    const startPositions = {};
+    elements.forEach((el) => {
+      if (selectedSet.has(el.id) || el.id === id) {
+        startPositions[el.id] = { x: el.x, y: el.y };
+      }
+    });
+
+    dragGroupRef.current = {
+      anchorId: id,
+      startPointer: pointer,
+      startPositions,
+    };
+  };
+
+  const onDragMoveElement = (id, evt) => {
+    const stage = stageRef.current;
+    const p = stage.getPointerPosition();
+    const ctx = dragGroupRef.current;
+    if (!ctx) return;
+
+    const dx = p.x - ctx.startPointer.x;
+    const dy = p.y - ctx.startPointer.y;
+
+    setElements((prev) =>
+      prev.map((el) => {
+        if (!ctx.startPositions[el.id]) return el;
+        const base = ctx.startPositions[el.id];
+        return { ...el, x: base.x + dx, y: base.y + dy };
+      })
+    );
+  };
+
+  const onDragEndElement = () => {
+    dragGroupRef.current = null;
+  };
+
+  // ----- Render elements -----
+  return (
+    <Stage
+      ref={stageRef}
+      width={900}
+      height={600}
+      onMouseDown={onStageMouseDown}
+      onMouseMove={onStageMouseMove}
+      onMouseUp={onStageMouseUp}
+      style={{ border: "1px solid #ddd", background: "#fff" }}
+    >
+      <Layer ref={layerRef}>
+        {/* selection rectangle */}
+        {selection.visible && (
+          <Rect
+            x={normalizeRect(selection).x}
+            y={normalizeRect(selection).y}
+            width={normalizeRect(selection).width}
+            height={normalizeRect(selection).height}
+            fill="rgba(0, 161, 255, 0.15)"
+            stroke="rgba(0, 161, 255, 0.9)"
+            dash={[6, 4]}
+            listening={false}
+          />
+        )}
+
+        {elements.map((el) => {
+          const isSelected = selectedSet.has(el.id);
+
+          return (
+            <Rect
+              key={el.id}
+              id={el.id}
+              name="selectable"
+              x={el.x}
+              y={el.y}
+              width={el.width}
+              height={el.height}
+              fill={isSelected ? "rgba(0,0,0,0.06)" : "white"}
+              stroke={isSelected ? "#00A1FF" : "black"}
+              strokeWidth={2}
+              draggable
+              onClick={(evt) => onSelectElement(el.id, evt)}
+              onTap={(evt) => onSelectElement(el.id, evt)}
+              onDragStart={(evt) => onDragStartElement(el.id, evt)}
+              onDragMove={(evt) => onDragMoveElement(el.id, evt)}
+              onDragEnd={onDragEndElement}
+            />
+          );
+        })}
+
+        <Transformer
+          ref={trRef}
+          rotateEnabled={false}
+          // якщо хочеш ресайз групи — можна увімкнути, але тоді потрібна логіка масштабування кожного el
+          enabledAnchors={[]}
+        />
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+### Як адаптувати під твої елементи (Line, Circle, Group тощо)
+
+1. Дай кожному Konva-об’єкту:
+
+   * `id={el.id}`
+   * `name="selectable"`
+2. У стані `elements` тримай мінімум `id, x, y` (і що потрібно для малювання: points, radius…).
+3. У `onDragMoveElement` змінюй **тільки** `x/y` для всіх виділених.
+
+Якщо покажеш, як у тебе організований `elements` (структура el для Rect/Line та де зберігається state), я піджену цей приклад прямо під твої файли (наприклад, під `LineElement.js` і загальний компонент сцени).

@@ -1,0 +1,265 @@
+Підійде майже **1:1**. У `react-konva` ти так само працюєш з **Konva.Stage / Konva.Layer** (це ті самі об’єкти), просто дістаєш їх через **refs** і вішаєш слухачі в `useEffect`, а на `unmount` — робиш `destroy()`.
+
+Нижче — **готовий варіант саме для react-konva** (zoom+/-/reset, wheel zoom до курсора, pan MMB або Space+LMB, і “лок” draggable).
+
+---
+
+## 1) Хелпер: lock/unlock draggable для Layer
+
+```js
+export function createDraggableLock(layer) {
+  const prev = new Map();
+  let locked = false;
+
+  function lock() {
+    if (locked) return;
+    locked = true;
+    prev.clear();
+
+    layer.find("*").each((node) => {
+      if (typeof node.draggable === "function") {
+        prev.set(node._id, node.draggable());
+        node.draggable(false);
+      }
+    });
+  }
+
+  function unlock() {
+    if (!locked) return;
+    locked = false;
+
+    layer.find("*").each((node) => {
+      if (prev.has(node._id)) node.draggable(prev.get(node._id));
+    });
+
+    prev.clear();
+  }
+
+  return { lock, unlock };
+}
+```
+
+---
+
+## 2) Хелпер: setup zoom+pan на Layer (react-konva friendly)
+
+```js
+import { createDraggableLock } from "./createDraggableLock";
+
+export function setupLayerZoomPan(stage, layer, {
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 6,
+  requireCtrlForWheel = false,
+  panMode = "mmb_or_space", // "mmb" | "space" | "mmb_or_space"
+} = {}) {
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+  const dragLock = createDraggableLock(layer);
+
+  const getScale = () => layer.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+    const p = pointOnStage ?? { x: stage.width() / 2, y: stage.height() / 2 };
+
+    const layerPos = layer.position();
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    layer.scale({ x: newScale, y: newScale });
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+  }
+
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  // ---- PAN ----
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const onKeyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const onKeyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown, { passive: false });
+  window.addEventListener("keyup", onKeyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function startPan(evt) {
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+    dragLock.lock();
+    container.style.cursor = "grabbing";
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    lastClient = null;
+    dragLock.unlock();
+    container.style.cursor = spaceDown ? "grab" : "default";
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+    if (!canStartPan(evt)) return;
+    evt.preventDefault();
+    startPan(evt);
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({ x: layer.x() + dx, y: layer.y() + dy });
+    lastClient = { x: evt.clientX, y: evt.clientY };
+    layer.batchDraw();
+  }
+
+  stage.on("wheel", onWheel);
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  return {
+    zoomIn: () => zoomToPoint(getScale() * zoomStep),
+    zoomOut: () => zoomToPoint(getScale() / zoomStep),
+    reset: () => {
+      layer.scale({ x: 1, y: 1 });
+      layer.position({ x: 0, y: 0 });
+      layer.batchDraw();
+    },
+    destroy: () => {
+      stage.off("wheel", onWheel);
+      stage.off("mousedown", onMouseDown);
+      stage.off("mousemove", onMouseMove);
+      stage.off("mouseup", stopPan);
+      stage.off("mouseleave", stopPan);
+
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+
+      // на всяк випадок
+      dragLock.unlock();
+      container.style.cursor = "default";
+    },
+  };
+}
+```
+
+---
+
+## 3) React-konva компонент (повний приклад)
+
+```jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Stage, Layer, Rect } from "react-konva";
+import { setupLayerZoomPan } from "./setupLayerZoomPan";
+
+export default function SchemeEditor() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const zoomApiRef = useRef(null);
+
+  const [size, setSize] = useState({ w: 1200, h: 800 });
+
+  // якщо треба авто-ресайз під контейнер
+  useEffect(() => {
+    const onResize = () => setSize({ w: window.innerWidth - 40, h: window.innerHeight - 140 });
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    const stage = stageRef.current?.getStage();
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    zoomApiRef.current = setupLayerZoomPan(stage, layer, {
+      panMode: "mmb_or_space",
+      requireCtrlForWheel: false,
+    });
+
+    return () => {
+      zoomApiRef.current?.destroy();
+      zoomApiRef.current = null;
+    };
+  }, []);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <button onClick={() => zoomApiRef.current?.zoomOut()}>-</button>
+        <button onClick={() => zoomApiRef.current?.zoomIn()}>+</button>
+        <button onClick={() => zoomApiRef.current?.reset()}>Reset</button>
+      </div>
+
+      <Stage ref={stageRef} width={size.w} height={size.h} style={{ border: "1px solid #ccc" }}>
+        <Layer ref={layerRef}>
+          {/* Вся схема тут */}
+          <Rect x={50} y={50} width={200} height={100} stroke="black" draggable />
+          <Rect x={300} y={200} width={160} height={120} stroke="black" draggable />
+        </Layer>
+      </Stage>
+    </div>
+  );
+}
+```
+
+---
+
+### Чим react-konva відрізняється від “чистого Konva” у цьому кейсі?
+
+Тільки тим, **як ти отримуєш stage/layer** і **де вішаєш/знімаєш** події:
+
+* refs → `stageRef.current.getStage()`, `layerRef.current`
+* `useEffect` + `return cleanup`
+
+Логіка зума/пану/локання draggable — така сама.
+
+Якщо в тебе шарів кілька (наприклад `gridLayer`, `mainLayer`, `uiLayer`) — напиши структуру, і я підкажу, який саме layer краще робити “камерою”, щоб UI (наприклад хендли/toolbar) не зумився разом зі схемою.

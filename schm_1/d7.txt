@@ -1,0 +1,318 @@
+```js
+// Konva “editor-like” delete UI:
+// - click shape/node -> shows “⋮” icon near it
+// - click “⋮” -> opens small menu with “Видалити”
+// - click “Видалити” -> removes the element AND all connections to it
+// - same approach for connections (edges)
+//
+// Assumptions (recommended):
+// - every node (element) has unique id in attrs:  node.setAttr("entityId", "n_123");
+// - every edge has unique id in attrs:           edgeGroup.setAttr("entityId", "e_456");
+// - every edge stores endpoints:                edgeGroup.setAttr("fromId", "n_123"); edgeGroup.setAttr("toId", "n_999");
+//
+// Use: createEditorDeleteUI({ stage, uiLayer, graph })
+//
+// graph = { nodes: Map, edges: Map }
+// nodes: Map<nodeId, Konva.Node>  (Group/Shape)
+// edges: Map<edgeId, Konva.Node>  (Group that contains Konva.Line + maybe arrows/labels)
+
+export function createEditorDeleteUI({ stage, uiLayer, graph }) {
+  if (!stage) throw new Error("stage is required");
+  if (!uiLayer) throw new Error("uiLayer is required");
+  if (!graph?.nodes || !graph?.edges) throw new Error("graph {nodes, edges} is required");
+
+  let selected = null; // { type: "node"|"edge", id, konva }
+
+  // ---- UI: 3-dots icon (⋮) ----
+  const dots = new Konva.Label({
+    visible: false,
+    listening: true,
+    opacity: 0.98,
+  });
+
+  const dotsTag = new Konva.Tag({
+    fill: "#111827", // dark
+    cornerRadius: 6,
+    shadowColor: "rgba(0,0,0,0.25)",
+    shadowBlur: 8,
+    shadowOffset: { x: 0, y: 2 },
+    shadowOpacity: 1,
+  });
+
+  const dotsText = new Konva.Text({
+    text: "⋮",
+    fontSize: 18,
+    fontFamily: "sans-serif",
+    fill: "white",
+    padding: 6,
+    align: "center",
+    verticalAlign: "middle",
+  });
+
+  dots.add(dotsTag);
+  dots.add(dotsText);
+  uiLayer.add(dots);
+
+  // ---- UI: menu (only "Видалити") ----
+  const menu = new Konva.Group({
+    visible: false,
+    listening: true,
+  });
+
+  const menuBg = new Konva.Rect({
+    width: 140,
+    height: 36,
+    fill: "white",
+    cornerRadius: 8,
+    stroke: "rgba(0,0,0,0.12)",
+    strokeWidth: 1,
+    shadowColor: "rgba(0,0,0,0.18)",
+    shadowBlur: 10,
+    shadowOffset: { x: 0, y: 3 },
+    shadowOpacity: 1,
+  });
+
+  const menuItem = new Konva.Text({
+    x: 10,
+    y: 9,
+    text: "Видалити",
+    fontSize: 14,
+    fontFamily: "sans-serif",
+    fill: "#b91c1c", // red-ish
+  });
+
+  // Hover effect
+  const menuHover = new Konva.Rect({
+    width: 140,
+    height: 36,
+    fill: "rgba(185, 28, 28, 0.08)",
+    cornerRadius: 8,
+    visible: false,
+    listening: false,
+  });
+
+  menu.add(menuBg);
+  menu.add(menuHover);
+  menu.add(menuItem);
+  uiLayer.add(menu);
+
+  menu.on("mouseenter", () => {
+    stage.container().style.cursor = "pointer";
+    menuHover.visible(true);
+    uiLayer.batchDraw();
+  });
+  menu.on("mouseleave", () => {
+    stage.container().style.cursor = "";
+    menuHover.visible(false);
+    uiLayer.batchDraw();
+  });
+
+  // ---- helpers ----
+  const hideUI = () => {
+    dots.visible(false);
+    menu.visible(false);
+    uiLayer.batchDraw();
+  };
+
+  const getNodeClientRectOnStage = (konvaNode) => {
+    // we want position in stage coordinates, then translate to UI layer coordinates
+    // uiLayer is usually not scaled; stage coords are fine for setting x/y on uiLayer
+    // getClientRect is in absolute coords by default when skipTransform=false
+    return konvaNode.getClientRect({ skipTransform: false });
+  };
+
+  const positionDotsNear = (konvaNode) => {
+    const r = getNodeClientRectOnStage(konvaNode);
+    const pad = 6;
+
+    // Top-right corner
+    const x = r.x + r.width + pad;
+    const y = r.y - pad;
+
+    dots.position({ x, y });
+  };
+
+  const positionMenuUnderDots = () => {
+    const pad = 6;
+    menu.position({
+      x: dots.x(),
+      y: dots.y() + dots.height() + pad,
+    });
+  };
+
+  const selectEntity = ({ type, id, konva }) => {
+    selected = { type, id, konva };
+    menu.visible(false);
+    dots.visible(true);
+
+    positionDotsNear(konva);
+    uiLayer.batchDraw();
+  };
+
+  // ---- delete logic ----
+  const deleteEdgeById = (edgeId) => {
+    const edgeKonva = graph.edges.get(edgeId);
+    if (!edgeKonva) return;
+
+    edgeKonva.destroy();
+    graph.edges.delete(edgeId);
+  };
+
+  const deleteNodeById = (nodeId) => {
+    const nodeKonva = graph.nodes.get(nodeId);
+    if (!nodeKonva) return;
+
+    // remove all connected edges
+    const edgesToDelete = [];
+    for (const [edgeId, edgeKonva] of graph.edges.entries()) {
+      const fromId = edgeKonva.getAttr("fromId");
+      const toId = edgeKonva.getAttr("toId");
+      if (fromId === nodeId || toId === nodeId) edgesToDelete.push(edgeId);
+    }
+    edgesToDelete.forEach(deleteEdgeById);
+
+    // remove node
+    nodeKonva.destroy();
+    graph.nodes.delete(nodeId);
+  };
+
+  const deleteSelected = () => {
+    if (!selected) return;
+
+    if (selected.type === "node") deleteNodeById(selected.id);
+    if (selected.type === "edge") deleteEdgeById(selected.id);
+
+    selected = null;
+    hideUI();
+
+    // redraw: assuming nodes/edges are on their own layers; at minimum redraw stage
+    stage.batchDraw();
+  };
+
+  // ---- dots click -> open menu ----
+  dots.on("mousedown touchstart", (e) => {
+    e.cancelBubble = true;
+    if (!selected) return;
+    menu.visible(true);
+    positionMenuUnderDots();
+    uiLayer.batchDraw();
+  });
+
+  // ---- menu click -> delete ----
+  menu.on("mousedown touchstart", (e) => {
+    e.cancelBubble = true;
+    deleteSelected();
+  });
+
+  // ---- click outside -> hide ----
+  stage.on("mousedown touchstart", (e) => {
+    // if click on empty space - hide
+    const target = e.target;
+    // Konva Stage itself is clicked when empty
+    if (target === stage) {
+      selected = null;
+      hideUI();
+      return;
+    }
+
+    // If clicked UI layer elements, let handlers above manage it
+    if (target.getLayer && target.getLayer() === uiLayer) return;
+
+    // Otherwise we keep selection until user clicks empty space,
+    // but hide menu if it was open and user clicked elsewhere.
+    if (menu.visible()) {
+      menu.visible(false);
+      uiLayer.batchDraw();
+    }
+  });
+
+  // ---- API for wiring nodes/edges ----
+  const wireNode = (nodeKonva) => {
+    const nodeId = nodeKonva.getAttr("entityId");
+    if (!nodeId) throw new Error("Node missing attrs.entityId");
+
+    // Ensure it’s clickable
+    nodeKonva.listening(true);
+
+    nodeKonva.on("mousedown touchstart", (e) => {
+      e.cancelBubble = true;
+      selectEntity({ type: "node", id: nodeId, konva: nodeKonva });
+    });
+  };
+
+  const wireEdge = (edgeKonva) => {
+    const edgeId = edgeKonva.getAttr("entityId");
+    if (!edgeId) throw new Error("Edge missing attrs.entityId");
+
+    edgeKonva.listening(true);
+
+    edgeKonva.on("mousedown touchstart", (e) => {
+      e.cancelBubble = true;
+      selectEntity({ type: "edge", id: edgeId, konva: edgeKonva });
+    });
+  };
+
+  // Optional: keep dots aligned while dragging nodes
+  const enableAutoRepositionOnDrag = (nodeKonva) => {
+    nodeKonva.on("dragmove", () => {
+      if (selected?.type === "node" && selected.id === nodeKonva.getAttr("entityId")) {
+        positionDotsNear(nodeKonva);
+        if (menu.visible()) positionMenuUnderDots();
+        uiLayer.batchDraw();
+      }
+    });
+  };
+
+  return {
+    wireNode,
+    wireEdge,
+    enableAutoRepositionOnDrag,
+    deleteNodeById,
+    deleteEdgeById,
+    hideUI,
+  };
+}
+
+/* ------------------ Example usage ------------------
+
+const graph = {
+  nodes: new Map(),
+  edges: new Map(),
+};
+
+// layers:
+const elementsLayer = new Konva.Layer(); // nodes
+const edgesLayer = new Konva.Layer();    // edges
+const uiLayer = new Konva.Layer();       // dots/menu overlay
+
+stage.add(edgesLayer);
+stage.add(elementsLayer);
+stage.add(uiLayer);
+
+const ui = createEditorDeleteUI({ stage, uiLayer, graph });
+
+// Create a node:
+const node = new Konva.Group({ x: 100, y: 100, draggable: true });
+node.setAttr("entityId", "n_1");
+node.add(new Konva.Rect({ width: 120, height: 60, fill: "#e5e7eb", cornerRadius: 10 }));
+elementsLayer.add(node);
+graph.nodes.set("n_1", node);
+ui.wireNode(node);
+ui.enableAutoRepositionOnDrag(node);
+
+// Create an edge group:
+const edge = new Konva.Group();
+edge.setAttr("entityId", "e_1");
+edge.setAttr("fromId", "n_1");
+edge.setAttr("toId", "n_2");
+edge.add(new Konva.Line({ points: [160, 130, 400, 220], stroke: "#111827", strokeWidth: 2 }));
+edgesLayer.add(edge);
+graph.edges.set("e_1", edge);
+ui.wireEdge(edge);
+
+stage.draw();
+
+-----------------------------------------------------*/
+```
+
+Якщо ти покажеш, як у тебе зараз створюються **елементи** та **зв’язки** (який саме Konva-об’єкт є “зв’язком”: `Line` чи `Group`, де лежать `fromId/toId`, як зберігаєш `graph`), я піджену цей код під твою фактичну структуру без “припущень”, щоб воно одразу встало в проект.
