@@ -1,0 +1,206 @@
+Щоб у react-konva можна було **вмикати/вимикати “шари”** (вимірювальні, текстові позначення, сітка, підсвітки, службові маркери тощо), найкраще думати не “я малюю фігури”, а **я рендерю сцену з категоріями**: кожен елемент має `type` і `layerKey`, а UI керує `layerVisibility[layerKey]`.
+
+Нижче — архітектура, яка добре масштабується (і під undo/redo теж ок).
+
+---
+
+## 1) Модель даних: елемент знає “до якого шару належить”
+
+Тримай усі об’єкти сцени в одному списку, але з **ключами групування**:
+
+* `type`: що це (rect, line, text, dimension, marker…)
+* `layerKey`: до якої “категорії” належить (MAIN, MEASURE, LABELS, GRID, HELPERS…)
+* `z`: порядок всередині шару (опціонально)
+
+```js
+// приклад одного елемента
+{
+  id: "t_12",
+  type: "text",
+  layerKey: "LABELS",
+  x: 120,
+  y: 80,
+  text: "Клапан 3",
+  rotation: 0,
+  props: { fontSize: 16, fill: "#000" }
+}
+```
+
+Це дає:
+
+* легке фільтрування для чекбоксів,
+* стабільну структуру,
+* простий експорт/збереження (в БД як JSON/нормалізовано).
+
+---
+
+## 2) Layer Registry: опис шарів в одному місці
+
+Створи “реєстр шарів” — конфіг, який каже:
+
+* назва,
+* чи це “сервісний” шар,
+* початково видимий,
+* чи слухає події (listening).
+
+```js
+export const LAYERS = {
+  GRID:      { title: "Сітка",        defaultVisible: true,  listening: false },
+  MAIN:      { title: "Елементи",     defaultVisible: true,  listening: true  },
+  MEASURE:   { title: "Вимірювання",  defaultVisible: true,  listening: true  },
+  LABELS:    { title: "Позначення",   defaultVisible: true,  listening: true  },
+  HELPERS:   { title: "Підсвітки",    defaultVisible: true,  listening: false },
+};
+```
+
+**Чому це важливо:** ти не розкидуєш “видимість” по коду — все централізовано.
+
+---
+
+## 3) Стан видимості шарів (checkbox UI → stage)
+
+`layerVisibility` — простий об’єкт, який UI змінює чекбоксами.
+
+```js
+const [layerVisibility, setLayerVisibility] = useState(() =>
+  Object.fromEntries(Object.entries(LAYERS).map(([k,v]) => [k, v.defaultVisible]))
+);
+```
+
+Checkbox:
+
+* змінює `layerVisibility[key]`,
+* Konva сама перемалює відповідний `<Layer visible={...} />`.
+
+---
+
+## 4) Рендер: один Stage, багато Layer, але елементи розкладені по “ключах”
+
+Ключовий принцип: **рендерити по шарах**.
+
+```jsx
+<Stage ref={stageRef} width={w} height={h}>
+  {/* GRID */}
+  {layerVisibility.GRID && (
+    <Layer listening={false}>
+      <GridComponent />
+    </Layer>
+  )}
+
+  {/* MAIN */}
+  <Layer
+    visible={layerVisibility.MAIN}
+    listening={LAYERS.MAIN.listening}
+  >
+    {elements
+      .filter(el => el.layerKey === "MAIN")
+      .sort((a,b)=> (a.z??0)-(b.z??0))
+      .map(renderElement)}
+  </Layer>
+
+  {/* MEASURE */}
+  <Layer
+    visible={layerVisibility.MEASURE}
+    listening={LAYERS.MEASURE.listening}
+  >
+    {elements
+      .filter(el => el.layerKey === "MEASURE")
+      .sort((a,b)=> (a.z??0)-(b.z??0))
+      .map(renderElement)}
+  </Layer>
+
+  {/* LABELS */}
+  <Layer visible={layerVisibility.LABELS}>
+    {elements.filter(el => el.layerKey === "LABELS").map(renderElement)}
+  </Layer>
+
+  {/* HELPERS (guides/snap highlights) */}
+  <Layer visible={layerVisibility.HELPERS} listening={false}>
+    <HelpersOverlay />
+  </Layer>
+</Stage>
+```
+
+**Великий плюс:** вимкнув шар — “зникли всі вимірювальні/тексти” одним прапорцем, без хаосу в логіці.
+
+---
+
+## 5) renderElement: фабрика компонентів по type
+
+Зроби один “dispatcher”, який обирає компонент по `type`:
+
+```js
+function renderElement(el) {
+  switch (el.type) {
+    case "rect": return <RectElement key={el.id} el={el} />;
+    case "line": return <LineElement key={el.id} el={el} />;
+    case "text": return <TextElement key={el.id} el={el} />;
+    case "dimension": return <DimensionElement key={el.id} el={el} />;
+    default: return null;
+  }
+}
+```
+
+Так ти легко додаєш нові типи (стрілки, виноски, “хмарки”, маркери).
+
+---
+
+## 6) Події та редагування: не змішувати “видимість” і “логіку”
+
+Правило:
+
+* **Layer** вирішує “чи видно і чи слухає події”,
+* **елемент** вирішує “як реагує на drag/transform”,
+* **контролер** (hook/store) вирішує “як змінити state”.
+
+Для “службових” шарів (GRID/HELPERS):
+
+* `listening={false}` — щоб вони **не блокували кліки** по елементах.
+
+---
+
+## 7) Вимірювання і позначення як “похідні” об’єкти
+
+Є два варіанти:
+
+### Варіант A (часто найкращий): вимірювання зберігаються як елементи
+
+Тобто “dimension” — це теж `elements[]`, просто `layerKey: "MEASURE"`.
+Плюс: вони зберігаються в БД, їх можна редагувати, undo/redo працює автоматично.
+
+### Варіант B: вимірювання рендеряться як derived overlay
+
+Наприклад, ти виділив прямокутник — система сама показує розміри.
+Тоді `dimension` не лежить у `elements[]`, а обчислюється з `selectedIds`.
+Плюс: не захаращує дані. Мінус: складніше з кастомним редагуванням.
+
+На практиці часто роблять мікс:
+
+* “постійні” вимірювання — як elements,
+* “тимчасові” (під час drag) — як HELPERS overlay.
+
+---
+
+## 8) Як це “правильно розкласти по файлах” (Next.js / app)
+
+Орієнтир структури (під твій editor):
+
+* `app/editor/[schemeId]/page.jsx` — сторінка
+* `app/editor/[schemeId]/_components/CanvasStage.jsx` — Stage + Layers
+* `app/editor/[schemeId]/_components/LayerToggles.jsx` — чекбокси шарів
+* `app/editor/[schemeId]/render/renderElement.js` — фабрика рендеру
+* `app/editor/[schemeId]/layers/` — Grid/Helpers/…
+* `app/editor/[schemeId]/elements/` — RectElement, LineElement, TextElement, DimensionElement
+* `app/editor/[schemeId]/state/` — store/hook (zustand або reducer)
+* `app/editor/[schemeId]/domain/` — утиліти: snap, geometry, hitTest, serialize
+
+---
+
+Якщо хочеш — я одразу накину **готовий мінімальний шаблон коду**:
+
+* `layerVisibility` + чекбокси
+* `LAYERS registry`
+* `CanvasStage` з фільтрацією
+* приклад `DimensionElement` (стрілки + текст) як тип `"dimension"`
+
+Скажи тільки: ти стан елементів тримаєш зараз в **useState**, **useReducer**, чи вже використовуєш **zustand**?

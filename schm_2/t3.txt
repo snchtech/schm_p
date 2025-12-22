@@ -1,0 +1,731 @@
+Нижче — **готовий набір файлів**, який можна просто розкласти по папках. Він дає:
+
+* **Grid on/off** (окремий layer, не заважає клікам)
+* **Guides (smart align)** під час drag (ліва/центр/права та верх/центр/низ)
+* Каркас **EditorStage** під Next.js **16.0.1 App Router** з `dynamic(..., { ssr:false })`
+* **Zustand store** для `showGrid`, `guides`, `viewport`, `elements`
+
+---
+
+## 0) Структура
+
+```
+app/
+  albums/
+    [albumId]/
+      editor/
+        page.jsx
+        EditorClient.jsx
+
+components/
+  editor/
+    stage/
+      EditorStage.jsx
+      GridLayer.jsx
+      GuidesLayer.jsx
+    elements/
+      RectElement.jsx
+      LineElement.jsx
+    ui/
+      EditorToolbar.jsx
+
+lib/
+  konva/
+    snap/
+      snapMath.js
+    zoomPan/
+      setupLayerZoomPan.js
+
+store/
+  editorStore.js
+```
+
+> Якщо ти ще на `pages/` router — скажи, я дам аналог для `pages`.
+
+---
+
+## 1) `store/editorStore.js`
+
+```js
+// store/editorStore.js
+import { create } from "zustand";
+
+export const useEditorStore = create((set, get) => ({
+  // UI
+  showGrid: true,
+  guides: [],
+  viewport: { scale: 1, x: 0, y: 0 },
+
+  // elements demo (підставиш свої з БД)
+  elements: [
+    { id: "r1", type: "rect", x: 80, y: 80, width: 160, height: 90, rotation: 0 },
+    { id: "r2", type: "rect", x: 380, y: 180, width: 140, height: 120, rotation: 0 },
+    { id: "l1", type: "line", x: 200, y: 320, points: [0, 0, 180, 0], rotation: 0 },
+  ],
+
+  setShowGrid: (v) => set({ showGrid: v }),
+  setGuides: (guides) => set({ guides }),
+  setViewport: (viewport) => set({ viewport }),
+
+  updateElement: (id, patch) =>
+    set({
+      elements: get().elements.map((el) => (el.id === id ? { ...el, ...patch } : el)),
+    }),
+}));
+```
+
+---
+
+## 2) `lib/konva/snap/snapMath.js`
+
+```js
+// lib/konva/snap/snapMath.js
+
+function getNodeBox(node) {
+  // relativeTo layer => в одній координатній системі для всіх елементів
+  return node.getClientRect({ relativeTo: node.getLayer() });
+}
+
+function getSnapLinesForNode(node) {
+  const box = getNodeBox(node);
+  const xLines = [
+    { type: "left", value: box.x },
+    { type: "centerX", value: box.x + box.width / 2 },
+    { type: "right", value: box.x + box.width },
+  ];
+  const yLines = [
+    { type: "top", value: box.y },
+    { type: "centerY", value: box.y + box.height / 2 },
+    { type: "bottom", value: box.y + box.height },
+  ];
+  return { box, x: xLines, y: yLines };
+}
+
+function collectOtherLines(layer, movingNode, selector = ".snap-target") {
+  const nodes = layer.find(selector).filter((n) => n !== movingNode);
+  const lines = { x: [], y: [] };
+
+  for (const n of nodes) {
+    const s = getSnapLinesForNode(n);
+    for (const lx of s.x) lines.x.push(lx.value);
+    for (const ly of s.y) lines.y.push(ly.value);
+  }
+
+  return lines;
+}
+
+function findClosestSnap(value, candidates, tolerance) {
+  let best = null;
+  for (const c of candidates) {
+    const diff = Math.abs(c - value);
+    if (diff <= tolerance && (!best || diff < best.diff)) {
+      best = { target: c, diff };
+    }
+  }
+  return best;
+}
+
+/**
+ * computeSnap:
+ * - Рахує підлипання (snap) по X і Y
+ * - Повертає нову absolute позицію та guides для відмальовки
+ */
+export function computeSnap({
+  movingNode,
+  layer,
+  tolerance = 6,
+  selector = ".snap-target",
+}) {
+  const moving = getSnapLinesForNode(movingNode);
+  const others = collectOtherLines(layer, movingNode, selector);
+
+  const absPos = movingNode.absolutePosition();
+  const guides = [];
+
+  let bestDx = 0;
+  let bestDy = 0;
+
+  // ---- X snap ----
+  let bestX = null;
+  for (const line of moving.x) {
+    const snap = findClosestSnap(line.value, others.x, tolerance);
+    if (snap && (!bestX || snap.diff < bestX.diff)) {
+      bestX = { ...snap, movingValue: line.value };
+    }
+  }
+  if (bestX) {
+    bestDx = bestX.target - bestX.movingValue;
+    guides.push({ points: [bestX.target, -100000, bestX.target, 100000] }); // vertical
+  }
+
+  // ---- Y snap ----
+  let bestY = null;
+  for (const line of moving.y) {
+    const snap = findClosestSnap(line.value, others.y, tolerance);
+    if (snap && (!bestY || snap.diff < bestY.diff)) {
+      bestY = { ...snap, movingValue: line.value };
+    }
+  }
+  if (bestY) {
+    bestDy = bestY.target - bestY.movingValue;
+    guides.push({ points: [-100000, bestY.target, 100000, bestY.target] }); // horizontal
+  }
+
+  return {
+    newAbsPos: { x: absPos.x + bestDx, y: absPos.y + bestDy },
+    guides,
+  };
+}
+```
+
+---
+
+## 3) `lib/konva/zoomPan/setupLayerZoomPan.js`
+
+Це “базовий” zoom до курсора + пан (space+LMB або MMB). Повертає `cleanup()`.
+
+```js
+// lib/konva/zoomPan/setupLayerZoomPan.js
+
+export function setupLayerZoomPan(
+  stage,
+  layer,
+  {
+    zoomStep = 1.15,
+    minScale = 0.2,
+    maxScale = 6,
+    requireCtrlForWheel = false,
+    panMode = "mmb_or_space", // "mmb" | "space" | "mmb_or_space"
+    onViewportChange = () => {},
+  } = {}
+) {
+  if (!stage) throw new Error("stage is required");
+  if (!layer) throw new Error("layer is required");
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const container = stage.container();
+
+  let isSpaceDown = false;
+  let isPanning = false;
+
+  const keyDown = (e) => {
+    if (e.code === "Space") {
+      isSpaceDown = true;
+      container.style.cursor = "grab";
+      e.preventDefault();
+    }
+  };
+  const keyUp = (e) => {
+    if (e.code === "Space") {
+      isSpaceDown = false;
+      container.style.cursor = "default";
+      e.preventDefault();
+    }
+  };
+
+  const onWheel = (e) => {
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    e.evt.preventDefault();
+    const oldScale = layer.scaleX() || 1;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    // point in layer coords before zoom
+    const mousePointTo = {
+      x: (pointer.x - layer.x()) / oldScale,
+      y: (pointer.y - layer.y()) / oldScale,
+    };
+
+    const direction = e.evt.deltaY > 0 ? 1 : -1;
+    const factor = direction > 0 ? 1 / zoomStep : zoomStep;
+    const newScale = clamp(oldScale * factor, minScale, maxScale);
+
+    layer.scale({ x: newScale, y: newScale });
+
+    // keep cursor point stable
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+    layer.position(newPos);
+
+    layer.batchDraw();
+    onViewportChange({ scale: newScale, x: newPos.x, y: newPos.y });
+  };
+
+  const canPanNow = (evt) => {
+    const isMMB = evt.evt.button === 1;
+    const isLMB = evt.evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && isSpaceDown;
+    return isMMB || (isLMB && isSpaceDown);
+  };
+
+  const onMouseDown = (e) => {
+    if (!canPanNow(e)) return;
+    isPanning = true;
+    container.style.cursor = "grabbing";
+  };
+
+  const onMouseUp = () => {
+    if (!isPanning) return;
+    isPanning = false;
+    container.style.cursor = isSpaceDown ? "grab" : "default";
+  };
+
+  const onMouseMove = (e) => {
+    if (!isPanning) return;
+    const dx = e.evt.movementX || 0;
+    const dy = e.evt.movementY || 0;
+
+    const pos = layer.position();
+    const newPos = { x: pos.x + dx, y: pos.y + dy };
+    layer.position(newPos);
+    layer.batchDraw();
+    onViewportChange({ scale: layer.scaleX() || 1, x: newPos.x, y: newPos.y });
+  };
+
+  // attach
+  stage.on("wheel", onWheel);
+  stage.on("mousedown", onMouseDown);
+  stage.on("mouseup", onMouseUp);
+  stage.on("mousemove", onMouseMove);
+
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp, { passive: false });
+
+  return function cleanup() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mouseup", onMouseUp);
+    stage.off("mousemove", onMouseMove);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+  };
+}
+```
+
+---
+
+## 4) `components/editor/stage/GridLayer.jsx`
+
+Грід “живе” в координатах layer, але рендериться відносно viewport. У store ми тримаємо `viewport`.
+
+```jsx
+// components/editor/stage/GridLayer.jsx
+"use client";
+import React, { useMemo } from "react";
+import { Layer, Line } from "react-konva";
+
+export default function GridLayer({
+  width,
+  height,
+  viewport,
+  visible = true,
+  gridSize = 40,
+  subDiv = 4,
+}) {
+  const { scale, x: offsetX, y: offsetY } = viewport;
+
+  const lines = useMemo(() => {
+    if (!visible) return [];
+    const minor = gridSize / subDiv;
+
+    const startX = -offsetX / scale;
+    const startY = -offsetY / scale;
+    const endX = startX + width / scale;
+    const endY = startY + height / scale;
+
+    const res = [];
+
+    for (let gx = Math.floor(startX / minor) * minor; gx < endX; gx += minor) {
+      const isMajor = Math.abs(gx % gridSize) < 0.0001;
+      res.push({ points: [gx, startY, gx, endY], major: isMajor });
+    }
+    for (let gy = Math.floor(startY / minor) * minor; gy < endY; gy += minor) {
+      const isMajor = Math.abs(gy % gridSize) < 0.0001;
+      res.push({ points: [startX, gy, endX, gy], major: isMajor });
+    }
+
+    return res;
+  }, [width, height, scale, offsetX, offsetY, visible, gridSize, subDiv]);
+
+  if (!visible) return null;
+
+  return (
+    <Layer listening={false}>
+      {lines.map((l, i) => (
+        <Line
+          key={i}
+          points={l.points}
+          stroke={l.major ? "#cfcfcf" : "#e9e9e9"}
+          strokeWidth={l.major ? 1 : 0.5}
+        />
+      ))}
+    </Layer>
+  );
+}
+```
+
+---
+
+## 5) `components/editor/stage/GuidesLayer.jsx`
+
+```jsx
+// components/editor/stage/GuidesLayer.jsx
+"use client";
+import React from "react";
+import { Layer, Line } from "react-konva";
+
+export default function GuidesLayer({ guides = [] }) {
+  if (!guides?.length) return null;
+
+  return (
+    <Layer listening={false}>
+      {guides.map((g, idx) => (
+        <Line
+          key={idx}
+          points={g.points}
+          stroke="#2f80ed"
+          strokeWidth={1}
+          dash={[6, 4]}
+        />
+      ))}
+    </Layer>
+  );
+}
+```
+
+---
+
+## 6) `components/editor/elements/RectElement.jsx`
+
+```jsx
+// components/editor/elements/RectElement.jsx
+"use client";
+import React from "react";
+import { Rect } from "react-konva";
+
+export default function RectElement({
+  el,
+  onDragMove,
+  onDragEnd,
+  onClick,
+}) {
+  return (
+    <Rect
+      name="snap-target"
+      id={el.id}
+      x={el.x}
+      y={el.y}
+      width={el.width}
+      height={el.height}
+      rotation={el.rotation || 0}
+      fill="#ffffff"
+      stroke="#111"
+      strokeWidth={1}
+      draggable
+      onClick={() => onClick?.(el.id)}
+      onTap={() => onClick?.(el.id)}
+      onDragMove={onDragMove}
+      onDragEnd={onDragEnd}
+    />
+  );
+}
+```
+
+---
+
+## 7) `components/editor/elements/LineElement.jsx`
+
+```jsx
+// components/editor/elements/LineElement.jsx
+"use client";
+import React from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({
+  el,
+  onDragMove,
+  onDragEnd,
+  onClick,
+}) {
+  return (
+    <Line
+      name="snap-target"
+      id={el.id}
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      stroke="#111"
+      strokeWidth={2}
+      rotation={el.rotation || 0}
+      draggable
+      onClick={() => onClick?.(el.id)}
+      onTap={() => onClick?.(el.id)}
+      onDragMove={onDragMove}
+      onDragEnd={onDragEnd}
+    />
+  );
+}
+```
+
+---
+
+## 8) `components/editor/ui/EditorToolbar.jsx`
+
+```jsx
+// components/editor/ui/EditorToolbar.jsx
+"use client";
+import React from "react";
+
+export default function EditorToolbar({ showGrid, onToggleGrid, onResetView }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        padding: 10,
+        borderBottom: "1px solid #ddd",
+        alignItems: "center",
+      }}
+    >
+      <button onClick={onToggleGrid}>
+        {showGrid ? "Вимкнути грід" : "Увімкнути грід"}
+      </button>
+
+      <button onClick={onResetView}>Reset view</button>
+    </div>
+  );
+}
+```
+
+---
+
+## 9) `components/editor/stage/EditorStage.jsx`
+
+Центральний файл: Stage+Layers+events.
+
+```jsx
+// components/editor/stage/EditorStage.jsx
+"use client";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+
+import GridLayer from "./GridLayer";
+import GuidesLayer from "./GuidesLayer";
+import RectElement from "../elements/RectElement";
+import LineElement from "../elements/LineElement";
+import EditorToolbar from "../ui/EditorToolbar";
+
+import { useEditorStore } from "@/store/editorStore";
+import { computeSnap } from "@/lib/konva/snap/snapMath";
+import { setupLayerZoomPan } from "@/lib/konva/zoomPan/setupLayerZoomPan";
+
+export default function EditorStage({ initialData }) {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const [stageSize, setStageSize] = useState({ width: 1200, height: 700 });
+
+  const {
+    showGrid,
+    guides,
+    viewport,
+    elements,
+    setShowGrid,
+    setGuides,
+    setViewport,
+    updateElement,
+  } = useEditorStore();
+
+  // stage size = container size
+  useEffect(() => {
+    const onResize = () => {
+      const el = document.getElementById("editor-stage-wrap");
+      if (!el) return;
+      setStageSize({ width: el.clientWidth, height: el.clientHeight });
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // setup zoom/pan once
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    const cleanup = setupLayerZoomPan(stage, layer, {
+      onViewportChange: (vp) => setViewport(vp),
+      panMode: "mmb_or_space",
+      requireCtrlForWheel: false,
+    });
+
+    // початковий viewport
+    setViewport({ scale: layer.scaleX() || 1, x: layer.x() || 0, y: layer.y() || 0 });
+
+    return cleanup;
+  }, [setViewport]);
+
+  const onToggleGrid = () => setShowGrid(!showGrid);
+
+  const onResetView = () => {
+    const layer = layerRef.current;
+    if (!layer) return;
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+    setViewport({ scale: 1, x: 0, y: 0 });
+  };
+
+  const handleDragMove = (e) => {
+    const node = e.target;
+    const layer = node.getLayer();
+    if (!layer) return;
+
+    const { newAbsPos, guides } = computeSnap({
+      movingNode: node,
+      layer,
+      tolerance: 6,
+      selector: ".snap-target",
+    });
+
+    // підлипання
+    node.absolutePosition(newAbsPos);
+
+    // показ ліній
+    setGuides(guides);
+
+    layer.batchDraw();
+  };
+
+  const handleDragEnd = (e) => {
+    const node = e.target;
+    const id = node.id();
+    const pos = node.position(); // position відносно layer (бо елементи у layer)
+
+    updateElement(id, { x: pos.x, y: pos.y });
+
+    setGuides([]);
+  };
+
+  const renderElement = (el) => {
+    const common = {
+      key: el.id,
+      el,
+      onDragMove: handleDragMove,
+      onDragEnd: handleDragEnd,
+      onClick: (id) => console.log("click", id),
+    };
+
+    if (el.type === "rect") return <RectElement {...common} />;
+    if (el.type === "line") return <LineElement {...common} />;
+    return null;
+  };
+
+  return (
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
+      <EditorToolbar
+        showGrid={showGrid}
+        onToggleGrid={onToggleGrid}
+        onResetView={onResetView}
+      />
+
+      <div id="editor-stage-wrap" style={{ flex: 1, minHeight: 0 }}>
+        <Stage
+          ref={stageRef}
+          width={stageSize.width}
+          height={stageSize.height}
+          style={{ background: "#fafafa" }}
+        >
+          {/* GRID (окремий layer) */}
+          <GridLayer
+            width={stageSize.width}
+            height={stageSize.height}
+            viewport={viewport}
+            visible={showGrid}
+            gridSize={40}
+            subDiv={4}
+          />
+
+          {/* GUIDES (окремий layer) */}
+          <GuidesLayer guides={guides} />
+
+          {/* MAIN WORK LAYER */}
+          <Layer ref={layerRef}>
+            {elements.map(renderElement)}
+          </Layer>
+        </Stage>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 10) `app/albums/[albumId]/editor/EditorClient.jsx`
+
+```jsx
+// app/albums/[albumId]/editor/EditorClient.jsx
+"use client";
+
+import dynamic from "next/dynamic";
+
+const EditorStage = dynamic(() => import("@/components/editor/stage/EditorStage"), {
+  ssr: false,
+});
+
+export default function EditorClient({ initialData }) {
+  return <EditorStage initialData={initialData} />;
+}
+```
+
+---
+
+## 11) `app/albums/[albumId]/editor/page.jsx`
+
+```jsx
+// app/albums/[albumId]/editor/page.jsx
+import EditorClient from "./EditorClient";
+
+export default async function Page({ params }) {
+  const { albumId } = params;
+
+  // Тут згодом можеш завантажувати initialData із БД / API
+  const initialData = { albumId };
+
+  return <EditorClient initialData={initialData} />;
+}
+```
+
+---
+
+# Що тобі треба поставити
+
+Якщо ще не поставлено:
+
+```bash
+npm i react-konva konva zustand
+```
+
+---
+
+# 2 важливі нотатки (щоб не “пливло”)
+
+1. **Snap працює по `getClientRect({ relativeTo: layer })`** — це добре для більшості фігур. Для складних Group/rotation інколи треба додатково підлаштовувати (я можу доробити).
+2. В `handleDragEnd` я беру `node.position()` — якщо ти будеш застосовувати `absolutePosition` і мати вкладені групи, тоді краще зберігати через `node.x()/node.y()` в координатах layer або нормалізувати.
+
+---
+
+Як наступний крок: скажи, ти **пан/зум робиш на layer** (як тут) чи хочеш на **stage**? Якщо підтвердиш — я додам ще:
+
+* snap до **меж сторінки** (A3 рамка/полотно)
+* snap до **grid** (кроком gridSize)
+* оптимізацію: кеш “інших ліній” на `dragstart`, щоб не шукати `layer.find()` на кожен `dragmove`.

@@ -1,0 +1,328 @@
+Ти можеш залишатися на `pages/` — це **не “неправильно”**, просто **App Router (`app/`) у Next 13+ (і в 16.0.1) — більш сучасний стандарт**: краща композиція layout’ів, Server Components, зручніші маршрути, спільні оболонки.
+
+Головне: **міграція може бути поступовою** — `pages/` і `app/` можуть співіснувати (ти переносиш по одному розділу, не ламаючи весь проєкт).
+
+Нижче — як **архітектурно правильно** перебудувати структуру під `app/` і як “перенести” твої сторінки та їхні компоненти.
+
+---
+
+## 1) Загальна ідея архітектури в Next.js 16 (App Router)
+
+Розділяємо на 3 рівні:
+
+1. **Routes (app/...)**
+
+   * тільки сторінки, layout’и, loading/error, server fetching
+2. **Features (components/features/...)**
+
+   * великі блоки під конкретну бізнес-фічу: “Albums”, “SchemeEditor”, “Auth”
+3. **Shared UI + Utils (components/ui, lib, store)**
+
+   * кнопки, модалки, хуки, konva-алгоритми, Zustand-store, API-клієнти
+
+---
+
+## 2) Рекомендована структура папок
+
+Ось “чиста” структура для твого проєкту **Альбом схем** (editor/viewer, albums, scheme):
+
+```
+app/
+  layout.jsx
+  globals.css
+  (auth)/
+    login/
+      page.jsx
+  (dashboard)/
+    layout.jsx
+    albums/
+      page.jsx
+      [albumId]/
+        page.jsx
+        editor/
+          [schemeId]/
+            page.jsx
+        viewer/
+          [schemeId]/
+            page.jsx
+
+components/
+  features/
+    albums/
+      AlbumsPageClient.jsx
+      AlbumsFilters.jsx
+      AlbumsTable.jsx
+      AlbumsTree.jsx
+    album/
+      AlbumPageClient.jsx
+      SchemesTree.jsx
+      CreateSchemeModal.jsx
+    editor/
+      EditorClient.jsx
+      stage/
+        EditorStage.jsx
+        GridLayer.jsx
+        GuidesLayer.jsx
+      elements/
+        RectElement.jsx
+        LineElement.jsx
+      ui/
+        EditorToolbar.jsx
+  ui/
+    Button.jsx
+    Modal.jsx
+    SearchInput.jsx
+  layout/
+    Topbar.jsx
+    Sidebar.jsx
+
+lib/
+  api/
+    client.js
+    albums.js
+    schemes.js
+  konva/
+    snap/snapMath.js
+    zoomPan/setupLayerZoomPan.js
+  utils/
+    format.js
+
+store/
+  editorStore.js
+  albumsStore.js
+```
+
+### Чому це добре
+
+* **app/** = маршрути та layout’и (мінімум логіки)
+* **components/features/** = вся “твоя логіка інтерфейсу” за доменами
+* **lib/** = API/konva/утиліти (без React)
+* **store/** = глобальний стан
+
+---
+
+## 3) Міграція з `pages/` → `app/` (покроково)
+
+### Крок 0 — увімкнути app router
+
+У Next 16 — це просто: **створи папку `app/`**.
+
+1. Створи `app/layout.jsx`
+
+```jsx
+// app/layout.jsx
+import "./globals.css";
+
+export const metadata = { title: "Альбом схем" };
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="uk">
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+2. Створи `app/globals.css` (можна поки порожній)
+
+---
+
+### Крок 1 — перенести одну сторінку як тест (наприклад /albums)
+
+Було в pages:
+
+```
+pages/albums/index.jsx
+```
+
+Стає в app:
+
+```
+app/(dashboard)/albums/page.jsx
+```
+
+```jsx
+// app/(dashboard)/albums/page.jsx
+import AlbumsPageClient from "@/components/features/albums/AlbumsPageClient";
+
+export default async function Page() {
+  // тут можна зробити server-side fetch (або залишити поки пусто)
+  return <AlbumsPageClient />;
+}
+```
+
+`AlbumsPageClient.jsx`:
+
+```jsx
+"use client";
+export default function AlbumsPageClient() {
+  return <div>Albums page</div>;
+}
+```
+
+> Після цього `/albums` почне відкриватися вже з App Router.
+
+---
+
+### Крок 2 — спільний layout для “dashboard”
+
+Було: в `pages/_app.js` + компоненти навігації.
+Стає: `app/(dashboard)/layout.jsx`
+
+```jsx
+// app/(dashboard)/layout.jsx
+import Sidebar from "@/components/layout/Sidebar";
+import Topbar from "@/components/layout/Topbar";
+
+export default function DashboardLayout({ children }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", height: "100vh" }}>
+      <Sidebar />
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <Topbar />
+        <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+```
+
+Тепер всі маршрути всередині `(dashboard)` автоматично мають спільну оболонку.
+
+---
+
+### Крок 3 — перенести dynamic routes
+
+Було:
+
+```
+pages/albums/[albumId].jsx
+```
+
+Стає:
+
+```
+app/(dashboard)/albums/[albumId]/page.jsx
+```
+
+```jsx
+// app/(dashboard)/albums/[albumId]/page.jsx
+import AlbumPageClient from "@/components/features/album/AlbumPageClient";
+
+export default function Page({ params }) {
+  return <AlbumPageClient albumId={params.albumId} />;
+}
+```
+
+---
+
+### Крок 4 — editor/viewer маршрути (твій випадок дуже в тему)
+
+Було (умовно):
+
+```
+pages/editor/[schemeId].jsx
+pages/viewer/[schemeId].jsx
+```
+
+Стає:
+
+```
+app/(dashboard)/albums/[albumId]/editor/[schemeId]/page.jsx
+app/(dashboard)/albums/[albumId]/viewer/[schemeId]/page.jsx
+```
+
+І тут важливо: **Konva тільки на клієнті**, тому Editor рендеримо через dynamic import.
+
+```jsx
+// components/features/editor/EditorClient.jsx
+"use client";
+import dynamic from "next/dynamic";
+
+const EditorStage = dynamic(() => import("./stage/EditorStage"), { ssr: false });
+
+export default function EditorClient({ albumId, schemeId }) {
+  return <EditorStage albumId={albumId} schemeId={schemeId} />;
+}
+```
+
+```jsx
+// app/(dashboard)/albums/[albumId]/editor/[schemeId]/page.jsx
+import EditorClient from "@/components/features/editor/EditorClient";
+
+export default function Page({ params }) {
+  return <EditorClient albumId={params.albumId} schemeId={params.schemeId} />;
+}
+```
+
+---
+
+## 4) Як “перенести набір компонентів для кожної сторінки” правильно
+
+Ти писав: *“для кожного page є набір компонентів”*.
+Тоді правило таке:
+
+* `app/.../page.jsx` = **тільки збирає сторінку**, мінімум логіки
+* Весь набір компонентів сторінки переносимо в:
+
+  * `components/features/<pageName>/...`
+
+Наприклад:
+
+### Albums
+
+```
+components/features/albums/
+  AlbumsPageClient.jsx   // “склейка” сторінки
+  AlbumsTree.jsx
+  AlbumsFilters.jsx
+  AlbumsTable.jsx
+  RecentChanges.jsx
+```
+
+### Album detail (/albums/[albumId])
+
+```
+components/features/album/
+  AlbumPageClient.jsx
+  SchemesTree.jsx
+  CreateSchemeModal.jsx
+```
+
+### Editor
+
+```
+components/features/editor/
+  EditorClient.jsx
+  stage/...
+  elements/...
+  ui/...
+```
+
+Так твій проєкт не перетвориться в “components на 1000 файлів без структури”.
+
+---
+
+## 5) Що робити з `pages/_app.js` і `pages/_document.js`
+
+* Їхній сенс переходить у `app/layout.jsx`
+* Глобальні стилі → `app/globals.css`
+* Провайдери (Theme, Zustand, i18n) — в `app/layout.jsx` або `app/providers.jsx` (якщо хочеш)
+
+---
+
+## 6) Плавна міграція без болю (реальний план)
+
+1. Створи `app/layout.jsx`
+2. Перенеси **1 маршрут** (`/albums`)
+3. Додай `(dashboard)/layout.jsx`
+4. Перенеси `/albums/[albumId]`
+5. Перенеси editor/viewer
+6. Коли все ок — поступово прибираєш `pages/*`
+
+> Важливо: не треба “одним комітом” переносити все.
+
+---
+
+Якщо ти скинеш **поточну структуру `pages/`** (списком: які є сторінки і які “набори компонентів” до них), я одразу дам **точну мапу “було → стало”** саме під твій проєкт (albums, albumId, editor/viewer, login тощо) і покажу, куди який компонент класти.

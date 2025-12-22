@@ -1,0 +1,206 @@
+Ок, якщо ти на **Next.js 16.0.1** (App Router), то найкраще розкласти це так, щоб:
+
+* **Konva-логіка** (zoom/pan, grid, snap/guides) була **в окремих “feature modules”** (без React-стану всередині).
+* **React-компоненти** (GridLayer/GuidesLayer/EditorStage) були простими, і тільки “склеювали” UI.
+* **Store/State** (елементи, selection, режим editor/viewer, showGrid) — окремо (Zustand або React Context).
+
+Нижче — практична структура папок + що куди класти.
+
+---
+
+## Рекомендована структура в Next.js (App Router)
+
+```
+app/
+  albums/
+    [albumId]/
+      editor/
+        page.jsx
+        EditorClient.jsx
+components/
+  editor/
+    stage/
+      EditorStage.jsx
+      GridLayer.jsx
+      GuidesLayer.jsx
+    elements/
+      LineElement.jsx
+      RectElement.jsx
+      GroupElement.jsx
+    ui/
+      EditorToolbar.jsx
+      ZoomControls.jsx
+      GridToggle.jsx
+lib/
+  konva/
+    zoomPan/
+      setupLayerZoomPan.js
+    grid/
+      gridMath.js
+    snap/
+      snapMath.js
+      snapSelectors.js
+    utils/
+      konvaBox.js
+store/
+  editorStore.js
+styles/
+  editor.css
+```
+
+### Чому так “архітектурно правильно”
+
+* `components/editor/**` — чисті React-компоненти.
+* `lib/konva/**` — “движок”: чисті функції/алгоритми без залежності від React.
+* `store/**` — централізований стан (зручно для мультиселекту, панелей, hotkeys).
+* `app/**` — сторінки (server компоненти) + тонкі клієнтські обгортки.
+
+---
+
+## 1) Де тримати GridLayer та GuidesLayer
+
+### `components/editor/stage/GridLayer.jsx`
+
+Тут тільки React+Konva. Жодної бізнес-логіки.
+
+### `components/editor/stage/GuidesLayer.jsx`
+
+Так само.
+
+Якщо у GridLayer є математика (розрахунок ліній) — краще винести її в `lib/konva/grid/gridMath.js`, щоб компонент був ще чистіший.
+
+---
+
+## 2) Snap / smart guides — як рознести
+
+### `lib/konva/snap/snapMath.js`
+
+Тут:
+
+* `getNodeBox(node)`
+* `collectOtherLines(layer, movingNode, selector)`
+* `computeSnap(...)`
+
+Це **чиста логіка**. Вона не має знати про `setGuides`, `state`, і т.д. Вона просто повертає результат.
+
+### `components/editor/stage/EditorStage.jsx`
+
+Тут:
+
+* підписка на `onDragMove` / `onDragEnd`
+* виклик `computeSnap()`
+* `setGuides(guides)` у стан (через store або локальний state)
+* `node.absolutePosition(...)` і `layer.batchDraw()`
+
+Тобто UI вирішує *коли* викликати snapping і *що* показувати, а math-модуль робить розрахунок.
+
+---
+
+## 3) Zoom/Pan — куди класти
+
+### `lib/konva/zoomPan/setupLayerZoomPan.js`
+
+Твоя функція `setupLayerZoomPan(stage, layer, options)` — тут.
+
+Вона:
+
+* вішає wheel/drag listeners
+* змінює `layer.scale()` / `layer.position()`
+* може викликати callback типу `onChangeTransform({scale, x, y})`
+
+### `components/editor/stage/EditorStage.jsx`
+
+* створює refs `stageRef`, `layerRef`
+* у `useEffect` викликає `setupLayerZoomPan(...)`
+* зберігає поточний `scale/x/y` у store, щоб **грід** знав, як себе малювати
+
+---
+
+## 4) Store: showGrid, guides, selection, elements
+
+### `store/editorStore.js` (Zustand — найзручніше)
+
+Зберігає:
+
+* `elements[]`
+* `selectedIds[]`
+* `showGrid`
+* `guides[]`
+* `viewport: { scale, x, y }`
+
+Так UI-частини не тягнуть пропси через 10 компонентів.
+
+---
+
+## 5) Важливо для Next.js 16.0.1 (App Router + Konva)
+
+Konva не любить SSR. Тому:
+
+* `EditorClient.jsx` має бути **клієнтським**: `use client`
+* `Stage` рендериться тільки на клієнті
+
+### `app/albums/[albumId]/editor/EditorClient.jsx`
+
+```jsx
+"use client";
+import dynamic from "next/dynamic";
+
+const EditorStage = dynamic(() => import("@/components/editor/stage/EditorStage"), {
+  ssr: false,
+});
+
+export default function EditorClient({ initialData }) {
+  return <EditorStage initialData={initialData} />;
+}
+```
+
+### `page.jsx` (серверний компонент)
+
+Тут ти можеш отримати дані, але відрендерити Stage — через `EditorClient`.
+
+---
+
+## 6) Мінімальні “відповідальності” файлів
+
+**EditorStage.jsx**
+
+* Stage/Layer
+* підключення zoom/pan
+* підключення grid + guides
+* мапінг elements → Element components
+* події drag/click/transform, де викликається snapMath
+
+**LineElement.jsx / RectElement.jsx**
+
+* тільки відображення фігури + прокидування подій наверх
+
+**snapMath.js**
+
+* тільки математика й Konva-виміри (getClientRect, absolutePosition)
+
+**gridMath.js**
+
+* тільки генерація ліній гріда
+
+---
+
+## 7) Як не зробити “хаос”
+
+Дуже коротке правило:
+
+* **React компоненти**: “як виглядає” + “які події”.
+* **lib/konva/**: “як рахувати” (grid/snap/zoom).
+* **store**: “де зберігати стан”, щоб не плодити пропси.
+
+---
+
+Якщо хочеш — я напишу тобі **готовий набір файлів** (з експортами/імпортами під App Router), який ти просто розкинеш по папках:
+
+* `EditorStage.jsx`
+* `GridLayer.jsx`
+* `GuidesLayer.jsx`
+* `setupLayerZoomPan.js`
+* `snapMath.js`
+* `editorStore.js`
+
+і воно одразу заведеться в Next.js 16.0.1 (з `dynamic(..., { ssr:false })`).

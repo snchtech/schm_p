@@ -1,0 +1,316 @@
+Зробити **Undo / Redo** в редакторі на react-konva реально й доволі “чисто”, якщо піти одним із двох підходів:
+
+1. **Snapshot history** (зберігаємо “знімки” стану) — найпростіше.
+2. **Command / Patch history** (зберігаємо лише зміни) — складніше, але ефективніше для великих схем.
+
+Нижче дам робочий варіант №1 (найчастіше його вистачає), і підкажу як перейти на “patches”, якщо стане важко по пам’яті.
+
+---
+
+## 1) Базова модель даних
+
+Нехай твоя схема — це масив елементів (rect/line/text/…):
+
+```js
+// приклад елемента
+{
+  id: "el_1",
+  type: "line",
+  x: 100,
+  y: 80,
+  rotation: 0,
+  points: [0,0, 120,20],
+  // ...інші поля
+}
+```
+
+І в React ти тримаєш:
+
+* `elements` — всі елементи
+* `selectedIds` — виділення (опційно)
+* інші UI-стейти (масштаб/пан) — за бажанням теж можна включати в undo, але зазвичай **не треба**.
+
+---
+
+## 2) Hook для Undo/Redo (snapshot-підхід)
+
+### `useHistoryState.js`
+
+```js
+import { useCallback, useRef, useState } from "react";
+
+// глибоке копіювання (для простих POJO вистачає structuredClone)
+const clone = (v) => structuredClone(v);
+
+export function useHistoryState(initialPresent, { limit = 200 } = {}) {
+  const [past, setPast] = useState([]);
+  const [present, setPresent] = useState(() => clone(initialPresent));
+  const [future, setFuture] = useState([]);
+
+  // щоб не пушити історію занадто часто (наприклад, під час dragmove)
+  const isBatchingRef = useRef(false);
+  const batchBaseRef = useRef(null);
+
+  const canUndo = past.length > 0;
+  const canRedo = future.length > 0;
+
+  const commit = useCallback((nextPresent, { replace = false } = {}) => {
+    setPresent((prev) => {
+      const next = typeof nextPresent === "function" ? nextPresent(prev) : nextPresent;
+
+      // якщо replace=true — не додаємо в past (зручно для "live update"), а просто міняємо present
+      if (replace) return clone(next);
+
+      setPast((p) => {
+        const newPast = [...p, clone(prev)];
+        // обрізаємо історію
+        if (newPast.length > limit) newPast.shift();
+        return newPast;
+      });
+      setFuture([]); // після нової дії redo-стек очищається
+      return clone(next);
+    });
+  }, [limit]);
+
+  const undo = useCallback(() => {
+    setPast((p) => {
+      if (p.length === 0) return p;
+      const previous = p[p.length - 1];
+
+      setFuture((f) => [clone(present), ...f]);
+      setPresent(clone(previous));
+
+      return p.slice(0, -1);
+    });
+  }, [present]);
+
+  const redo = useCallback(() => {
+    setFuture((f) => {
+      if (f.length === 0) return f;
+      const next = f[0];
+
+      setPast((p) => [...p, clone(present)]);
+      setPresent(clone(next));
+
+      return f.slice(1);
+    });
+  }, [present]);
+
+  // batching: під час dragmove ми робимо replace, а на dragend — один commit як “одна дія”
+  const beginBatch = useCallback(() => {
+    if (isBatchingRef.current) return;
+    isBatchingRef.current = true;
+    batchBaseRef.current = clone(present);
+  }, [present]);
+
+  const updateBatch = useCallback((nextPresent) => {
+    if (!isBatchingRef.current) return;
+    commit(nextPresent, { replace: true });
+  }, [commit]);
+
+  const endBatch = useCallback(() => {
+    if (!isBatchingRef.current) return;
+    isBatchingRef.current = false;
+
+    // якщо стан реально змінився — запишемо як одну дію
+    const base = batchBaseRef.current;
+    batchBaseRef.current = null;
+
+    // просте порівняння (для великих даних краще зробити hash / shallow compare)
+    if (JSON.stringify(base) !== JSON.stringify(present)) {
+      // додаємо base в past, present вже виставлений
+      setPast((p) => {
+        const newPast = [...p, clone(base)];
+        if (newPast.length > limit) newPast.shift();
+        return newPast;
+      });
+      setFuture([]);
+    }
+  }, [present, limit]);
+
+  return {
+    past, present, future,
+    setPresent: commit,
+    commit,
+    undo, redo,
+    canUndo, canRedo,
+    beginBatch, updateBatch, endBatch,
+  };
+}
+```
+
+---
+
+## 3) Використання в твоєму Editor-компоненті
+
+```js
+import React, { useCallback, useEffect } from "react";
+import { Stage, Layer } from "react-konva";
+import { useHistoryState } from "./useHistoryState";
+
+export default function Editor() {
+  const {
+    present: elements,
+    setPresent: commitElements,
+    undo, redo,
+    canUndo, canRedo,
+    beginBatch, updateBatch, endBatch
+  } = useHistoryState([], { limit: 300 });
+
+  // --- гарячі клавіші: Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z ---
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const ctrl = isMac ? e.metaKey : e.ctrlKey;
+
+      if (!ctrl) return;
+
+      if (e.key.toLowerCase() === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo]);
+
+  // --- приклад: додати елемент (це одна історична дія) ---
+  const addLine = useCallback(() => {
+    commitElements((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), type: "line", x: 50, y: 50, rotation: 0, points: [0, 0, 120, 20] }
+    ]);
+  }, [commitElements]);
+
+  // --- приклад: видалити елемент ---
+  const deleteById = useCallback((id) => {
+    commitElements((prev) => prev.filter((x) => x.id !== id));
+  }, [commitElements]);
+
+  // --- приклад: почати перетягування (batch) ---
+  const onDragStartEl = useCallback(() => {
+    beginBatch();
+  }, [beginBatch]);
+
+  // під час dragmove ми НЕ хочемо робити commit (бо буде 1000 кроків історії)
+  const onDragMoveEl = useCallback((id, pos) => {
+    updateBatch((prev) =>
+      prev.map((el) => (el.id === id ? { ...el, x: pos.x, y: pos.y } : el))
+    );
+  }, [updateBatch]);
+
+  // на dragend — завершуємо batch як “одну” дію
+  const onDragEndEl = useCallback(() => {
+    endBatch();
+  }, [endBatch]);
+
+  return (
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: 8, display: "flex", gap: 8 }}>
+        <button onClick={undo} disabled={!canUndo}>Undo</button>
+        <button onClick={redo} disabled={!canRedo}>Redo</button>
+        <button onClick={addLine}>Add line</button>
+      </div>
+
+      <div style={{ flex: 1 }}>
+        <Stage width={1200} height={700}>
+          <Layer>
+            {/* тут рендериш свої елементи */}
+            {elements.map((el) => {
+              if (el.type === "line") {
+                // у тебе вже є LineElement — просто додай onDragStart/onDragMove
+                return (
+                  <LineElement
+                    key={el.id}
+                    el={el}
+                    onDelete={() => deleteById(el.id)}
+                    onDragStart={() => onDragStartEl()}
+                    onDragMove={(pos) => onDragMoveEl(el.id, pos)}
+                    onDragEnd={() => onDragEndEl()}
+                  />
+                );
+              }
+              return null;
+            })}
+          </Layer>
+        </Stage>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4) Онови LineElement (важливо: dragmove → pos)
+
+```js
+import React from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({
+  el,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  onDelete
+}) {
+  return (
+    <Line
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      rotation={el.rotation}
+      stroke="black"
+      strokeWidth={2}
+      draggable
+      onDragStart={() => onDragStart?.()}
+      onDragMove={(e) => {
+        const node = e.target;
+        onDragMove?.({ x: node.x(), y: node.y() });
+      }}
+      onDragEnd={() => onDragEnd?.()}
+      // приклад: правий клік — видалити (замість меню)
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        onDelete?.();
+      }}
+    />
+  );
+}
+```
+
+---
+
+## 5) Які події варто “комітити” як 1 дію
+
+* ✅ Add element / Delete element — одразу `commit`.
+* ✅ Drag & Drop — `beginBatch` на start, `updateBatch` на move, `endBatch` на end.
+* ✅ Transform (resize/rotate через Transformer) — аналогічно: start/move/end або просто `beginBatch` на `transformstart`, `endBatch` на `transformend`.
+* ✅ Multi-select move — теж batching (але змінюєш одразу кілька елементів).
+
+---
+
+## 6) Коли snapshot-історія стане “важкою” і що тоді
+
+Якщо елементів буде багато і JSON стане великий:
+
+* Зменшуй `limit` (наприклад 100–200).
+* Перейди на **patch history**:
+
+  * або через `immer` (`produceWithPatches`)
+  * або через свої “command actions” (move/add/delete з inverse дією).
+
+Якщо скажеш, скільки в середньому елементів на схемі (100? 1000? 5000?) — я одразу накину оптимальний варіант (snapshot чи patches) під твій кейс.
+
+---
+
+Якщо хочеш, я можу під це ж під’єднати:
+
+* кнопки в Material-UI (IconButton + Tooltip),
+* вимкнення undo/redo під час редагування тексту,
+* об’єднання кількох дрібних змін в одну (наприклад, швидкі послідовні nudges стрілками).
