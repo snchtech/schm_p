@@ -1,0 +1,128 @@
+Це нормальна ситуація: **MUI `<Menu>` закривається**, коли клік відбувається *в DOM*, але твій клік по canvas (Konva Stage) інколи **не доходить як “outside click”** для MUI (через портали/оверлей/обробку подій).
+
+Надійне рішення: **закривати меню самим при будь-якому кліку по Stage** (і на `touchstart` теж). Є 2 робочі варіанти.
+
+---
+
+## Варіант A (рекомендую): закривати на `onMouseDown` / `onTouchStart` Stage
+
+У твоєму `Graph.jsx`:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={...}
+  height={...}
+  onMouseDown={() => {
+    if (menuState.open) closeMenu();
+  }}
+  onTouchStart={() => {
+    if (menuState.open) closeMenu();
+  }}
+>
+  ...
+</Stage>
+```
+
+Але важливо: коли ти клікаєш **по самому елементу**, а не “поза меню”, це теж закриє меню.
+Тому додаємо “стоп” — якщо меню відкрите і ти **клікнув правою кнопкою**, воно відкриється знову; а якщо лівою — ми хочемо закрити.
+
+Тоді робимо точніше:
+
+```jsx
+<Stage
+  onMouseDown={(e) => {
+    // ЛКМ по canvas — закрити меню
+    if (menuState.open && e.evt.button === 0) closeMenu();
+  }}
+  onTouchStart={() => {
+    if (menuState.open) closeMenu();
+  }}
+>
+```
+
+---
+
+## Варіант B: глобальний listener по document (ще більш “залізно”)
+
+Якщо є кейси, де Stage не ловить клік (наприклад, над canvas якісь DOM-елементи), роби так:
+
+```jsx
+import { useEffect } from "react";
+
+useEffect(() => {
+  if (!menuState.open) return;
+
+  const onDown = () => closeMenu();
+  window.addEventListener("mousedown", onDown, true);
+  window.addEventListener("touchstart", onDown, true);
+
+  return () => {
+    window.removeEventListener("mousedown", onDown, true);
+    window.removeEventListener("touchstart", onDown, true);
+  };
+}, [menuState.open]);
+```
+
+Але тут треба **не закривати меню, коли клікають по самому меню**.
+Тому додаємо “перевірку”: якщо клік був всередині меню — не закривати.
+
+### Як зробити перевірку (правильно для MUI)
+
+Додай `MenuListProps` з `onMouseDown` який стопає “зовнішній” клік:
+
+```jsx
+<Menu
+  open={open}
+  onClose={onClose}
+  anchorReference="anchorPosition"
+  anchorPosition={anchorPosition ?? undefined}
+  MenuListProps={{
+    onMouseDown: (e) => e.stopPropagation(),
+    onTouchStart: (e) => e.stopPropagation(),
+  }}
+>
+```
+
+Тоді глобальний listener закриватиме меню лише при кліку **поза меню**.
+
+---
+
+## Найкраща комбінація (те, що я ставлю в проєктах)
+
+1. `Stage.onMouseDown / onTouchStart` → закрити
+2. * у `<Menu>` додати `MenuListProps.stopPropagation`, щоб не закривалось при кліку в меню
+
+### Готові вставки:
+
+**Stage:**
+
+```jsx
+<Stage
+  onMouseDown={(e) => {
+    if (menuState.open && e.evt.button === 0) closeMenu();
+  }}
+  onTouchStart={() => {
+    if (menuState.open) closeMenu();
+  }}
+>
+```
+
+**MUI Menu:**
+
+```jsx
+<Menu
+  open={open}
+  onClose={onClose}
+  anchorReference="anchorPosition"
+  anchorPosition={anchorPosition ?? undefined}
+  MenuListProps={{
+    onMouseDown: (e) => e.stopPropagation(),
+    onTouchStart: (e) => e.stopPropagation(),
+  }}
+>
+```
+
+---
+
+Якщо хочеш — я ще додам логіку: **Esc** закриває меню + **Delete** видаляє вибране (але тільки коли меню відкрите / є selected).

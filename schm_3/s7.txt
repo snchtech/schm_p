@@ -1,0 +1,136 @@
+Таке трапляється майже завжди з однієї причини: **ти передаєш у MUI `anchorPosition` координати не з “DOM-екрану” (px), а зі “сцени” (stage/layer координати)**. При zoom/pan layer ці системи координат *розходяться*, і меню “їде” вбік.
+
+Надійне правило:
+
+* **MUI Menu** хоче `top/left` **в пікселях відносно вікна браузера** (viewport).
+* Konva `getPointerPosition()` / `x,y` елементів — це **координати всередині canvas** (і можуть бути в “stage space”).
+
+Нижче 2 правильні варіанти синхронізації.
+
+---
+
+## Варіант A (рекомендований): меню відкриваємо в точці курсора (DOM coords)
+
+У `openAtEvent` бери **лише `e.evt.clientX/clientY`** — вони вже правильні при zoom/pan layer.
+
+### `useGraphContextMenu.js`
+
+```js
+"use client";
+import { useCallback, useState } from "react";
+
+export function useGraphContextMenu() {
+  const [open, setOpen] = useState(false);
+  const [anchorPosition, setAnchorPosition] = useState(null);
+  const [target, setTarget] = useState(null);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    setAnchorPosition(null);
+    setTarget(null);
+  }, []);
+
+  const openAtEvent = useCallback((konvaEvent, t) => {
+    // ВАЖЛИВО: DOM-координати екрану
+    const { clientX, clientY } = konvaEvent.evt;
+    setOpen(true);
+    setAnchorPosition({ top: clientY, left: clientX });
+    setTarget(t);
+  }, []);
+
+  return { open, anchorPosition, target, openAtEvent, close };
+}
+```
+
+✅ Якщо зараз у тебе меню “їде”, дуже ймовірно, що ти десь використовував `stage.getPointerPosition()` або `el.x/el.y` для `anchorPosition`. Для MUI так робити не треба.
+
+---
+
+## Варіант B: меню позиціонуємо біля ЕЛЕМЕНТА (не під курсором), коректно з zoom/pan
+
+Це “як у Visio”: меню з’являється біля виділеного об’єкта, а не строго під мишкою.
+
+Тут треба взяти **рамку елемента в координатах Stage** (враховує scale/пан), а потім перевести її в **DOM** через `getBoundingClientRect()` контейнера.
+
+### Хелпер: `getAnchorFromKonvaNode(node, stage)`
+
+```js
+export function getAnchorFromKonvaNode(node, stage) {
+  const box = node.getClientRect({ relativeTo: stage }); 
+  // box.x/y/width/height вже враховують transform (zoom/pan layer)
+
+  const r = stage.container().getBoundingClientRect();
+
+  // наприклад, правий верхній кут елемента
+  const left = r.left + box.x + box.width;
+  const top  = r.top + box.y;
+
+  return { top, left };
+}
+```
+
+### Використання при contextmenu
+
+```js
+const openAtNode = (node, stage, target) => {
+  const pos = getAnchorFromKonvaNode(node, stage);
+  setMenuState({
+    open: true,
+    anchorPosition: pos,
+    target,
+  });
+};
+```
+
+А в елементі (NodeElement) передаєш `e.target` і `e.target.getStage()`:
+
+```jsx
+onContextMenu={(e) => {
+  e.evt.preventDefault();
+  onOpenMenuNearNode(e.target, e.target.getStage(), { type:"node", id: el.id });
+}}
+```
+
+---
+
+## Найчастіша помилка, яка дає “меню десь збоку”
+
+Ти робиш так (НЕПРАВИЛЬНО для MUI):
+
+```js
+const p = stage.getPointerPosition();
+anchorPosition = { top: p.y, left: p.x }; // ❌ це координати canvas, не DOM
+```
+
+Правильно так:
+
+```js
+const rect = stage.container().getBoundingClientRect();
+const p = stage.getPointerPosition();
+anchorPosition = { top: rect.top + p.y, left: rect.left + p.x }; // ✅ DOM
+```
+
+Якщо тобі зручніше не залежати від `e.evt`, можна використовувати цей спосіб завжди:
+
+```js
+const openAtStagePointer = (stage, target) => {
+  const p = stage.getPointerPosition();
+  const r = stage.container().getBoundingClientRect();
+  setMenuState({
+    open: true,
+    anchorPosition: { top: r.top + p.y, left: r.left + p.x },
+    target,
+  });
+};
+```
+
+Це теж буде синхронно при zoom/pan layer.
+
+---
+
+### Що обрати
+
+* Хочеш меню **там, де курсор** → Варіант A (`clientX/clientY`)
+* Хочеш меню **біля об’єкта** (visio-like) → Варіант B (`getClientRect + container rect`)
+
+Якщо скинеш твій поточний `openMenuAtEvent` (або місце, де ти формуєш `anchorPosition`) і як саме ти робиш zoom/pan (stage чи layer, які `scale/position` міняєш), я точково скажу, який саме рядок зараз “ламає” синхронізацію.

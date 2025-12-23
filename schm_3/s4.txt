@@ -1,0 +1,229 @@
+Ось повний приклад **з MUI контекстним меню (ПКМ) + пункт “Видалити”**, і щоб меню **закривалось при кліку ЛКМ поза меню** (по canvas), але **не закривалось**, коли клікаєш всередині меню.
+
+### 1) utils видалення
+
+```js
+// utils/graphDelete.js
+export function deleteNodeWithLinks(nodeId, elements, lines) {
+  return {
+    elements: elements.filter((el) => el.id !== nodeId),
+    lines: lines.filter((l) => l.fromId !== nodeId && l.toId !== nodeId),
+  };
+}
+
+export function deleteLine(lineId, lines) {
+  return lines.filter((l) => l.id !== lineId);
+}
+```
+
+---
+
+### 2) MUI Menu компонент (із stopPropagation + delete)
+
+```jsx
+// components/graph/GraphContextMenuMui.jsx
+import * as React from "react";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+export default function GraphContextMenuMui({
+  open,
+  anchorPosition,
+  onClose,
+  onDelete,
+}) {
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={anchorPosition ?? undefined}
+      disableAutoFocusItem
+      // ключове: кліки всередині меню не “пробивають” до Stage/window
+      MenuListProps={{
+        onMouseDown: (e) => e.stopPropagation(),
+        onTouchStart: (e) => e.stopPropagation(),
+      }}
+    >
+      <MenuItem
+        onClick={() => {
+          onDelete();
+          onClose();
+        }}
+      >
+        <ListItemIcon>
+          <DeleteIcon fontSize="small" />
+        </ListItemIcon>
+        Видалити
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+### 3) Твій LineElement з ПКМ
+
+```jsx
+// app/component/graph/lineElement.js
+import React from "react";
+import { Line } from "react-konva";
+
+const LineElement = ({ el, onContextMenu }) => {
+  return (
+    <Line
+      key={el.id}
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      stroke="black"
+      strokeWidth={2}
+      rotation={el.rotation}
+      draggable
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        onContextMenu(e, { type: "line", id: el.id });
+      }}
+    />
+  );
+};
+
+export default LineElement;
+```
+
+---
+
+### 4) Graph.jsx — повна логіка меню + delete + закриття поза меню
+
+```jsx
+import React, { useState } from "react";
+import { Stage, Layer, Rect } from "react-konva";
+import GraphContextMenuMui from "@/components/graph/GraphContextMenuMui";
+import LineElement from "@/app/component/graph/lineElement";
+import { deleteLine, deleteNodeWithLinks } from "@/utils/graphDelete";
+
+export default function Graph() {
+  // приклад даних
+  const [elements, setElements] = useState([
+    { id: "n1", x: 80, y: 80, w: 120, h: 60 },
+    { id: "n2", x: 320, y: 220, w: 120, h: 60 },
+  ]);
+
+  const [lines, setLines] = useState([
+    {
+      id: "l1",
+      fromId: "n1",
+      toId: "n2",
+      x: 0,
+      y: 0,
+      rotation: 0,
+      points: [140, 110, 320, 250],
+    },
+  ]);
+
+  const [menuState, setMenuState] = useState({
+    open: false,
+    anchorPosition: null, // {top,left}
+    target: null, // {type,id}
+  });
+
+  const closeMenu = () => {
+    setMenuState({ open: false, anchorPosition: null, target: null });
+  };
+
+  const openMenuAtEvent = (e, target) => {
+    const { clientX, clientY } = e.evt;
+    setMenuState({
+      open: true,
+      anchorPosition: { top: clientY, left: clientX },
+      target,
+    });
+  };
+
+  const handleDelete = () => {
+    const t = menuState.target;
+    if (!t) return;
+
+    if (t.type === "node") {
+      const res = deleteNodeWithLinks(t.id, elements, lines);
+      setElements(res.elements);
+      setLines(res.lines);
+      return;
+    }
+
+    if (t.type === "line") {
+      setLines(deleteLine(t.id, lines));
+    }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <Stage
+        width={900}
+        height={600}
+        // ЛКМ по canvas (будь-де) → закрити меню
+        onMouseDown={(e) => {
+          if (menuState.open && e.evt.button === 0) closeMenu();
+        }}
+        onTouchStart={() => {
+          if (menuState.open) closeMenu();
+        }}
+        // ПКМ по пустому місцю → закрити меню (і прибрати браузерне)
+        onContextMenu={(e) => {
+          if (e.target === e.target.getStage()) {
+            e.evt.preventDefault();
+            closeMenu();
+          }
+        }}
+      >
+        <Layer>
+          {/* nodes (приклад прямокутниками) */}
+          {elements.map((el) => (
+            <Rect
+              key={el.id}
+              x={el.x}
+              y={el.y}
+              width={el.w}
+              height={el.h}
+              fill="#e5e7eb"
+              cornerRadius={10}
+              draggable
+              onContextMenu={(e) => {
+                e.evt.preventDefault();
+                openMenuAtEvent(e, { type: "node", id: el.id });
+              }}
+            />
+          ))}
+
+          {/* lines */}
+          {lines.map((l) => (
+            <LineElement key={l.id} el={l} onContextMenu={openMenuAtEvent} />
+          ))}
+        </Layer>
+      </Stage>
+
+      {/* DOM-меню поверх canvas */}
+      <GraphContextMenuMui
+        open={menuState.open}
+        anchorPosition={menuState.anchorPosition}
+        onClose={closeMenu}
+        onDelete={handleDelete}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+### Чому тепер меню гарантовано зникає “поза ним”
+
+* `Stage.onMouseDown` закриває меню при ЛКМ по canvas.
+* `MenuListProps.stopPropagation()` не дає клікам по меню “пробити” вниз, тому меню не закриється, коли ти натискаєш “Видалити”.
+
+---
+
+Якщо ти покажеш, як у тебе зараз виглядає **NodeElement** (не лінія, а блок/фігура схеми) і структура `lines` (чи є `fromId/toId`), я підставлю це 1-в-1 у твій проект, щоб видалення зв’язків працювало без припущень.

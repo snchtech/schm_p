@@ -1,0 +1,343 @@
+Так, є “класичний” підхід, щоб **не було каші**: ти робиш **одне місце-оркестратор** (Canvas/Graph renderer), а всю логіку (меню, delete, selection, hotkeys) — в **хуки** + маленькі UI-компоненти. Тоді кожна фіча додається *одним файлом* і *одним підключенням*.
+
+Нижче даю **чітку структуру + конкретні кроки “створи файл → встав код → підключи”** для твого кейсу: **ПКМ → MUI меню → Delete node + its links / Delete link**.
+
+---
+
+# 1) Структура папок (Next.js App Router + react-konva)
+
+Рекомендовано тримати логіку канваса в модулі `features/graph`:
+
+```
+app/
+  (routes)/
+  editor/
+    page.jsx
+
+components/
+  graph/
+    CanvasStage.jsx          // головний рендер Stage/Layer
+    elements/
+      LineElement.jsx
+      NodeElement.jsx
+    ui/
+      GraphContextMenuMui.jsx // тільки UI меню (MUI)
+features/
+  graph/
+    hooks/
+      useGraphContextMenu.js  // стан меню + відкриття/закриття
+      useGraphDelete.js       // delete логіка
+    utils/
+      graphDelete.js          // pure functions
+```
+
+> Якщо ти зараз вже маєш `app/component/graph/...` — ок, просто перенеси поступово. Головне: **один CanvasStage + hooks + ui**.
+
+---
+
+# 2) Один “рендер-файл” (CanvasStage) — тут все зводиться докупи
+
+## ✅ Створи: `components/graph/CanvasStage.jsx`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import { Stage, Layer } from "react-konva";
+
+import LineElement from "./elements/LineElement";
+import NodeElement from "./elements/NodeElement";
+import GraphContextMenuMui from "./ui/GraphContextMenuMui";
+
+import { useGraphContextMenu } from "@/features/graph/hooks/useGraphContextMenu";
+import { useGraphDelete } from "@/features/graph/hooks/useGraphDelete";
+
+export default function CanvasStage() {
+  // 1) Дані схеми (поки що локально; потім можна в Zustand/Redux)
+  const [nodes, setNodes] = useState([
+    { id: "n1", x: 80, y: 80, w: 140, h: 70 },
+    { id: "n2", x: 340, y: 220, w: 140, h: 70 },
+  ]);
+
+  const [links, setLinks] = useState([
+    {
+      id: "l1",
+      fromId: "n1",
+      toId: "n2",
+      points: [150, 115, 340, 255],
+    },
+  ]);
+
+  // 2) Контекстне меню (стан + відкрити/закрити)
+  const menu = useGraphContextMenu();
+
+  // 3) Delete логіка (працює з state)
+  const { deleteByTarget } = useGraphDelete({ nodes, links, setNodes, setLinks, closeMenu: menu.close });
+
+  return (
+    <div style={{ position: "relative" }}>
+      <Stage
+        width={900}
+        height={600}
+        // ЛКМ по canvas → закрити меню
+        onMouseDown={(e) => {
+          if (menu.open && e.evt.button === 0) menu.close();
+        }}
+        onTouchStart={() => {
+          if (menu.open) menu.close();
+        }}
+        // ПКМ по пустому місцю → закрити меню
+        onContextMenu={(e) => {
+          if (e.target === e.target.getStage()) {
+            e.evt.preventDefault();
+            menu.close();
+          }
+        }}
+      >
+        <Layer>
+          {links.map((l) => (
+            <LineElement
+              key={l.id}
+              el={l}
+              onContextMenu={(e) => menu.openAtEvent(e, { type: "link", id: l.id })}
+            />
+          ))}
+
+          {nodes.map((n) => (
+            <NodeElement
+              key={n.id}
+              el={n}
+              onContextMenu={(e) => menu.openAtEvent(e, { type: "node", id: n.id })}
+            />
+          ))}
+        </Layer>
+      </Stage>
+
+      <GraphContextMenuMui
+        open={menu.open}
+        anchorPosition={menu.anchorPosition}
+        onClose={menu.close}
+        onDelete={() => deleteByTarget(menu.target)}
+      />
+    </div>
+  );
+}
+```
+
+> Це “центр”. В ньому ти лише **підключаєш фічі**.
+
+---
+
+# 3) Елементи (тільки рендер + події)
+
+## ✅ Створи: `components/graph/elements/LineElement.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({ el, onContextMenu }) {
+  return (
+    <Line
+      points={el.points}
+      stroke="black"
+      strokeWidth={2}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        onContextMenu(e);
+      }}
+    />
+  );
+}
+```
+
+## ✅ Створи: `components/graph/elements/NodeElement.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Rect } from "react-konva";
+
+export default function NodeElement({ el, onContextMenu }) {
+  return (
+    <Rect
+      x={el.x}
+      y={el.y}
+      width={el.w}
+      height={el.h}
+      fill="#e5e7eb"
+      cornerRadius={10}
+      draggable
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        onContextMenu(e);
+      }}
+    />
+  );
+}
+```
+
+---
+
+# 4) UI меню (тільки MUI, без логіки)
+
+## ✅ Створи: `components/graph/ui/GraphContextMenuMui.jsx`
+
+```jsx
+"use client";
+
+import * as React from "react";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+export default function GraphContextMenuMui({ open, anchorPosition, onClose, onDelete }) {
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={anchorPosition ?? undefined}
+      disableAutoFocusItem
+      // щоб кліки в меню не закривали Stage-обробником
+      MenuListProps={{
+        onMouseDown: (e) => e.stopPropagation(),
+        onTouchStart: (e) => e.stopPropagation(),
+      }}
+    >
+      <MenuItem
+        onClick={() => {
+          onDelete();
+          onClose();
+        }}
+      >
+        <ListItemIcon>
+          <DeleteIcon fontSize="small" />
+        </ListItemIcon>
+        Видалити
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+# 5) Хук меню (вся логіка відкриття/закриття)
+
+## ✅ Створи: `features/graph/hooks/useGraphContextMenu.js`
+
+```js
+"use client";
+
+import { useCallback, useState } from "react";
+
+export function useGraphContextMenu() {
+  const [open, setOpen] = useState(false);
+  const [anchorPosition, setAnchorPosition] = useState(null); // {top,left}
+  const [target, setTarget] = useState(null); // {type,id}
+
+  const close = useCallback(() => {
+    setOpen(false);
+    setAnchorPosition(null);
+    setTarget(null);
+  }, []);
+
+  const openAtEvent = useCallback((konvaEvent, t) => {
+    const { clientX, clientY } = konvaEvent.evt;
+    setOpen(true);
+    setAnchorPosition({ top: clientY, left: clientX });
+    setTarget(t);
+  }, []);
+
+  return { open, anchorPosition, target, openAtEvent, close };
+}
+```
+
+---
+
+# 6) Delete логіка (в одному місці, без UI)
+
+## ✅ Створи: `features/graph/utils/graphDelete.js`
+
+```js
+export function deleteNodeWithLinks(nodeId, nodes, links) {
+  return {
+    nodes: nodes.filter((n) => n.id !== nodeId),
+    links: links.filter((l) => l.fromId !== nodeId && l.toId !== nodeId),
+  };
+}
+
+export function deleteLink(linkId, links) {
+  return links.filter((l) => l.id !== linkId);
+}
+```
+
+## ✅ Створи: `features/graph/hooks/useGraphDelete.js`
+
+```js
+"use client";
+
+import { useCallback } from "react";
+import { deleteLink, deleteNodeWithLinks } from "../utils/graphDelete";
+
+export function useGraphDelete({ nodes, links, setNodes, setLinks, closeMenu }) {
+  const deleteByTarget = useCallback(
+    (target) => {
+      if (!target) return;
+
+      if (target.type === "node") {
+        const res = deleteNodeWithLinks(target.id, nodes, links);
+        setNodes(res.nodes);
+        setLinks(res.links);
+        closeMenu?.();
+        return;
+      }
+
+      if (target.type === "link") {
+        setLinks(deleteLink(target.id, links));
+        closeMenu?.();
+      }
+    },
+    [nodes, links, setNodes, setLinks, closeMenu]
+  );
+
+  return { deleteByTarget };
+}
+```
+
+---
+
+# 7) Підключення на сторінці
+
+## ✅ В `app/editor/page.jsx`:
+
+```jsx
+import CanvasStage from "@/components/graph/CanvasStage";
+
+export default function EditorPage() {
+  return <CanvasStage />;
+}
+```
+
+---
+
+## Чому це “класика” і чому так легше
+
+* **CanvasStage.jsx** — єдиний файл, де “збирається” граф
+* `elements/*` — лише рендер і події (ніякої бізнес-логіки)
+* `ui/*` — лише UI (MUI меню)
+* `hooks/*` — логіка фіч (menu, delete, потім додаси: selection, hotkeys, undo/redo)
+* `utils/*` — чисті функції (легко тестувати)
+
+---
+
+Якщо ти скажеш, як у тебе **в проекті** називаються:
+
+* “вузли” (елементи схеми)
+* “зв’язки” (Line/Arrow/Group)
+  і де саме лежить твій головний рендер Stage/Layer — я підставлю цю структуру **під твої реальні папки**, щоб ти просто зробив “створи 5 файлів → встав код → імпорти”.

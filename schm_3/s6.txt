@@ -1,0 +1,278 @@
+Зробити “як у Visio” в react-konva реально. Класичний підхід такий:
+
+1. ти маєш **selectedId** (і selectedType: node/link) у стані.
+2. кожен елемент, коли **selected**, рендерить **акцент**:
+
+   * або **stroke**/outline навколо фігури
+   * * **resize handles** через `Transformer` (як рамка з маркерами)
+3. для “visio-стилю” ще часто додають **пунктирну рамку** + **маленькі круглі хендли**.
+
+Нижче даю структуру “додай у файл → підключи”, максимально послідовно.
+
+---
+
+## 1) У CanvasStage додай selected state і “клік виділяє”
+
+**`components/graph/CanvasStage.jsx`** (показую тільки важливі шматки)
+
+```jsx
+const [selection, setSelection] = useState({ type: null, id: null }); // {type:'node'|'link', id}
+
+<Stage
+  onMouseDown={(e) => {
+    // клік в пустоту -> зняти виділення
+    if (e.target === e.target.getStage()) {
+      setSelection({ type: null, id: null });
+      return;
+    }
+  }}
+>
+  <Layer>
+    {nodes.map((n) => (
+      <NodeElement
+        key={n.id}
+        el={n}
+        isSelected={selection.type === "node" && selection.id === n.id}
+        onSelect={() => setSelection({ type: "node", id: n.id })}
+        onContextMenu={(e) => menu.openAtEvent(e, { type: "node", id: n.id })}
+      />
+    ))}
+
+    {links.map((l) => (
+      <LineElement
+        key={l.id}
+        el={l}
+        isSelected={selection.type === "link" && selection.id === l.id}
+        onSelect={() => setSelection({ type: "link", id: l.id })}
+        onContextMenu={(e) => menu.openAtEvent(e, { type: "link", id: l.id })}
+      />
+    ))}
+  </Layer>
+</Stage>
+```
+
+---
+
+## 2) Виділення для node: рамка + Transformer (як у редакторах)
+
+### ✅ Створи/онови файл `components/graph/ui/SelectionTransformer.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useRef } from "react";
+import { Transformer } from "react-konva";
+
+export default function SelectionTransformer({ selectedNode, enabled = true }) {
+  const trRef = useRef(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const tr = trRef.current;
+    if (!tr) return;
+
+    if (selectedNode) {
+      tr.nodes([selectedNode]);
+      tr.getLayer()?.batchDraw();
+    } else {
+      tr.nodes([]);
+      tr.getLayer()?.batchDraw();
+    }
+  }, [selectedNode, enabled]);
+
+  if (!enabled) return null;
+
+  return (
+    <Transformer
+      ref={trRef}
+      rotateEnabled={true}
+      // візуально “як редактор”
+      borderStroke="#3b82f6"
+      borderStrokeWidth={1}
+      borderDash={[6, 4]}
+      anchorStroke="#3b82f6"
+      anchorFill="white"
+      anchorSize={8}
+      // щоб не чіпляло за дуже близько
+      padding={6}
+    />
+  );
+}
+```
+
+> Це дає прям “Visio-вайб”: пунктир + хендли.
+
+---
+
+## 3) NodeElement: додай ref і outline (підсвітка)
+
+### ✅ Онови `components/graph/elements/NodeElement.jsx`
+
+```jsx
+"use client";
+
+import React, { useRef, useEffect } from "react";
+import { Group, Rect } from "react-konva";
+
+export default function NodeElement({ el, isSelected, onSelect, onContextMenu, registerNodeRef }) {
+  const groupRef = useRef(null);
+
+  // віддаємо ref нагору, щоб Transformer знав, кого “обводити”
+  useEffect(() => {
+    if (!registerNodeRef) return;
+    registerNodeRef(el.id, groupRef.current);
+    return () => registerNodeRef(el.id, null);
+  }, [el.id, registerNodeRef]);
+
+  return (
+    <Group
+      ref={groupRef}
+      x={el.x}
+      y={el.y}
+      draggable
+      onMouseDown={(e) => {
+        // ЛКМ по елементу -> select
+        if (e.evt.button === 0) onSelect();
+      }}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        onSelect(); // часто зручно: ПКМ теж робить selected
+        onContextMenu(e);
+      }}
+    >
+      {/* Основна фігура */}
+      <Rect
+        width={el.w}
+        height={el.h}
+        fill="#e5e7eb"
+        cornerRadius={10}
+      />
+
+      {/* Акцент/outline коли selected (під фігурою або над - як хочеш) */}
+      {isSelected && (
+        <Rect
+          x={-6}
+          y={-6}
+          width={el.w + 12}
+          height={el.h + 12}
+          cornerRadius={12}
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dash={[6, 4]}
+          listening={false} // щоб не перехоплював кліки
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+> Тут ми робимо два рівні: **outline** (видимий акцент) + **Transformer** (хендли).
+
+---
+
+## 4) В CanvasStage підключи Transformer правильно
+
+У CanvasStage треба мати “мапу ref-ів” для нод і передати selected node у Transformer.
+
+### ✅ Додай в `components/graph/CanvasStage.jsx`
+
+```jsx
+import SelectionTransformer from "./ui/SelectionTransformer";
+import { useRef } from "react";
+
+const nodeRefs = useRef(new Map());
+
+const registerNodeRef = (id, node) => {
+  if (!node) nodeRefs.current.delete(id);
+  else nodeRefs.current.set(id, node);
+};
+
+const selectedKonvaNode =
+  selection.type === "node" ? nodeRefs.current.get(selection.id) : null;
+```
+
+І в Layer (в кінці) додай:
+
+```jsx
+<SelectionTransformer selectedNode={selectedKonvaNode} enabled={selection.type === "node"} />
+```
+
+А в NodeElement передай `registerNodeRef`:
+
+```jsx
+<NodeElement
+  ...
+  registerNodeRef={registerNodeRef}
+/>
+```
+
+---
+
+## 5) Для ліній (зв’язків) — “Visio style” підсвітка
+
+Лінію Transformer-ом зазвичай не ресайзять як прямокутник. Її підсвічують так:
+
+* коли selected → збільшити `strokeWidth`, змінити `stroke`, або намалювати “підкладку” (ширшу блакитну лінію під основною).
+
+### ✅ Онови `components/graph/elements/LineElement.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({ el, isSelected, onSelect, onContextMenu }) {
+  return (
+    <>
+      {/* “підкладка” для виділення */}
+      {isSelected && (
+        <Line
+          points={el.points}
+          stroke="#3b82f6"
+          strokeWidth={8}
+          lineCap="round"
+          lineJoin="round"
+          listening={false}
+          opacity={0.35}
+        />
+      )}
+
+      <Line
+        points={el.points}
+        stroke="black"
+        strokeWidth={2}
+        lineCap="round"
+        lineJoin="round"
+        onMouseDown={(e) => {
+          if (e.evt.button === 0) onSelect();
+        }}
+        onContextMenu={(e) => {
+          e.evt.preventDefault();
+          onSelect();
+          onContextMenu(e);
+        }}
+      />
+    </>
+  );
+}
+```
+
+---
+
+# Підсумок “як у Visio”
+
+* **Node selected**: пунктирна рамка + Transformer anchors (хендли) ✅
+* **Link selected**: блакитна “підкладка” під лінією ✅
+* **Клік в пустоту**: знімає selection ✅
+* **ПКМ**: може одночасно робити selection і відкривати меню ✅
+
+---
+
+Якщо хочеш “ще ближче до Visio”, наступний крок:
+
+* показувати **маленькі точки-конектори** на вузлах (4/8 точок) тільки коли node selected/hover,
+* і для лінії показувати **ендпоінти** (кружечки на початку/кінці) коли selected.
+
+Можу додати це в такій самій структурі файлів.

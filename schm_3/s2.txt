@@ -1,0 +1,34 @@
+Так, підходить — **це нормальний і правильний підхід саме для react-konva**, бо:
+
+* подія `onContextMenu` **підтримується** у `react-konva` (вона мапиться на нативний `contextmenu`)
+* `e.evt` у Konva event — це **справжній DOM MouseEvent**, тому `e.evt.preventDefault()` працює
+* меню Material UI — це **DOM-оверлей**, його якраз і треба показувати поверх canvas, не всередині Konva
+
+Є тільки 3 дрібні моменти, щоб було 100% стабільно:
+
+1. **Використовуй `clientX/clientY`** для `anchorPosition` (як я і показав) — це координати екрана, MUI їх очікує.
+2. Якщо в тебе `Stage` всередині скрол-контейнера, `clientX/clientY` все одно ок, але інколи хочуть `pageX/pageY`. Для MUI краще `client*`.
+3. Для закриття меню зручно додати:
+
+   * `Stage.onMouseDown` / `Stage.onTouchStart` → `closeMenu()`
+   * правий клік на порожньому місці → `closeMenu()`
+
+Мінімальний тест-кейс (точно працює в react-konva):
+
+```jsx
+<Line
+  points={[10, 10, 200, 200]}
+  stroke="black"
+  strokeWidth={2}
+  onContextMenu={(e) => {
+    e.evt.preventDefault();
+    console.log("Right click on line", e.evt.clientX, e.evt.clientY);
+  }}
+/>
+```
+
+Якщо хочеш, я можу одразу адаптувати під твою реальну структуру даних:
+
+* як ти зберігаєш зв’язки (чи є `fromId/toId`)
+* як виглядає твій компонент елемента (node)
+  …і дам готовий шматок коду “вставив і працює” для Stage/Layer з меню.

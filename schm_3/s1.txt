@@ -1,0 +1,242 @@
+Ок — для **React-Konva + Material UI** найкраще зробити так:
+
+* **правий клік** по елементу/лінії → **preventDefault** → запам’ятали, що саме клікнули + координати на екрані
+* показали **MUI `<Menu>`** (це звичайний DOM-оверлей поверх canvas)
+* `Delete` → міняємо state:
+
+  * якщо **node** → видаляємо node + всі edges з `fromId/toId`
+  * якщо **edge** → видаляємо лише edge
+
+Нижче даю готовий код-патерн.
+
+---
+
+## 1) Хелпери видалення (без змін)
+
+**`utils/graphDelete.js`**
+
+```js
+export function deleteNodeWithLinks(nodeId, elements, lines) {
+  return {
+    elements: elements.filter((el) => el.id !== nodeId),
+    lines: lines.filter((l) => l.fromId !== nodeId && l.toId !== nodeId),
+  };
+}
+
+export function deleteLine(lineId, lines) {
+  return lines.filter((l) => l.id !== lineId);
+}
+```
+
+---
+
+## 2) Контекстне меню на Material UI (DOM)
+
+**`components/graph/GraphContextMenuMui.jsx`**
+
+```jsx
+import * as React from "react";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+export default function GraphContextMenuMui({
+  anchorPosition,
+  open,
+  onClose,
+  onDelete,
+}) {
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={anchorPosition ?? undefined}
+      // важливо, щоб Menu не крало фокус у canvas без потреби
+      disableAutoFocusItem
+    >
+      <MenuItem
+        onClick={() => {
+          onDelete();
+          onClose();
+        }}
+      >
+        <ListItemIcon>
+          <DeleteIcon fontSize="small" />
+        </ListItemIcon>
+        Видалити
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+> Тут уже легко додавати нові пункти меню в майбутньому.
+
+---
+
+## 3) Оновлений LineElement: правий клік (contextmenu)
+
+**`app/component/graph/lineElement.js` (твій файл, перероблений)**
+
+```jsx
+import React from "react";
+import { Line } from "react-konva";
+
+const LineElement = ({ el, onContextMenu }) => {
+  return (
+    <Line
+      key={el.id}
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      stroke="black"
+      strokeWidth={2}
+      rotation={el.rotation}
+      draggable
+      onContextMenu={(e) => {
+        // правий клік по лінії
+        e.evt.preventDefault(); // блокує стандартне меню браузера
+        onContextMenu(e, { type: "line", id: el.id });
+      }}
+    />
+  );
+};
+
+export default LineElement;
+```
+
+---
+
+## 4) Аналогічно для елемента (node/shape)
+
+Будь-який твій компонент елемента (Rect/Group/...) робиш так:
+
+```jsx
+onContextMenu={(e) => {
+  e.evt.preventDefault();
+  onContextMenu(e, { type: "node", id: el.id });
+}}
+```
+
+---
+
+## 5) Інтеграція в Graph (де зберігаються state lines/elements)
+
+**`Graph.jsx` (приклад ядра логіки)**
+
+```jsx
+import React, { useMemo, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+import GraphContextMenuMui from "./GraphContextMenuMui";
+import { deleteLine, deleteNodeWithLinks } from "@/utils/graphDelete";
+
+export default function Graph() {
+  const stageRef = useRef(null);
+
+  const [elements, setElements] = useState([]); // nodes
+  const [lines, setLines] = useState([]);       // edges
+
+  const [menuState, setMenuState] = useState({
+    open: false,
+    anchorPosition: null, // { top, left }
+    target: null,         // { type, id }
+  });
+
+  const closeMenu = () =>
+    setMenuState((s) => ({ ...s, open: false, anchorPosition: null, target: null }));
+
+  const openMenuAtEvent = (e, target) => {
+    // e — Konva event, e.evt — нативна мишка
+    const { clientX, clientY } = e.evt;
+    setMenuState({
+      open: true,
+      anchorPosition: { top: clientY, left: clientX },
+      target,
+    });
+  };
+
+  const handleDelete = () => {
+    const t = menuState.target;
+    if (!t) return;
+
+    if (t.type === "node") {
+      const res = deleteNodeWithLinks(t.id, elements, lines);
+      setElements(res.elements);
+      setLines(res.lines);
+      return;
+    }
+
+    if (t.type === "line") {
+      setLines(deleteLine(t.id, lines));
+    }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={700}
+        // правий клік на порожньому місці — закрити меню
+        onContextMenu={(e) => {
+          // Якщо клікнули по Stage (порожньо) — закриваємо
+          if (e.target === e.target.getStage()) {
+            e.evt.preventDefault();
+            closeMenu();
+          }
+        }}
+        // будь-який лівий клік по canvas — закрити меню (зручно)
+        onMouseDown={() => {
+          if (menuState.open) closeMenu();
+        }}
+      >
+        <Layer>
+          {/* Рендер твоїх ліній */}
+          {lines.map((l) => (
+            <LineElement
+              key={l.id}
+              el={l}
+              onContextMenu={openMenuAtEvent}
+            />
+          ))}
+
+          {/* Рендер твоїх node-елементів (приклад) */}
+          {/* {elements.map(el => (
+              <NodeElement key={el.id} el={el} onContextMenu={openMenuAtEvent} />
+          ))} */}
+        </Layer>
+      </Stage>
+
+      {/* DOM-меню поверх canvas */}
+      <GraphContextMenuMui
+        open={menuState.open}
+        anchorPosition={menuState.anchorPosition}
+        onClose={closeMenu}
+        onDelete={handleDelete}
+      />
+    </div>
+  );
+}
+```
+
+> **Ключовий момент:** MUI `Menu` — це DOM, він нормально відмальовується поверх `<canvas>` Konva.
+
+---
+
+## 6) Щоб працювало і на touch (опційно)
+
+Якщо треба, можна додати “довгий тап” → меню, але поки ти просив лише ПКМ.
+
+---
+
+## Невеликі поради, щоб не було багів
+
+1. У `onContextMenu` завжди роби `e.evt.preventDefault()`, інакше відкриється браузерне меню.
+2. `anchorReference="anchorPosition"` — правильний варіант для позиціювання в координатах екрана.
+3. Зберігай у `target` тільки `{type,id}`, не сам Konva node (щоб не тримати “живі” посилання).
+
+---
+
+Якщо ти скинеш ще **NodeElement** (як у тебе виглядає прямокутник/група для елемента схеми) і як у тебе зараз виглядає структура `lines` (чи є там `fromId/toId`), я одразу піджену цей код під твої реальні дані (щоб видалення зв’язків було 1-в-1 як у тебе).
