@@ -1,0 +1,618 @@
+Ок. Розділяємо так, щоб:
+
+* **useDiagramStore** — тільки дані + сеттери (symbols, connections, hovered…, message, режими).
+* **useSelection** — тільки selection логіка (setSelection, clear, select).
+* **useConnectionRouting** — вся «важка» логіка побудови/оновлення ліній, прив’язок, анкорів: `getAnchorPoints`, `handleLineClick`, `handleAnchorClick`, `handleDragMove`, `updateConnectionOffset` + внутрішні хелпери (normalize/resolve/boxes/propagate).
+
+А зверху робимо **useDiagramState** як “composer”, щоб твій `DiagramEditor` майже не мінявся.
+
+Нижче — готовий набір файлів (JS, як ти просив). Я залишаю твої назви/поведінку максимально близько, але прибираю хаос.
+
+---
+
+# 0) Структура файлів (feature-папка)
+
+```
+src/features/diagram-editor/model/
+  useDiagramStore.js
+  useSelection.js
+  useConnectionRouting.js
+  useDiagramState.js        // composer (як фасад)
+
+src/features/diagram-editor/geometry/geometry.js   // твій geometry.js (може лежати як було, але краще тут)
+```
+
+> `geometry.js` можеш лишити в shared або feature/geometry — головне, щоб routing модуль імпортував з одного місця.
+
+---
+
+# 1) useDiagramStore.js (тільки стан + прості режими)
+
+```js
+"use client";
+
+import { useState } from "react";
+import { v4 as uuidv4 } from "uuid";
+
+export function useDiagramStore() {
+  const [symbols, setSymbols] = useState([
+    {
+      id: uuidv4(),
+      type: "rect",
+      x: 100,
+      y: 100,
+      width: 80,
+      height: 50,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+    {
+      id: uuidv4(),
+      type: "circle",
+      x: 300,
+      y: 200,
+      width: 60,
+      height: 60,
+      radius: 30,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+    {
+      id: uuidv4(),
+      type: "rect",
+      x: 450,
+      y: 200,
+      width: 80,
+      height: 50,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  ]);
+
+  const [connections, setConnections] = useState([]);
+
+  // режими взаємодії
+  const [isAddingConnector, setIsAddingConnector] = useState(false);
+  const [isAddingAnchor, setIsAddingAnchor] = useState(false);
+
+  // тимчасовий вибір стартового anchor при створенні конектора
+  const [selectedAnchor, setSelectedAnchor] = useState(null);
+
+  // hover-стани
+  const [hoveredAnchor, setHoveredAnchor] = useState(null);
+  const [hoveredElement, setHoveredElement] = useState(null);
+  const [hoveredConnectionId, setHoveredConnectionId] = useState(null);
+  const [hoveredLineAnchorId, setHoveredLineAnchorId] = useState(null);
+
+  // повідомлення юзеру
+  const [message, setMessage] = useState("");
+
+  // прості режими
+  const startAddConnector = () => {
+    setIsAddingAnchor(false);
+    setSelectedAnchor(null);
+    setIsAddingConnector(true);
+  };
+
+  const startAddLineAnchor = () => {
+    setIsAddingConnector(false);
+    setSelectedAnchor(null);
+    setIsAddingAnchor(true);
+  };
+
+  const cancelAddModes = () => {
+    setIsAddingConnector(false);
+    setIsAddingAnchor(false);
+    setSelectedAnchor(null);
+    setMessage("");
+  };
+
+  return {
+    // data
+    symbols,
+    connections,
+
+    // mode flags
+    isAddingConnector,
+    isAddingAnchor,
+
+    // draft selection for connector creation
+    selectedAnchor,
+
+    // hovers
+    hoveredAnchor,
+    hoveredElement,
+    hoveredConnectionId,
+    hoveredLineAnchorId,
+
+    // message
+    message,
+
+    // setters
+    setSymbols,
+    setConnections,
+    setIsAddingConnector,
+    setIsAddingAnchor,
+    setSelectedAnchor,
+    setHoveredAnchor,
+    setHoveredElement,
+    setHoveredConnectionId,
+    setHoveredLineAnchorId,
+    setMessage,
+
+    // actions
+    startAddConnector,
+    startAddLineAnchor,
+    cancelAddModes,
+  };
+}
+```
+
+---
+
+# 2) useSelection.js (єдиний selection контракт)
+
+Вводимо один контракт:
+
+```js
+{ kind: "shape" | "connection" | null, id: string | null }
+```
+
+```js
+"use client";
+
+import { useCallback, useState } from "react";
+
+export function useSelection() {
+  const [selection, setSelection] = useState({ kind: null, id: null });
+
+  const clearSelection = useCallback(() => {
+    setSelection({ kind: null, id: null });
+  }, []);
+
+  const selectShape = useCallback((shapeId) => {
+    setSelection({ kind: "shape", id: shapeId });
+  }, []);
+
+  const selectConnection = useCallback((connectionId) => {
+    setSelection({ kind: "connection", id: connectionId });
+  }, []);
+
+  // клік по Stage (порожньому місцю) — очистити
+  const clearOnStagePointerDown = useCallback((konvaEvent) => {
+    const target = konvaEvent?.target;
+    const stage = target?.getStage?.();
+    if (stage && target === stage) {
+      setSelection({ kind: null, id: null });
+    }
+  }, []);
+
+  return {
+    selection,
+    setSelection,
+    clearSelection,
+    selectShape,
+    selectConnection,
+    clearOnStagePointerDown,
+  };
+}
+```
+
+> Тепер **ніяких “node”**.
+
+---
+
+# 3) useConnectionRouting.js (вся логіка ліній + прив’язок)
+
+Це великий модуль. Я даю компактно, але повністю робочою структурою: всі твої внутрішні хелпери з `useDiagramState` перенесені сюди, і функції працюють через `store`.
+
+```js
+"use client";
+
+import { v4 as uuidv4 } from "uuid";
+import {
+  findClosestSegment,
+  calculateOrthogonalPath,
+  getExitDirForLineAttachment,
+  getExitDir,
+  boxFromSymbol,
+} from "../geometry/geometry"; // шлях підлаштуй під свій
+
+export function useConnectionRouting(store) {
+  const {
+    symbols,
+    connections,
+    isAddingConnector,
+    isAddingAnchor,
+    selectedAnchor,
+
+    setSymbols,
+    setConnections,
+    setSelectedAnchor,
+    setIsAddingConnector,
+    setIsAddingAnchor,
+    setHoveredElement,
+    setHoveredAnchor,
+    setHoveredLineAnchorId,
+    setMessage,
+  } = store;
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const MIN_OFFSET = 8;
+  const MAX_OFFSET = 300;
+
+  // ✅ Anchor points: узгоджуємо з твоїми type ("rect"/"circle")
+  const getAnchorPoints = (el) => {
+    const { x, y, width, height, type } = el;
+
+    if (type === "rect") {
+      return [
+        { x: x + width / 2, y: y, direction: "top" },
+        { x: x + width / 2, y: y + height, direction: "bottom" },
+        { x: x, y: y + height / 2, direction: "left" },
+        { x: x + width, y: y + height / 2, direction: "right" },
+      ];
+    }
+
+    if (type === "circle") {
+      return [
+        { x: x, y: y - height / 2, direction: "top" },
+        { x: x, y: y + height / 2, direction: "bottom" },
+        { x: x - width / 2, y: y, direction: "left" },
+        { x: x + width / 2, y: y, direction: "right" },
+      ];
+    }
+
+    return [];
+  };
+
+  // ---------- Attachment helpers ----------
+  const normalizeAttachment = (a) => {
+    // line anchor
+    if (a?.kind === "lineAnchor") {
+      return {
+        type: "line",
+        connectionId: a.parentConnectionId || a.connectionId,
+        anchorId: a.id,
+        segIndex: a.segIndex,
+        t: a.t,
+        x: a.x,
+        y: a.y,
+      };
+    }
+
+    // symbol anchor
+    return {
+      type: "symbol",
+      symbolId: a.parentId || a.symbolId || a.id,
+      direction: a.direction,
+    };
+  };
+
+  const resolveAttachmentPoint = (att, symbolsState, connectionsState) => {
+    if (!att) return null;
+
+    if (att.type === "symbol") {
+      const sym = symbolsState.find((s) => s.id === att.symbolId);
+      if (!sym) return null;
+      return getAnchorPoints(sym).find((p) => p.direction === att.direction) || null;
+    }
+
+    if (att.type === "line") {
+      const parent = connectionsState.find((c) => c.id === att.connectionId);
+      if (!parent) return { x: att.x, y: att.y, direction: "mid" };
+
+      const pts = parent.points || [];
+
+      let live = null;
+      if (att.anchorId) {
+        live = (parent.additionalAnchors || []).find((a) => a.id === att.anchorId) || null;
+      }
+      if (live) return { x: live.x, y: live.y, direction: "mid" };
+
+      if (att.segIndex != null && att.t != null && 2 * att.segIndex + 3 < pts.length) {
+        const x1 = pts[2 * att.segIndex],
+          y1 = pts[2 * att.segIndex + 1];
+        const x2 = pts[2 * att.segIndex + 2],
+          y2 = pts[2 * att.segIndex + 3];
+        return { x: x1 + att.t * (x2 - x1), y: y1 + att.t * (y2 - y1), direction: "mid" };
+      }
+
+      return { x: att.x, y: att.y, direction: "mid" };
+    }
+
+    return null;
+  };
+
+  const getBoxForAttachment = (att, symbolsState) => {
+    if (!att || att.type !== "symbol") return null;
+    const s = symbolsState.find((x) => x.id === att.symbolId);
+    return s ? boxFromSymbol(s, 10) : null;
+  };
+
+  // ---------- Actions ----------
+  const handleLineClick = (connectionId, event) => {
+    if (!isAddingAnchor) return;
+    event.cancelBubble = true;
+
+    const stage = event.target.getStage();
+    const pos = stage.getPointerPosition();
+    if (!pos) return;
+
+    setConnections((prev) =>
+      prev.map((conn) => {
+        if (conn.id !== connectionId) return conn;
+
+        const closest = findClosestSegment(conn.points, pos.x, pos.y);
+
+        const already = (conn.additionalAnchors || []).some(
+          (a) => Math.abs(a.x - closest.x) < 1 && Math.abs(a.y - closest.y) < 1,
+        );
+        if (already) return conn;
+
+        const newAnchor = {
+          id: uuidv4(),
+          x: closest.x,
+          y: closest.y,
+          parentConnectionId: connectionId,
+          segIndex: closest.segIndex,
+          t: closest.t,
+          vertexIndex: null,
+          kind: "lineAnchor",
+        };
+
+        return { ...conn, additionalAnchors: [...(conn.additionalAnchors || []), newAnchor] };
+      }),
+    );
+
+    setSelectedAnchor(null);
+    setIsAddingConnector(false);
+    setIsAddingAnchor(false);
+  };
+
+  const handleAnchorClick = (anchor) => {
+    if (!isAddingConnector) return;
+
+    if (!selectedAnchor) {
+      setSelectedAnchor(anchor);
+      setMessage("Оберіть наступний елемент для зв'язку");
+      return;
+    }
+
+    const from = normalizeAttachment(selectedAnchor);
+    const to = normalizeAttachment(anchor);
+
+    const sp = resolveAttachmentPoint(from, symbols, connections);
+    const ep = resolveAttachmentPoint(to, symbols, connections);
+
+    if (!sp || !ep) {
+      setSelectedAnchor(null);
+      setIsAddingConnector(false);
+      setMessage("Не вдалося визначити точки прив'язки");
+      return;
+    }
+
+    const dirFrom = getExitDir(from, ep, connections);
+    const dirTo = getExitDir(to, sp, connections);
+
+    const initialOffset = 20;
+    const newConnId = uuidv4();
+
+    const pts = calculateOrthogonalPath(
+      { ...sp, direction: dirFrom },
+      { ...ep, direction: dirTo },
+      { startOffset: initialOffset, endOffset: initialOffset },
+      getBoxForAttachment(from, symbols),
+      getBoxForAttachment(to, symbols),
+    );
+
+    setConnections((prev) => [
+      ...prev,
+      {
+        id: newConnId,
+        from,
+        to,
+        points: pts,
+        routing: { startOffset: initialOffset, endOffset: initialOffset },
+        fromExitDir: dirFrom,
+        toExitDir: dirTo,
+        additionalAnchors: [],
+      },
+    ]);
+
+    setSelectedAnchor(null);
+    setHoveredElement(null);
+    setHoveredAnchor(null);
+    setMessage("");
+    setIsAddingConnector(false);
+    setHoveredLineAnchorId(null);
+  };
+
+  // перетягування фігури
+  const handleDragMove = (id, e) => {
+    const { x, y } = e.target.position();
+    const symbolsNext = symbols.map((s) => (s.id === id ? { ...s, x, y } : s));
+    setSymbols(symbolsNext);
+
+    // перерахунок ліній
+    setConnections((prev) => {
+      let next = prev.map((conn) => {
+        const sp = resolveAttachmentPoint(conn.from, symbolsNext, prev);
+        const ep = resolveAttachmentPoint(conn.to, symbolsNext, prev);
+        if (!sp || !ep) return conn;
+
+        const df = getExitDir(conn.from, ep, prev);
+        const dt = getExitDir(conn.to, sp, prev);
+
+        const routing = {
+          startOffset: conn.routing?.startOffset ?? 20,
+          endOffset: conn.routing?.endOffset ?? 20,
+        };
+
+        const pts = calculateOrthogonalPath(
+          { ...sp, direction: df },
+          { ...ep, direction: dt },
+          routing,
+          getBoxForAttachment(conn.from, symbolsNext),
+          getBoxForAttachment(conn.to, symbolsNext),
+        );
+
+        return pts ? { ...conn, points: pts, fromExitDir: df, toExitDir: dt, routing } : conn;
+      });
+
+      // оновити координати додаткових anchors після перерахунку
+      next = next.map((conn) => {
+        if (!conn.additionalAnchors?.length) return conn;
+        const updated = conn.additionalAnchors.map((a) => {
+          const i = a.segIndex;
+          const pts = conn.points || [];
+          if (i == null || 2 * i + 3 >= pts.length) return a;
+          const x1 = pts[2 * i],
+            y1 = pts[2 * i + 1];
+          const x2 = pts[2 * i + 2],
+            y2 = pts[2 * i + 3];
+          return { ...a, x: x1 + a.t * (x2 - x1), y: y1 + a.t * (y2 - y1) };
+        });
+        return { ...conn, additionalAnchors: updated };
+      });
+
+      return next;
+    });
+  };
+
+  const updateConnectionOffset = (connId, newOffset, side = "both", extra = {}) => {
+    setConnections((prev) => {
+      const pad = clamp(newOffset, MIN_OFFSET, MAX_OFFSET);
+      const idx = prev.findIndex((c) => c.id === connId);
+      if (idx < 0) return prev;
+
+      const next = [...prev];
+      const conn = next[idx];
+
+      const prevStart = conn.routing?.startOffset ?? 20;
+      const prevEnd = conn.routing?.endOffset ?? 20;
+
+      let startOffset = prevStart;
+      let endOffset = prevEnd;
+
+      if (side === "start") startOffset = pad;
+      else if (side === "end") endOffset = pad;
+      else {
+        startOffset = pad;
+        endOffset = pad;
+      }
+
+      const sp = resolveAttachmentPoint(conn.from, symbols, next);
+      const ep = resolveAttachmentPoint(conn.to, symbols, next);
+      if (!sp || !ep) return prev;
+
+      const df = getExitDir(conn.from, ep, next);
+      const dt = getExitDir(conn.to, sp, next);
+
+      const pts = calculateOrthogonalPath(
+        { ...sp, direction: df },
+        { ...ep, direction: dt },
+        { startOffset, endOffset },
+        getBoxForAttachment(conn.from, symbols),
+        getBoxForAttachment(conn.to, symbols),
+      );
+
+      next[idx] = {
+        ...conn,
+        points: pts,
+        fromExitDir: df,
+        toExitDir: dt,
+        routing: { startOffset, endOffset },
+      };
+
+      return next;
+    });
+  };
+
+  return {
+    getAnchorPoints,
+    handleLineClick,
+    handleAnchorClick,
+    handleDragMove,
+    updateConnectionOffset,
+  };
+}
+```
+
+> Так, тут ще можна винести частину хелперів у `routing/utils.js`, але зараз ти хотів **структуру + розділення**, а не “ідеально дрібно”.
+
+---
+
+# 4) useDiagramState.js (композер-фасад, як було)
+
+```js
+"use client";
+
+import { useDiagramStore } from "./useDiagramStore";
+import { useSelection } from "./useSelection";
+import { useConnectionRouting } from "./useConnectionRouting";
+
+export function useDiagramState() {
+  const store = useDiagramStore();
+  const selectionApi = useSelection();
+  const routingApi = useConnectionRouting(store);
+
+  return {
+    // store
+    ...store,
+
+    // selection
+    ...selectionApi,
+
+    // routing
+    ...routingApi,
+  };
+}
+```
+
+---
+
+# 5) Мінімальні зміни в компонентах
+
+## DiagramSymbols
+
+Тепер `onMouseDown` викликає `selectShape(el.id)` замість старого `selectHightlightEl(el)`.
+
+Тобто в `DiagramEditor`:
+
+```js
+onMouseDown={(el) => S.selectShape(el.id)}
+selected={S.selection}
+```
+
+А очистку selection на Stage — додаєш в `Stage`:
+
+```jsx
+<Stage
+  ...
+  onMouseDown={S.clearOnStagePointerDown}
+>
+```
+
+---
+
+# 6) Чому це “оптимально” для уникнення дублювання
+
+* У тебе `routing` — **одна точка правди**: всі формули/обхід/anchors.
+* `store` — **одна точка правди** для станів.
+* `selection` — не змішується з routing і не “протікає” у store.
+
+Далі дуже легко:
+
+* зробити `diagram-store` на Zustand/Redux (якщо захочеш)
+* додати persistence (save/load)
+* винести toolbar / menu в UI-компоненти, які працюють через фасад `S`
+
+---
+
+## Наступний крок (логічний)
+
+Хочеш, я одразу покажу **оновлені фрагменти DiagramEditor** (toolbar/zoom/menu залишаємо як є), щоб ти бачив як це виглядає після рефакторингу?

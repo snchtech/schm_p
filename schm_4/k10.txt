@@ -1,0 +1,86 @@
+Ти правий: **частково ми вже “виносили”** — але не повністю і не в тому сенсі, який потрібен для “feature-структури”.
+
+### Що ми реально зробили вище
+
+* Ми **розділили доменну логіку** (`updateConnectionOffset`, створення конектора) на окремі файли *model/domain*.
+* Ми **підчистили UI-компоненти** `DiagramSymbols` / `DiagramConnections`.
+* Але в `DiagramEditor` у тебе все ще змішано:
+
+  * **UI панель кнопок** (toolbar)
+  * **панель zoom**
+  * **контекстне меню**
+  * **Stage/Layer** та wiring пропсів
+  * **refs / registerNodeRef / selectionKonvaNode**
+  * плюс “технічні” речі (setupLayerZoomPan)
+
+Тобто це ще не “компоненти по блоках сторінки”, а поки один великий контейнер.
+
+---
+
+## Що означає “винести toolbar/zoom/menu в окремі компоненти” в нашому контексті
+
+Один файл `DiagramEditor` має стати **композицією 3 блоків сторінки**:
+
+1. `TopBar` (toolbar + zoom кнопки + інструменти)
+2. `Canvas` (Stage/Layer + symbols/connections/transformer)
+3. `ContextMenu` (MUI меню для target)
+
+І кожен блок:
+
+* отримує мінімум пропсів
+* не тягне зайву логіку
+* не знає про внутрішню реалізацію інших блоків
+
+---
+
+## Чому все одно варто винести (навіть якщо “частково вже виносили”)
+
+Бо зараз, навіть після наших правок:
+
+* `DiagramEditor` залишається “оркестратором” з купою JSX та станів
+* при додаванні нових кнопок/режимів/гарячих клавіш файл знову “розбухне”
+* контекстне меню і zoom API — це UI-інфраструктура, а не canvas-логіка
+
+---
+
+## Мінімальна структура (як ти хочеш по блоках сторінки)
+
+```
+features/scheme-editor/
+  ui/
+    DiagramEditorPage.jsx          // збирає все разом
+    topbar/
+      EditorTopBar.jsx             // toolbar + zoom
+    canvas/
+      EditorCanvas.jsx             // Stage/Layer + symbols/connections/transformer
+      DiagramSymbols.jsx
+      DiagramConnections.jsx
+      SelectionTransformer.jsx
+    context-menu/
+      GraphContextMenuMui.jsx
+  model/
+    state/useDiagramState.js
+    domain/...
+  shared/
+    zoom/setupLayerZoomPan.js
+    geometry/...
+```
+
+---
+
+## Відповідь на твоє питання
+
+Так, **ми виносили частково**, але:
+
+* виносили здебільшого **domain-логіку і виправляли компоненти**
+* а “toolbar/zoom/menu” як **окремі блоки сторінки** (із чіткими межами) — **ще ні**, бо вони все ще сидять у `DiagramEditor`.
+
+---
+
+Якщо ок — наступним повідомленням я одразу дам **готові 3 файли**:
+
+1. `EditorTopBar.jsx` (toolbar + zoom, приймає `apiRef` і callbacks з state)
+2. `EditorCanvas.jsx` (stage/layer/refs + symbols/connections + selection)
+3. `DiagramEditorPage.jsx` (склеює все і тримає menuState + apiRef)
+
+Без додаткових питань, з урахуванням `kind`.

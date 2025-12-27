@@ -1,0 +1,285 @@
+Супер. `LazyZoom.js` якраз ідеально лягає в **shared**, бо це чиста “інфраструктура редактора”, без бізнес-логіки схеми.
+
+Нижче даю:
+
+1. як правильно **розкласти по файлах** (без дублювання),
+2. як трохи **підчистити API/імʼя** (але лишаємось на JS),
+3. що міняємо в `DiagramEditor.js` (імпорти + refs).
+
+---
+
+## ✅ Куди покласти в shared
+
+```
+src/shared/konva/zoom-pan/
+  draggableLock.js
+  setupLayerZoomPan.js
+  index.js
+```
+
+> Чому `shared/konva`, а не `shared/diagram`?
+> Бо це **не тільки для diagram**, а для будь-якого Konva stage/layer у твоєму проєкті.
+
+---
+
+# 1) `src/shared/konva/zoom-pan/draggableLock.js`
+
+```js
+export function createDraggableLock(layer) {
+  const prev = new Map();
+  let locked = false;
+
+  function lock() {
+    if (locked) return;
+    locked = true;
+    prev.clear();
+
+    layer.find("*").each((node) => {
+      if (typeof node.draggable === "function") {
+        prev.set(node._id, node.draggable());
+        node.draggable(false);
+      }
+    });
+  }
+
+  function unlock() {
+    if (!locked) return;
+    locked = false;
+
+    layer.find("*").each((node) => {
+      if (prev.has(node._id)) node.draggable(prev.get(node._id));
+    });
+
+    prev.clear();
+  }
+
+  return { lock, unlock };
+}
+```
+
+---
+
+# 2) `src/shared/konva/zoom-pan/setupLayerZoomPan.js`
+
+```js
+import { createDraggableLock } from "./draggableLock";
+
+export function setupLayerZoomPan(
+  stage,
+  layer,
+  {
+    zoomStep = 1.15,
+    minScale = 0.2,
+    maxScale = 6,
+    requireCtrlForWheel = false,
+    panMode = "mmb_or_space", // "mmb" | "space" | "mmb_or_space"
+  } = {},
+) {
+  if (!stage) throw new Error("stage is required");
+  if (!layer) throw new Error("layer is required");
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+  const dragLock = createDraggableLock(layer);
+
+  // ---------- ZOOM ----------
+  const getScale = () => layer.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? { x: stage.width() / 2, y: stage.height() / 2 };
+    const layerPos = layer.position();
+
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    layer.scale({ x: newScale, y: newScale });
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+  }
+
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // ---------- PAN ----------
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const keyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const keyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+    if (!canStartPan(evt)) return;
+
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    dragLock.lock();
+    container.style.cursor = "grabbing";
+    evt.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({ x: layer.x() + dx, y: layer.y() + dy });
+
+    lastClient = { x: evt.clientX, y: evt.clientY };
+    layer.batchDraw();
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    lastClient = null;
+
+    dragLock.unlock();
+    container.style.cursor = spaceDown ? "grab" : "default";
+  }
+
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  // ---------- API ----------
+  function zoomIn() {
+    zoomToPoint(getScale() * zoomStep);
+  }
+  function zoomOut() {
+    zoomToPoint(getScale() / zoomStep);
+  }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+  }
+
+  function destroy() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mousemove", onMouseMove);
+    stage.off("mouseup", stopPan);
+    stage.off("mouseleave", stopPan);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+
+    dragLock.unlock();
+    container.style.cursor = "default";
+  }
+
+  return { zoomIn, zoomOut, reset, getScale, setScale: (s) => zoomToPoint(s), destroy };
+}
+```
+
+---
+
+# 3) `src/shared/konva/zoom-pan/index.js`
+
+```js
+export { createDraggableLock } from "./draggableLock";
+export { setupLayerZoomPan } from "./setupLayerZoomPan";
+```
+
+---
+
+## ✅ Як змінити імпорт у `DiagramEditor.js`
+
+Було:
+
+```js
+import { setupLayerZoomPan } from './LayerZoom'
+```
+
+Стане:
+
+```js
+import { setupLayerZoomPan } from "@/shared/konva/zoom-pan";
+```
+
+---
+
+## ⚠️ Важливе для `DiagramEditor.js`
+
+У твоєму `DiagramEditor` ти **маєш дати ref-и в Stage/Layer**, інакше zoom/pan не підʼєднається.
+
+Правильно так (показую фрагмент):
+
+```jsx
+<Stage ref={stageRef} width={1000} height={600}>
+  <Layer ref={layerRef}>
+    ...
+  </Layer>
+</Stage>
+```
+
+І в `useEffect`:
+
+```js
+useEffect(() => {
+  const stage = stageRef.current;
+  const layer = layerRef.current;
+  if (!stage || !layer) return;
+
+  apiRef.current = setupLayerZoomPan(stage, layer, { panMode: "mmb_or_space" });
+  return () => apiRef.current?.destroy?.();
+}, []);
+```
+
+---
+
+## Далі
+
+Скидай наступний файл: **SelectionTransformer** (або твій `GraphLibrary` index), і ми також винесемо його в shared правильно (щоб не плодити імпорти і “../..”).

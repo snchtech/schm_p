@@ -1,0 +1,145 @@
+Супер — `geometry.js` якраз той файл, який **має жити в “shared”**, бо це чиста математика/геометрія і буде використовуватись різними feature’ами.
+
+Але перед тим як переносити — є 4 важливі проблеми в твоєму файлі, які зараз роблять його “хаотичним” і можуть ламати підтримку.
+
+---
+
+## 1) Змішування відповідальностей (треба розділити на 2–3 файли)
+
+Зараз в одному файлі:
+
+* **low-level math** (`projectPointOnSegment`, `findClosestSegment`, `mergeCollinear`, `eq`, `EPS`)
+* **routing** (`calculateOrthogonalPath`, `routeAvoidingBoxesStrict`, обходи боксів)
+* **shape bounding boxes** (`boxFromSymbol`)
+* **debug** (`console.log`)
+
+✅ Правильніше так (в `shared`):
+
+```
+shared/diagram-geometry/
+  core.ts|js              // EPS, eq, projectPointOnSegment, findClosestSegment, mergeCollinear
+  boxes.ts|js             // boxFromSymbol
+  routing.ts|js           // calculateOrthogonalPath, routeAvoidingBoxesStrict, helpers for elbows
+  index.ts|js             // реекспорт
+```
+
+> Це прибере “monolith file”, і ти зможеш тестувати routing окремо.
+
+---
+
+## 2) Несумісність `type`: у тебе `rect/circle`, але в geometry `"RECTANGLE"/"CIRCLE"`
+
+Це вже реальна помилка.
+
+У `useDiagramState` ти створюєш:
+
+```js
+type: 'rect'
+type: 'circle'
+```
+
+А `boxFromSymbol` перевіряє:
+
+```js
+if (sym.type === "RECTANGLE") ...
+if (sym.type === "CIRCLE") ...
+```
+
+✅ Треба уніфікувати: або всюди `rect/circle`, або всюди `RECTANGLE/CIRCLE`.
+
+Я раджу: **залишити в data `rect/circle`** (бо це ще й мапиться на компонент), а в `geometry` підтримати обидва варіанти:
+
+```js
+export function boxFromSymbol(sym, pad = 6) {
+  if (!sym) return null;
+
+  const t = String(sym.type).toLowerCase();
+
+  if (t === "rectangle" || t === "rect") {
+    const { x, y, width, height } = sym;
+    return { left: x - pad, right: x + width + pad, top: y - pad, bottom: y + height + pad };
+  }
+
+  if (t === "circle") {
+    const r = sym.radius ?? (sym.width ?? sym.height) / 2;
+    return {
+      left: sym.x - r - pad,
+      right: sym.x + r + pad,
+      top: sym.y - r - pad,
+      bottom: sym.y + r + pad,
+    };
+  }
+
+  return null;
+}
+```
+
+---
+
+## 3) `calculateOrthogonalPath` зараз з “DEBUG” і подвійними блоками
+
+Там є:
+
+* багато закоментованого коду
+* кілька дубльованих секцій “ЛОГІКА ЗЛОМІВ”
+* `console.log` у середині routing (це буде вбивати перформанс при drag)
+
+✅ Мінімально, що зробити вже зараз:
+
+* прибрати `console.log`
+* винести “elbow insertion” в окремий helper `maybeInsertVerticalDetour(...)`
+* залишити **одну** реалізацію, інші — у git історії, а не у файлі
+
+---
+
+## 4) naming + exports: у тебе вже є `getPolylineElbows`, `getMainRunElbows` — це добре
+
+Але `DiagramConnections.js` робить власний `collectElbows`, дублює логіку.
+
+✅ Оптимально:
+
+* винести `collectElbows` (або використовувати `getPolylineElbows/getMainRunElbows`) з geometry
+* `DiagramConnections` не повинен знати як рахувати elbows — він просто рендерить.
+
+---
+
+# Як я пропоную зробити структуру для geometry в твоїй FSD-like схемі
+
+### ✅ Розміщення
+
+```
+src/shared/diagram/geometry/
+  core.js
+  boxes.js
+  routing.js
+  elbows.js
+  index.js
+```
+
+### ✅ `index.js` (реекспорти)
+
+```js
+export * from "./core";
+export * from "./boxes";
+export * from "./routing";
+export * from "./elbows";
+```
+
+---
+
+# Питання “чи треба geometry під kind?”
+
+Ні. `kind` — це про UI/targets/selection.
+`geometry` працює з **точками, points масивами, і коробками**. Тут `kind` не потрібен.
+
+---
+
+# Що робимо далі прямо зараз
+
+Щоб не розмазувати:
+
+1. Я дам тобі **готовий розбитий варіант geometry.js** на 4 файли (core/boxes/elbows/routing) без debug і без мертвого коду.
+2. Потім покажу, як оновити імпорти в `useDiagramState.js`.
+
+Скажи коротко: **ти хочеш поки лишити JS чи одразу перейти на TS для shared/geometry?**
+(Якщо не хочеш морочитись — зроблю все в JS.)

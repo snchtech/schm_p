@@ -1,0 +1,205 @@
+Треба, але **мінімально** — щоб у тебе всюди був один контракт: `selection / contextMenuTarget / handleAnchorClick` працюють з **`kind`**, а не з мішаниною `type:'node'` vs `type:'rect'`.
+
+Нижче — що саме змінити в **DiagramEditor.js** і **useDiagramState.js** (без “переписати все з нуля”).
+
+---
+
+## 1) DiagramEditor.js — що переробити під `kind`
+
+### A) Стан selection/menu target
+
+Було (в тебе місцями):
+
+```js
+const [selected, setSelected] = useState(null)
+...
+target: { type, id }
+```
+
+Стає:
+
+```js
+const [menuTarget, setMenuTarget] = useState(null); 
+// { kind: "node"|"connection"|"anchor", id, shape?, ... }
+
+const [menuState, setMenuState] = useState({
+  open: false,
+  anchorPosition: null,
+  target: null, // menuTarget
+});
+```
+
+### B) Відкриття меню
+
+Було:
+
+```js
+onElementContextMenu(e, {type:'node', id: el.id})
+```
+
+Стає (і для symbols, і для connections):
+
+```js
+onElementContextMenu(e, { kind: "node", id: el.id, shape: el.type })
+```
+
+і в самому editor:
+
+```js
+const handleContextMenu = (e, target) => {
+  e.evt.preventDefault();
+  openMenuAtEvent(e, target);
+};
+```
+
+### C) Виділення (selection)
+
+Ти вже передаєш `onMouseDown` у Symbols/Connections — тепер це має бути:
+
+```js
+onMouseDown?.({ kind: "node", id: el.id })
+onMouseDown?.({ kind: "connection", id: conn.id })
+```
+
+У DiagramEditor ти просто прокидаєш:
+
+```jsx
+onMouseDown={S.selectHighlightEl}
+```
+
+### D) Transformer
+
+Тут ключове: `selectedKonvaNode` шукаємо тільки коли `selection.kind === "node"`:
+
+```js
+const selectedKonvaNode =
+  S.selection?.kind === "node"
+    ? nodeRefs.current.get(S.selection.id)
+    : null;
+```
+
+---
+
+## 2) useDiagramState.js — що переробити під `kind`
+
+### A) selection state
+
+Було:
+
+```js
+const [selection, setSelection] = useState({ type: null, id: null })
+```
+
+Стає:
+
+```js
+const [selection, setSelection] = useState({ kind: null, id: null });
+```
+
+### B) select / clear functions
+
+Було:
+
+```js
+const clearSelectHighlightEl = (e) => {
+  if (e.target === e.target.getStage()) setSelection({ type:null, id:null })
+}
+const selectHightlightEl = (el) => setSelection({ type: el.type, id: el.id })
+```
+
+Стає:
+
+```js
+const clearSelectHighlightEl = (e) => {
+  if (e.target === e.target.getStage()) {
+    setSelection({ kind: null, id: null });
+  }
+};
+
+const selectHighlightEl = (info) => {
+  // info очікуємо як { kind, id }
+  if (!info?.kind || !info?.id) return;
+  setSelection({ kind: info.kind, id: info.id });
+};
+```
+
+> І важливо: в компонентах тепер треба передавати `{kind:'node', id}` або `{kind:'connection', id}`, як я вже показував.
+
+### C) normalizeAttachment (якорі)
+
+Якщо ти приймаєш “уніфікований” формат якорів:
+
+* `kind:"anchor", anchorKind:"lineAnchor"`
+* `kind:"anchor", anchorKind:"symbolAnchor"`
+
+то `normalizeAttachment` виносимо/правимо так:
+
+```js
+const normalizeAttachment = (a) => {
+  // line anchor
+  if (a?.kind === "anchor" && a?.anchorKind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  // symbol anchor
+  if (a?.kind === "anchor" && a?.anchorKind === "symbolAnchor") {
+    return {
+      type: "symbol",
+      symbolId: a.parentId || a.symbolId,
+      direction: a.direction,
+    };
+  }
+
+  // backward compatibility (старий формат)
+  if (a?.kind === "lineAnchor") { ... }
+  if (a?.kind === "symbolAnchor") { ... }
+
+  return null;
+};
+```
+
+І в `DiagramSymbols` при кліку на зелений anchor:
+
+```js
+handleAnchorClick({
+  kind: "anchor",
+  anchorKind: "symbolAnchor",
+  ...point,
+  parentId: el.id,
+});
+```
+
+А в `DiagramConnections` на синій anchor:
+
+```js
+handleAnchorClick({
+  kind: "anchor",
+  anchorKind: "lineAnchor",
+  ...a,
+});
+```
+
+---
+
+## 3) Висновок
+
+Так — **DiagramEditor.js** і **useDiagramState.js** треба під `kind`, але:
+
+* це **невеликий рефакторинг контрактів** (selection + menuTarget + anchors)
+* логіка маршрутизації/геометрії майже не чіпається
+
+---
+
+Якщо хочеш, наступним кроком я можу:
+
+1. навести “чистий” `DiagramEditor` як контейнер (без логіки),
+2. винести toolbar/zoom/menu в окремі компоненти,
+3. і показати, як це лягає в `features/scheme-editor` структуру (ui/model/shared).

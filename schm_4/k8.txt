@@ -1,0 +1,453 @@
+Клас, цей файл уже набагато “чистіший”, ніж `DiagramSymbols`, але тут теж треба **уніфікувати “node vs rect/circle”** і додати **selection для connection** + (за бажання) **context menu для line**. А ще — я б виніс “визначення winners” і `collectElbows/eq/key1` в `shared`, але поки зробимо мінімальні правки під твою нову модель `kind`.
+
+Нижче даю **точкові зміни** + готовий “покращений” варіант файла.
+
+---
+
+## 1) Як правильно називати типи тут
+
+* Для selection/меню на лінії:
+  ✅ `{ kind: "connection", id: conn.id }`
+* Для кліку по синьому якорю:
+  ✅ `{ kind: "anchor", anchorKind: "lineAnchor", ...a }`
+  або (мінімально) лишаємо як в тебе: `{ ...a, kind: "lineAnchor" }` — але тоді `kind` стає **не категорією**, а підтипом, і почнеться плутанина.
+
+Я рекомендую **не використовувати `kind` як “lineAnchor”**, бо `kind` ми хочемо стабільним: `node|connection|anchor`.
+
+---
+
+## 2) Додаємо selection на лінії (щоб Transformer/виділення працювали)
+
+Ти вже маєш `hoveredConnectionId`. Додаємо props:
+
+* `onSelect` (або `onMouseDown`) — як у Symbols
+* `selectedConnectionId` або `isSelectedConnection(connId)`.
+
+### Мінімально: додаємо `onMouseDown` і `selection`
+
+В props:
+
+```js
+onMouseDown,
+isSelected,
+onConnectionContextMenu,
+```
+
+І в `Line` додаємо:
+
+```js
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  onMouseDown?.({ kind: "connection", id: conn.id });
+}}
+onContextMenu={(e) => onConnectionContextMenu?.(e, { kind: "connection", id: conn.id })}
+```
+
+---
+
+## 3) Готовий варіант `DiagramConnections.js` (під твою уніфікацію)
+
+> Я НЕ міняю алгоритми, лише додаю selection + приводжу типи до `kind`.
+
+```jsx
+"use client";
+import { Group, Line, Circle, Rect } from "react-konva";
+
+const eq = (a, b, eps = 0.001) => Math.abs(a - b) < eps;
+const key1 = (v) => Math.round(v * 10) / 10;
+
+// зібрати всі коліна (місця зміни орієнтації)
+function collectElbows(pts) {
+  const elbows = [];
+  const n = Math.floor(pts.length / 2);
+  if (n < 3) return elbows;
+
+  const isHoriz = (i) => {
+    const x1 = pts[2 * i],
+      y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2],
+      y2 = pts[2 * i + 3];
+    return Math.abs(y2 - y1) <= Math.abs(x2 - x1);
+  };
+
+  for (let i = 0; i < n - 2; i++) {
+    const h1 = isHoriz(i);
+    const h2 = isHoriz(i + 1);
+    if (h1 !== h2) {
+      const idx = i + 1;
+      elbows.push({ x: pts[2 * idx], y: pts[2 * idx + 1], idx });
+    }
+  }
+  return elbows;
+}
+
+export const DiagramConnections = ({
+  connections,
+  hoveredConnectionId,
+  hoveredLineAnchorId,
+  isAddingConnector,
+  setHoveredConnectionId,
+  setHoveredLineAnchorId,
+  handleLineClick,
+  handleAnchorClick,
+  updateConnectionOffset,
+
+  // ✅ нове (для уніфікації з DiagramSymbols)
+  onMouseDown, // (info) => void
+  isSelected,  // (id)=>bool або selection object
+  onConnectionContextMenu, // (e, info) => void
+}) => {
+  // ---- «переможці» для прямих без зламів ----
+  const straightGroups = new Map();
+  connections.forEach((c) => {
+    const p = c.points || [];
+    if (p.length !== 4) return;
+    const [x1, y1, x2, y2] = p;
+
+    if (eq(x1, x2)) {
+      const key = `V:${key1(x1)}`;
+      const arr = straightGroups.get(key) || [];
+      arr.push({ id: c.id, topY: Math.min(y1, y2) });
+      straightGroups.set(key, arr);
+    } else if (eq(y1, y2)) {
+      const key = `H:${key1(y1)}`;
+      const arr = straightGroups.get(key) || [];
+      arr.push({ id: c.id, leftX: Math.min(x1, x2) });
+      straightGroups.set(key, arr);
+    }
+  });
+
+  const straightWinners = new Set();
+  for (const [k, arr] of straightGroups.entries()) {
+    if (!arr.length) continue;
+    if (k.startsWith("V:")) {
+      arr.sort((a, b) => a.topY - b.topY);
+      straightWinners.add(arr[0].id);
+    } else {
+      arr.sort((a, b) => a.leftX - b.leftX);
+      straightWinners.add(arr[0].id);
+    }
+  }
+
+  const isConnSelected = (connId) =>
+    typeof isSelected === "function"
+      ? isSelected(connId)
+      : !!isSelected && (isSelected.id === connId || isSelected === connId);
+
+  const setCursor = (e, cursor) => {
+    const stage = e.target.getStage();
+    const style = stage?.container()?.style;
+    if (style) style.cursor = cursor;
+  };
+
+  return (
+    <>
+      {connections.map((conn) => {
+        const pts = conn.points || [];
+        const selected = isConnSelected(conn.id);
+
+        const commonLineProps = {
+          points: pts,
+          stroke: hoveredConnectionId === conn.id || selected ? "#2F80ED" : "black",
+          strokeWidth: hoveredConnectionId === conn.id || selected ? 4 : 2,
+          lineJoin: "round",
+          lineCap: "round",
+          shadowColor: hoveredConnectionId === conn.id || selected ? "#2F80ED" : "transparent",
+          shadowBlur: hoveredConnectionId === conn.id || selected ? 8 : 0,
+          onMouseEnter: (e) => {
+            setHoveredConnectionId(conn.id);
+            setCursor(e, "pointer");
+          },
+          onMouseLeave: (e) => {
+            setHoveredConnectionId(null);
+            setCursor(e, "default");
+          },
+          onMouseDown: (e) => {
+            e.cancelBubble = true;
+            onMouseDown?.({ kind: "connection", id: conn.id });
+          },
+          onContextMenu: (e) => {
+            if (!onConnectionContextMenu) return;
+            e.evt?.preventDefault?.();
+            onConnectionContextMenu(e, { kind: "connection", id: conn.id });
+          },
+          onClick: (e) => {
+            e.cancelBubble = true;
+            handleLineClick(conn.id, e);
+          },
+        };
+
+        // --- Пряма лінія ---
+        if (pts.length === 4) {
+          const [x1, y1, x2, y2] = pts;
+          const isVert = eq(x1, x2);
+          const isHorz = eq(y1, y2);
+
+          if (isVert || isHorz) {
+            const show = straightWinners.has(conn.id);
+            const hx = isVert ? x1 : Math.min(x1, x2);
+            const hy = isVert ? Math.min(y1, y2) : y1;
+
+            return (
+              <Group key={conn.id}>
+                <Line {...commonLineProps} />
+
+                {show && (
+                  <Rect
+                    x={hx - 6}
+                    y={hy - 6}
+                    width={12}
+                    height={12}
+                    fill={hoveredConnectionId === conn.id ? "#F2C94C" : "#2D9CDB"}
+                    stroke="black"
+                    strokeWidth={1}
+                    listening={false}
+                  />
+                )}
+
+                {(conn.additionalAnchors || []).map((a) => (
+                  <Circle
+                    key={a.id}
+                    x={a.x}
+                    y={a.y}
+                    radius={6}
+                    fill={isAddingConnector && hoveredLineAnchorId === a.id ? "yellow" : "blue"}
+                    stroke="black"
+                    strokeWidth={1}
+                    onMouseEnter={(e) => {
+                      if (!isAddingConnector) return;
+                      setHoveredLineAnchorId(a.id);
+                      setCursor(e, "pointer");
+                    }}
+                    onMouseLeave={(e) => {
+                      setHoveredLineAnchorId(null);
+                      setCursor(e, "default");
+                    }}
+                    onMouseDown={(e) => (e.cancelBubble = true)}
+                    onClick={() =>
+                      handleAnchorClick({
+                        kind: "anchor",
+                        anchorKind: "lineAnchor",
+                        ...a,
+                      })
+                    }
+                  />
+                ))}
+              </Group>
+            );
+          }
+        }
+
+        // --- Ламані ---
+        if (pts.length < 6) return null;
+
+        const dirFrom = conn.fromExitDir || "right";
+        const dirTo = conn.toExitDir || "right";
+
+        const elbows = collectElbows(pts);
+        const startElbow = elbows.length >= 2 ? elbows[1] : null; // друге коліно
+        const endElbow = elbows.length >= 1 ? elbows[elbows.length - 1] : null;
+
+        const sameElbow = startElbow && endElbow && startElbow.idx === endElbow.idx;
+
+        const showStartHandle = !!startElbow && conn?.from?.type !== "line";
+        const showEndHandle = !!endElbow && (!sameElbow || (sameElbow && !showStartHandle));
+
+        return (
+          <Group key={conn.id}>
+            <Line {...commonLineProps} />
+
+            {showStartHandle && (
+              <Rect
+                x={startElbow.x - 6}
+                y={startElbow.y - 6}
+                width={12}
+                height={12}
+                fill={hoveredConnectionId === conn.id ? "#F2C94C" : "#2D9CDB"}
+                stroke="black"
+                strokeWidth={1}
+                draggable
+                dragBoundFunc={(pos) =>
+                  dirFrom === "left" || dirFrom === "right"
+                    ? { x: pos.x, y: startElbow.y - 6 }
+                    : { x: startElbow.x - 6, y: pos.y }
+                }
+                onMouseDown={(e) => (e.cancelBubble = true)}
+                onDragMove={(e) => {
+                  const p = e.target.position();
+                  const baseX = pts[0],
+                    baseY = pts[1];
+                  const raw =
+                    dirFrom === "left" || dirFrom === "right"
+                      ? Math.abs(p.x + 6 - baseX)
+                      : Math.abs(p.y + 6 - baseY);
+
+                  const desiredY = dirFrom === "top" || dirFrom === "bottom" ? p.y + 6 : undefined;
+                  const desiredX = dirFrom === "left" || dirFrom === "right" ? p.x + 6 : undefined;
+
+                  updateConnectionOffset(conn.id, raw, "start", { desiredY, desiredX });
+                }}
+              />
+            )}
+
+            {showEndHandle && (
+              <Rect
+                x={endElbow.x - 6}
+                y={endElbow.y - 6}
+                width={12}
+                height={12}
+                fill={hoveredConnectionId === conn.id ? "#F2C94C" : "#2D9CDB"}
+                stroke="black"
+                strokeWidth={1}
+                draggable
+                dragBoundFunc={(pos) =>
+                  dirTo === "left" || dirTo === "right"
+                    ? { x: pos.x, y: endElbow.y - 6 }
+                    : { x: endElbow.x - 6, y: pos.y }
+                }
+                onMouseDown={(e) => (e.cancelBubble = true)}
+                onDragMove={(e) => {
+                  const p = e.target.position();
+                  const baseX = pts[pts.length - 2],
+                    baseY = pts[pts.length - 1];
+
+                  const raw =
+                    dirTo === "left" || dirTo === "right"
+                      ? Math.abs(p.x + 6 - baseX)
+                      : Math.abs(p.y + 6 - baseY);
+
+                  const desiredY = dirTo === "top" || dirTo === "bottom" ? p.y + 6 : undefined;
+                  const desiredX = dirTo === "left" || dirTo === "right" ? p.x + 6 : undefined;
+
+                  updateConnectionOffset(conn.id, raw, "end", { desiredY, desiredX });
+                }}
+              />
+            )}
+
+            {(conn.additionalAnchors || []).map((a) => (
+              <Circle
+                key={a.id}
+                x={a.x}
+                y={a.y}
+                radius={6}
+                fill={isAddingConnector && hoveredLineAnchorId === a.id ? "yellow" : "blue"}
+                stroke="black"
+                strokeWidth={1}
+                onMouseEnter={(e) => {
+                  if (!isAddingConnector) return;
+                  setHoveredLineAnchorId(a.id);
+                  setCursor(e, "pointer");
+                }}
+                onMouseLeave={(e) => {
+                  setHoveredLineAnchorId(null);
+                  setCursor(e, "default");
+                }}
+                onMouseDown={(e) => (e.cancelBubble = true)}
+                onClick={() =>
+                  handleAnchorClick({
+                    kind: "anchor",
+                    anchorKind: "lineAnchor",
+                    ...a,
+                  })
+                }
+              />
+            ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+};
+```
+
+---
+
+## 4) Що змінити у `useDiagramState` через це
+
+Ти зараз `handleAnchorClick` очікує `anchor` з полями `kind: "lineAnchor"` або `kind: "symbolAnchor"`.
+Ми щойно змінили line-anchor на:
+
+```js
+{ kind: "anchor", anchorKind: "lineAnchor", ...a }
+```
+
+Тому треба підлаштувати `normalizeAttachment` (в `attachments.js`) на новий формат:
+
+### Онови `normalizeAttachment` так:
+
+```js
+export function normalizeAttachment(a) {
+  // line anchor
+  if (a?.kind === "anchor" && a?.anchorKind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  // symbol anchor
+  if (a?.kind === "symbolAnchor") {
+    // якщо ти генеруєш symbolAnchor як kind: "symbolAnchor"
+    // можна теж уніфікувати, але поки залишимо сумісність
+  }
+
+  // fallback: старий формат
+  if (a?.kind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  // symbol
+  return {
+    type: "symbol",
+    symbolId: a.parentId || a.symbolId || a.id,
+    direction: a.direction,
+  };
+}
+```
+
+(Потім уніфікуємо й `symbolAnchor` так само: `kind:"anchor", anchorKind:"symbolAnchor"` — буде ідеально.)
+
+---
+
+## 5) Як тепер передати selection із Editor
+
+У `DiagramEditor`/`EditorCanvas`:
+
+```jsx
+<DiagramConnections
+  ...
+  onMouseDown={S.selectHightlightEl}
+  isSelected={(id) => S.selection?.kind === "connection" && S.selection?.id === id}
+  onConnectionContextMenu={handleElementContextMenu}
+/>
+```
+
+А в `DiagramSymbols`:
+
+```jsx
+onMouseDown={S.selectHightlightEl}
+isSelected={(id) => S.selection?.kind === "node" && S.selection?.id === id}
+```
+
+І `selectHightlightEl` має ставити:
+
+```js
+setSelection({ kind: info.kind, id: info.id })
+```
+
+---
+
+Якщо хочеш — наступним кроком я покажу, як **витягнути** з `DiagramConnections` обчислення straightWinners у memo (`useMemo`) щоб не рахувалось на кожен рендер при drag (бо зараз це буде трошки дорого на великих схемах). Але спершу краще зафіксити уніфіковані типи та selection по всіх компонентах.

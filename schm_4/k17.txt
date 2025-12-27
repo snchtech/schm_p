@@ -1,0 +1,487 @@
+Ок, робимо **розбиття `geometry.js` на shared-модуль** і лишаємось на **JS**.
+
+Нижче — готові файли. Ти просто створюєш папки/файли і замінюєш імпорти в `useDiagramState.js`.
+
+---
+
+# ✅ Нова структура
+
+```
+src/shared/diagram/geometry/
+  core.js
+  boxes.js
+  elbows.js
+  routing.js
+  index.js
+```
+
+---
+
+# 1) `src/shared/diagram/geometry/core.js`
+
+```js
+// low-level math helpers
+
+const EPS = 1e-3;
+export const eq = (a, b) => Math.abs(a - b) <= EPS;
+
+export const projectPointOnSegment = (px, py, x1, y1, x2, y2) => {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+
+  if (len2 === 0) {
+    return { x: x1, y: y1, t: 0, dist2: (px - x1) ** 2 + (py - y1) ** 2 };
+  }
+
+  let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+
+  const x = x1 + t * dx;
+  const y = y1 + t * dy;
+
+  return { x, y, t, dist2: (px - x) ** 2 + (py - y) ** 2 };
+};
+
+export const findClosestSegment = (points, px, py) => {
+  let best = null;
+  const n = points.length / 2;
+
+  for (let i = 0; i < n - 1; i++) {
+    const x1 = points[2 * i];
+    const y1 = points[2 * i + 1];
+    const x2 = points[2 * i + 2];
+    const y2 = points[2 * i + 3];
+
+    const proj = projectPointOnSegment(px, py, x1, y1, x2, y2);
+    if (!best || proj.dist2 < best.dist2) best = { segIndex: i, ...proj };
+  }
+
+  return best;
+};
+
+export const mergeCollinear = (pts) => {
+  if (!pts || pts.length < 6) return pts; // < 3 points
+
+  const res = [pts[0], pts[1]];
+
+  for (let i = 2; i < pts.length; i += 2) {
+    const x0 = res[res.length - 4];
+    const y0 = res[res.length - 3];
+    const x1 = res[res.length - 2];
+    const y1 = res[res.length - 1];
+    const x2 = pts[i];
+    const y2 = pts[i + 1];
+
+    if ((eq(x0, x1) && eq(x1, x2)) || (eq(y0, y1) && eq(y1, y2))) {
+      // remove middle point
+      res[res.length - 2] = x2;
+      res[res.length - 1] = y2;
+    } else {
+      res.push(x2, y2);
+    }
+  }
+
+  return res;
+};
+
+export const segmentIsHorizontal = (pts, segIndex) => {
+  const x1 = pts[2 * segIndex];
+  const y1 = pts[2 * segIndex + 1];
+  const x2 = pts[2 * segIndex + 2];
+  const y2 = pts[2 * segIndex + 3];
+  return Math.abs(y2 - y1) <= Math.abs(x2 - x1);
+};
+```
+
+---
+
+# 2) `src/shared/diagram/geometry/boxes.js`
+
+```js
+// bounding boxes for shapes
+
+export function boxFromSymbol(sym, pad = 6) {
+  if (!sym) return null;
+
+  const t = String(sym.type || "").toLowerCase();
+
+  // rect / rectangle
+  if (t === "rect" || t === "rectangle") {
+    const { x, y, width, height } = sym;
+    return { left: x - pad, right: x + width + pad, top: y - pad, bottom: y + height + pad };
+  }
+
+  // circle
+  if (t === "circle") {
+    const r = sym.radius ?? (sym.width ?? sym.height) / 2;
+    return {
+      left: sym.x - r - pad,
+      right: sym.x + r + pad,
+      top: sym.y - r - pad,
+      bottom: sym.y + r + pad,
+    };
+  }
+
+  return null;
+}
+```
+
+---
+
+# 3) `src/shared/diagram/geometry/elbows.js`
+
+```js
+// elbows helpers
+
+export const getPolylineElbows = (pts) => {
+  if (!pts || pts.length < 6) return { start: null, end: null };
+
+  let start = null;
+  for (let i = 0; i < pts.length / 2 - 2; i++) {
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+    const x3 = pts[2 * i + 4];
+    const y3 = pts[2 * i + 5];
+
+    const horiz1 = Math.abs(y2 - y1) <= Math.abs(x2 - x1);
+    const horiz2 = Math.abs(y3 - y2) <= Math.abs(x3 - x2);
+
+    if (horiz1 !== horiz2) {
+      start = { x: x2, y: y2, idx: i + 1 };
+      break;
+    }
+  }
+
+  let end = null;
+  for (let i = pts.length / 2 - 3; i >= 0; i--) {
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+    const x3 = pts[2 * i + 4];
+    const y3 = pts[2 * i + 5];
+
+    const horiz1 = Math.abs(y2 - y1) <= Math.abs(x2 - x1);
+    const horiz2 = Math.abs(y3 - y2) <= Math.abs(x3 - x2);
+
+    if (horiz1 !== horiz2) {
+      end = { x: x2, y: y2, idx: i + 1 };
+      break;
+    }
+  }
+
+  return { start, end };
+};
+
+export const getMainRunElbows = (pts) => {
+  if (!pts || pts.length < 6) return { start: null, end: null };
+
+  const n = Math.floor(pts.length / 2);
+
+  // longest horizontal
+  let bestH = { len: -1, i: -1 };
+  for (let i = 0; i < n - 1; i++) {
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+
+    if (y1 === y2) {
+      const len = Math.abs(x2 - x1);
+      if (len > bestH.len) bestH = { len, i };
+    }
+  }
+
+  // fallback: longest vertical
+  let idx = bestH.i;
+  if (idx < 0) {
+    let bestV = { len: -1, i: -1 };
+    for (let i = 0; i < n - 1; i++) {
+      const x1 = pts[2 * i];
+      const y1 = pts[2 * i + 1];
+      const x2 = pts[2 * i + 2];
+      const y2 = pts[2 * i + 3];
+
+      if (x1 === x2) {
+        const len = Math.abs(y2 - y1);
+        if (len > bestV.len) bestV = { len, i };
+      }
+    }
+    idx = bestV.i;
+    if (idx < 0) return { start: null, end: null };
+  }
+
+  const start = { x: pts[2 * idx], y: pts[2 * idx + 1], idx };
+  const end = { x: pts[2 * idx + 2], y: pts[2 * idx + 3], idx: idx + 1 };
+  return { start, end };
+};
+```
+
+---
+
+# 4) `src/shared/diagram/geometry/routing.js`
+
+> Тут я залишаю твою поточну поведінку, але **прибираю console.log + дублікати**.
+> `routeAvoidingBoxesStrict`/`fixDiagonals`/`orthogonalizeWithStubs` — збережені.
+
+```js
+import { eq, mergeCollinear, segmentIsHorizontal, findClosestSegment } from "./core";
+import { boxFromSymbol } from "./boxes";
+
+// ------------ exit dir ------------
+export const getExitDirForLineAttachment = (att, otherPoint, connectionsState) => {
+  const parent = connectionsState.find((c) => c.id === att.connectionId);
+  if (!parent || att.segIndex == null) return "right";
+
+  const pts = parent.points || [];
+  const i = att.segIndex;
+  if (2 * i + 3 >= pts.length) return "right";
+
+  const x1 = pts[2 * i];
+  const y1 = pts[2 * i + 1];
+  const x2 = pts[2 * i + 2];
+  const y2 = pts[2 * i + 3];
+
+  const ax = x1 + att.t * (x2 - x1);
+  const ay = y1 + att.t * (y2 - y1);
+
+  const horiz = segmentIsHorizontal(pts, i);
+  if (horiz) return otherPoint?.y < ay ? "top" : "bottom";
+  return otherPoint?.x < ax ? "left" : "right";
+};
+
+export const getExitDir = (att, otherPoint, connectionsState) => {
+  if (!att) return "right";
+  if (att.type === "symbol") return att.direction;
+  if (att.type === "line") return getExitDirForLineAttachment(att, otherPoint, connectionsState);
+  return "right";
+};
+
+// ------------ routing helpers ------------
+function fixDiagonals(pts) {
+  if (!pts || pts.length < 4) return pts;
+
+  const out = [pts[0], pts[1]];
+
+  for (let i = 2; i < pts.length; i += 2) {
+    const nx = pts[i];
+    const ny = pts[i + 1];
+    const lx = out[out.length - 2];
+    const ly = out[out.length - 1];
+
+    if (lx === nx || ly === ny) {
+      out.push(nx, ny);
+    } else {
+      const prevHoriz = out.length >= 4 ? out[out.length - 4] !== out[out.length - 2] : true;
+      if (prevHoriz) out.push(nx, ly);
+      else out.push(lx, ny);
+      out.push(nx, ny);
+    }
+  }
+
+  return out;
+}
+
+export function orthogonalizeWithStubs(pts) {
+  if (!pts || pts.length < 4) return pts;
+
+  const out = [pts[0], pts[1]];
+
+  for (let i = 2; i < pts.length; i += 2) {
+    const nx = pts[i];
+    const ny = pts[i + 1];
+    const lx = out[out.length - 2];
+    const ly = out[out.length - 1];
+
+    if (eq(lx, nx) || eq(ly, ny)) {
+      out.push(nx, ny);
+      continue;
+    }
+
+    const dx = Math.abs(nx - lx);
+    const dy = Math.abs(ny - ly);
+
+    if (dx >= dy) out.push(nx, ly, nx, ny);
+    else out.push(lx, ny, nx, ny);
+  }
+
+  return mergeCollinear(out);
+}
+
+// ------------ main router (твоя логіка, прибрані дублікати/логи) ------------
+export const calculateOrthogonalPath = (
+  start,
+  end,
+  opts = { startOffset: 20, endOffset: 20 },
+  startBox = null,
+  endBox = null,
+) => {
+  const startOffset = Math.max(1, Number(opts?.startOffset ?? 20));
+  const endOffset = Math.max(1, Number(opts?.endOffset ?? 20));
+
+  const { x: x1, y: y1, direction: d1 } = start;
+  const { x: x2, y: y2, direction: d2 } = end;
+
+  const points = [x1, y1];
+
+  // start stub
+  if (d1 === "left") points.push(x1 - startOffset, y1);
+  else if (d1 === "right") points.push(x1 + startOffset, y1);
+  else if (d1 === "top") points.push(x1, y1 - startOffset);
+  else if (d1 === "bottom") points.push(x1, y1 + startOffset);
+
+  // optional detour elbow
+  let elbowJustInserted = false;
+  {
+    const pad = Math.max(8, endOffset);
+
+    if (startBox && endBox) {
+      const crossesX = startBox.left <= endBox.right + pad && startBox.right >= endBox.left - pad;
+      const above = startBox.bottom + pad < endBox.top;
+      const below = startBox.top - pad > endBox.bottom;
+
+      if (crossesX && (above || below)) {
+        const midY = above ? endBox.top - pad : endBox.bottom + pad;
+
+        const stubX = points[points.length - 2];
+        const stubY = points[points.length - 1];
+
+        points.push(stubX, midY);
+        points.push(x2, midY);
+
+        elbowJustInserted = true;
+      }
+    }
+  }
+
+  // approach to end (if no elbow inserted)
+  if (!elbowJustInserted) {
+    const lastX2 = points[points.length - 2];
+    const lastY2 = points[points.length - 1];
+
+    if (d2 === "top") {
+      if (lastY2 > y2) points.push(lastX2, y2 - endOffset);
+      else if (lastY2 !== y2) points.push(x2, lastY2);
+    } else if (d2 === "bottom") {
+      if (lastY2 < y2) points.push(lastX2, y2 + endOffset);
+      else if (lastY2 !== y2) points.push(x2, lastY2);
+    } else if (d2 === "left") {
+      if (lastX2 > x2) points.push(x2 - endOffset, lastY2);
+      else if (lastX2 !== x2) points.push(lastX2, y2);
+    } else if (d2 === "right") {
+      if (lastX2 < x2) points.push(x2 + endOffset, lastY2);
+      else if (lastX2 !== x2) points.push(lastX2, y2);
+    }
+  }
+
+  // end stub (if no elbow inserted)
+  if (!elbowJustInserted) {
+    const px = points[points.length - 2];
+    const py = points[points.length - 1];
+
+    let tx = x2;
+    let ty = y2;
+
+    if (d2 === "left") {
+      tx = x2 - endOffset;
+      ty = y2;
+    } else if (d2 === "right") {
+      tx = x2 + endOffset;
+      ty = y2;
+    } else if (d2 === "top") {
+      tx = x2;
+      ty = y2 - endOffset;
+    } else if (d2 === "bottom") {
+      tx = x2;
+      ty = y2 + endOffset;
+    }
+
+    if (px !== tx || py !== ty) points.push(tx, ty);
+  }
+
+  points.push(x2, y2);
+
+  return points;
+};
+
+// Якщо ти захочеш згодом повернути строгий обхід — можна підключити тут.
+// Я залишив реалізації з твого файлу як "optional" експорти.
+export function routeAvoidingBoxesStrict(
+  pts,
+  startBox,
+  endBox,
+  d1,
+  d2,
+  startOffset,
+  endOffset,
+) {
+  // Можемо повернути твою повну реалізацію сюди наступним кроком,
+  // але зараз головне — структурування і стабільні імпорти.
+  // (Якщо треба 1-в-1 — скажеш, вставлю повністю.)
+  return fixDiagonals(mergeCollinear(pts));
+}
+
+// реекспорт boxFromSymbol щоб useDiagramState не тягнув з різних файлів
+export { boxFromSymbol, findClosestSegment };
+```
+
+> `routeAvoidingBoxesStrict` я тут залишив як “stub” (щоб структура вже була), бо твоя реалізація величезна.
+> Якщо хочеш **1-в-1** перенести її повністю — скажи “перенеси strict повністю”, і я вставлю її в `routing.js` (без змін логіки).
+
+---
+
+# 5) `src/shared/diagram/geometry/index.js`
+
+```js
+export * from "./core";
+export * from "./boxes";
+export * from "./elbows";
+export * from "./routing";
+```
+
+---
+
+# ✅ Як тепер замінити імпорт у `useDiagramState.js`
+
+Було:
+
+```js
+import {
+  projectPointOnSegment,
+  findClosestSegment,
+  calculateOrthogonalPath,
+  segmentIsHorizontal,
+  getExitDirForLineAttachment,
+  getExitDir,
+  getPolylineElbows,
+  boxFromSymbol,
+} from "./geometry";
+```
+
+Стане:
+
+```js
+import {
+  projectPointOnSegment,
+  findClosestSegment,
+  calculateOrthogonalPath,
+  segmentIsHorizontal,
+  getExitDirForLineAttachment,
+  getExitDir,
+  getPolylineElbows,
+  boxFromSymbol,
+} from "@/shared/diagram/geometry";
+```
+
+> `@/` має бути налаштований в `jsconfig.json` або `tsconfig.json` (paths). Якщо в тебе ще нема — скажи, дам мінімальний конфіг.
+
+---
+
+## Далі що?
+
+Наступний файл логічно: **`LayerZoom.js`** або **`SelectionTransformer`**, бо це теж “shared/editor infrastructure”.
+
+Скидай наступний файл — і розкладаємо його по структурі.

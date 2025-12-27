@@ -1,0 +1,290 @@
+Ок — виношу **`updateConnectionOffset` + `propagateAnchorIndexToChildren`** в окремий файл і підключаю назад у `useDiagramState`. Роблю це максимально “1-в-1” з твоїм кодом (без зміни логіки), просто через factory.
+
+---
+
+## 1) Новий файл: `features/scheme-editor/model/domain/connectionOffsetUpdate.js`
+
+```js
+import { calculateOrthogonalPath, getExitDir, findClosestSegment } from "../../../shared/geometry";
+import { clamp, MIN_OFFSET, MAX_OFFSET } from "../state/constants";
+import { resolveAttachmentPoint, getBoxForAttachment } from "./attachments";
+
+// 🔁 оновити segIndex/t у ВСІХ дочірніх прив'язках на оновлений parent
+function propagateAnchorIndexToChildren(next, parentId, updatedAnchors) {
+  const fixAtt = (att) => {
+    if (att?.type === "line" && att.connectionId === parentId && att.anchorId) {
+      const live = (updatedAnchors || []).find((a) => a.id === att.anchorId);
+      if (live) {
+        return { ...att, segIndex: live.segIndex, t: live.t }; // критично
+      }
+    }
+    return att;
+  };
+
+  return next.map((c) => {
+    const newFrom = fixAtt(c.from);
+    const newTo = fixAtt(c.to);
+    if (newFrom !== c.from || newTo !== c.to) {
+      return { ...c, from: newFrom, to: newTo };
+    }
+    return c;
+  });
+}
+
+export function updateConnectionOffsetFactory({ symbols, setConnections }) {
+  return function updateConnectionOffset(connId, newOffset, side = "both", extra = {}) {
+    setConnections((prev) => {
+      const pad = clamp(newOffset, MIN_OFFSET, MAX_OFFSET);
+
+      let next = [...prev];
+      const idx = next.findIndex((c) => c.id === connId);
+      if (idx < 0) return prev;
+
+      let conn = next[idx];
+
+      let prevStart = conn.routing?.startOffset ?? 20;
+      let prevEnd = conn.routing?.endOffset ?? 20;
+
+      let newStart = prevStart;
+      let newEnd = prevEnd;
+
+      if (side === "start") {
+        newStart = pad;
+        if (typeof extra?.desiredY === "number" || typeof extra?.desiredX === "number") {
+          newEnd = pad;
+        }
+      } else if (side === "end") {
+        newEnd = pad;
+        if (typeof extra?.desiredY === "number" || typeof extra?.desiredX === "number") {
+          newStart = pad;
+        }
+      } else if (side === "both") {
+        newStart = pad;
+        newEnd = pad;
+      }
+
+      conn = {
+        ...conn,
+        routing: {
+          startOffset: side === "end" ? prevStart : newStart,
+          endOffset: side === "start" ? prevEnd : newEnd,
+        },
+      };
+
+      next[idx] = conn;
+
+      // 2) ковзання синього якірця по батьківській вертикалі/горизонталі
+      if (
+        side === "end" &&
+        conn.from?.type === "line" &&
+        (typeof extra?.desiredY === "number" || typeof extra?.desiredX === "number")
+      ) {
+        const parentIdx = next.findIndex((c) => c.id === conn.from.connectionId);
+        if (parentIdx >= 0) {
+          const parent = next[parentIdx];
+          const ppts = parent.points || [];
+          const si = conn.from.segIndex;
+
+          if (Number.isFinite(si) && 2 * si + 3 < ppts.length) {
+            const x1 = ppts[2 * si],
+              y1 = ppts[2 * si + 1];
+            const x2 = ppts[2 * si + 2],
+              y2 = ppts[2 * si + 3];
+
+            // вертикальний сегмент
+            if (x1 === x2 && typeof extra.desiredY === "number") {
+              const ymin = Math.min(y1, y2),
+                ymax = Math.max(y1, y2);
+              const y = Math.max(ymin, Math.min(ymax, extra.desiredY));
+              const t = y2 === y1 ? 0 : (y - y1) / (y2 - y1);
+
+              const updAnch = (parent.additionalAnchors || []).map((a) =>
+                a.id === conn.from.anchorId
+                  ? { ...a, x: x1, y, segIndex: si, t, vertexIndex: null }
+                  : a,
+              );
+
+              next[parentIdx] = { ...parent, additionalAnchors: updAnch };
+              conn = { ...conn, from: { ...conn.from, segIndex: si, t } };
+              next[idx] = conn;
+            }
+
+            // горизонтальний сегмент
+            if (y1 === y2 && typeof extra.desiredX === "number") {
+              const xmin = Math.min(x1, x2),
+                xmax = Math.max(x1, x2);
+              const x = Math.max(xmin, Math.min(xmax, extra.desiredX));
+              const t = x2 === x1 ? 0 : (x - x1) / (x2 - x1);
+
+              const updAnch = (parent.additionalAnchors || []).map((a) =>
+                a.id === conn.from.anchorId
+                  ? { ...a, x, y: y1, segIndex: si, t, vertexIndex: null }
+                  : a,
+              );
+
+              next[parentIdx] = { ...parent, additionalAnchors: updAnch };
+              conn = { ...conn, from: { ...conn.from, segIndex: si, t } };
+              next[idx] = conn;
+            }
+          }
+        }
+      }
+
+      // 3) перерахунок маршруту з урахуванням офсетів та коробок обходу
+      const sp = resolveAttachmentPoint(conn.from, symbols, next);
+      const ep = resolveAttachmentPoint(conn.to, symbols, next);
+
+      if (sp && ep) {
+        const dirFrom = getExitDir(conn.from, ep, next);
+        const dirTo = getExitDir(conn.to, sp, next);
+
+        const pts = calculateOrthogonalPath(
+          { ...sp, direction: dirFrom },
+          { ...ep, direction: dirTo },
+          { startOffset: conn.routing.startOffset, endOffset: conn.routing.endOffset },
+          getBoxForAttachment(conn.from, symbols),
+          getBoxForAttachment(conn.to, symbols),
+        );
+
+        const updatedAnchors = (conn.additionalAnchors || []).map((a) => {
+          if (a.vertexIndex != null) {
+            const vi = a.vertexIndex;
+            const vx = pts[2 * vi],
+              vy = pts[2 * vi + 1];
+            const maxSeg = pts.length / 2 - 2;
+            let newSeg = Math.min(Math.max(vi - 1, 0), maxSeg);
+            let newT = 0.5;
+            return { ...a, x: vx, y: vy, segIndex: newSeg, t: newT, vertexIndex: null };
+          }
+
+          let nearest = findClosestSegment(pts, a.x, a.y);
+          return { ...a, x: nearest.x, y: nearest.y, segIndex: nearest.segIndex, t: nearest.t };
+        });
+
+        next[idx] = {
+          ...conn,
+          points: pts,
+          fromExitDir: dirFrom,
+          toExitDir: dirTo,
+          additionalAnchors: updatedAnchors,
+          routing: conn.routing,
+        };
+
+        next = propagateAnchorIndexToChildren(next, connId, updatedAnchors);
+      }
+
+      // 4) перерахунок залежних звʼязків (ті, що причеплені до цієї лінії)
+      next = next.map((c) => {
+        const dependsOn = (att) => att?.type === "line" && att.connectionId === connId;
+        if (!dependsOn(c.from) && !dependsOn(c.to)) return c;
+
+        const sp2 = resolveAttachmentPoint(c.from, symbols, next);
+        const ep2 = resolveAttachmentPoint(c.to, symbols, next);
+        if (!sp2 || !ep2) return c;
+
+        const df = getExitDir(c.from, ep2, next);
+        const dt = getExitDir(c.to, sp2, next);
+
+        const pts2 = calculateOrthogonalPath(
+          { ...sp2, direction: df },
+          { ...ep2, direction: dt },
+          { startOffset: c.routing?.startOffset ?? 20, endOffset: c.routing?.endOffset ?? 20 },
+          getBoxForAttachment(c.from, symbols),
+          getBoxForAttachment(c.to, symbols),
+        );
+
+        return { ...c, points: pts2, fromExitDir: df, toExitDir: dt, routing: c.routing };
+      });
+
+      // 5) синхронізуємо координати «синіх» якорів на їхніх маршрутах
+      next = next.map((c) => {
+        if (!c.additionalAnchors?.length) return c;
+
+        const upd = c.additionalAnchors.map((a) => {
+          const i = a.segIndex;
+          const pts = c.points || [];
+          if (i == null || 2 * i + 3 >= pts.length) return a;
+
+          const x1 = pts[2 * i],
+            y1 = pts[2 * i + 1];
+          const x2 = pts[2 * i + 2],
+            y2 = pts[2 * i + 3];
+
+          return { ...a, x: x1 + a.t * (x2 - x1), y: y1 + a.t * (y2 - y1) };
+        });
+
+        return { ...c, additionalAnchors: upd, routing: c.routing };
+      });
+
+      return next;
+    });
+  };
+}
+```
+
+> Зверни увагу: тут імпортую `MIN_OFFSET/MAX_OFFSET` із `state/constants`. Переконайся, що вони там є (я раніше пропонував їх винести туди). Якщо ти їх залишиш в іншому файлі — просто підправиш імпорт.
+
+---
+
+## 2) Оновлення `features/scheme-editor/model/state/constants.js`
+
+(щоб `MIN_OFFSET/MAX_OFFSET` були там, як у твоєму файлі)
+
+```js
+export const MIN_OFFSET = 8;
+export const MAX_OFFSET = 300;
+
+export const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+```
+
+---
+
+## 3) Підключаємо назад у `useDiagramState.js`
+
+В кінець `useDiagramState` додаємо:
+
+```js
+import { updateConnectionOffsetFactory } from "./domain/connectionOffsetUpdate";
+```
+
+і нижче в тілі:
+
+```js
+const updateConnectionOffset = updateConnectionOffsetFactory({
+  symbols,
+  setConnections,
+});
+```
+
+та додаємо в `return { ... }`:
+
+```js
+updateConnectionOffset,
+```
+
+---
+
+## 4) Мінімальний diff `useDiagramState.js` (що саме змінити)
+
+1. Додати імпорт `useEffect`, бо зараз він в коді використовується:
+
+```js
+import { useState, useEffect } from "react";
+```
+
+2. Додати імпорт `updateConnectionOffsetFactory`
+3. Додати створення `updateConnectionOffset` через factory
+4. Додати `updateConnectionOffset` в return
+
+---
+
+## 5) Маленьке попередження (але ми це вирішимо наступним кроком)
+
+`updateConnectionOffsetFactory({ symbols, setConnections })` бере `symbols` із замикання — тобто якщо `symbols` часто змінюються, функція все одно буде актуальна, бо `useDiagramState` перестворює її на кожен рендер. Це ок, але в майбутньому, коли перейдемо на reducer/store, це стане ще чистіше.
+
+---
+
+Якщо хочеш, наступним повідомленням я:
+
+* підчищу `handleAnchorClick` (у тебе зараз подвійний `setConnections`) так, щоб було **одне** атомарне оновлення,
+* і вирівняю selection: зараз `selectHightlightEl` очікує `{type, id}`, а в UI в тебе місцями передається `event`. Це теж варто зафіксити, щоб не було багів у selection/transformer.

@@ -1,0 +1,104 @@
+Файл нормальний і простий 👍 Але щоб він реально був “контекстним” (під різні `kind`) і не тягнув логіку наверх, я раджу зробити 2 маленькі покращення:
+
+1. **передавати `target` в меню**, щоб воно могло:
+
+* показати правильний текст (“Видалити фігуру” / “Видалити зв’язок” / “Видалити точку”)
+* викликати `onDelete(target)` (а не просто `onDelete()`)
+
+2. (опційно) **додати пункт “Скасувати”** або просто залишити закриття кліком поза меню.
+
+Нижче — готова оновлена версія.
+
+---
+
+## ✅ Оновлений `GraphContextMenuMui.js` (під `kind`)
+
+```jsx
+import * as React from "react";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+function getDeleteLabel(target) {
+  if (!target?.kind) return "Видалити";
+
+  switch (target.kind) {
+    case "node":
+      return "Видалити фігуру";
+    case "connection":
+      return "Видалити зв’язок";
+    case "anchor":
+      return "Видалити точку";
+    default:
+      return "Видалити";
+  }
+}
+
+export default function GraphContextMenuMui({
+  anchorPosition,
+  open,
+  onClose,
+  onDelete,
+  target, // ✅ додали
+}) {
+  const label = getDeleteLabel(target);
+
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={anchorPosition ?? undefined}
+      disableEnforceFocus
+      disableRestoreFocus
+    >
+      <MenuItem
+        onClick={() => {
+          onDelete?.(target); // ✅ передаємо target
+          onClose?.();
+        }}
+        disabled={!target}
+      >
+        <ListItemIcon>
+          <DeleteIcon fontSize="small" />
+        </ListItemIcon>
+        {label}
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+## ✅ Як тепер викликати меню з Editor (мінімально)
+
+У твоєму `EditorContextMenu` / `DiagramEditorPage` треба передати `target`:
+
+```jsx
+<GraphContextMenuMui
+  open={menuState.open}
+  anchorPosition={menuState.anchorPosition}
+  target={menuState.target}
+  onClose={closeMenu}
+  onDelete={(target) => {
+    if (!target) return;
+    S.deleteByTarget(target);
+  }}
+/>
+```
+
+І все — меню саме підставить правильну назву.
+
+---
+
+## Де формувати `target`
+
+* для фігури: `{ kind:"node", id: el.id, shape: el.type }`
+* для лінії: `{ kind:"connection", id: conn.id }`
+* для синього якоря (якщо захочеш видаляти): `{ kind:"anchor", anchorKind:"lineAnchor", id: a.id, connectionId: conn.id }`
+
+---
+
+Якщо хочеш наступний логічний крок: я можу одразу показати, як **додати пункт “Видалити точку прив’язки”** (anchor) тільки тоді, коли `target.kind==="anchor"`, і як реалізувати `deleteAnchorById` в `useDiagramState`.

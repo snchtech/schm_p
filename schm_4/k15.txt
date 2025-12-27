@@ -1,0 +1,142 @@
+Ок — робимо повний цикл: **відкрити меню на синьому anchor → показати “Видалити точку” → видалити anchor з connection**.
+
+Нижче 3 частини:
+
+1. як формувати `target` для anchor у `DiagramConnections`
+2. як показати пункт меню лише для anchor (або універсально)
+3. `deleteByTarget` / `deleteAnchor` у `useDiagramState`
+
+---
+
+## 1) `DiagramConnections.js`: контекст-меню на синьому anchor
+
+Зараз у `Circle` для `additionalAnchors` є тільки `onClick`. Додаємо `onContextMenu`:
+
+```jsx
+<Circle
+  ...
+  onContextMenu={(e) => {
+    e.evt.preventDefault();
+    // важливо: зупинити bubbling, щоб не відкривалось меню лінії
+    e.cancelBubble = true;
+
+    onConnectionContextMenu?.(e, {
+      kind: "anchor",
+      anchorKind: "lineAnchor",
+      id: a.id,
+      connectionId: conn.id,     // щоб знати, в якому connection шукати anchor
+    });
+  }}
+/>
+```
+
+> `onConnectionContextMenu` у тебе вже прокидається як `onContextMenu` з EditorCanvas.
+
+---
+
+## 2) `GraphContextMenuMui.js`: пункт “Видалити …” з різною назвою (в тебе вже є)
+
+Ти вже погодився на версію з `target`. Там усе ок.
+
+Якщо хочеш, щоб **видалення anchor було доступне тільки коли target.kind==="anchor"**, то робити окремий пункт не потрібно — один пункт “Видалити …” і так працює.
+Але якщо хочеш *декілька пунктів* (наприклад “Видалити зв’язок” навіть коли клікнули по anchor) — скажеш, додам.
+
+---
+
+## 3) `useDiagramState.js`: реалізація видалення anchor
+
+### ✅ Додай функцію `deleteLineAnchor(connectionId, anchorId)`
+
+```js
+const deleteLineAnchor = (connectionId, anchorId) => {
+  setConnections((prev) =>
+    prev.map((c) => {
+      if (c.id !== connectionId) return c;
+      const nextAnchors = (c.additionalAnchors || []).filter((a) => a.id !== anchorId);
+      return { ...c, additionalAnchors: nextAnchors };
+    }),
+  );
+
+  // якщо selection стояв на цьому anchor — скинути
+  setSelection((sel) =>
+    sel.kind === "anchor" && sel.id === anchorId ? { kind: null, id: null } : sel,
+  );
+};
+```
+
+### ✅ Онови `deleteByTarget(target)` — додай кейс для anchor
+
+```js
+const deleteByTarget = (target) => {
+  if (!target?.kind || !target?.id) return;
+
+  if (target.kind === "anchor" && target.anchorKind === "lineAnchor") {
+    if (!target.connectionId) return;
+    deleteLineAnchor(target.connectionId, target.id);
+    return;
+  }
+
+  if (target.kind === "node") {
+    // ... твоя логіка delete node (або через deleteNodeWithLinks)
+    return;
+  }
+
+  if (target.kind === "connection") {
+    // ... твоя логіка delete connection (cascade)
+    return;
+  }
+};
+```
+
+### ✅ В `return` додай експорти:
+
+```js
+deleteByTarget,
+deleteLineAnchor,
+```
+
+---
+
+## 4) `DiagramEditorPage.jsx`: onDelete приймає target
+
+У тебе вже меню викликає `onDelete(target)`, тому в контейнері:
+
+```js
+const handleDelete = useCallback(
+  (target) => {
+    if (!target) return;
+    S.deleteByTarget(target);
+    closeMenu();
+  },
+  [S, closeMenu],
+);
+```
+
+І передаєш в меню:
+
+```jsx
+<EditorContextMenu
+  open={menuState.open}
+  anchorPosition={menuState.anchorPosition}
+  target={menuState.target}
+  onClose={closeMenu}
+  onDelete={handleDelete}
+/>
+```
+
+---
+
+## Що ти отримуєш після цього
+
+✅ ПКМ по лінії → “Видалити зв’язок”
+✅ ПКМ по фігурі → “Видалити фігуру”
+✅ ПКМ по синьому anchor → “Видалити точку” (і реально прибере `additionalAnchors[]`)
+
+---
+
+Якщо хочеш наступний рівень (дуже корисно): зробити так, щоб **ПКМ по anchor показував два пункти**:
+
+1. “Видалити точку”
+2. “Видалити зв’язок” (батьківський)
+
+Це зручно в редакторах. Сказати — і я дам готовий код меню з умовними пунктами.

@@ -1,0 +1,262 @@
+Ок — приводимо `DiagramSymbols` до **чистої, стабільної версії**: без хаосу з `useEffect` всередині `map`, без “node”, з нормальними назвами, з реєстрацією ref’ів **правильно**.
+
+Нижче даю:
+
+1. **новий файл** `DiagramSymbols.js` (готовий до вставки)
+2. допоміжний компонент `SymbolGroup.js` (щоб refs не ламались)
+3. як це під’єднати + що змінити в `DiagramEditor`
+
+---
+
+# 1) Правильна структура файлів для symbols
+
+```
+src/features/diagram-editor/canvas/
+  DiagramSymbols/
+    DiagramSymbols.js
+    SymbolGroup.js
+    index.js
+```
+
+`ShapeRegistry` беремо з shared:
+
+```
+src/shared/diagram/shapes/index.js
+```
+
+---
+
+# 2) `SymbolGroup.js` — винесли Group в окремий компонент
+
+**Чому так:**
+У React **не можна** викликати `useEffect` всередині `.map()` як у твоєму коді. Тому робимо компонент на 1 shape — і вже там реєструємо ref.
+
+```js
+"use client";
+
+import React, { useEffect, useRef } from "react";
+import { Group, Rect, Circle } from "react-konva";
+
+export default function SymbolGroup({
+  el,
+  ShapeComponent,
+  isAddingConnector,
+  hoveredElementId,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElementId,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  isSelected,
+  registerNodeRef,
+}) {
+  const groupRef = useRef(null);
+
+  // реєструємо ref Group нагору (для Transformer/selection)
+  useEffect(() => {
+    if (!registerNodeRef) return;
+    registerNodeRef(el.id, groupRef.current);
+    return () => registerNodeRef(el.id, null);
+  }, [el.id, registerNodeRef]);
+
+  // універсальні габарити для outline (у тебе в коді було el.w/el.h — зробимо fallback)
+  const w = el.width ?? el.w ?? (el.radius ? el.radius * 2 : 0);
+  const h = el.height ?? el.h ?? (el.radius ? el.radius * 2 : 0);
+
+  return (
+    <Group
+      ref={groupRef}
+      key={el.id}
+      x={el.x}
+      y={el.y}
+      draggable
+      onDragMove={(e) => handleDragMove?.(el.id, e)}
+      onMouseEnter={() => isAddingConnector && setHoveredElementId?.(el.id)}
+      onMouseLeave={() => isAddingConnector && setHoveredElementId?.(null)}
+      onContextMenu={(e) => onElementContextMenu?.(e, { kind: "shape", id: el.id, shapeType: el.type })}
+      onMouseDown={() => onMouseDown?.(el)}
+    >
+      {/* сама фігура */}
+      {ShapeComponent ? <ShapeComponent el={el} /> : null}
+
+      {/* outline при виділенні */}
+      {isSelected && w > 0 && h > 0 && (
+        <Rect
+          x={-6}
+          y={-6}
+          width={w + 12}
+          height={h + 12}
+          cornerRadius={12}
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dash={[6, 4]}
+          listening={false}
+        />
+      )}
+
+      {/* анкор-поінти */}
+      {hoveredElementId === el.id &&
+        getAnchorPoints?.(el)?.map((point, i) => (
+          <Circle
+            key={i}
+            x={point.x - el.x}
+            y={point.y - el.y}
+            radius={6}
+            fill={hoveredAnchor && hoveredAnchor.x === point.x && hoveredAnchor.y === point.y ? "yellow" : "green"}
+            stroke="black"
+            strokeWidth={1}
+            onMouseEnter={() => setHoveredAnchor?.(point)}
+            onMouseLeave={() => setHoveredAnchor?.(null)}
+            onClick={() => handleAnchorClick?.({ ...point, parentId: el.id, kind: "symbolAnchor" })}
+          />
+        ))}
+    </Group>
+  );
+}
+```
+
+---
+
+# 3) `DiagramSymbols.js` — чистий контейнер
+
+```js
+"use client";
+
+import React, { useMemo } from "react";
+import SymbolGroup from "./SymbolGroup";
+import { ShapeRegistry } from "@/shared/diagram/shapes";
+
+export default function DiagramSymbols({
+  symbols,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  selected,          // { type/kind, id } або твоя структура
+  registerNodeRef,
+}) {
+  // швидкий lookup для selected
+  const selectedId = selected?.id ?? null;
+
+  // якщо колись захочеш: зробити allow-list / filter по типах
+  const items = useMemo(() => symbols ?? [], [symbols]);
+
+  return (
+    <>
+      {items.map((el) => {
+        const ShapeComponent = ShapeRegistry[el.type];
+
+        // якщо невідомий тип — просто пропускаємо (або можеш рендерити placeholder)
+        if (!ShapeComponent) return null;
+
+        return (
+          <SymbolGroup
+            key={el.id}
+            el={el}
+            ShapeComponent={ShapeComponent}
+            isAddingConnector={isAddingConnector}
+            hoveredElementId={hoveredElement}
+            hoveredAnchor={hoveredAnchor}
+            getAnchorPoints={getAnchorPoints}
+            setHoveredElementId={setHoveredElement}
+            setHoveredAnchor={setHoveredAnchor}
+            handleDragMove={handleDragMove}
+            handleAnchorClick={handleAnchorClick}
+            onElementContextMenu={onElementContextMenu}
+            onMouseDown={onMouseDown}
+            isSelected={selectedId === el.id}
+            registerNodeRef={registerNodeRef}
+          />
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 4) `index.js` для зручного імпорту
+
+```js
+export { default as DiagramSymbols } from "./DiagramSymbols";
+```
+
+---
+
+# 5) Що змінити в `DiagramEditor.js`
+
+### Було (приблизно)
+
+```jsx
+<DiagramSymbols
+  ...
+  onMouseDown={S.selectHightlightEl}
+  isSelected={S.selected}
+  registerNodeRef={registerNodeRef}
+/>
+```
+
+### Стає
+
+* `selected` передаємо як є (але тепер `DiagramSymbols` очікує `selected?.id`)
+* `onMouseDown` лишається, але ми вже **викликаємо її з el** (як і було)
+
+```jsx
+<DiagramSymbols
+  symbols={S.symbols}
+  isAddingConnector={S.isAddingConnector}
+  hoveredElement={S.hoveredElement}
+  hoveredAnchor={S.hoveredAnchor}
+  getAnchorPoints={S.getAnchorPoints}
+  setHoveredElement={S.setHoveredElement}
+  setHoveredAnchor={S.setHoveredAnchor}
+  handleDragMove={S.handleDragMove}
+  handleAnchorClick={S.handleAnchorClick}
+  onElementContextMenu={handleElementContextMenu}
+  onMouseDown={S.selectHightlightEl}
+  selected={S.selection}          // ⬅️ важливо: тут має бути {id,...}
+  registerNodeRef={registerNodeRef}
+/>
+```
+
+> У тебе зараз іде плутанина `S.selected` vs `S.selection`.
+> Для `Transformer`/outline **краще мати один**: `selection = { kind/type, id }`.
+
+---
+
+# 6) Про “node” → як правильно тепер
+
+В `onContextMenu` я вже зробив:
+
+```js
+{ kind: "shape", id: el.id, shapeType: el.type }
+```
+
+Тобто:
+
+* **shape** = будь-яка фігура (rect/circle/text/symbol1…)
+* **connection** = зв’язок (line/polyline)
+
+Це зніме плутанину назавжди.
+
+---
+
+## Далі
+
+Якщо ок — наступним кроком я б:
+
+1. узгодив **єдиний формат selection** в `useDiagramState` (`{ kind: "shape"|"connection", id }`)
+2. привів `handleDelete` під цей формат
+3. прибрав зайвий локальний `selected`/`elements/lines` з `DiagramEditor` (бо все вже є в S)
+
+Скинути твій поточний `useDiagramState` selection/selected частину, чи я одразу дам “правильний” варіант і ти адаптуєш?

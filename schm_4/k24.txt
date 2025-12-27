@@ -1,0 +1,37 @@
+У твоєму `Circle.js` є 2 проблеми:
+
+1. `×={0}` — це помилка (має бути `x={0}`)
+2. Компонент приймає купу пропсів (`onSelect`, `onDragEnd`…), але **всередині ти їх не використовуєш**. Це не страшно, але краще або використати, або прибрати, щоб не плодити “шум”.
+
+Нижче — **чиста правильна версія** під твій підхід (фігура малюється в `0,0`, а позицію задає `Group` у `DiagramSymbols`).
+
+## Circle.js (чиста версія)
+
+```js
+import React from "react";
+import { Circle } from "react-konva";
+
+const CircleElement = ({ el }) => {
+  return (
+    <Circle
+      x={0}
+      y={0}
+      radius={el.radius ?? Math.min(el.width ?? 0, el.height ?? 0) / 2}
+      fill={el.fill}
+      stroke={el.stroke}
+      strokeWidth={el.strokeWidth}
+      listening={false} // події ловить Group зверху
+    />
+  );
+};
+
+export default CircleElement;
+```
+
+### Чому `listening={false}`?
+
+Бо події (drag, click, context menu, selection) ти вішаєш на `Group` у `DiagramSymbols`. Так надійніше: **один контрольний контейнер** для всіх фігур.
+
+---
+
+Якщо хочеш, я одразу приведу так само до “чистого” вигляду ще `TextElement.js` і `LineElement.js`, щоб `GraphLibrary` був одноманітний.

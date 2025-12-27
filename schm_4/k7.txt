@@ -1,0 +1,107 @@
+Тут краще розділити **“що це за сутність”** і **“який підтип/shape”**.
+
+### ✅ Правильна модель
+
+* **kind / entityType** — загальний тип сутності на схемі
+
+  * `"node"` (будь-яка фігура: rect/circle/text/…)
+  * `"connection"` (лінія/зв’язок)
+  * `"connector"` / `"anchor"` (точки прив’язки — якщо треба)
+* **shape / nodeType** — підтип вузла (форма)
+
+  * `"rect" | "circle" | "text" | ...`
+
+Тобто `node` — це *категорія*, а `rect/circle/...` — це *shape* всередині цієї категорії.
+
+---
+
+## Як виправити в коді (мінімально й правильно)
+
+### 1) У selection/context-menu передавай **node** як сутність
+
+Замість:
+
+```js
+{ type: el.type, id: el.id }
+```
+
+або мішанини з `rect/circle`
+
+роби так:
+
+```js
+{ kind: "node", id: el.id }
+```
+
+А якщо хочеш зберегти shape для зручності:
+
+```js
+{ kind: "node", id: el.id, shape: el.type } // el.type = rect/circle/...
+```
+
+### 2) У state заміни `selection = { type, id }` на:
+
+```js
+selection = { kind: null, id: null } 
+// kind: "node" | "connection" | "anchor" | null
+```
+
+І в `selectHighlightEl`:
+
+```js
+setSelection({ kind: "node", id })
+```
+
+### 3) У `DiagramSymbols` (твій файл)
+
+В контекст-меню:
+
+```jsx
+onContextMenu={(e) => onElementContextMenu(e, { kind: "node", id: el.id, shape: el.type })}
+```
+
+В mouse down (selection):
+
+```jsx
+onMouseDown?.({ kind: "node", id: el.id })
+```
+
+### 4) У `DiagramConnections` (коли скинеш файл)
+
+Для лінії:
+
+```js
+{ kind: "connection", id: conn.id }
+```
+
+---
+
+## Якщо хочеш НЕ міняти всі файли одразу (перехідний варіант)
+
+Можна лишити ключ `type`, але зробити його **завжди** одним із:
+
+* `"node"`
+* `"connection"`
+* `"anchor"`
+
+А підтип форми зберігати окремо як `nodeType`:
+
+```js
+{ type: "node", id: el.id, nodeType: el.type }
+```
+
+Це мінімально ламає існуючий код (бо `type` вже використовується), але прибирає плутанину.
+
+---
+
+### Що я рекомендую для твого проєкту
+
+Йди з варіантом:
+
+```ts
+{ kind: "node" | "connection" | "anchor", id: string, shape?: string }
+```
+
+Бо в тебе буде багато різних node-форм, а `kind` завжди стабільний і не “розповзається”.
+
+Якщо скинеш `DiagramConnections.js`, я одразу перероблю його під цю схему, і ми уніфікуємо selection/menus/transformer по всій сторінці.

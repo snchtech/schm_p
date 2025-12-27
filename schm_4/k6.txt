@@ -1,0 +1,198 @@
+Бачу логіку, але цей файл зараз **невалідний JS/React** і саме він буде давати тобі “хаос” + баги:
+
+* ти робиш `const Shape = ...` **всередині JSX map**, але не в блоці `{}`
+* ти викликаєш `useEffect()` **всередині циклу `.map()`** — це заборонено правилами хуків
+* один `groupRef` використовується для **всіх** елементів (refs перезапишуться)
+* `el.w / el.h` — у тебе в даних `width/height`, тому outline не працюватиме
+* `isSelected` приходить як булеве, але треба порівняння з id (selected саме цей елемент чи ні)
+* імпорт `GraphLibrary` має дивний шлях `./ .. /graph` (пробіли)
+
+Нижче даю **готову правильну версію**, яка:
+✅ не порушує правила хуків
+✅ коректно реєструє ref на кожен `Group` через callback-ref
+✅ робить selection через `onMouseDown` як ми домовились (`{type:'node', id}`)
+✅ показує anchor points нормально
+✅ outline працює через `width/height` (або `radius`)
+
+---
+
+## ✅ Переписаний `DiagramSymbols.js` (готовий до вставки)
+
+> Примітка: я залишив підхід з `ELEMENT_COMPONENTS`, але зробив його коректним.
+
+```jsx
+"use client";
+
+import React, { useCallback } from "react";
+import { Group, Rect, Circle } from "react-konva";
+import GraphLibrary from "../graph"; // <-- виправ шлях без пробілів
+
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+};
+
+export const DiagramSymbols = ({
+  symbols,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown, // очікуємо: (info) => void, де info = {type,id}
+  isSelected,  // очікуємо: (id) => boolean або selection object
+  registerNodeRef,
+}) => {
+  // callback-ref фабрика для конкретного id
+  const makeGroupRef = useCallback(
+    (id) => (node) => {
+      if (!registerNodeRef) return;
+      registerNodeRef(id, node);
+    },
+    [registerNodeRef],
+  );
+
+  return (
+    <>
+      {symbols.map((el) => {
+        const Shape = ELEMENT_COMPONENTS[el.type];
+
+        // selection: підтримуємо 2 варіанти:
+        // 1) isSelected як function(id)->bool
+        // 2) isSelected як object {type,id} або {id}
+        const selected =
+          typeof isSelected === "function"
+            ? isSelected(el.id)
+            : !!isSelected && (isSelected.id === el.id || isSelected === el.id);
+
+        // outline dimensions
+        const outline = (() => {
+          if (el.type === "rect") {
+            const w = el.width ?? el.w ?? 0;
+            const h = el.height ?? el.h ?? 0;
+            return { x: -6, y: -6, width: w + 12, height: h + 12 };
+          }
+          if (el.type === "circle") {
+            const r = el.radius ?? Math.max((el.width ?? 0) / 2, (el.height ?? 0) / 2);
+            const d = r * 2;
+            return { x: -r - 6, y: -r - 6, width: d + 12, height: d + 12 };
+          }
+          // fallback
+          const w = el.width ?? el.w ?? 0;
+          const h = el.height ?? el.h ?? 0;
+          return { x: -6, y: -6, width: w + 12, height: h + 12 };
+        })();
+
+        return (
+          <Group
+            key={el.id}
+            ref={makeGroupRef(el.id)}
+            x={el.x}
+            y={el.y}
+            draggable
+            onDragMove={(e) => handleDragMove(el.id, e)}
+            onMouseEnter={() => isAddingConnector && setHoveredElement(el.id)}
+            onMouseLeave={() => isAddingConnector && setHoveredElement(null)}
+            onContextMenu={(e) => onElementContextMenu(e, { type: "node", id: el.id })}
+            onMouseDown={(e) => {
+              e.cancelBubble = true;
+              onMouseDown?.({ type: "node", id: el.id });
+            }}
+          >
+            {Shape ? <Shape el={el} /> : null}
+
+            {/* Outline коли вибрано */}
+            {selected && (
+              <Rect
+                {...outline}
+                cornerRadius={12}
+                stroke="#3b82f6"
+                strokeWidth={1}
+                dash={[6, 4]}
+                listening={false}
+              />
+            )}
+
+            {/* Anchor points */}
+            {hoveredElement === el.id &&
+              getAnchorPoints(el).map((point, i) => (
+                <Circle
+                  key={i}
+                  // point.x/point.y у глобальних координатах
+                  // а Group має x/y = el.x/el.y, тому віднімаємо
+                  x={point.x - el.x}
+                  y={point.y - el.y}
+                  radius={6}
+                  fill={
+                    hoveredAnchor &&
+                    hoveredAnchor.x === point.x &&
+                    hoveredAnchor.y === point.y
+                      ? "yellow"
+                      : "green"
+                  }
+                  stroke="black"
+                  strokeWidth={1}
+                  onMouseEnter={() => setHoveredAnchor(point)}
+                  onMouseLeave={() => setHoveredAnchor(null)}
+                  onMouseDown={(e) => e.cancelBubble = true}
+                  onClick={() =>
+                    handleAnchorClick({
+                      ...point,
+                      parentId: el.id,
+                      kind: "symbolAnchor",
+                    })
+                  }
+                />
+              ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+};
+```
+
+---
+
+## Як підключити selection правильно (з твоїм `useDiagramState`)
+
+У `EditorCanvas` ти передаєш:
+
+```jsx
+<DiagramSymbols
+  ...
+  onMouseDown={S.selectHightlightEl}
+  isSelected={S.selection} // або isSelected={(id)=>S.selection?.id===id}
+ />
+```
+
+Я рекомендую так (без магії):
+
+```jsx
+onMouseDown={S.selectHightlightEl}
+isSelected={(id) => S.selection?.type === "node" && S.selection?.id === id}
+```
+
+А для ліній аналогічно.
+
+---
+
+## Що ще треба виправити в твоєму state, щоб anchors працювали рівно
+
+У `getAnchorPoints` зараз логіка під `rect/circle` ок, але для circle треба уточнити: **x/y це центр чи top-left?**
+Твої `Circle` рендери зазвичай очікують центр. Якщо у тебе `Group` стоїть на `x/y`, а `Circle` всередині малюється на `radius,radius` — то `getAnchorPoints` треба підлаштувати. Я це швидко підлаштую, коли побачу компонент `GraphLibrary.circle`.
+
+---
+
+Скидай тепер `DiagramConnections.js` (і/або `GraphLibrary.circle/rect`), і я так само перероблю його:
+
+* без хуків в циклах
+* з коректним selection (`{type:'line', id}`)
+* з реєстрацією ref на лінію (якщо треба для transformer або hit-testing)
+* з правильним `onContextMenu` для лінії/якоря

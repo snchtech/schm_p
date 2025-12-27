@@ -1,0 +1,188 @@
+Добре — робимо 2 речі: **(1) прибираємо подвійний `setConnections` у `handleAnchorClick`**, щоб створення конектора було атомарним, і **(2) вирівнюємо selection**, щоб ти всюди передавав або *elementInfo*, або *подію*, але не міксував.
+
+---
+
+## 1) Фікс `handleAnchorClick`: один `setConnections` (атомарно)
+
+Зараз у тебе в оригіналі після створення ти робиш ще один `setConnections`, щоб “допроініціалізувати” маршрут. Це можна зробити **всередині одного updater-а**, бо там у нас є `prev` (актуальні connections).
+
+### Онови файл: `features/scheme-editor/model/domain/connectionCreate.js`
+
+Замінити весь `handleAnchorClickFactory` на цей:
+
+```js
+import { v4 as uuidv4 } from "uuid";
+import { calculateOrthogonalPath, getExitDir } from "../../../shared/geometry";
+import { normalizeAttachment, resolveAttachmentPoint, getBoxForAttachment } from "./attachments";
+
+export function handleAnchorClickFactory({
+  isAddingConnector,
+  selectedAnchor,
+  setSelectedAnchor,
+  setMessage,
+  setConnections,
+  setHoveredElement,
+  setHoveredAnchor,
+  setIsAddingConnector,
+  setHoveredLineAnchorId,
+  symbols,
+}) {
+  return function handleAnchorClick(anchor) {
+    if (!isAddingConnector) return;
+
+    // 1) вибір першої точки
+    if (!selectedAnchor) {
+      setSelectedAnchor(anchor);
+      setMessage("Оберіть наступний елемент для зв'язку");
+      return;
+    }
+
+    const from = normalizeAttachment(selectedAnchor);
+    const to = normalizeAttachment(anchor);
+
+    const initialOffset = 20;
+    const newConnId = uuidv4();
+
+    // 2) атомарне створення + ініціалізація в одному setConnections
+    setConnections((prev) => {
+      // inherited routing from parent if attached to line
+      let routing = { startOffset: initialOffset, endOffset: initialOffset };
+
+      if (from.type === "line") {
+        const parent = prev.find((c) => c.id === from.connectionId);
+        if (parent?.routing) routing = { ...parent.routing };
+      } else if (to.type === "line") {
+        const parent = prev.find((c) => c.id === to.connectionId);
+        if (parent?.routing) routing = { ...parent.routing };
+      }
+
+      // resolve points з урахуванням prev
+      const sp = resolveAttachmentPoint(from, symbols, prev);
+      const ep = resolveAttachmentPoint(to, symbols, prev);
+
+      if (!sp || !ep) {
+        // не змінюємо connections
+        // а UI-стан відкотимо нижче (після setConnections)
+        return prev;
+      }
+
+      const dirFrom = getExitDir(from, ep, prev);
+      const dirTo = getExitDir(to, sp, prev);
+
+      const pts = calculateOrthogonalPath(
+        { ...sp, direction: dirFrom },
+        { ...ep, direction: dirTo },
+        routing,
+        getBoxForAttachment(from, symbols),
+        getBoxForAttachment(to, symbols),
+      );
+
+      const newConn = {
+        id: newConnId,
+        from,
+        to,
+        points: pts,
+        routing,
+        fromExitDir: dirFrom,
+        toExitDir: dirTo,
+        additionalAnchors: [],
+      };
+
+      return [...prev, newConn];
+    });
+
+    // 3) UI cleanup (після створення)
+    setSelectedAnchor(null);
+    setHoveredElement(null);
+    setHoveredAnchor(null);
+    setMessage("");
+    setIsAddingConnector(false);
+    setHoveredLineAnchorId(null);
+  };
+}
+```
+
+✅ Це прибирає дубльовані оновлення і зменшує “глітчі”.
+
+> Якщо потрібно — далі додамо валідацію “не створювати дублікати зв’язків” або “не дозволяти з’єднувати сам із собою”, але зараз я залишив поведінку як була.
+
+---
+
+## 2) Вирівнюємо selection: не передаємо event у `selectHightlightEl`
+
+### Проблема
+
+У `DiagramEditor` ти пишеш:
+
+```jsx
+onMouseDown={S.selectHightlightEl}
+```
+
+А `selectHightlightEl` у твоєму state очікує **об’єкт елемента** (`{type, id}`), а не Konva event.
+
+### Правильний патерн
+
+* Canvas/Shapes повинні викликати `selectHighlightEl({type:'node', id})` або `selectHighlightEl({type:'line', id})`.
+
+### Мінімальна правка у `DiagramSymbols`
+
+Там, де ти рендериш елемент (Group/Rect/Circle), зроби так:
+
+```jsx
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  S.selectHightlightEl({ type: "node", id: el.id });
+}}
+```
+
+А для лінії в `DiagramConnections` (або там де handleLineClick):
+
+```jsx
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  S.selectHightlightEl({ type: "line", id: conn.id });
+}}
+```
+
+### А очищення selection
+
+На Stage (або Layer) вішаєш:
+
+```jsx
+onMouseDown={S.clearSelectHighlightEl}
+```
+
+але важливо: `clearSelectHighlightEl` вже перевіряє `e.target === e.target.getStage()` — тому його краще ставити на `Stage`, а не на внутрішні елементи.
+
+У `EditorCanvas.jsx`:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={S.clearSelectHighlightEl}
+>
+```
+
+---
+
+## 3) Невеликий, але критичний фікс: імпорт useEffect
+
+У твоєму `useDiagramState` є `useEffect`, але нема імпорту.
+
+Заміни на:
+
+```js
+import { useState, useEffect } from "react";
+```
+
+---
+
+## 4) Після цього transformer запрацює стабільніше
+
+Ти вже дістаєш `selectedKonvaNode` з `S.selection`, тож коли selection стане консистентним (`node/line/connector`) — `SelectionTransformer` буде працювати без випадкових станів.
+
+---
+
+Якщо ти скинеш `DiagramSymbols` і `DiagramConnections` (або їхні ключові шматки), я відразу покажу **конкретні місця**, куди вставити `selectHightlightEl` та `onContextMenu`, щоб не було “event замість elementInfo”.

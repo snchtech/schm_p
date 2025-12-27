@@ -1,0 +1,422 @@
+Краще **спочатку сформувати файли з `DiagramEditor`**, а `useDiagramState` підключити вже другим кроком.
+
+Причина проста: зараз `DiagramEditor` — це “каркас сторінки” (TopMenu + Canvas + ContextMenu + refs + zoom/pan). Ми можемо **рознести його на компоненти/хуки** без зміни логіки стану — просто прокинувши `S` як props. Тоді `useDiagramState` залишиться як “чорний ящик”, і ми не зламаємо поведінку.
+
+### Порядок робіт (оптимально)
+
+1. **Розкласти `DiagramEditor`** на:
+
+   * `DiagramEditorPage` (контейнер-композиція)
+   * `EditorTopBar`
+   * `EditorCanvas`
+   * `EditorContextMenu`
+   * хуки: `useNodeRefs`, `useZoomPan`, `useContextMenu`
+2. Після цього скидаєш `useDiagramState` — і ми:
+
+   * розіб’ємо його на `model/*` (actions/selectors/types)
+   * винесемо доменні операції (delete, connect, selection, anchors) у `model/graph/*`
+   * все універсальне (konva zoom/pan, helpers) — у `shared/*`
+
+---
+
+Нижче я одразу даю **готовий набір файлів**, сформований на основі твого `DiagramEditor.js` (поки без рефактору `useDiagramState`, тільки акуратне винесення).
+
+## 1) Нова структура файлів для цього коду
+
+```txt
+features/scheme-editor/
+  ui/page/DiagramEditorPage.jsx
+  ui/top-bar/EditorTopBar.jsx
+  ui/canvas/EditorCanvas.jsx
+  ui/context-menu/EditorContextMenu.jsx
+  lib/useNodeRefs.js
+  lib/useZoomPan.js
+  lib/useContextMenu.js
+  model/useDiagramState.js         # (поки імпортуємо як було)
+  model/graph/delete.js            # (поки імпортуємо як було, або проксі)
+shared/
+  konva/zoom-pan/setupLayerZoomPan.js
+```
+
+---
+
+## 2) Файли (з кодом)
+
+### `features/scheme-editor/ui/page/DiagramEditorPage.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { useDiagramState } from "../../model/useDiagramState";
+import { useZoomPan } from "../../lib/useZoomPan";
+import { useNodeRefs } from "../../lib/useNodeRefs";
+import { useContextMenu } from "../../lib/useContextMenu";
+
+import EditorTopBar from "../top-bar/EditorTopBar";
+import EditorCanvas from "../canvas/EditorCanvas";
+import EditorContextMenu from "../context-menu/EditorContextMenu";
+
+import { deleteNodeWithLinks, deleteLine } from "../../model/graph/delete";
+
+export default function DiagramEditorPage() {
+  const S = useDiagramState();
+
+  const { stageRef, layerRef, zoomApiRef, isReady } = useZoomPan({
+    panMode: "mmb_or_space",
+  });
+
+  const { nodeRefs, registerNodeRef, getNodeById } = useNodeRefs();
+
+  // Context menu state + helpers
+  const {
+    menuState,
+    closeMenu,
+    openMenuAtKonvaEvent,
+    selectedTarget,
+    setSelectedTarget,
+  } = useContextMenu();
+
+  const selectedKonvaNode = useMemo(() => {
+    if (!S.selection?.type || S.selection.type === "connector") return null;
+    return getNodeById(S.selection.id);
+  }, [S.selection, getNodeById]);
+
+  const handleElementContextMenu = (e, elementInfo) => {
+    e.evt.preventDefault();
+    setSelectedTarget(elementInfo);
+    openMenuAtKonvaEvent(e, e.target);
+  };
+
+  const handleDelete = () => {
+    if (!selectedTarget) return;
+
+    if (selectedTarget.type === "node") {
+      const res = deleteNodeWithLinks(selectedTarget.id, S.symbols, S.connections);
+      // ВАЖЛИВО: я не знаю точну форму res у твоїх функцій — адаптуємо після того,
+      // як ти покажеш useGraphDelete/useDiagramState.
+      if (res?.elements) S.setSymbols(res.elements);
+      if (res?.connections) S.setConnections(res.connections);
+    }
+
+    if (selectedTarget.type === "line") {
+      // Тут теж залежить від твого state (connections/lines)
+      if (S.connections) {
+        const next = deleteLine(selectedTarget.id, S.connections);
+        S.setConnections(next);
+      }
+    }
+
+    setSelectedTarget(null);
+    closeMenu();
+  };
+
+  return (
+    <>
+      <EditorTopBar
+        message={S.message}
+        isAddingConnector={S.isAddingConnector}
+        isAddingAnchor={S.isAddingAnchor}
+        startAddConnector={S.startAddConnector}
+        cancelAddConnector={() => S.setIsAddingConnector(false)}
+        startAddLineAnchor={S.startAddLineAnchor}
+        cancelAddAnchor={() => S.setIsAddingAnchor(false)}
+        zoomApiRef={zoomApiRef}
+        isZoomReady={isReady}
+      />
+
+      <EditorCanvas
+        stageRef={stageRef}
+        layerRef={layerRef}
+        S={S}
+        selectedKonvaNode={selectedKonvaNode}
+        registerNodeRef={registerNodeRef}
+        onElementContextMenu={handleElementContextMenu}
+      />
+
+      <EditorContextMenu
+        open={menuState.open}
+        anchorPosition={menuState.anchorPosition}
+        onClose={closeMenu}
+        onDelete={handleDelete}
+      />
+    </>
+  );
+}
+```
+
+---
+
+### `features/scheme-editor/ui/top-bar/EditorTopBar.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+
+export default function EditorTopBar({
+  message,
+  isAddingConnector,
+  isAddingAnchor,
+  startAddConnector,
+  cancelAddConnector,
+  startAddLineAnchor,
+  cancelAddAnchor,
+  zoomApiRef,
+  isZoomReady,
+}) {
+  return (
+    <>
+      <header style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+        <button onClick={startAddConnector}>Новий connector</button>
+        {isAddingConnector && <button onClick={cancelAddConnector}>Відмінити</button>}
+
+        <button onClick={startAddLineAnchor}>Нова точка привязки на лінії</button>
+        {isAddingAnchor && <button onClick={cancelAddAnchor}>Відмінити</button>}
+      </header>
+
+      <nav style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <button
+          id="btnZoomOut"
+          disabled={!isZoomReady}
+          onClick={() => zoomApiRef.current?.zoomOut?.()}
+        >
+          -
+        </button>
+        <button
+          id="btnZoomIn"
+          disabled={!isZoomReady}
+          onClick={() => zoomApiRef.current?.zoomIn?.()}
+        >
+          +
+        </button>
+        <button
+          id="btnReset"
+          disabled={!isZoomReady}
+          onClick={() => zoomApiRef.current?.reset?.()}
+        >
+          Reset
+        </button>
+      </nav>
+
+      {message && <p>{message}</p>}
+    </>
+  );
+}
+```
+
+---
+
+### `features/scheme-editor/ui/canvas/EditorCanvas.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Stage, Layer } from "react-konva";
+
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import SelectionTransformer from "./SelectionTransformer";
+
+export default function EditorCanvas({
+  stageRef,
+  layerRef,
+  S,
+  selectedKonvaNode,
+  registerNodeRef,
+  onElementContextMenu,
+}) {
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        style={{ border: "1px solid #ccc" }}
+      >
+        <Layer ref={layerRef}>
+          <DiagramConnections
+            connections={S.connections}
+            hoveredConnectionId={S.hoveredConnectionId}
+            hoveredLineAnchorId={S.hoveredLineAnchorId}
+            isAddingConnector={S.isAddingConnector}
+            setHoveredConnectionId={S.setHoveredConnectionId}
+            setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+            handleLineClick={S.handleLineClick}
+            handleAnchorClick={S.handleAnchorClick}
+            updateConnectionOffset={S.updateConnectionOffset}
+          />
+
+          <DiagramSymbols
+            symbols={S.symbols}
+            isAddingConnector={S.isAddingConnector}
+            hoveredElement={S.hoveredElement}
+            hoveredAnchor={S.hoveredAnchor}
+            getAnchorPoints={S.getAnchorPoints}
+            setHoveredElement={S.setHoveredElement}
+            setHoveredAnchor={S.setHoveredAnchor}
+            handleDragMove={S.handleDragMove}
+            handleAnchorClick={S.handleAnchorClick}
+            onElementContextMenu={onElementContextMenu}
+            onMouseDown={S.selectHightlightEl}
+            isSelected={S.selected}
+            registerNodeRef={registerNodeRef}
+          />
+
+          <SelectionTransformer
+            selectedNode={selectedKonvaNode}
+            enabled={!!selectedKonvaNode}
+          />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+---
+
+### `features/scheme-editor/ui/context-menu/EditorContextMenu.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import GraphContextMenuMui from "../../../graph/interface-elements/GraphContextMenuMui";
+
+export default function EditorContextMenu({ open, anchorPosition, onClose, onDelete }) {
+  return (
+    <GraphContextMenuMui
+      open={open}
+      anchorPosition={anchorPosition}
+      onClose={onClose}
+      onDelete={onDelete}
+    />
+  );
+}
+```
+
+> Пізніше цей імпорт ми вирівняємо: або `GraphContextMenuMui` переїде в `shared/ui/menus`, або залишиться локально до редактора (залежить, чи використовується десь ще).
+
+---
+
+## 3) Хуки
+
+### `features/scheme-editor/lib/useZoomPan.js`
+
+```js
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { setupLayerZoomPan } from "../../../shared/konva/zoom-pan/setupLayerZoomPan";
+
+export function useZoomPan(options) {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+  const zoomApiRef = useRef(null);
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    zoomApiRef.current = setupLayerZoomPan(stage, layer, options);
+    setIsReady(true);
+
+    return () => {
+      zoomApiRef.current?.destroy?.();
+      zoomApiRef.current = null;
+      setIsReady(false);
+    };
+  }, []);
+
+  return { stageRef, layerRef, zoomApiRef, isReady };
+}
+```
+
+---
+
+### `features/scheme-editor/lib/useNodeRefs.js`
+
+```js
+"use client";
+
+import { useCallback, useRef } from "react";
+
+export function useNodeRefs() {
+  const nodeRefs = useRef(new Map());
+
+  const registerNodeRef = useCallback((id, node) => {
+    if (!node) nodeRefs.current.delete(id);
+    else nodeRefs.current.set(id, node);
+  }, []);
+
+  const getNodeById = useCallback((id) => {
+    return nodeRefs.current.get(id) || null;
+  }, []);
+
+  return { nodeRefs, registerNodeRef, getNodeById };
+}
+```
+
+---
+
+### `features/scheme-editor/lib/useContextMenu.js`
+
+```js
+"use client";
+
+import { useCallback, useState } from "react";
+
+export function useContextMenu() {
+  const [selectedTarget, setSelectedTarget] = useState(null);
+  const [menuState, setMenuState] = useState({
+    open: false,
+    anchorPosition: null, // { top, left }
+    target: null,
+  });
+
+  const closeMenu = useCallback(() => {
+    setMenuState((s) => ({ ...s, open: false, anchorPosition: null, target: null }));
+  }, []);
+
+  const openMenuAtKonvaEvent = useCallback((e, target) => {
+    const { clientX, clientY } = e.evt;
+    setMenuState({
+      open: true,
+      anchorPosition: { top: clientY, left: clientX },
+      target,
+    });
+  }, []);
+
+  return {
+    menuState,
+    closeMenu,
+    openMenuAtKonvaEvent,
+    selectedTarget,
+    setSelectedTarget,
+  };
+}
+```
+
+---
+
+## 4) Проксі для delete (поки без твоїх деталей)
+
+### `features/scheme-editor/model/graph/delete.js`
+
+```js
+export { deleteLine, deleteNodeWithLinks } from "../../../useGraphDelete";
+```
+
+Пізніше ми винесемо реальну реалізацію з `useGraphDelete` сюди, щоб не тягнути “старі шляхи”.
+
+---
+
+## Відповідь на твоє питання (в одну фразу)
+
+**Роби так:** спочатку розносимо `DiagramEditor` на файли (як вище), а потім ти скидаєш `useDiagramState` — і ми вже оптимально розкладемо state/actions/utils між `model/` і `shared/`, без дублювань.
+
+Кидай наступним `useDiagramState` (або `useGraphDelete`, якщо там найбільше “доменної” логіки видалення/зв’язків) — і я покажу, як його розпиляти правильно.

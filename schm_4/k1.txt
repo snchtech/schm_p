@@ -1,0 +1,190 @@
+Так, цей `DiagramEditor.js` зараз реально “змішав усе”: **UI кнопок**, **логіку зум/пан**, **стан редактора**, **контекст-меню**, **refs на Konva-ноди**, **transformer**, **видалення графа**. Це і є причина хаосу.
+
+Нижче — як я б **розбив його по файлах**, враховуючи, що це **одна сторінка** з блоками (TopMenu + Canvas + LeftMenu), і ми хочемо мінімізувати дублювання через `shared/`.
+
+---
+
+## 1) Що саме винести з DiagramEditor
+
+### A) TopMenu (кнопки інструментів + зум)
+
+Все що зараз у `<header>` і `<nav>` — це 100% **TopMenu**.
+
+**Файл:**
+
+* `features/scheme-editor/ui/top-bar/EditorTopBar.tsx`
+
+Він отримує `editorApi` (actions) і `state` (flags), і просто рендерить кнопки.
+
+---
+
+### B) Canvas блок (Konva Stage/Layer + рендер символів/ліній + transformer)
+
+Все що в `<Stage><Layer>...` — це **Canvas**.
+
+**Файли:**
+
+* `features/scheme-editor/ui/canvas/EditorCanvas.tsx` – Stage/Layer + композиція
+* `features/scheme-editor/ui/canvas/DiagramConnections.tsx` (в тебе вже є)
+* `features/scheme-editor/ui/canvas/DiagramSymbols.tsx` (в тебе вже є)
+* `features/scheme-editor/ui/canvas/SelectionTransformer.tsx`
+
+Важливо: **EditorCanvas** не має знати про кнопки TopMenu. Він працює зі станом/екшенами редактора.
+
+---
+
+### C) Konva refs + вибір ноди для transformer
+
+Оцей шматок:
+
+```js
+const nodeRefs = useRef(new Map())
+const registerNodeRef = (id, node) => { ... }
+const selectedKonvaNode = ...
+```
+
+краще винести в хук, щоб Canvas був чистий.
+
+**Файл:**
+
+* `features/scheme-editor/lib/useNodeRefs.ts`
+
+Це стане “інфраструктура Canvas”, але локальна до фічі.
+
+---
+
+### D) Zoom/Pan setupLayerZoomPan
+
+Це чиста “lib” логіка. Якщо вона потрібна ще десь (можливо буде), винести в `shared/konva`.
+
+**Файл:**
+
+* `shared/konva/zoom-pan/setupLayerZoomPan.ts`
+
+І додати маленький хук-обгортку:
+
+* `features/scheme-editor/lib/useZoomPan.ts` (ініціалізація + destroy)
+
+---
+
+### E) Контекстне меню (MUI) і його стан
+
+`GraphContextMenuMui` + `menuState` + `openMenuAtEvent/closeMenu` — це окремий UI-компонент/хук.
+
+**Файли:**
+
+* `features/scheme-editor/ui/context-menu/EditorContextMenu.tsx`
+* `features/scheme-editor/lib/useContextMenu.ts`
+
+Ідея: Canvas викликає `openAtKonvaEvent(e, target)` — і все.
+
+---
+
+### F) Логіка видалення графа (deleteNodeWithLinks, deleteLine)
+
+Це **доменна логіка** (операції над data-моделлю). Вона не має бути поруч із UI.
+
+**Файл:**
+
+* `features/scheme-editor/model/graph/delete.ts`
+
+(або `entities/scheme/graph/delete.ts`, якщо це буде використовуватись не тільки тут)
+
+---
+
+## 2) Ключова рекомендація (щоб не з’явився новий хаос)
+
+Зараз у тебе частина стану в `useDiagramState()`, а частина локально в `useState` (`selected`, `elements`, `menuState`). Це швидко знову розповзеться.
+
+Оптимально:
+
+* **є один “джерело правди” редактора**: `useDiagramState()` (або store),
+* локально в UI лишаються тільки “чисто UI дрібниці”, які не впливають на модель (наприклад, позиція меню може бути в `useContextMenu`, але target/selection краще тримати в editor state).
+
+Тоді `handleDelete` має викликати щось типу:
+
+* `S.deleteSelected()` або `S.deleteByTarget(target)`
+
+а не лазити по `S.symbols` напряму в UI.
+
+---
+
+## 3) Пропонована структура папок для цієї сторінки (одна сторінка, кілька блоків)
+
+```txt
+app/
+  (protected)/
+    schemes/
+      [schemeId]/
+        page.tsx            # thin: збирає layout
+features/
+  scheme-editor/
+    ui/
+      page/
+        DiagramEditorPage.tsx     # компонує LeftPanel + TopBar + Canvas
+      top-bar/
+        EditorTopBar.tsx
+      left-panel/
+        LeftPanel.tsx             # додамо пізніше
+      canvas/
+        EditorCanvas.tsx
+        DiagramConnections.tsx
+        DiagramSymbols.tsx
+        SelectionTransformer.tsx
+      context-menu/
+        EditorContextMenu.tsx
+    model/
+      useDiagramState.ts          # твій існуючий хук/стейт
+      graph/
+        delete.ts                 # deleteNodeWithLinks, deleteLine
+    lib/
+      useNodeRefs.ts
+      useZoomPan.ts
+      useContextMenu.ts
+    index.ts
+shared/
+  konva/
+    zoom-pan/
+      setupLayerZoomPan.ts
+  ui/
+    ... (якщо треба базові компоненти)
+  lib/
+    ...
+```
+
+---
+
+## 4) Які проблеми я бачу прямо в коді (і це треба виправити при розбитті)
+
+Це дрібниці, але вони заважають:
+
+* `ukeRef` → має бути `useRef`
+* `nul1` → `null`
+* `clientx` → `clientX`
+* `Iselected` → `!selected` або помилка змінної
+* `setLines`, `lines` — у файлі не оголошені (зараз видалення ліній не працюватиме)
+* `SelectionTransformer` імпорт: у тебе `selectionTransformer`, а в JSX `SelectionTransformer` (різний регістр/назва)
+* `Stage`/`Layer` refs не підключені: ти створив `stageRef/layerRef`, але не передав їх у компоненти `<Stage ref={...}> <Layer ref={...}>`
+
+Це варто почистити, коли будемо переносити у `EditorCanvas`.
+
+---
+
+## 5) Що я пропоную зробити наступним кроком
+
+Без зайвих питань: наступним кроком ми перетворюємо `DiagramEditor.js` на **композиційний контейнер**:
+
+* `DiagramEditorPage`:
+
+  * піднімає `const S = useDiagramState()`
+  * ініціалізує `zoomPanApi`
+  * тримає `nodeRefs`
+  * рендерить:
+
+    * `<EditorTopBar .../>`
+    * `<EditorCanvas .../>`
+    * `<EditorContextMenu .../>`
+
+А потім вже поступово підключимо LeftMenu як третій блок.
+
+Кидай наступний файл: `useDiagramState` або `setupLayerZoomPan` — і я покажу, як їх правильно розкласти по `model/lib/shared`, щоб не дублювати і не порушити кордони імпортів.

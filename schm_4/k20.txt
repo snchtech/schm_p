@@ -1,0 +1,248 @@
+Чудово, тепер контекст **GraphLibrary** повністю зрозумілий 👍
+Ти інтуїтивно вже прийшов до **правильного патерну**, просто його треба трохи «додисциплінувати», щоб він добре ліг у FSD-подібну архітектуру і не розвалився через пів року.
+
+Нижче — **чітко і по кроках**.
+
+---
+
+## 1️⃣ Що таке GraphLibrary у твоїй архітектурі (і це правильно)
+
+Те, що ти описав:
+
+> GraphLibrary — файл, де підключаються усі графічні компоненти, які **дозволені** для відмальовки
+
+👉 Це **registry / factory**, а не просто index.
+
+Це:
+
+* не UI сторінки
+* не бізнес-логіка
+* не diagram-state
+* **це shared layer**
+
+✔ Абсолютно правильна ідея.
+
+---
+
+## 2️⃣ Де GraphLibrary має жити
+
+### ❌ НЕ тут
+
+```
+features/diagram-editor/graph
+```
+
+### ✅ ПРАВИЛЬНО
+
+```
+src/shared/diagram/shapes/
+  Rect/
+    RectShape.js
+    index.js
+  Circle/
+    CircleShape.js
+    index.js
+  Text/
+    TextShape.js
+    index.js
+  Line/
+    LineShape.js
+    index.js
+  Symbol1/
+    Symbol1Shape.js
+    index.js
+
+  registry.js        ← твій GraphLibrary
+  index.js
+```
+
+> Чому `shared/diagram/shapes`, а не `shared/konva`?
+> Бо це **доменно-специфічні примітиви схеми**, а не просто Konva-утиліти (як zoom/selection).
+
+---
+
+## 3️⃣ Як правильно називати: НЕ `Rect`, а `RectShape`
+
+### Чому?
+
+* `Rect` — це konva primitive
+* `RectElement` — UI-термін
+* у тебе це **доменна фігура схеми**
+
+👉 Тому: `RectShape`, `CircleShape`, `LineShape`
+
+---
+
+## 4️⃣ Як виглядає правильний `registry.js` (GraphLibrary)
+
+### `shared/diagram/shapes/registry.js`
+
+```js
+import { RectShape } from "./Rect";
+import { CircleShape } from "./Circle";
+import { TextShape } from "./Text";
+import { LineShape } from "./Line";
+import { Symbol1Shape } from "./Symbol1";
+
+/**
+ * Registry дозволених shape
+ * key === el.type
+ */
+export const ShapeRegistry = {
+  rect: RectShape,
+  circle: CircleShape,
+  text: TextShape,
+  line: LineShape,
+  symbol1: Symbol1Shape,
+};
+```
+
+### `shared/diagram/shapes/index.js`
+
+```js
+export { ShapeRegistry } from "./registry";
+```
+
+---
+
+## 5️⃣ Твій Rect.js — що в ньому треба поправити
+
+### ❌ Було
+
+```js
+const RectElement = ({ el }) => {
+  return (
+    <Rect
+      x={0}
+      y={0}
+      width={el.width}
+      height={el.height}
+      fill={el.fill}
+      stroke={el.stroke}
+      strokeWidth={el.strokeWidth}
+    />
+  );
+};
+```
+
+### ✅ Стало (`RectShape.js`)
+
+```js
+import React from "react";
+import { Rect } from "react-konva";
+
+export function RectShape({ el }) {
+  return (
+    <Rect
+      x={0}
+      y={0}
+      width={el.width}
+      height={el.height}
+      fill={el.fill}
+      stroke={el.stroke}
+      strokeWidth={el.strokeWidth}
+      listening={true}
+    />
+  );
+}
+```
+
+> 🔑 **ВАЖЛИВО:**
+
+* `x=0,y=0` — правильно, бо позицію тримає `Group`
+* shape **НЕ повинна знати** про drag, selection, menu
+  → це відповідальність `DiagramSymbols`
+
+---
+
+## 6️⃣ Як тепер виглядає `DiagramSymbols.js` (ключовий момент)
+
+### ❌ Було
+
+```js
+import GraphLibrary from './../graph'
+```
+
+### ✅ Стало
+
+```js
+import { ShapeRegistry } from "@/shared/diagram/shapes";
+```
+
+І рендер:
+
+```js
+const Shape = ShapeRegistry[el.type];
+if (!Shape) return null;
+
+return (
+  <Group ...>
+    <Shape el={el} />
+    ...
+  </Group>
+);
+```
+
+✔ Тепер:
+
+* `DiagramSymbols` **не знає**, що таке Rect/Circle
+* він працює тільки з `type`
+* shapes легко додавати / забороняти
+
+---
+
+## 7️⃣ Відповідь на твоє питання про `node`
+
+> *«використовується node, під node я розумію різні фігури»*
+
+✔ Ти **правильно відчув**, що `node` — погана назва.
+
+### ❌ НЕ варто
+
+* `node` — Konva-термін
+* `node` — DOM-термін
+* `node` — алгоритмічний термін
+
+### ✅ Краще
+
+| Контекст  | Назва                              |
+| --------- | ---------------------------------- |
+| Дані      | `shape`                            |
+| Selection | `shapeId`                          |
+| UI        | `selectedShape`                    |
+| target    | `{ kind: "shape", shapeType, id }` |
+
+👉 У контекстному меню:
+
+```js
+{ kind: "shape", id: el.id, shapeType: el.type }
+```
+
+---
+
+## 8️⃣ Підсумок — ти робиш **дуже правильну архітектуру**
+
+У тебе вже є:
+
+* feature-scoped editor
+* shared konva infra
+* registry shapes
+* state із чіткою відповідальністю
+
+👉 Це **майже FSD + editor-engine**.
+
+---
+
+## Що пропоную далі
+
+Наступні логічні кроки (рекомендую по черзі):
+
+1️⃣ Привести **DiagramSymbols** до остаточної чистої версії
+2️⃣ Ввести **shape schema** (`width/height/radius`) як контракт
+3️⃣ Розділити `useDiagramState` на:
+
+* `useDiagramStore`
+* `useConnectionRouting`
+* `useSelection`
+
+👉 Скажи, з чого йдемо далі — **DiagramSymbols** чи **useDiagramState**.

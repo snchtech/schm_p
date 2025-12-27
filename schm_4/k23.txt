@@ -1,0 +1,270 @@
+Ок — показую, як має виглядати **DiagramEditor.js** після розділення на `useDiagramStore/useSelection/useConnectionRouting` (через фасад `useDiagramState`) і як підключаються **DiagramSymbols / DiagramConnections / SelectionTransformer / контекстне меню**.
+
+Нижче — **готовий приклад DiagramEditor.js** (JS, Next.js client).
+
+> Важливо: я роблю мінімальні зміни: тільки **selection**, **context menu**, **refs для Transformer**, і підключення твоїх екшенів з фасаду.
+
+---
+
+## DiagramEditor.js (оновлений)
+
+```js
+"use client";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+
+import { useDiagramState } from "./model/useDiagramState"; // шлях під себе
+
+import { DiagramSymbols } from "./DiagramSymbols";
+import { DiagramConnections } from "./DiagramConnections";
+import SelectionTransformer from "./SelectionTransformer";
+
+import GraphContextMenuMui from "./GraphContextMenuMui";
+import { deleteNodeWithLinks, deleteLine } from "./useGroupDelete"; // тимчасово як у тебе
+
+import { setupLayerZoomPan } from "./LazyZoom"; // якщо використовуєш
+
+export default function DiagramEditor() {
+  const S = useDiagramState();
+
+  // stage/layer refs
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  // refs для Transformer: мапа id -> Konva.Node
+  const nodeRefs = useRef(new Map());
+
+  const registerNodeRef = (id, node) => {
+    if (!id) return;
+    if (!node) nodeRefs.current.delete(id);
+    else nodeRefs.current.set(id, node);
+  };
+
+  // вибраний konva-node для Transformer
+  const selectedKonvaNode = useMemo(() => {
+    if (S.selection?.kind !== "shape") return null;
+    return nodeRefs.current.get(S.selection.id) || null;
+  }, [S.selection]);
+
+  // ---------------- Context menu ----------------
+  const [menu, setMenu] = useState({
+    open: false,
+    anchorPosition: null,
+    target: null, // {kind:'shape'|'connection', id}
+  });
+
+  const closeMenu = () => {
+    setMenu({ open: false, anchorPosition: null, target: null });
+  };
+
+  const onElementContextMenu = (e, target) => {
+    e.evt.preventDefault();
+    e.cancelBubble = true;
+
+    // target => { kind:'shape'|'connection', id }
+    setMenu({
+      open: true,
+      anchorPosition: { top: e.evt.clientY, left: e.evt.clientX },
+      target,
+    });
+  };
+
+  const onDeleteFromMenu = () => {
+    if (!menu.target) return;
+
+    if (menu.target.kind === "shape") {
+      const nodeId = menu.target.id;
+
+      // ✅ тут поки твій тимчасовий deleteNodeWithLinks
+      const res = deleteNodeWithLinks(nodeId, S.symbols, S.connections);
+
+      // якщо твоя функція повертає тільки elements — підставляємо
+      if (res?.elements) S.setSymbols(res.elements);
+
+      // IMPORTANT: якщо ти додаси видалення зв’язків — тут треба буде:
+      // S.setConnections(res.lines)
+
+      // прибираємо selection якщо видалили його
+      if (S.selection?.kind === "shape" && S.selection.id === nodeId) {
+        S.clearSelection();
+      }
+    }
+
+    if (menu.target.kind === "connection") {
+      const lineId = menu.target.id;
+      S.setConnections((prev) => deleteLine(lineId, prev));
+
+      if (S.selection?.kind === "connection" && S.selection.id === lineId) {
+        S.clearSelection();
+      }
+    }
+  };
+
+  // ---------------- Zoom/Pan optional ----------------
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    const api = setupLayerZoomPan(stage, layer, {
+      panMode: "mmb_or_space",
+      requireCtrlForWheel: false,
+    });
+
+    return () => api?.destroy?.();
+  }, []);
+
+  // ---------------- handlers ----------------
+  const onStagePointerDown = (e) => {
+    // клік по пустому місцю → clear selection
+    S.clearOnStagePointerDown(e);
+    closeMenu();
+  };
+
+  const onShapeMouseDown = (el) => {
+    // el — твій symbol object
+    S.selectShape(el.id);
+  };
+
+  const onConnectionMouseDown = (connId, e) => {
+    // якщо хочеш: клік по лінії = вибір лінії
+    e.cancelBubble = true;
+    S.selectConnection(connId);
+  };
+
+  return (
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      {/* Тут може бути Toolbar, винесений компонентом */}
+      {/* <DiagramToolbar ... /> */}
+
+      <Stage
+        ref={stageRef}
+        width={1200}
+        height={700}
+        onMouseDown={onStagePointerDown}
+        style={{ background: "#fff" }}
+      >
+        <Layer ref={layerRef}>
+          {/* Connections під фігурами */}
+          <DiagramConnections
+            connections={S.connections}
+            hoveredConnectionId={S.hoveredConnectionId}
+            hoveredLineAnchorId={S.hoveredLineAnchorId}
+            isAddingConnector={S.isAddingConnector}
+            setHoveredConnectionId={S.setHoveredConnectionId}
+            setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+            handleLineClick={S.handleLineClick}
+            handleAnchorClick={S.handleAnchorClick}
+            updateConnectionOffset={S.updateConnectionOffset}
+            // (optional) select connection on click
+            onConnectionMouseDown={onConnectionMouseDown}
+            onElementContextMenu={onElementContextMenu}
+          />
+
+          {/* Symbols */}
+          <DiagramSymbols
+            symbols={S.symbols}
+            isAddingConnector={S.isAddingConnector}
+            hoveredElement={S.hoveredElement}
+            hoveredAnchor={S.hoveredAnchor}
+            getAnchorPoints={S.getAnchorPoints}
+            setHoveredElement={S.setHoveredElement}
+            setHoveredAnchor={S.setHoveredAnchor}
+            handleDragMove={S.handleDragMove}
+            handleAnchorClick={S.handleAnchorClick}
+            onElementContextMenu={(e, payload) => {
+              // payload у нас нормалізуємо одразу
+              // payload: {kind:'shape', id}
+              onElementContextMenu(e, payload);
+            }}
+            onMouseDown={onShapeMouseDown}
+            isSelected={(id) => S.selection?.kind === "shape" && S.selection.id === id}
+            registerNodeRef={registerNodeRef}
+          />
+
+          {/* Transformer лише для shapes */}
+          <SelectionTransformer selectedNode={selectedKonvaNode} enabled={true} />
+        </Layer>
+      </Stage>
+
+      {/* Context menu */}
+      <GraphContextMenuMui
+        open={menu.open}
+        anchorPosition={menu.anchorPosition}
+        onClose={closeMenu}
+        onDelete={onDeleteFromMenu}
+      />
+
+      {/* message */}
+      {S.message && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 12,
+            left: 12,
+            background: "rgba(0,0,0,0.75)",
+            color: "#fff",
+            padding: "8px 10px",
+            borderRadius: 8,
+            fontSize: 13,
+          }}
+        >
+          {S.message}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+# Дрібні, але важливі зміни в дочірніх компонентах
+
+## 1) DiagramSymbols: що передавати в context menu
+
+Ти питав про “node”. Правильно: **kind: "shape"** (а не node). Тип фігури (`rect/circle/...`) — це `el.type`, але *kind* для selection/menus — загальний.
+
+Тобто у `DiagramSymbols` при контекстному меню:
+
+```js
+onContextMenu={(e) => onElementContextMenu(e, { kind: "shape", id: el.id })}
+```
+
+А `isSelected` краще зробити функцією:
+
+```js
+isSelected={(id) => S.selection.kind==="shape" && S.selection.id===id}
+```
+
+---
+
+## 2) DiagramConnections: додати context menu + select (за бажанням)
+
+У тебе вже є hover/click. Додай:
+
+* `onContextMenu={(e)=> onElementContextMenu(e,{kind:'connection', id:conn.id})}`
+* і якщо хочеш selection по кліку — виклик `onConnectionMouseDown(conn.id, e)`.
+
+---
+
+# Відповідь на твоє питання “чи треба переробляти під kind?”
+
+✅ Так, але **тільки на рівні UI/selection/context menu**.
+У **useDiagramStore/useConnectionRouting** `kind` не потрібен (там використовується `type: "symbol" | "line"` у attachment-структурі — це інше).
+
+Тобто:
+
+* **selection/menu:** `kind: "shape" | "connection"`
+* **attachments у routing:** `type: "symbol" | "line"`
+
+Це норм: вони описують різні речі.
+
+---
+
+# Наступний файл
+
+Ти просив: “Привести DiagramSymbols до остаточної чистої версії”.
+
+Якщо скажеш “так” — я дам **повністю переписаний DiagramSymbols.js** без помилок (бо зараз у тебе там `useEffect` всередині map — так не можна), і під твою GraphLibrary.

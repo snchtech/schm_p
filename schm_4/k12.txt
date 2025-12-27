@@ -1,0 +1,232 @@
+Ок — даю **конкретний diff-план для `useDiagramState.js`** під `kind` + уніфіковані anchors, і **одну функцію `deleteByTarget(target)`**, щоб `DiagramEditorPage` не знав деталей.
+
+Нижче — готові вставки.
+
+---
+
+## 1) `useDiagramState.js`: імпорти + selection
+
+### ✅ Імпорт `useEffect` (у тебе його не було)
+
+На самому верху:
+
+```js
+import { useState, useEffect, useCallback } from "react";
+```
+
+(якщо `useCallback` не треба — можеш прибрати, я його не використовую нижче)
+
+### ✅ Заміна selection
+
+Було:
+
+```js
+const [selection, setSelection] = useState({ type: null, id: null })
+```
+
+Стає:
+
+```js
+const [selection, setSelection] = useState({ kind: null, id: null });
+```
+
+---
+
+## 2) `selectHighlightEl` та `clearSelectHighlightEl`
+
+Замінити твої функції на ці:
+
+```js
+const clearSelectHighlightEl = (e) => {
+  if (e.target === e.target.getStage()) {
+    setSelection({ kind: null, id: null });
+    return;
+  }
+};
+
+// info очікуємо як { kind: "node"|"connection", id }
+const selectHighlightEl = (info) => {
+  if (!info?.kind || !info?.id) return;
+  setSelection({ kind: info.kind, id: info.id });
+};
+```
+
+І в `return` зміни експорт:
+
+* було `selectHightlightEl`
+* стане `selectHighlightEl`
+
+(і в компонентах теж оновиш назву)
+
+---
+
+## 3) Уніфікація anchors: `normalizeAttachment`
+
+Заміни твою `normalizeAttachment` на версію, яка підтримує **новий формат** і **старий** (щоб перехід був м’який):
+
+```js
+const normalizeAttachment = (a) => {
+  // ✅ NEW unified anchor format
+  if (a?.kind === "anchor" && a?.anchorKind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  if (a?.kind === "anchor" && a?.anchorKind === "symbolAnchor") {
+    return {
+      type: "symbol",
+      symbolId: a.parentId || a.symbolId || a.id,
+      direction: a.direction,
+    };
+  }
+
+  // ✅ backward compatibility (old)
+  if (a?.kind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  // ✅ old symbol anchor format (if you had it)
+  if (a?.kind === "symbolAnchor") {
+    return {
+      type: "symbol",
+      symbolId: a.parentId || a.symbolId || a.id,
+      direction: a.direction,
+    };
+  }
+
+  // fallback: якщо передали просто point від getAnchorPoints
+  return {
+    type: "symbol",
+    symbolId: a.parentId || a.symbolId || a.id,
+    direction: a.direction,
+  };
+};
+```
+
+---
+
+## 4) `handleAnchorClick`: працює без змін (майже)
+
+Тепер `handleAnchorClick` прийматиме:
+
+* від `DiagramSymbols` зелений якір: `{ kind:"anchor", anchorKind:"symbolAnchor", ... }`
+* від `DiagramConnections` синій якір: `{ kind:"anchor", anchorKind:"lineAnchor", ... }`
+
+Твоя логіка з `selectedAnchor` лишається, бо вона зберігає той самий payload.
+
+---
+
+## 5) Додай `deleteByTarget(target)` в `useDiagramState.js`
+
+Це дає єдину точку видалення для меню.
+
+```js
+const deleteByTarget = (target) => {
+  if (!target?.kind || !target?.id) return;
+
+  // 1) delete node (shape)
+  if (target.kind === "node") {
+    const nodeId = target.id;
+
+    // видаляємо сам символ
+    setSymbols((prev) => prev.filter((s) => s.id !== nodeId));
+
+    // видаляємо всі connections, де symbolId == nodeId
+    setConnections((prev) =>
+      prev.filter((c) => {
+        const fromIsNode = c.from?.type === "symbol" && c.from?.symbolId === nodeId;
+        const toIsNode = c.to?.type === "symbol" && c.to?.symbolId === nodeId;
+        return !(fromIsNode || toIsNode);
+      }),
+    );
+
+    // прибираємо selection, якщо він був на цьому node
+    setSelection((sel) => (sel.kind === "node" && sel.id === nodeId ? { kind: null, id: null } : sel));
+    return;
+  }
+
+  // 2) delete connection
+  if (target.kind === "connection") {
+    const connId = target.id;
+
+    // прибираємо сам коннект
+    setConnections((prev) => prev.filter((c) => c.id !== connId));
+
+    // ⚠️ якщо у тебе є "дочірні" коннекти, підключені до lineAnchor цього connId,
+    // їх теж треба видаляти або перепідв’язувати.
+    // Мінімально: видалимо залежні:
+    setConnections((prev) =>
+      prev.filter((c) => {
+        const fromDepends = c.from?.type === "line" && c.from?.connectionId === connId;
+        const toDepends = c.to?.type === "line" && c.to?.connectionId === connId;
+        return !(fromDepends || toDepends);
+      }),
+    );
+
+    setSelection((sel) =>
+      sel.kind === "connection" && sel.id === connId ? { kind: null, id: null } : sel,
+    );
+    return;
+  }
+};
+```
+
+### Додай в `return { ... }`:
+
+```js
+selection,
+selectHighlightEl,
+clearSelectHighlightEl,
+deleteByTarget,
+```
+
+---
+
+## 6) Онови `DiagramEditorPage.jsx` — delete тепер простий
+
+Замість TODO у `handleDelete`:
+
+```js
+const handleDelete = useCallback(() => {
+  const t = menuState.target;
+  if (!t) return;
+  S.deleteByTarget(t);
+  closeMenu();
+}, [menuState.target, closeMenu, S]);
+```
+
+---
+
+## 7) Обов’язково онови місця виклику selection (в UI)
+
+* `DiagramSymbols` при mouseDown: `onMouseDown({ kind:"node", id: el.id })`
+* `DiagramConnections` при mouseDown: `onMouseDown({ kind:"connection", id: conn.id })`
+
+І в `EditorCanvas`:
+
+```jsx
+onMouseDown={S.selectHighlightEl}
+```
+
+---
+
+Хочеш — я наступним кроком дам **точні правки для DiagramSymbols/DiagramConnections**, щоб:
+
+* зелений anchor теж став `kind:"anchor", anchorKind:"symbolAnchor"`
+* синій anchor — `kind:"anchor", anchorKind:"lineAnchor"`
+  і тоді `normalizeAttachment` можна буде спростити (без backward compatibility).

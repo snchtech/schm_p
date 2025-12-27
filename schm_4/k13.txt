@@ -1,0 +1,167 @@
+Ок, цей файл якраз треба **прибрати як “сирий helper”** і зробити нормальну частину model, бо зараз:
+
+* `deleteNodeWithLinks(nodeId, elements, lines)` **ігнорує lines**
+* повертає тільки `elements`, а lines не чіпає
+* у тебе вже є `symbols` + `connections`, тож назви треба узгодити
+* видалення має враховувати **зв’язки, прив’язані до node**, і (важливо) **дочірні зв’язки**, які прив’язані до лінії через lineAnchor
+
+Нижче даю правильну версію під твою модель `symbols/connections` + `kind`.
+
+---
+
+## ✅ Новий файл: `features/scheme-editor/model/domain/deleteGraph.js`
+
+```js
+// Видаляє node (symbol) і всі connections, які напряму або опосередковано від нього залежать.
+
+export function deleteNodeWithLinks(nodeId, symbols, connections) {
+  const nextSymbols = symbols.filter((s) => s.id !== nodeId);
+
+  // 1) прибрати всі connections, де node є from/to symbol
+  const removedConnIds = new Set();
+  let nextConnections = connections.filter((c) => {
+    const fromIsNode = c.from?.type === "symbol" && c.from?.symbolId === nodeId;
+    const toIsNode = c.to?.type === "symbol" && c.to?.symbolId === nodeId;
+
+    const shouldRemove = fromIsNode || toIsNode;
+    if (shouldRemove) removedConnIds.add(c.id);
+    return !shouldRemove;
+  });
+
+  // 2) прибрати connections, які були підключені до ліній, що щойно видалили (каскад)
+  // repeat-until-stable, бо можуть бути ланцюжки залежностей
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const beforeLen = nextConnections.length;
+
+    nextConnections = nextConnections.filter((c) => {
+      const fromDepends = c.from?.type === "line" && removedConnIds.has(c.from?.connectionId);
+      const toDepends = c.to?.type === "line" && removedConnIds.has(c.to?.connectionId);
+
+      const shouldRemove = fromDepends || toDepends;
+      if (shouldRemove) removedConnIds.add(c.id);
+      return !shouldRemove;
+    });
+
+    changed = nextConnections.length !== beforeLen;
+  }
+
+  return { symbols: nextSymbols, connections: nextConnections };
+}
+
+// Видаляє connection + всі залежні connections (які прив’язані до неї як до parent line)
+export function deleteConnectionCascade(connectionId, connections) {
+  const removed = new Set([connectionId]);
+
+  let next = connections.filter((c) => c.id !== connectionId);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const beforeLen = next.length;
+
+    next = next.filter((c) => {
+      const fromDepends = c.from?.type === "line" && removed.has(c.from?.connectionId);
+      const toDepends = c.to?.type === "line" && removed.has(c.to?.connectionId);
+
+      const shouldRemove = fromDepends || toDepends;
+      if (shouldRemove) removed.add(c.id);
+      return !shouldRemove;
+    });
+
+    changed = next.length !== beforeLen;
+  }
+
+  return next;
+}
+```
+
+---
+
+## Як підключити в `useDiagramState.js`
+
+Замість старого `useGraphDelete`:
+
+```js
+import { deleteNodeWithLinks, deleteConnectionCascade } from "../domain/deleteGraph";
+```
+
+І в `deleteByTarget` (який ми додавали) робиш:
+
+```js
+const deleteByTarget = (target) => {
+  if (!target?.kind || !target?.id) return;
+
+  if (target.kind === "node") {
+    setSymbols((prevSymbols) => {
+      // ⚠️ connections змінюються теж, тому тут краще зробити один setConnections
+      return prevSymbols;
+    });
+
+    setConnections((prevConnections) => {
+      const res = deleteNodeWithLinks(target.id, symbols, prevConnections);
+      // symbols береться з closure — краще робити атомарно через один setState (нижче напишу)
+      return res.connections;
+    });
+  }
+
+  if (target.kind === "connection") {
+    setConnections((prev) => deleteConnectionCascade(target.id, prev));
+  }
+};
+```
+
+Але тут є нюанс: **symbols і connections повинні оновитись узгоджено**.
+Найчистіше рішення — перейти на `useReducer` (один store), але ти просив “без зайвого переписування”.
+
+### ✅ Мінімально правильно без reducer
+
+У `deleteByTarget` робимо так:
+
+```js
+const deleteByTarget = (target) => {
+  if (!target?.kind || !target?.id) return;
+
+  if (target.kind === "node") {
+    // беремо актуальні значення через функціональні апдейтери
+    setSymbols((prevSymbols) => {
+      setConnections((prevConnections) => {
+        const res = deleteNodeWithLinks(target.id, prevSymbols, prevConnections);
+        return res.connections;
+      });
+      return prevSymbols.filter((s) => s.id !== target.id);
+    });
+
+    setSelection((sel) =>
+      sel.kind === "node" && sel.id === target.id ? { kind: null, id: null } : sel,
+    );
+    return;
+  }
+
+  if (target.kind === "connection") {
+    setConnections((prev) => deleteConnectionCascade(target.id, prev));
+    setSelection((sel) =>
+      sel.kind === "connection" && sel.id === target.id ? { kind: null, id: null } : sel,
+    );
+  }
+};
+```
+
+Так ми гарантуємо, що `deleteNodeWithLinks` бачить **актуальні** `prevSymbols` і `prevConnections`.
+
+---
+
+## Що робити зі старим `useGroupDelete.js`
+
+1. Перейменуй на `deleteGraph.js` і перенеси в `model/domain/`.
+2. Видали `console.log` з продакшн коду.
+3. Перестань передавати `elements/lines` — у тебе це `symbols/connections`.
+
+---
+
+Якщо скинеш твій `GraphContextMenuMui`, я підкажу, як зробити щоб меню показувало різні пункти для:
+
+* node (видалити вузол)
+* connection (видалити лінію)
+* anchor (видалити точку прив’язки на лінії — якщо потрібно)

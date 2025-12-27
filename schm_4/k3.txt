@@ -1,0 +1,639 @@
+Чудово, `useDiagramState` — це саме той файл, який треба “розпиляти”, бо зараз він одночасно:
+
+* **store/state** (useState)
+* **режими інструментів** (isAddingConnector/isAddingAnchor)
+* **selection/hover UI**
+* **геометрія/роутинг** (calculateOrthogonalPath + box обходу)
+* **domain-операції над графом** (створення з’єднань, перерахунок при drag, офсети, propagation до дітей)
+
+Нижче я даю **конкретно сформовані файли**, які можна створити **вже зараз** на базі цього коду (без “вигадування нової логіки”), і як їх підключити.
+
+> Важливо: у твоєму коді є баг: `useEffect` використовується, але не імпортований. Також `getAnchorPoints` перевіряє `"RECTANGLE"/"CIRCLE"`, а у `symbols` ти задаєш `type: 'rect'/'circle'`. Це треба вирівняти (нижче покажу де).
+
+---
+
+## 1) Структура для `useDiagramState` (FSD-ish, але під твою 1 сторінку)
+
+```txt
+features/scheme-editor/
+  model/
+    useDiagramState.js                # тонка "збірка": state + actions
+    state/initialState.js
+    state/constants.js
+    selectors/getAnchorPoints.js
+    domain/
+      attachments.js                  # normalize/resolve/boxes
+      connectionCreate.js             # handleAnchorClick core
+      connectionAnchors.js            # handleLineClick (дод. сині якорі)
+      connectionUpdateOnDrag.js       # handleDragMove
+      connectionOffsetUpdate.js       # updateConnectionOffset + propagate
+      selection.js                    # select/clear selection
+shared/
+  geometry/
+    index.js                          # реекспорт з твоєї ./geometry (або прямий імпорт)
+```
+
+Тут `shared/geometry` — якщо геометрія буде використовуватись ще десь. Якщо ні — можна залишити в `features/scheme-editor/shared/geometry`, але ти казав, що додаємо глобальний `shared`, тож так ок.
+
+---
+
+## 2) Готові файли (на основі твого коду)
+
+### `features/scheme-editor/model/state/constants.js`
+
+```js
+export const MIN_OFFSET = 8;
+export const MAX_OFFSET = 300;
+
+export const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+```
+
+### `features/scheme-editor/model/state/initialState.js`
+
+```js
+import { v4 as uuidv4 } from "uuid";
+
+export function getInitialSymbols() {
+  return [
+    {
+      id: uuidv4(),
+      type: "rect",
+      x: 100,
+      y: 100,
+      width: 80,
+      height: 50,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+    {
+      id: uuidv4(),
+      type: "circle",
+      x: 300,
+      y: 200,
+      width: 60,
+      height: 60,
+      radius: 30,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+    {
+      id: uuidv4(),
+      type: "rect",
+      x: 450,
+      y: 200,
+      width: 80,
+      height: 50,
+      fill: "gray",
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  ];
+}
+```
+
+### `features/scheme-editor/model/selectors/getAnchorPoints.js`
+
+> Тут виправляємо типи під твої `rect/circle`.
+
+```js
+export function getAnchorPoints(element) {
+  const { x, y, width, height, type } = element;
+
+  if (type === "rect") {
+    return [
+      { x: x + width / 2, y: y, direction: "top" },
+      { x: x + width / 2, y: y + height, direction: "bottom" },
+      { x: x, y: y + height / 2, direction: "left" },
+      { x: x + width, y: y + height / 2, direction: "right" },
+    ];
+  }
+
+  if (type === "circle") {
+    // якщо circle намальований через Group і x/y — це центр, тоді формула інша.
+    // Я залишаю як у тебе, але зверни увагу на систему координат:
+    return [
+      { x: x, y: y - height / 2, direction: "top" },
+      { x: x, y: y + height / 2, direction: "bottom" },
+      { x: x - width / 2, y: y, direction: "left" },
+      { x: x + width / 2, y: y, direction: "right" },
+    ];
+  }
+
+  return [];
+}
+```
+
+---
+
+### `features/scheme-editor/model/domain/attachments.js`
+
+Це твій блок: normalize + resolve + boxes.
+
+```js
+import { boxFromSymbol } from "../../../shared/geometry";
+import { getAnchorPoints } from "../selectors/getAnchorPoints";
+
+export function normalizeAttachment(a) {
+  if (a?.kind === "lineAnchor") {
+    return {
+      type: "line",
+      connectionId: a.parentConnectionId || a.connectionId,
+      anchorId: a.id,
+      segIndex: a.segIndex,
+      t: a.t,
+      x: a.x,
+      y: a.y,
+    };
+  }
+
+  return {
+    type: "symbol",
+    symbolId: a.parentId || a.symbolId || a.id,
+    direction: a.direction,
+  };
+}
+
+export function resolveAttachmentPoint(att, symbolsState, connectionsState) {
+  if (!att) return null;
+
+  if (att.type === "symbol") {
+    const sym = symbolsState.find((s) => s.id === att.symbolId);
+    if (!sym) return null;
+    return getAnchorPoints(sym).find((p) => p.direction === att.direction) || null;
+  }
+
+  if (att.type === "line") {
+    const parent = connectionsState.find((c) => c.id === att.connectionId);
+    if (!parent) return { x: att.x, y: att.y, direction: "mid" };
+
+    const pts = parent.points || [];
+
+    let live = null;
+    if (att.anchorId) {
+      live = (parent.additionalAnchors || []).find((a) => a.id === att.anchorId) || null;
+    }
+    if (live) return { x: live.x, y: live.y, direction: "mid" };
+
+    if (att.segIndex != null && att.t != null && 2 * att.segIndex + 3 < pts.length) {
+      const x1 = pts[2 * att.segIndex],
+        y1 = pts[2 * att.segIndex + 1];
+      const x2 = pts[2 * att.segIndex + 2],
+        y2 = pts[2 * att.segIndex + 3];
+      return { x: x1 + att.t * (x2 - x1), y: y1 + att.t * (y2 - y1), direction: "mid" };
+    }
+
+    return { x: att.x, y: att.y, direction: "mid" };
+  }
+
+  return null;
+}
+
+export function getBoxForAttachment(att, symbolsState) {
+  if (!att || att.type !== "symbol") return null;
+  const s = symbolsState.find((x) => x.id === att.symbolId);
+  return s ? boxFromSymbol(s, 10) : null;
+}
+```
+
+---
+
+### `features/scheme-editor/model/domain/connectionAnchors.js`
+
+Це твій `handleLineClick`.
+
+```js
+import { v4 as uuidv4 } from "uuid";
+import { findClosestSegment } from "../../../shared/geometry";
+
+export function handleLineClickFactory({ isAddingAnchor, setConnections, setSelectedAnchor, setIsAddingConnector, setIsAddingAnchor }) {
+  return function handleLineClick(connectionId, event) {
+    if (!isAddingAnchor) return;
+    event.cancelBubble = true;
+
+    const stage = event.target.getStage();
+    const { x: px, y: py } = stage.getPointerPosition();
+
+    setConnections((prev) =>
+      prev.map((conn) => {
+        if (conn.id !== connectionId) return conn;
+
+        const closest = findClosestSegment(conn.points, px, py);
+
+        const already = (conn.additionalAnchors || []).some(
+          (a) => Math.abs(a.x - closest.x) < 1 && Math.abs(a.y - closest.y) < 1,
+        );
+        if (already) return conn;
+
+        const newAnchor = {
+          id: uuidv4(),
+          x: closest.x,
+          y: closest.y,
+          parentConnectionId: connectionId,
+          segIndex: closest.segIndex,
+          t: closest.t,
+          vertexIndex: null,
+          kind: "lineAnchor",
+        };
+
+        return { ...conn, additionalAnchors: [...(conn.additionalAnchors || []), newAnchor] };
+      }),
+    );
+
+    setSelectedAnchor(null);
+    setIsAddingConnector(false);
+    setIsAddingAnchor(false);
+  };
+}
+```
+
+---
+
+### `features/scheme-editor/model/domain/connectionCreate.js`
+
+Це ядро `handleAnchorClick` (великий шматок), я зберігаю логіку, але виношу в factory.
+
+```js
+import { v4 as uuidv4 } from "uuid";
+import { calculateOrthogonalPath, getExitDir } from "../../../shared/geometry";
+import { normalizeAttachment, resolveAttachmentPoint, getBoxForAttachment } from "./attachments";
+
+export function handleAnchorClickFactory({
+  isAddingConnector,
+  selectedAnchor,
+  setSelectedAnchor,
+  setMessage,
+  setConnections,
+  setHoveredElement,
+  setHoveredAnchor,
+  setIsAddingConnector,
+  setHoveredLineAnchorId,
+  symbols,
+}) {
+  return function handleAnchorClick(anchor) {
+    if (!isAddingConnector) return;
+
+    if (!selectedAnchor) {
+      setSelectedAnchor(anchor);
+      setMessage("Оберіть наступний елемент для зв'язку");
+      return;
+    }
+
+    const from = normalizeAttachment(selectedAnchor);
+    const to = normalizeAttachment(anchor);
+
+    const startPoint = resolveAttachmentPoint(from, symbols, []); // connections підставимо нижче
+    const endPoint = resolveAttachmentPoint(to, symbols, []);
+    if (!startPoint || !endPoint) {
+      setSelectedAnchor(null);
+      setIsAddingConnector(false);
+      setMessage("Не вдалося визначити точки прив'язки");
+      return;
+    }
+
+    const initialOffset = 20;
+    const newConnId = uuidv4();
+
+    setConnections((prev) => {
+      const next = [...prev];
+
+      // inherited routing from parent if attached to line
+      let inheritedRouting = { startOffset: initialOffset, endOffset: initialOffset };
+      if (from.type === "line") {
+        const parent = prev.find((c) => c.id === from.connectionId);
+        if (parent?.routing) inheritedRouting = { ...parent.routing };
+      } else if (to.type === "line") {
+        const parent = prev.find((c) => c.id === to.connectionId);
+        if (parent?.routing) inheritedRouting = { ...parent.routing };
+      }
+
+      // тепер вже можемо resolve з prev
+      const sp = resolveAttachmentPoint(from, symbols, prev);
+      const ep = resolveAttachmentPoint(to, symbols, prev);
+      if (!sp || !ep) return prev;
+
+      const dirFrom = getExitDir(from, ep, prev);
+      const dirTo = getExitDir(to, sp, prev);
+
+      const pts = calculateOrthogonalPath(
+        { ...sp, direction: dirFrom },
+        { ...ep, direction: dirTo },
+        inheritedRouting,
+        getBoxForAttachment(from, symbols),
+        getBoxForAttachment(to, symbols),
+      );
+
+      const newConn = {
+        id: newConnId,
+        from,
+        to,
+        points: pts,
+        routing: inheritedRouting,
+        fromExitDir: dirFrom,
+        toExitDir: dirTo,
+        additionalAnchors: [],
+      };
+
+      next.push(newConn);
+      return next;
+    });
+
+    setSelectedAnchor(null);
+    setHoveredElement(null);
+    setHoveredAnchor(null);
+    setMessage("");
+    setIsAddingConnector(false);
+    setHoveredLineAnchorId(null);
+  };
+}
+```
+
+> Ти робив **подвійний setConnections** (після створення ще “примусове ініціалізування”). Це зазвичай симптом, що всередині замикання бракує актуальних `symbols/connections`. Після переведення в store (або reducer) ми це приберемо. Поки я лишив “один setConnections”, щоб не плодити дублі. Якщо тобі критично треба другий прохід — додамо його назад, але краще зробити правильно в одному оновленні.
+
+---
+
+### `features/scheme-editor/model/domain/connectionUpdateOnDrag.js`
+
+Це твій `handleDragMove` (поки залишаємо логіку як є, але в factory).
+
+```js
+import { calculateOrthogonalPath, getExitDir, findClosestSegment } from "../../../shared/geometry";
+import { resolveAttachmentPoint, getBoxForAttachment } from "./attachments";
+
+export function handleDragMoveFactory({ symbols, setSymbols, setConnections }) {
+  return function handleDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const symbolsNext = symbols.map((s) => (s.id === id ? { ...s, x, y } : s));
+    setSymbols(symbolsNext);
+
+    setConnections((prev) => {
+      let next = prev.map((conn) => {
+        if (conn.from?.type !== "symbol" || conn.to?.type !== "symbol") return conn;
+        if (conn.from.symbolId !== id && conn.to.symbolId !== id) return conn;
+
+        const sp = resolveAttachmentPoint(conn.from, symbolsNext, prev);
+        const ep = resolveAttachmentPoint(conn.to, symbolsNext, prev);
+        if (!sp || !ep) return conn;
+
+        const dirFrom = getExitDir(conn.from, ep, prev);
+        const dirTo = getExitDir(conn.to, sp, prev);
+
+        let routing = {
+          startOffset: conn.routing?.startOffset ?? 20,
+          endOffset: conn.routing?.endOffset ?? 20,
+        };
+
+        const pts = calculateOrthogonalPath(
+          { ...sp, direction: dirFrom },
+          { ...ep, direction: dirTo },
+          routing,
+          getBoxForAttachment(conn.from, symbolsNext),
+          getBoxForAttachment(conn.to, symbolsNext),
+        );
+
+        return pts ? { ...conn, points: pts, fromExitDir: dirFrom, toExitDir: dirTo, routing } : conn;
+      });
+
+      next = next.map((conn) => {
+        if (conn.from?.type === "line" || conn.to?.type === "line") {
+          const sp = resolveAttachmentPoint(conn.from, symbolsNext, next);
+          const ep = resolveAttachmentPoint(conn.to, symbolsNext, next);
+          if (!sp || !ep) return conn;
+
+          const dirFrom = getExitDir(conn.from, ep, next);
+          const dirTo = getExitDir(conn.to, sp, next);
+
+          let routing = {
+            startOffset: conn.routing?.startOffset ?? 20,
+            endOffset: conn.routing?.endOffset ?? 20,
+          };
+
+          if (!conn.routing) {
+            if (conn.from?.type === "line") {
+              const parent = next.find((c) => c.id === conn.from.connectionId);
+              if (parent?.routing) routing = { ...parent.routing };
+            }
+            if (conn.to?.type === "line") {
+              const parent = next.find((c) => c.id === conn.to.connectionId);
+              if (parent?.routing) routing = { ...parent.routing };
+            }
+          }
+
+          const pts = calculateOrthogonalPath(
+            { ...sp, direction: dirFrom },
+            { ...ep, direction: dirTo },
+            routing,
+            getBoxForAttachment(conn.from, symbolsNext),
+            getBoxForAttachment(conn.to, symbolsNext),
+          );
+
+          return pts ? { ...conn, points: pts, fromExitDir: dirFrom, toExitDir: dirTo, routing } : conn;
+        }
+        return conn;
+      });
+
+      next = next.map((conn) => {
+        if (!conn.additionalAnchors?.length) return conn;
+
+        const updatedAnchors = conn.additionalAnchors.map((a) => {
+          const i = a.segIndex;
+          const pts = conn.points || [];
+          if (i == null || 2 * i + 3 >= pts.length) return a;
+          const x1 = pts[2 * i],
+            y1 = pts[2 * i + 1];
+          const x2 = pts[2 * i + 2],
+            y2 = pts[2 * i + 3];
+          return { ...a, x: x1 + a.t * (x2 - x1), y: y1 + a.t * (y2 - y1) };
+        });
+
+        return { ...conn, additionalAnchors: updatedAnchors };
+      });
+
+      return next;
+    });
+  };
+}
+```
+
+---
+
+### `features/scheme-editor/model/domain/selection.js`
+
+```js
+export function clearSelectHighlightElFactory({ setSelection }) {
+  return function clearSelectHighlightEl(e) {
+    if (e.target === e.target.getStage()) {
+      setSelection({ type: null, id: null });
+    }
+  };
+}
+
+export function selectHighlightElFactory({ setSelection }) {
+  return function selectHightlightEl(el) {
+    setSelection({ type: el.type, id: el.id });
+  };
+}
+```
+
+---
+
+### `features/scheme-editor/model/useDiagramState.js`
+
+Оце і є “тонка збірка”: стейти + підключення actions factory.
+
+```js
+"use client";
+
+import { useEffect, useState } from "react";
+
+import { getInitialSymbols } from "./state/initialState";
+
+import { getAnchorPoints } from "./selectors/getAnchorPoints";
+
+import { handleLineClickFactory } from "./domain/connectionAnchors";
+import { handleAnchorClickFactory } from "./domain/connectionCreate";
+import { handleDragMoveFactory } from "./domain/connectionUpdateOnDrag";
+import { clearSelectHighlightElFactory, selectHighlightElFactory } from "./domain/selection";
+
+export function useDiagramState() {
+  const [symbols, setSymbols] = useState(getInitialSymbols);
+  const [connections, setConnections] = useState([]);
+
+  const [isAddingConnector, setIsAddingConnector] = useState(false);
+  const [isAddingAnchor, setIsAddingAnchor] = useState(false);
+
+  const [selectedAnchor, setSelectedAnchor] = useState(null);
+  const [hoveredAnchor, setHoveredAnchor] = useState(null);
+  const [hoveredElement, setHoveredElement] = useState(null);
+
+  const [message, setMessage] = useState("");
+
+  const [hoveredConnectionId, setHoveredConnectionId] = useState(null);
+  const [hoveredLineAnchorId, setHoveredLineAnchorId] = useState(null);
+
+  const [selection, setSelection] = useState({ type: null, id: null });
+
+  useEffect(() => {
+    // поки пусто — але якщо далі потрібна реакція на selection, залишимо тут
+  }, [selection]);
+
+  // режими
+  const startAddConnector = () => {
+    setIsAddingAnchor(false);
+    setSelectedAnchor(null);
+    setIsAddingConnector(true);
+  };
+
+  const startAddLineAnchor = () => {
+    setIsAddingConnector(false);
+    setSelectedAnchor(null);
+    setIsAddingAnchor(true);
+  };
+
+  // actions (factory)
+  const handleLineClick = handleLineClickFactory({
+    isAddingAnchor,
+    setConnections,
+    setSelectedAnchor,
+    setIsAddingConnector,
+    setIsAddingAnchor,
+  });
+
+  const handleAnchorClick = handleAnchorClickFactory({
+    isAddingConnector,
+    selectedAnchor,
+    setSelectedAnchor,
+    setMessage,
+    setConnections,
+    setHoveredElement,
+    setHoveredAnchor,
+    setIsAddingConnector,
+    setHoveredLineAnchorId,
+    symbols,
+  });
+
+  const handleDragMove = handleDragMoveFactory({
+    symbols,
+    setSymbols,
+    setConnections,
+  });
+
+  const clearSelectHighlightEl = clearSelectHighlightElFactory({ setSelection });
+  const selectHightlightEl = selectHighlightElFactory({ setSelection });
+
+  // updateConnectionOffset — винесемо наступним (він великий)
+  // поки можна лишити у цьому файлі або одразу винести в domain/connectionOffsetUpdate.js
+  // (якщо хочеш — я винесу в наступному повідомленні, бо там 200+ рядків)
+
+  return {
+    symbols,
+    connections,
+    isAddingConnector,
+    selectedAnchor,
+    hoveredAnchor,
+    hoveredElement,
+    message,
+    isAddingAnchor,
+    hoveredConnectionId,
+    hoveredLineAnchorId,
+    selection,
+
+    setIsAddingConnector,
+    setIsAddingAnchor,
+    setHoveredElement,
+    setHoveredAnchor,
+    setHoveredConnectionId,
+    setHoveredLineAnchorId,
+    setSymbols,
+    setConnections,
+    setSelection,
+
+    getAnchorPoints,
+
+    handleLineClick,
+    handleAnchorClick,
+    handleDragMove,
+
+    startAddConnector,
+    startAddLineAnchor,
+
+    clearSelectHighlightEl,
+    selectHightlightEl,
+
+    // updateConnectionOffset: поки залишимо, або винесемо окремо
+  };
+}
+```
+
+---
+
+## 3) Що робимо з `updateConnectionOffset`?
+
+Це найбільший “монстр” у файлі. Його **обов’язково** винести в:
+
+* `features/scheme-editor/model/domain/connectionOffsetUpdate.js`
+
+але щоб зробити це правильно, треба 2 речі:
+
+1. знати, як ти хочеш зберігати `symbols` в момент виклику (бо там використовується `symbols` із замикання)
+2. чи ти плануєш store/reducer (бо тоді це стає простіше)
+
+Я можу **винести його вже зараз 1-в-1**, просто зробивши `updateConnectionOffsetFactory({ symbols, setConnections })` — але буде те саме замикання. Це нормально як проміжний крок.
+
+---
+
+## 4) Відповідь на твою ціль: мінімум дублювання
+
+Це розбиття якраз робить так, що:
+
+* **геометрія** залишається в `shared/geometry` (одна копія),
+* логіка прив’язок/роутингу/оновлень — в `model/domain/*` (одна копія),
+* а `useDiagramState` стає **чистим “оркестратором”**.
+
+---
+
+Якщо ок — наступним кроком я:
+
+1. винесу `updateConnectionOffset` + `propagateAnchorIndexToChildren` в окремий файл `connectionOffsetUpdate.js`;
+2. підправлю `DiagramEditorPage`, щоб `S.selection` / `selectHighlightEl` працювали однаково (зараз у тебе `selectHightlightEl` приймає `el`, а в компоненті передається подія — ми це вирівняємо).

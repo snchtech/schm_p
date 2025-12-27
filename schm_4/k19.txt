@@ -1,0 +1,111 @@
+Ок, `SelectionTransformer.js` — це теж **shared**, бо він не про “схему”, а про **універсальну взаємодію з Konva (виділення/resize/rotate)**.
+
+## ✅ Куди покласти
+
+```
+src/shared/konva/selection/
+  SelectionTransformer.js
+  index.js
+```
+
+---
+
+## `src/shared/konva/selection/SelectionTransformer.js`
+
+(Залишаю JS, але роблю маленьке покращення: коли `enabled=false` — гарантовано чистимо nodes, щоб не лишався “підвисший” трансформер у випадку швидких перемикань.)
+
+```js
+"use client";
+
+import React, { useEffect, useRef } from "react";
+import { Transformer } from "react-konva";
+
+export default function SelectionTransformer({ selectedNode, enabled = true }) {
+  const trRef = useRef(null);
+
+  useEffect(() => {
+    const tr = trRef.current;
+    if (!tr) return;
+
+    // якщо вимкнули — чистимо, щоб нічого не висіло
+    if (!enabled) {
+      tr.nodes([]);
+      tr.getLayer()?.batchDraw();
+      return;
+    }
+
+    if (selectedNode) {
+      tr.nodes([selectedNode]);
+    } else {
+      tr.nodes([]);
+    }
+    tr.getLayer()?.batchDraw();
+  }, [selectedNode, enabled]);
+
+  if (!enabled) return null;
+
+  return (
+    <Transformer
+      ref={trRef}
+      rotateEnabled
+      borderStroke="#3b82f6"
+      borderStrokeWidth={1}
+      borderDash={[6, 4]}
+      anchorStroke="#3b82f6"
+      anchorFill="white"
+      anchorSize={8}
+      padding={6}
+    />
+  );
+}
+```
+
+---
+
+## `src/shared/konva/selection/index.js`
+
+```js
+export { default as SelectionTransformer } from "./SelectionTransformer";
+```
+
+---
+
+## ✅ Як міняється імпорт у `DiagramEditor.js`
+
+Було:
+
+```js
+import selectionTransformer from './SelectionTransformer'
+```
+
+Стає:
+
+```js
+import { SelectionTransformer } from "@/shared/konva/selection";
+```
+
+І використання (в тебе вже ок):
+
+```jsx
+<SelectionTransformer selectedNode={selectedKonvaNode} enabled={!!selectedKonvaNode} />
+```
+
+---
+
+## Маленька порада по API (на майбутнє, без перепису зараз)
+
+Якщо ти захочеш керувати тим, що дозволено трансформити (resize тільки по X/Y, обмеження мін/макс, заборона rotate) — краще зробити проп `transformerProps`:
+
+```jsx
+<SelectionTransformer
+  selectedNode={...}
+  enabled={...}
+  transformerProps={{ rotateEnabled: false }}
+/>
+```
+
+Але це можна додати пізніше, коли будемо приводити “editor state”.
+
+---
+
+Готовий до наступного: скидай **GraphLibrary** (той `./../graph`), бо зараз у `DiagramSymbols` він виглядає як головне джерело хаосу й дублювання.

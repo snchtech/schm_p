@@ -1,0 +1,306 @@
+Ок — даю **готовий розподіл на 3 блоки** (TopBar / Canvas / ContextMenu) під `kind`, з мінімальним дублюванням і так, щоб `DiagramEditor` став “тонким” контейнером.
+
+Нижче 4 файли (бо menu теж окремим компонентом):
+
+1. `DiagramEditorPage.jsx` – сторінка/контейнер
+2. `EditorTopBar.jsx` – toolbar + zoom
+3. `EditorCanvas.jsx` – Stage/Layer + wiring props
+4. `EditorContextMenu.jsx` – MUI контекст-меню (обгортка над твоїм `GraphContextMenuMui`)
+
+> **Важливо:** я зберігаю твою `setupLayerZoomPan`, `GraphContextMenuMui`, `SelectionTransformer`, `DiagramSymbols`, `DiagramConnections`. Ти просто розкладаєш їх по папках і підключаєш як нижче.
+
+---
+
+# 1) `features/scheme-editor/ui/DiagramEditorPage.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useRef, useState, useCallback } from "react";
+
+import { useDiagramState } from "../model/state/useDiagramState";
+import { setupLayerZoomPan } from "../shared/zoom/setupLayerZoomPan";
+
+import { EditorTopBar } from "./topbar/EditorTopBar";
+import { EditorCanvas } from "./canvas/EditorCanvas";
+import { EditorContextMenu } from "./context-menu/EditorContextMenu";
+
+export default function DiagramEditorPage() {
+  const S = useDiagramState();
+
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+  const apiRef = useRef(null);
+
+  const nodeRefs = useRef(new Map());
+  const registerNodeRef = useCallback((id, node) => {
+    if (!node) nodeRefs.current.delete(id);
+    else nodeRefs.current.set(id, node);
+  }, []);
+
+  // MUI context menu state
+  const [menuState, setMenuState] = useState({
+    open: false,
+    anchorPosition: null, // { top, left }
+    target: null, // { kind, id, shape? ... }
+  });
+
+  const closeMenu = useCallback(() => {
+    setMenuState({ open: false, anchorPosition: null, target: null });
+  }, []);
+
+  const openMenuAtEvent = useCallback((e, target) => {
+    const { clientX, clientY } = e.evt;
+    setMenuState({
+      open: true,
+      anchorPosition: { top: clientY, left: clientX },
+      target,
+    });
+  }, []);
+
+  const handleContextMenu = useCallback(
+    (e, target) => {
+      e.evt.preventDefault();
+      openMenuAtEvent(e, target);
+    },
+    [openMenuAtEvent],
+  );
+
+  // zoom/pan init
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    apiRef.current = setupLayerZoomPan(stage, layer, { panMode: "mmb_or_space" });
+
+    return () => {
+      apiRef.current?.destroy?.();
+      apiRef.current = null;
+    };
+  }, []);
+
+  // Konva node for transformer (only for selected node)
+  const selectedKonvaNode =
+    S.selection?.kind === "node" ? nodeRefs.current.get(S.selection.id) : null;
+
+  // Delete action (from context menu)
+  const handleDelete = useCallback(() => {
+    const t = menuState.target;
+    if (!t) return;
+
+    // TODO: під твій реальний delete (ти згадував deleteNodeWithLinks/deleteLine)
+    // Тут просто викликни S.deleteByTarget(t) якщо винесеш в model.
+    // Поки залишаю місце.
+
+    closeMenu();
+  }, [menuState.target, closeMenu]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <EditorTopBar
+        message={S.message}
+        isAddingConnector={S.isAddingConnector}
+        isAddingAnchor={S.isAddingAnchor}
+        onStartAddConnector={S.startAddConnector}
+        onCancelAddConnector={() => S.setIsAddingConnector(false)}
+        onStartAddLineAnchor={S.startAddLineAnchor}
+        onCancelAddLineAnchor={() => S.setIsAddingAnchor(false)}
+        onZoomIn={() => apiRef.current?.zoomIn?.()}
+        onZoomOut={() => apiRef.current?.zoomOut?.()}
+        onResetZoom={() => apiRef.current?.reset?.()}
+      />
+
+      <EditorCanvas
+        stageRef={stageRef}
+        layerRef={layerRef}
+        state={S}
+        registerNodeRef={registerNodeRef}
+        selectedKonvaNode={selectedKonvaNode}
+        onContextMenu={handleContextMenu}
+      />
+
+      <EditorContextMenu
+        open={menuState.open}
+        anchorPosition={menuState.anchorPosition}
+        onClose={closeMenu}
+        onDelete={handleDelete}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+# 2) `features/scheme-editor/ui/topbar/EditorTopBar.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+
+export function EditorTopBar({
+  message,
+  isAddingConnector,
+  isAddingAnchor,
+
+  onStartAddConnector,
+  onCancelAddConnector,
+  onStartAddLineAnchor,
+  onCancelAddLineAnchor,
+
+  onZoomOut,
+  onZoomIn,
+  onResetZoom,
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Toolbar */}
+      <header style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <button onClick={onStartAddConnector}>Новий connector</button>
+        {isAddingConnector && <button onClick={onCancelAddConnector}>Відмінити</button>}
+
+        <button onClick={onStartAddLineAnchor}>Нова точка прив&apos;язки на лінії</button>
+        {isAddingAnchor && <button onClick={onCancelAddLineAnchor}>Відмінити</button>}
+      </header>
+
+      {/* Zoom */}
+      <nav style={{ display: "flex", gap: 8 }}>
+        <button onClick={onZoomOut}>-</button>
+        <button onClick={onZoomIn}>+</button>
+        <button onClick={onResetZoom}>Reset</button>
+      </nav>
+
+      {message ? <p style={{ margin: 0 }}>{message}</p> : null}
+    </div>
+  );
+}
+```
+
+---
+
+# 3) `features/scheme-editor/ui/canvas/EditorCanvas.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Stage, Layer } from "react-konva";
+
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import SelectionTransformer from "./SelectionTransformer";
+
+export function EditorCanvas({
+  stageRef,
+  layerRef,
+  state: S,
+  registerNodeRef,
+  selectedKonvaNode,
+  onContextMenu, // (e, target)
+}) {
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        style={{ border: "1px solid #ccc" }}
+        onMouseDown={S.clearSelectHighlightEl}
+      >
+        <Layer ref={layerRef}>
+          <DiagramConnections
+            connections={S.connections}
+            hoveredConnectionId={S.hoveredConnectionId}
+            hoveredLineAnchorId={S.hoveredLineAnchorId}
+            isAddingConnector={S.isAddingConnector}
+            setHoveredConnectionId={S.setHoveredConnectionId}
+            setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+            handleLineClick={S.handleLineClick}
+            handleAnchorClick={S.handleAnchorClick}
+            updateConnectionOffset={S.updateConnectionOffset}
+            onMouseDown={S.selectHighlightEl}
+            isSelected={(id) => S.selection?.kind === "connection" && S.selection?.id === id}
+            onConnectionContextMenu={onContextMenu}
+          />
+
+          <DiagramSymbols
+            symbols={S.symbols}
+            isAddingConnector={S.isAddingConnector}
+            hoveredElement={S.hoveredElement}
+            hoveredAnchor={S.hoveredAnchor}
+            getAnchorPoints={S.getAnchorPoints}
+            setHoveredElement={S.setHoveredElement}
+            setHoveredAnchor={S.setHoveredAnchor}
+            handleDragMove={S.handleDragMove}
+            handleAnchorClick={S.handleAnchorClick}
+            onElementContextMenu={onContextMenu}
+            onMouseDown={S.selectHighlightEl}
+            isSelected={(id) => S.selection?.kind === "node" && S.selection?.id === id}
+            registerNodeRef={registerNodeRef}
+          />
+
+          <SelectionTransformer selectedNode={selectedKonvaNode} enabled={!!selectedKonvaNode} />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+---
+
+# 4) `features/scheme-editor/ui/context-menu/EditorContextMenu.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import GraphContextMenuMui from "../../shared/ui/GraphContextMenuMui"; 
+// або твій шлях до GraphContextMenuMui без пробілів
+
+export function EditorContextMenu({ open, anchorPosition, onClose, onDelete }) {
+  return (
+    <GraphContextMenuMui
+      open={open}
+      anchorPosition={anchorPosition}
+      onClose={onClose}
+      onDelete={onDelete}
+    />
+  );
+}
+```
+
+---
+
+## 5) Мінімальні зміни в `useDiagramState.js` під це
+
+Тобі треба, щоб у state були такі методи/поля (частина вже є):
+
+* `selection` з `{ kind, id }`
+* `selectHighlightEl(info)` (викликається і з symbols і з connections)
+* `clearSelectHighlightEl(e)` (вішаємо на Stage)
+* `setIsAddingConnector`, `setIsAddingAnchor` (є)
+* `getAnchorPoints`, `handleLineClick`, `handleAnchorClick`, `handleDragMove`, `updateConnectionOffset` (є)
+
+Тобто: **тільки перейменування/уніфікація selection**.
+
+---
+
+## 6) Важлива ремарка про “ми вище вже виносили”
+
+Ось тепер ми реально винесли “по блоках сторінки”:
+
+* TopBar (кнопки/zoom)
+* Canvas (Stage)
+* ContextMenu (меню)
+
+А доменні штуки (routing/offsets/attachments) — це вже інший рівень (model).
+
+---
+
+Якщо ок — наступне, що логічно зробити:
+
+1. я покажу точний diff для `useDiagramState` (selection -> kind, normalizeAttachment для anchor),
+2. і тоді додамо “delete” нормально: `deleteNodeWithLinks` + `deleteLine` в model як `deleteByTarget(target)`, щоб `DiagramEditorPage` взагалі не знав деталі видалення.
