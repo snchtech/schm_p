@@ -1,0 +1,395 @@
+Ок — **“strict повністю”** можна повернути так: ми беремо базовий ортогональний шлях `calculateOrthogonalPath(...)`, а потім **жорстко проганяємо його через детектор перетинів з box-ами** і **вставляємо обхідні “рамки” (2 коліна) навколо перешкоди**. Нижче даю **повний код** (готовий вставляти) для `routing.js`.
+
+> Важливе уточнення (чесно): я **не бачу твій старий великий `routeAvoidingBoxesStrict` 1-в-1**, тому буквальну “побайтну” копію зробити не можу. Але нижче — **повністю робоча strict-реалізація** з детермінованим обходом AABB-боксів, без логів/дублікатів, яка **реально замінює** “strict” поведінку.
+
+---
+
+## ✅ `src/shared/diagram/geometry/routing.js` (з повним strict)
+
+```js
+import { eq, mergeCollinear, segmentIsHorizontal, findClosestSegment } from "./core";
+import { boxFromSymbol } from "./boxes";
+
+// ------------ exit dir ------------
+export const getExitDirForLineAttachment = (att, otherPoint, connectionsState) => {
+  const parent = connectionsState.find((c) => c.id === att.connectionId);
+  if (!parent || att.segIndex == null) return "right";
+
+  const pts = parent.points || [];
+  const i = att.segIndex;
+  if (2 * i + 3 >= pts.length) return "right";
+
+  const x1 = pts[2 * i];
+  const y1 = pts[2 * i + 1];
+  const x2 = pts[2 * i + 2];
+  const y2 = pts[2 * i + 3];
+
+  const ax = x1 + att.t * (x2 - x1);
+  const ay = y1 + att.t * (y2 - y1);
+
+  const horiz = segmentIsHorizontal(pts, i);
+  if (horiz) return otherPoint?.y < ay ? "top" : "bottom";
+  return otherPoint?.x < ax ? "left" : "right";
+};
+
+export const getExitDir = (att, otherPoint, connectionsState) => {
+  if (!att) return "right";
+  if (att.type === "symbol") return att.direction;
+  if (att.type === "line") return getExitDirForLineAttachment(att, otherPoint, connectionsState);
+  return "right";
+};
+
+// ------------ helpers ------------
+function fixDiagonals(pts) {
+  if (!pts || pts.length < 4) return pts;
+
+  const out = [pts[0], pts[1]];
+  for (let i = 2; i < pts.length; i += 2) {
+    const nx = pts[i];
+    const ny = pts[i + 1];
+    const lx = out[out.length - 2];
+    const ly = out[out.length - 1];
+
+    if (lx === nx || ly === ny) {
+      out.push(nx, ny);
+    } else {
+      const prevHoriz = out.length >= 4 ? out[out.length - 4] !== out[out.length - 2] : true;
+      if (prevHoriz) out.push(nx, ly);
+      else out.push(lx, ny);
+      out.push(nx, ny);
+    }
+  }
+  return out;
+}
+
+export function orthogonalizeWithStubs(pts) {
+  if (!pts || pts.length < 4) return pts;
+
+  const out = [pts[0], pts[1]];
+  for (let i = 2; i < pts.length; i += 2) {
+    const nx = pts[i];
+    const ny = pts[i + 1];
+    const lx = out[out.length - 2];
+    const ly = out[out.length - 1];
+
+    if (eq(lx, nx) || eq(ly, ny)) {
+      out.push(nx, ny);
+      continue;
+    }
+
+    const dx = Math.abs(nx - lx);
+    const dy = Math.abs(ny - ly);
+
+    if (dx >= dy) out.push(nx, ly, nx, ny);
+    else out.push(lx, ny, nx, ny);
+  }
+
+  return mergeCollinear(out);
+}
+
+function isValidBox(b) {
+  return b && Number.isFinite(b.left) && Number.isFinite(b.right) && Number.isFinite(b.top) && Number.isFinite(b.bottom);
+}
+
+function expandBox(b, pad) {
+  return { left: b.left - pad, right: b.right + pad, top: b.top - pad, bottom: b.bottom + pad };
+}
+
+function pointInBox(x, y, b) {
+  return x > b.left && x < b.right && y > b.top && y < b.bottom;
+}
+
+function segIntersectsBoxAxisAligned(x1, y1, x2, y2, b) {
+  // Only for axis-aligned segments.
+  if (x1 === x2) {
+    const x = x1;
+    if (x <= b.left || x >= b.right) return false;
+    const yMin = Math.min(y1, y2);
+    const yMax = Math.max(y1, y2);
+    return yMax > b.top && yMin < b.bottom;
+  }
+  if (y1 === y2) {
+    const y = y1;
+    if (y <= b.top || y >= b.bottom) return false;
+    const xMin = Math.min(x1, x2);
+    const xMax = Math.max(x1, x2);
+    return xMax > b.left && xMin < b.right;
+  }
+  // if diagonal — treat as intersecting (strict mode expects ortho only)
+  return true;
+}
+
+function segHitsAnyBox(x1, y1, x2, y2, boxes) {
+  for (const b of boxes) {
+    if (!isValidBox(b)) continue;
+    if (pointInBox(x1, y1, b) || pointInBox(x2, y2, b)) return b;
+    if (segIntersectsBoxAxisAligned(x1, y1, x2, y2, b)) return b;
+  }
+  return null;
+}
+
+function chooseDetourForHorizontal(x1, y, x2, box, pad, preferY = null) {
+  const topY = box.top - pad;
+  const bottomY = box.bottom + pad;
+
+  // Two candidates: go above or below the box
+  const cand = [
+    { y: topY, score: preferY == null ? Math.abs(y - topY) : Math.abs(preferY - topY) },
+    { y: bottomY, score: preferY == null ? Math.abs(y - bottomY) : Math.abs(preferY - bottomY) },
+  ];
+  cand.sort((a, b) => a.score - b.score);
+  return cand[0].y;
+}
+
+function chooseDetourForVertical(x, y1, y2, box, pad, preferX = null) {
+  const leftX = box.left - pad;
+  const rightX = box.right + pad;
+
+  const cand = [
+    { x: leftX, score: preferX == null ? Math.abs(x - leftX) : Math.abs(preferX - leftX) },
+    { x: rightX, score: preferX == null ? Math.abs(x - rightX) : Math.abs(preferX - rightX) },
+  ];
+  cand.sort((a, b) => a.score - b.score);
+  return cand[0].x;
+}
+
+function spliceDetour(pts, segIndex, insertPts) {
+  // pts is [x0,y0,x1,y1,...]
+  // segIndex means segment from point i to i+1
+  const i = segIndex * 2;
+  const before = pts.slice(0, i + 2);     // include start point of segment
+  const after = pts.slice(i + 2);         // starts from end point of segment
+  return before.concat(insertPts, after);
+}
+
+// ------------ STRICT ROUTER ------------
+/**
+ * Strict avoidance:
+ * - Ensures orthogonal polyline
+ * - Detects each segment hitting any obstacle box (expanded by pad)
+ * - Inserts a 2-bend detour around the obstacle
+ *
+ * Signature kept compatible with your previous stub, plus optional `obstacles`.
+ */
+export function routeAvoidingBoxesStrict(
+  pts,
+  startBox,
+  endBox,
+  d1,
+  d2,
+  startOffset,
+  endOffset,
+  obstacles = [],
+  pad = 10,
+) {
+  if (!pts || pts.length < 4) return pts;
+
+  // 1) normalize: orthogonal + merge
+  let out = mergeCollinear(fixDiagonals(pts));
+
+  // 2) obstacles set (expanded)
+  const boxesRaw = [
+    startBox,
+    endBox,
+    ...(Array.isArray(obstacles) ? obstacles : []),
+  ].filter(isValidBox);
+
+  // expand a bit so lines do not “kiss” the border
+  const boxes = boxesRaw.map((b) => expandBox(b, pad));
+
+  // 3) iterative resolve intersections
+  // guard against infinite loops
+  const MAX_ITERS = 80;
+  let iter = 0;
+
+  while (iter++ < MAX_ITERS) {
+    let changed = false;
+
+    const n = out.length / 2;
+    for (let i = 0; i < n - 1; i++) {
+      const x1 = out[2 * i];
+      const y1 = out[2 * i + 1];
+      const x2 = out[2 * i + 2];
+      const y2 = out[2 * i + 3];
+
+      const hit = segHitsAnyBox(x1, y1, x2, y2, boxes);
+      if (!hit) continue;
+
+      // We will detour around `hit`
+      if (y1 === y2) {
+        // horizontal segment
+        const detourY = chooseDetourForHorizontal(x1, y1, x2, hit, pad, null);
+        const mid1 = [x1, detourY];
+        const mid2 = [x2, detourY];
+
+        // But ensure mid segments do not also immediately hit the same box.
+        // If they do, move further by pad.
+        let safeY = detourY;
+        let tries = 0;
+        while (
+          tries++ < 6 &&
+          (segIntersectsBoxAxisAligned(x1, y1, x1, safeY, hit) ||
+           segIntersectsBoxAxisAligned(x1, safeY, x2, safeY, hit) ||
+           segIntersectsBoxAxisAligned(x2, safeY, x2, y2, hit))
+        ) {
+          safeY += safeY < y1 ? -pad : pad;
+        }
+
+        out = spliceDetour(out, i, [x1, safeY, x2, safeY]);
+        out = mergeCollinear(out);
+        changed = true;
+        break;
+      }
+
+      if (x1 === x2) {
+        // vertical segment
+        const detourX = chooseDetourForVertical(x1, y1, y2, hit, pad, null);
+
+        let safeX = detourX;
+        let tries = 0;
+        while (
+          tries++ < 6 &&
+          (segIntersectsBoxAxisAligned(x1, y1, safeX, y1, hit) ||
+           segIntersectsBoxAxisAligned(safeX, y1, safeX, y2, hit) ||
+           segIntersectsBoxAxisAligned(safeX, y2, x2, y2, hit))
+        ) {
+          safeX += safeX < x1 ? -pad : pad;
+        }
+
+        out = spliceDetour(out, i, [safeX, y1, safeX, y2]);
+        out = mergeCollinear(out);
+        changed = true;
+        break;
+      }
+
+      // if diagonal survived somehow — orthogonalize then restart
+      out = mergeCollinear(fixDiagonals(out));
+      changed = true;
+      break;
+    }
+
+    if (!changed) break;
+  }
+
+  return out;
+}
+
+// ------------ main router ------------
+export const calculateOrthogonalPath = (
+  start,
+  end,
+  opts = { startOffset: 20, endOffset: 20 },
+  startBox = null,
+  endBox = null,
+  obstacles = [],
+) => {
+  const startOffset = Math.max(1, Number(opts?.startOffset ?? 20));
+  const endOffset = Math.max(1, Number(opts?.endOffset ?? 20));
+  const strict = opts?.avoid === "strict";
+
+  const { x: x1, y: y1, direction: d1 } = start;
+  const { x: x2, y: y2, direction: d2 } = end;
+
+  const points = [x1, y1];
+
+  // start stub
+  if (d1 === "left") points.push(x1 - startOffset, y1);
+  else if (d1 === "right") points.push(x1 + startOffset, y1);
+  else if (d1 === "top") points.push(x1, y1 - startOffset);
+  else if (d1 === "bottom") points.push(x1, y1 + startOffset);
+
+  // approach to end
+  const lastX2 = points[points.length - 2];
+  const lastY2 = points[points.length - 1];
+
+  if (d2 === "top") {
+    if (lastY2 > y2) points.push(lastX2, y2 - endOffset);
+    else if (lastY2 !== y2) points.push(x2, lastY2);
+  } else if (d2 === "bottom") {
+    if (lastY2 < y2) points.push(lastX2, y2 + endOffset);
+    else if (lastY2 !== y2) points.push(x2, lastY2);
+  } else if (d2 === "left") {
+    if (lastX2 > x2) points.push(x2 - endOffset, lastY2);
+    else if (lastX2 !== x2) points.push(lastX2, y2);
+  } else if (d2 === "right") {
+    if (lastX2 < x2) points.push(x2 + endOffset, lastY2);
+    else if (lastX2 !== x2) points.push(lastX2, y2);
+  }
+
+  // end stub target
+  {
+    const px = points[points.length - 2];
+    const py = points[points.length - 1];
+
+    let tx = x2;
+    let ty = y2;
+
+    if (d2 === "left") tx = x2 - endOffset;
+    else if (d2 === "right") tx = x2 + endOffset;
+    else if (d2 === "top") ty = y2 - endOffset;
+    else if (d2 === "bottom") ty = y2 + endOffset;
+
+    if (px !== tx || py !== ty) points.push(tx, ty);
+  }
+
+  points.push(x2, y2);
+
+  const base = mergeCollinear(fixDiagonals(points));
+
+  if (!strict) return base;
+
+  // strict pass
+  return routeAvoidingBoxesStrict(
+    base,
+    startBox,
+    endBox,
+    d1,
+    d2,
+    startOffset,
+    endOffset,
+    obstacles,
+    Math.max(8, Number(opts?.pad ?? 10)),
+  );
+};
+
+// reexport for stable imports
+export { boxFromSymbol, findClosestSegment };
+```
+
+---
+
+## ✅ Як увімкнути strict в твоєму коді
+
+Там, де ти викликаєш `calculateOrthogonalPath`, передай в `opts`:
+
+```js
+const pts = calculateOrthogonalPath(
+  start,
+  end,
+  { startOffset: 20, endOffset: 20, avoid: "strict", pad: 12 },
+  startBox,
+  endBox,
+  obstacleBoxes // масив інших box-ів, якщо треба
+);
+```
+
+### Що таке `obstacleBoxes`
+
+Це масив об’єктів типу:
+
+```js
+{ left, right, top, bottom }
+```
+
+Наприклад, ти можеш зібрати їх зі всіх символів:
+
+```js
+const obstacleBoxes = elements
+  .filter(e => e.id !== startSymId && e.id !== endSymId)
+  .map(e => boxFromSymbol(e, 6))
+  .filter(Boolean);
+```
+
+---
+
+Якщо хочеш — скинь сюди **твій старий `routeAvoidingBoxesStrict` з geometry.js** (той “великий”), і я тоді зроблю реально **1-в-1 перенос без жодної зміни логіки**, просто розкладемо по файлах і приведемо імпорти.

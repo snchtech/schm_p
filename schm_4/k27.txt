@@ -1,0 +1,171 @@
+Так, це робиться **на рівні компонента** дуже чисто: кожна фігура сама повертає (або малює) **свої anchor’и** і сама ж визначає їх координати.
+
+Є 2 нормальні підходи (можна навіть комбінувати):
+
+## Підхід A: “Фігура повертає anchors” (дані), а рендерить їх один спільний компонент
+
+Ти робиш у бібліотеці фігур **метод `getAnchors(el)`**, і для Circle він повертає **тільки left/right**.
+
+### 1) Контракт anchor’а
+
+```js
+// anchor = { id, dir, x, y }
+```
+
+### 2) Circle: тільки 2 точки
+
+```js
+// src/entities/diagram/elements/Circle/anchors.js
+export function getCircleAnchors(el) {
+  const r = el.radius ?? (Math.min(el.width ?? 0, el.height ?? 0) / 2) ?? 30;
+
+  // важливо: визначись, що x,y у circle — це центр (рекомендую)
+  const cx = el.x;
+  const cy = el.y;
+
+  return [
+    { id: "left",  dir: "left",  x: cx - r, y: cy },
+    { id: "right", dir: "right", x: cx + r, y: cy },
+  ];
+}
+```
+
+### 3) Rect: 4 точки (як у тебе “універсально”)
+
+```js
+// src/entities/diagram/elements/Rect/anchors.js
+export function getRectAnchors(el) {
+  const x = el.x, y = el.y, w = el.width, h = el.height;
+  return [
+    { id: "top",    dir: "top",    x: x + w / 2, y },
+    { id: "bottom", dir: "bottom", x: x + w / 2, y: y + h },
+    { id: "left",   dir: "left",   x,            y: y + h / 2 },
+    { id: "right",  dir: "right",  x: x + w,     y: y + h / 2 },
+  ];
+}
+```
+
+### 4) У GraphLibrary додаєш `getAnchors`
+
+```js
+import CircleElement from "./Circle";
+import { getCircleAnchors } from "./Circle/anchors";
+
+export const GraphLibrary = {
+  circle: {
+    Component: CircleElement,
+    getAnchors: getCircleAnchors,
+  },
+  // rect: { Component: RectElement, getAnchors: getRectAnchors },
+};
+```
+
+### 5) Спільний рендер “AnchorLayer”
+
+```jsx
+// src/features/diagram/anchors/AnchorsLayer.jsx
+import React from "react";
+import { Group, Circle as KCircle } from "react-konva";
+
+export function AnchorsLayer({ elements, graphLibrary, selectedId, onAnchorDown }) {
+  if (!selectedId) return null;
+
+  const el = elements.find((e) => e.id === selectedId);
+  if (!el) return null;
+
+  const def = graphLibrary[el.type];
+  const anchors = def?.getAnchors ? def.getAnchors(el) : [];
+
+  return (
+    <Group listening>
+      {anchors.map((a) => (
+        <KCircle
+          key={`${el.id}:${a.id}`}
+          x={a.x}
+          y={a.y}
+          radius={5}
+          stroke="black"
+          fill="white"
+          strokeWidth={2}
+          onMouseDown={(e) => onAnchorDown({ elementId: el.id, anchorId: a.id, dir: a.dir, x: a.x, y: a.y }, e)}
+        />
+      ))}
+    </Group>
+  );
+}
+```
+
+✅ Плюси: **контроль anchor’ів = на рівні компонента/типу**, а UI/логіка підключення — **в одному місці**.
+
+---
+
+## Підхід B: “Фігура сама рендерить свої anchors”
+
+Це коли Circle-компонент малює Circle + 2 маленькі круги-анкорі.
+
+```jsx
+// Circle.js
+import React from "react";
+import { Group, Circle as KCircle } from "react-konva";
+
+export default function CircleElement({ el, isSelected, onAnchorDown }) {
+  const r = el.radius ?? 30;
+  const cx = el.x;
+  const cy = el.y;
+
+  const anchors = [
+    { id: "left", dir: "left", x: cx - r, y: cy },
+    { id: "right", dir: "right", x: cx + r, y: cy },
+  ];
+
+  return (
+    <Group>
+      <KCircle x={cx} y={cy} radius={r} fill={el.fill} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+
+      {isSelected &&
+        anchors.map((a) => (
+          <KCircle
+            key={a.id}
+            x={a.x}
+            y={a.y}
+            radius={5}
+            fill="white"
+            stroke="black"
+            strokeWidth={2}
+            onMouseDown={(e) => onAnchorDown({ elementId: el.id, anchorId: a.id, dir: a.dir, x: a.x, y: a.y }, e)}
+          />
+        ))}
+    </Group>
+  );
+}
+```
+
+✅ Плюси: швидко і просто.
+❌ Мінус: логіка прив’язок розмазується по фігурах (важче уніфікувати).
+
+---
+
+## Як я б зробив у твоєму проєкті
+
+Рекомендую **Підхід A**:
+
+* **тип фігури керує anchors** (`getAnchors`)
+* **один AnchorsLayer** малює їх для всіх
+* логіка конектів/drag/hover — централізована
+
+---
+
+### Маленький важливий нюанс про Circle
+
+Ти в прикладі колись малював Circle як:
+
+```jsx
+<Circle x={0} y={0} ... />
+```
+
+Якщо так, то ти використовуєш Group з позицією, і тоді anchors треба рахувати **від Group**. Тобто або:
+
+* стандартизуєш: `el.x/el.y` = **центр**, і Circle рендериться в `x={el.x} y={el.y}`, або
+* лишаєш `x=0,y=0`, але тоді вся фігура має бути в `<Group x={el.x} y={el.y}>`, і anchors треба в координатах групи.
+
+Якщо скажеш, який варіант у тебе зараз (центр чи group), я підлаштую код 1-в-1 під твою структуру елементів.

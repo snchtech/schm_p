@@ -1,0 +1,430 @@
+Норм, твій `EditorCanvas` уже ідеально підходить під “Visio-like” **marquee selection + drag групи**. Нижче даю **готовий каркас** (хуки + мінімальні правки в `EditorCanvas` і `DiagramSymbols`), який працює з zoom/pan і з `registerNodeRef`.
+
+---
+
+# 1) Додай в стор (state: S) мінімальні поля/методи
+
+Тобі треба **логічна мультивибірка** (без Konva.Group):
+
+```js
+// must-have в S
+S.selectedNodeIds            // string[]  (виділені фігури)
+S.setSelectedNodeIds(ids)    // (string[]) => void
+S.clearSelection()           // () => void (скинути все)
+S.isNodeSelected(id)         // (id) => boolean
+
+// для переміщення групи
+S.moveNodesBy(ids, dx, dy)   // batch move: додає dx/dy до x/y у symbols
+```
+
+> Якщо в тебе зараз `S.selection.kind === 'node' && S.selection.id`, це ок — просто додай ще масив `selectedNodeIds` і синхронізуй одиночний вибір з масивом (масив з 1 елемента).
+
+---
+
+# 2) Хелпер: pointer → координати шару (важливо для scale/пану)
+
+**`src/shared/diagram/selection/worldPoint.js`**
+
+```js
+export function getWorldPoint(stage, layer) {
+  const p = stage.getPointerPosition();
+  if (!p) return null;
+
+  const tr = layer.getAbsoluteTransform().copy();
+  tr.invert();
+  return tr.point(p);
+}
+```
+
+---
+
+# 3) Hook: рамка виділення (marquee)
+
+**`src/shared/diagram/selection/useMarqueeSelect.js`**
+
+```js
+import { useCallback, useMemo, useRef, useState } from "react";
+import Konva from "konva";
+import { getWorldPoint } from "./worldPoint";
+
+function rectFromPoints(a, b) {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const width = Math.abs(a.x - b.x);
+  const height = Math.abs(a.y - b.y);
+  return { x, y, width, height };
+}
+
+export function useMarqueeSelect({
+  stageRef,
+  layerRef,
+  // Map<string, Konva.Node>
+  nodeRefs,
+  // all node ids that can be selected
+  selectableIds,
+  // store API
+  selectedIds,
+  setSelectedIds,
+  clearSelection,
+}) {
+  const [box, setBox] = useState(null); // {x,y,width,height} | null
+  const drag = useRef({
+    active: false,
+    start: null,
+    shift: false,
+  });
+
+  const isEmptyClick = useCallback((e) => {
+    const stage = e.target.getStage();
+    // клік по сцені або по layer-порожнечі
+    return e.target === stage;
+  }, []);
+
+  const onMouseDown = useCallback((e) => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    // якщо клік не по пустому місцю — рамку не стартуємо
+    if (!isEmptyClick(e)) return;
+
+    const wp = getWorldPoint(stage, layer);
+    if (!wp) return;
+
+    drag.current.active = true;
+    drag.current.start = wp;
+    drag.current.shift = !!e.evt.shiftKey;
+
+    setBox({ x: wp.x, y: wp.y, width: 0, height: 0 });
+
+    // Visio-like: клік по пустому місцю без Shift — скидає вибір
+    if (!drag.current.shift) clearSelection();
+  }, [stageRef, layerRef, clearSelection, isEmptyClick]);
+
+  const onMouseMove = useCallback(() => {
+    if (!drag.current.active) return;
+
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    const wp = getWorldPoint(stage, layer);
+    if (!wp || !drag.current.start) return;
+
+    setBox(rectFromPoints(drag.current.start, wp));
+  }, [stageRef, layerRef]);
+
+  const onMouseUp = useCallback(() => {
+    if (!drag.current.active) return;
+    drag.current.active = false;
+
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) {
+      setBox(null);
+      return;
+    }
+
+    if (!box || box.width < 2 || box.height < 2) {
+      // маленький рух — вважаємо як клік
+      setBox(null);
+      return;
+    }
+
+    const selectionRect = new Konva.Rect({ ...box });
+
+    const hits = [];
+    for (const id of selectableIds) {
+      const node = nodeRefs.get(id);
+      if (!node) continue;
+
+      // bbox елемента у координатах layer
+      const r = node.getClientRect({ relativeTo: layer });
+      const nodeRect = new Konva.Rect(r);
+
+      // Visio-like: перетин (а не повне входження)
+      if (Konva.Util.haveIntersection(selectionRect.getClientRect(), nodeRect.getClientRect())) {
+        hits.push(id);
+      }
+    }
+
+    if (drag.current.shift) {
+      const merged = new Set([...(selectedIds || []), ...hits]);
+      setSelectedIds(Array.from(merged));
+    } else {
+      setSelectedIds(hits);
+    }
+
+    setBox(null);
+  }, [box, stageRef, layerRef, nodeRefs, selectableIds, selectedIds, setSelectedIds]);
+
+  return useMemo(() => ({
+    marqueeBox: box,
+    onMouseDown,
+    onMouseMove,
+    onMouseUp,
+  }), [box, onMouseDown, onMouseMove, onMouseUp]);
+}
+```
+
+---
+
+# 4) Hook: drag групи через delta (як у Visio)
+
+**`src/shared/diagram/selection/useGroupDrag.js`**
+
+```js
+import { useMemo, useRef } from "react";
+
+/**
+ * Логіка: якщо тягнемо виділений елемент і selectedIds.length>1,
+ * то рухаємо ВСІ виділені на delta.
+ */
+export function useGroupDrag({ selectedIds, isSelected, moveNodesBy }) {
+  const dragRef = useRef({
+    active: false,
+    startAbs: null,
+    baseIds: [],
+  });
+
+  const onDragStart = (id, e) => {
+    if (!isSelected(id)) return;
+
+    const ids = selectedIds?.length ? selectedIds : [id];
+    if (ids.length <= 1) return;
+
+    dragRef.current.active = true;
+    dragRef.current.baseIds = ids;
+
+    const n = e.target;
+    dragRef.current.startAbs = n.absolutePosition(); // {x,y}
+  };
+
+  const onDragMove = (id, e) => {
+    if (!dragRef.current.active) return;
+
+    const n = e.target;
+    const now = n.absolutePosition();
+    const prev = dragRef.current.startAbs;
+    if (!prev) return;
+
+    const dx = now.x - prev.x;
+    const dy = now.y - prev.y;
+
+    if (dx === 0 && dy === 0) return;
+
+    // рухаємо всі виділені (включно з поточним)
+    moveNodesBy(dragRef.current.baseIds, dx, dy);
+
+    // щоб Konva не додала зміщення ще раз "сама",
+    // повертаємо ноду назад (візуально вона вже рухнулась через state)
+    n.absolutePosition(prev);
+
+    // оновлюємо опорну точку
+    dragRef.current.startAbs = prev;
+  };
+
+  const onDragEnd = () => {
+    dragRef.current.active = false;
+    dragRef.current.startAbs = null;
+    dragRef.current.baseIds = [];
+  };
+
+  return useMemo(() => ({
+    onDragStart,
+    onDragMove,
+    onDragEnd,
+  }), []);
+}
+```
+
+---
+
+# 5) Правки в `EditorCanvas.jsx`
+
+Тобі треба:
+
+1. **додати overlay Layer** з прямокутником marquee
+2. **підключити Stage handlers**: down/move/up
+3. **підключити groupDrag** і прокинути в `DiagramSymbols`
+
+Ось патч (показую повністю, щоб можна було просто замінити):
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Stage, Layer, Rect } from "react-konva";
+
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import SelectionTransformer from "./SelectionTransformer";
+
+import { useMarqueeSelect } from "@/shared/diagram/selection/useMarqueeSelect";
+import { useGroupDrag } from "@/shared/diagram/selection/useGroupDrag";
+
+export function EditorCanvas({
+  stageRef,
+  layerRef,
+  state: S,
+  registerNodeRef,
+  selectedKonvaNode,
+  onContextMenu, // (e, target)
+}) {
+  // ids всіх фігур, які можна виділяти рамкою
+  const selectableIds = useMemo(
+    () => (S.symbols || []).map((x) => x.id),
+    [S.symbols]
+  );
+
+  // marquee selection
+  const marquee = useMarqueeSelect({
+    stageRef,
+    layerRef,
+    nodeRefs: S.nodeRefs,                 // Map(id->Konva.Node). Якщо у тебе інакше — скажеш, піджену.
+    selectableIds,
+    selectedIds: S.selectedNodeIds,
+    setSelectedIds: S.setSelectedNodeIds,
+    clearSelection: S.clearSelection,
+  });
+
+  // group drag
+  const groupDrag = useGroupDrag({
+    selectedIds: S.selectedNodeIds,
+    isSelected: S.isNodeSelected,
+    moveNodesBy: S.moveNodesBy,
+  });
+
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        style={{ border: "1px solid #ccc" }}
+        onMouseDown={(e) => {
+          marquee.onMouseDown(e);
+          // твоя стара логіка highlight — краще робити після,
+          // але тільки якщо це НЕ старт рамки по пустому місцю
+          // (тут мінімально лишаю як є, але без дублювання)
+        }}
+        onMouseMove={marquee.onMouseMove}
+        onMouseUp={marquee.onMouseUp}
+      >
+        {/* Основний шар */}
+        <Layer ref={layerRef}>
+          <DiagramConnections
+            connections={S.connections}
+            hoveredConnectionId={S.hoveredConnectionId}
+            hoveredLineAnchorId={S.hoveredLineAnchorId}
+            isAddingConnector={S.isAddingConnector}
+            setHoveredConnectionId={S.setHoveredConnectionId}
+            setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+            handleLineClick={S.handleLineClick}
+            handleAnchorClick={S.handleAnchorClick}
+            updateConnectionOffset={S.updateConnectionOffset}
+            onMouseDown={S.selectHighlightEl}
+            isSelected={(id) => S.selection?.kind === "connection" && S.selection?.id === id}
+            onConnectionContextMenu={onContextMenu}
+          />
+
+          <DiagramSymbols
+            symbols={S.symbols}
+            isAddingConnector={S.isAddingConnector}
+            hoveredElement={S.hoveredElement}
+            hoveredAnchor={S.hoveredAnchor}
+            getAnchorPoints={S.getAnchorPoints}
+            setHoveredElement={S.setHoveredElement}
+            setHoveredAnchor={S.setHoveredAnchor}
+            handleAnchorClick={S.handleAnchorClick}
+            onElementContextMenu={onContextMenu}
+
+            // Важливо: мультиселект логіка
+            onElementMouseDown={S.handleElementMouseDown} // зробиш: без Shift -> [id], з Shift -> toggle
+            isSelected={(id) => S.isNodeSelected(id)}
+            registerNodeRef={registerNodeRef}
+
+            // Груповий drag
+            onNodeDragStart={groupDrag.onDragStart}
+            onNodeDragMove={groupDrag.onDragMove}
+            onNodeDragEnd={groupDrag.onDragEnd}
+
+            // твій single drag (якщо треба для snap/guides)
+            handleDragMove={S.handleDragMove}
+          />
+
+          <SelectionTransformer selectedNode={selectedKonvaNode} enabled={!!selectedKonvaNode} />
+        </Layer>
+
+        {/* Overlay шар рамки виділення */}
+        <Layer listening={false}>
+          {marquee.marqueeBox && (
+            <Rect
+              x={marquee.marqueeBox.x}
+              y={marquee.marqueeBox.y}
+              width={marquee.marqueeBox.width}
+              height={marquee.marqueeBox.height}
+              strokeWidth={1}
+              stroke="#4a90e2"
+              dash={[6, 4]}
+            />
+          )}
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+> Якщо ти принципово не хочеш `stroke="#4a90e2"` — прибери, але я залишив для читабельності.
+
+---
+
+# 6) Мінімальні правки в `DiagramSymbols`
+
+Ти маєш у кожній фігурі (Circle/Rect/Shape) додати:
+
+* `onMouseDown={(e)=>props.onElementMouseDown(el.id, e)}`
+* `onDragStart={(e)=>props.onNodeDragStart?.(el.id, e)}`
+* `onDragMove={(e)=>{ props.onNodeDragMove?.(el.id, e); props.handleDragMove?.(e, el.id); }}`
+* `onDragEnd={(e)=>props.onNodeDragEnd?.(el.id, e)}`
+
+Головне: **groupDrag викликається ПЕРШИМ** у `onDragMove`, а потім вже твої snap/guides.
+
+---
+
+# 7) Критичне: `nodeRefs` (бо marquee робить getClientRect)
+
+Ти вже маєш `registerNodeRef`. Зроби, щоб воно складало Map:
+
+```js
+// у store
+nodeRefs = new Map()
+
+registerNodeRef = (id, node) => {
+  if (!node) this.nodeRefs.delete(id);
+  else this.nodeRefs.set(id, node);
+};
+```
+
+І в компонентах фігур:
+
+```jsx
+<Shape
+  ref={(n) => registerNodeRef(el.id, n)}
+  ...
+/>
+```
+
+---
+
+## Що вийде “як у Visio”
+
+* рамкою виділяєш групу
+* Shift додає
+* тягнеш будь-який виділений елемент — рухається вся група
+* з zoom/pan не ламається (бо worldPoint)
+
+---
+
+Якщо ти покажеш фрагмент `DiagramSymbols` (хоча б як ти рендериш один symbol), я дам точний патч без “псевдо-пропсів” і підлаштую під твої існуючі `S.selectHighlightEl / S.handleDragMove / S.selection`.

@@ -1,0 +1,169 @@
+Супер — у тебе `Group` уже є, `registerNodeRef(el.id, node)` теж є, тобто **marquee по `getClientRect()` піде “з коробки”**. Зараз додамо тільки 2 речі:
+
+1. **мультиселект (Shift+клік + toggle)**
+2. **group-drag (як у Visio)** — через `onDragStart/onDragMove/onDragEnd` у `Group`
+
+Нижче — конкретні правки під твій `DiagramSymbols` (мінімальні, без ламання anchor’ів).
+
+---
+
+## 1) Онови `DiagramSymbols`: додай пропси для group-drag + нормальний mouseDown
+
+### ✅ Замінити сигнатуру пропсів
+
+Додай:
+
+* `onElementMouseDown(id, e)` – для мультиселекту (Shift toggle)
+* `onNodeDragStart(id, e)`
+* `onNodeDragMove(id, e)`
+* `onNodeDragEnd(id, e)`
+
+І трохи підправ `onMouseDown` (зараз ти кидаєш `{type,id}` без event — для Shift нам треба `e.evt.shiftKey`).
+
+Ось патч (показую лише важливі шматки; можеш прямо вставити):
+
+```jsx
+export const DiagramSymbols = ({
+  symbols,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+
+  // було:
+  // onMouseDown,
+  // стане:
+  onElementMouseDown,   // (id, e) => void
+
+  isSelected,
+  registerNodeRef,
+
+  // нове для групового drag
+  onNodeDragStart,
+  onNodeDragMove,
+  onNodeDragEnd,
+}) => {
+```
+
+### ✅ У `Group` додай 3 drag-хендлери і оновлений mouseDown
+
+```jsx
+<Group
+  key={el.id}
+  ref={makeGroupRef(el.id)}
+  x={el.x}
+  y={el.y}
+  draggable
+
+  onDragStart={(e) => {
+    // якщо це груповий drag — hook “перехопить”
+    onNodeDragStart?.(el.id, e);
+  }}
+
+  onDragMove={(e) => {
+    // 1) спочатку груповий drag (він може "відкотити" позицію ноди)
+    onNodeDragMove?.(el.id, e);
+
+    // 2) потім твій існуючий handleDragMove (snap/guides/оновлення зв’язків)
+    handleDragMove?.(el.id, e);
+  }}
+
+  onDragEnd={(e) => {
+    onNodeDragEnd?.(el.id, e);
+  }}
+
+  onMouseEnter={() => isAddingConnector && setHoveredElement(el.id)}
+  onMouseLeave={() => isAddingConnector && setHoveredElement(null)}
+  onContextMenu={(e) => onElementContextMenu(e, { type: "node", id: el.id })}
+
+  onMouseDown={(e) => {
+    e.cancelBubble = true;
+
+    // мультиселект (Shift+клік)
+    onElementMouseDown?.(el.id, e);
+  }}
+>
+```
+
+> Важливо: ми **не чіпаємо** anchor’и — вони як були, так і лишаються (в них `cancelBubble` уже стоїть).
+
+---
+
+## 2) Логіка мультиселекту в S (store)
+
+Зроби в `S` метод, який викликається з `onElementMouseDown(id,e)`:
+
+```js
+// приклад
+handleElementMouseDown = (id, e) => {
+  const shift = !!e.evt?.shiftKey;
+
+  // якщо зараз виділяємо конектор/інше — скинь або окремо керуй selection.kind
+  // але для фігур:
+  if (!shift) {
+    this.setSelectedNodeIds([id]);
+    return;
+  }
+
+  // shift toggle
+  const set = new Set(this.selectedNodeIds || []);
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+
+  this.setSelectedNodeIds(Array.from(set));
+};
+```
+
+І `isNodeSelected(id)`:
+
+```js
+isNodeSelected = (id) => (this.selectedNodeIds || []).includes(id);
+```
+
+---
+
+## 3) Підключення group-drag у `EditorCanvas`
+
+Ти вже бачив у попередньому повідомленні `useGroupDrag`. Тепер воно “сідає” на твої Group-и і працює ідеально.
+
+У `EditorCanvas` просто прокидаєш:
+
+```jsx
+<DiagramSymbols
+  ...
+  onElementMouseDown={S.handleElementMouseDown}
+  isSelected={(id) => S.isNodeSelected(id)}
+  onNodeDragStart={groupDrag.onDragStart}
+  onNodeDragMove={groupDrag.onDragMove}
+  onNodeDragEnd={groupDrag.onDragEnd}
+/>
+```
+
+---
+
+## 4) Дрібний, але важливий нюанс: коли selected = 1
+
+`useGroupDrag` спеціально **вмикається тільки коли selectedIds.length > 1**.
+Тобто одиночний drag працює як зараз — `handleDragMove` не ламається.
+
+---
+
+## 5) Що буде “як у Visio” після цього
+
+✅ Shift+клік — додати/зняти елемент
+✅ Тягнеш один із виділених — рухаються всі виділені
+✅ Anchor’и не зламаються
+✅ Marquee (рамка) з `getClientRect()` — працюватиме, бо ти реєструєш Group refs
+
+---
+
+Якщо хочеш, наступним кроком я дам **готову реалізацію marquee** прямо під твій `EditorCanvas` (з overlay `Layer` + `Rect`) і покажу, як зробити правило:
+
+* клік по пустому — зняти виділення
+* drag по пустому — рамка виділення
+* Shift+рамка — додає до поточного selection.

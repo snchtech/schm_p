@@ -1,0 +1,451 @@
+Ок, давай “прикрутимо” **grid + guides/snap** так, щоб воно лягло **в твою нову структуру (app router + розбиті хуки)** і не розповзлось по компонентах.
+
+Нижче — **конкретно: куди що покласти**, які **експорти/імпорти**, і **мінімальні правки** у твоєму `Stage/Layer` та в елементах бібліотеки.
+
+---
+
+# 1) Куди покласти файли (структура)
+
+Я рекомендую так (під твою логіку `useDiagramStore / useConnectionRouting / useSelection`):
+
+```
+app/
+  (editor)/
+    editor/[schemeId]/
+      page.jsx
+      _components/
+        DiagramStage.jsx
+        DiagramToolbar.jsx
+        layers/
+          GridLayer.jsx
+          GuidesLayer.jsx
+  components/
+    graph/
+      elements/
+        Rect.jsx
+        Circle.jsx
+        Line.jsx
+        TextElement.jsx
+      GraphLibrary.js
+
+  diagram/
+    store/
+      useDiagramStore.js
+    hooks/
+      useGrid.js
+      useGuidesSnap.js
+    utils/
+      grid/
+        buildGridLines.js
+      snap/
+        computeSnap.js
+```
+
+**Ідея:**
+
+* `GridLayer` + `GuidesLayer` — це “view-layer” компоненти.
+* `computeSnap.js` і `buildGridLines.js` — чисті утиліти без React.
+* `useGrid`, `useGuidesSnap` — хуки, які тримають стан (visible, guides, handlers).
+
+---
+
+# 2) Grid: утиліта + компонент Layer
+
+## `app/diagram/utils/grid/buildGridLines.js`
+
+```js
+export function buildGridLines({
+  width,
+  height,
+  scale = 1,
+  offsetX = 0,
+  offsetY = 0,
+  gridSize = 40,
+  subDiv = 4,
+}) {
+  const minor = gridSize / subDiv;
+
+  const lines = [];
+  const startX = -offsetX / scale;
+  const startY = -offsetY / scale;
+  const endX = startX + width / scale;
+  const endY = startY + height / scale;
+
+  for (let x = Math.floor(startX / minor) * minor; x < endX; x += minor) {
+    lines.push({ points: [x, startY, x, endY], major: Math.abs(x % gridSize) < 0.0001 });
+  }
+  for (let y = Math.floor(startY / minor) * minor; y < endY; y += minor) {
+    lines.push({ points: [startX, y, endX, y], major: Math.abs(y % gridSize) < 0.0001 });
+  }
+
+  return lines;
+}
+```
+
+## `app/(editor)/editor/[schemeId]/_components/layers/GridLayer.jsx`
+
+```jsx
+"use client";
+import React, { useMemo } from "react";
+import { Layer, Line } from "react-konva";
+import { buildGridLines } from "@/app/diagram/utils/grid/buildGridLines";
+
+export default function GridLayer({
+  width,
+  height,
+  scale,
+  offsetX,
+  offsetY,
+  visible,
+  gridSize = 40,
+  subDiv = 4,
+}) {
+  const lines = useMemo(() => {
+    if (!visible) return [];
+    return buildGridLines({ width, height, scale, offsetX, offsetY, gridSize, subDiv });
+  }, [width, height, scale, offsetX, offsetY, visible, gridSize, subDiv]);
+
+  if (!visible) return null;
+
+  return (
+    <Layer listening={false}>
+      {lines.map((l, i) => (
+        <Line
+          key={i}
+          points={l.points}
+          stroke={l.major ? "#cfcfcf" : "#e9e9e9"}
+          strokeWidth={l.major ? 1 : 0.5}
+        />
+      ))}
+    </Layer>
+  );
+}
+```
+
+---
+
+# 3) Guides + Snap: утиліта + Layer + хук
+
+## `app/diagram/utils/snap/computeSnap.js`
+
+(майже твій код, але одразу “готовий до підключення”)
+
+```js
+const SNAP = {
+  left: (b) => b.x,
+  centerX: (b) => b.x + b.width / 2,
+  right: (b) => b.x + b.width,
+  top: (b) => b.y,
+  centerY: (b) => b.y + b.height / 2,
+  bottom: (b) => b.y + b.height,
+};
+
+function getNodeBox(node) {
+  // враховує scale/rotation
+  return node.getClientRect({ relativeTo: node.getLayer() });
+}
+
+function getSnapLinesForNode(node) {
+  const box = getNodeBox(node);
+  return {
+    x: [
+      { type: "left", value: SNAP.left(box) },
+      { type: "centerX", value: SNAP.centerX(box) },
+      { type: "right", value: SNAP.right(box) },
+    ],
+    y: [
+      { type: "top", value: SNAP.top(box) },
+      { type: "centerY", value: SNAP.centerY(box) },
+      { type: "bottom", value: SNAP.bottom(box) },
+    ],
+  };
+}
+
+function collectOtherLines(layer, movingNode, selector) {
+  const nodes = layer.find(selector).filter((n) => n !== movingNode);
+  const lines = { x: [], y: [] };
+
+  nodes.forEach((n) => {
+    const { x, y } = getSnapLinesForNode(n);
+    x.forEach((lx) => lines.x.push(lx.value));
+    y.forEach((ly) => lines.y.push(ly.value));
+  });
+
+  return lines;
+}
+
+function findClosestSnap(value, candidates, tolerance) {
+  let best = null;
+  for (const c of candidates) {
+    const diff = Math.abs(c - value);
+    if (diff <= tolerance && (!best || diff < best.diff)) best = { target: c, diff };
+  }
+  return best;
+}
+
+export function computeSnap({ movingNode, layer, tolerance = 6, selector = ".snap-target" }) {
+  const moving = getSnapLinesForNode(movingNode);
+  const others = collectOtherLines(layer, movingNode, selector);
+
+  const absPos = movingNode.absolutePosition();
+  const guides = [];
+
+  let dx = 0;
+  let dy = 0;
+
+  // X
+  let bestX = null;
+  for (const line of moving.x) {
+    const snap = findClosestSnap(line.value, others.x, tolerance);
+    if (snap && (!bestX || snap.diff < bestX.diff)) {
+      bestX = { ...snap, from: line.value };
+    }
+  }
+  if (bestX) {
+    dx = bestX.target - bestX.from;
+    guides.push({ points: [bestX.target, -100000, bestX.target, 100000] });
+  }
+
+  // Y
+  let bestY = null;
+  for (const line of moving.y) {
+    const snap = findClosestSnap(line.value, others.y, tolerance);
+    if (snap && (!bestY || snap.diff < bestY.diff)) {
+      bestY = { ...snap, from: line.value };
+    }
+  }
+  if (bestY) {
+    dy = bestY.target - bestY.from;
+    guides.push({ points: [-100000, bestY.target, 100000, bestY.target] });
+  }
+
+  return {
+    newAbsPos: { x: absPos.x + dx, y: absPos.y + dy },
+    guides,
+  };
+}
+```
+
+## `app/(editor)/editor/[schemeId]/_components/layers/GuidesLayer.jsx`
+
+```jsx
+"use client";
+import React from "react";
+import { Layer, Line } from "react-konva";
+
+export default function GuidesLayer({ guides = [] }) {
+  return (
+    <Layer listening={false}>
+      {guides.map((g, idx) => (
+        <Line
+          key={idx}
+          points={g.points}
+          stroke="#2f80ed"
+          strokeWidth={1}
+          dash={[6, 4]}
+        />
+      ))}
+    </Layer>
+  );
+}
+```
+
+## `app/diagram/hooks/useGuidesSnap.js`
+
+Хук, який віддає **handlers** для drag, і **guides** для рендера.
+
+```js
+"use client";
+import { useState, useCallback } from "react";
+import { computeSnap } from "@/app/diagram/utils/snap/computeSnap";
+
+export function useGuidesSnap({ enabled = true, tolerance = 6, selector = ".snap-target" } = {}) {
+  const [guides, setGuides] = useState([]);
+
+  const onDragMove = useCallback(
+    (e) => {
+      if (!enabled) return;
+
+      const node = e.target;
+      const layer = node.getLayer();
+      if (!layer) return;
+
+      const { newAbsPos, guides } = computeSnap({ movingNode: node, layer, tolerance, selector });
+      node.absolutePosition(newAbsPos);
+
+      setGuides(guides);
+      layer.batchDraw();
+    },
+    [enabled, tolerance, selector]
+  );
+
+  const onDragEnd = useCallback(() => {
+    setGuides([]);
+  }, []);
+
+  return { guides, onDragMove, onDragEnd, setGuides };
+}
+```
+
+---
+
+# 4) Хук для grid-стану (перемикач)
+
+## `app/diagram/hooks/useGrid.js`
+
+```js
+"use client";
+import { useState, useCallback } from "react";
+
+export function useGrid(defaultVisible = true) {
+  const [gridVisible, setGridVisible] = useState(defaultVisible);
+  const toggleGrid = useCallback(() => setGridVisible((v) => !v), []);
+  return { gridVisible, toggleGrid, setGridVisible };
+}
+```
+
+---
+
+# 5) Підключення в твоєму `DiagramStage.jsx`
+
+## `app/(editor)/editor/[schemeId]/_components/DiagramStage.jsx`
+
+Тут важливо: ти вже робиш zoom/pan (скоріше за все) **на Layer**.
+Тому `GridLayer` має отримувати `scale` і `offset` саме цього Layer.
+
+```jsx
+"use client";
+import React, { useRef, useMemo } from "react";
+import { Stage, Layer } from "react-konva";
+
+import GridLayer from "./layers/GridLayer";
+import GuidesLayer from "./layers/GuidesLayer";
+
+import { useGrid } from "@/app/diagram/hooks/useGrid";
+import { useGuidesSnap } from "@/app/diagram/hooks/useGuidesSnap";
+
+import GraphLibrary from "@/app/components/graph/GraphLibrary";
+import { useDiagramStore } from "@/app/diagram/store/useDiagramStore";
+
+export default function DiagramStage() {
+  const stageRef = useRef(null);
+  const schemeLayerRef = useRef(null);
+
+  const { elements } = useDiagramStore(); // твій масив елементів
+  const { gridVisible, toggleGrid } = useGrid(true);
+
+  const { guides, onDragMove, onDragEnd } = useGuidesSnap({
+    enabled: true,
+    tolerance: 6,
+    selector: ".snap-target",
+  });
+
+  const stageSize = useMemo(() => ({ width: 1200, height: 800 }), []); // або from container resize
+
+  const layerTransform = useMemo(() => {
+    const layer = schemeLayerRef.current;
+    return {
+      scale: layer ? layer.scaleX() : 1,
+      offsetX: layer ? layer.x() : 0,
+      offsetY: layer ? layer.y() : 0,
+    };
+  }, [schemeLayerRef.current]); // якщо треба реактивно — зберігай scale/x/y у store
+
+  return (
+    <>
+      {/* тут твоя кнопка */}
+      <button onClick={toggleGrid}>Grid</button>
+
+      <Stage ref={stageRef} width={stageSize.width} height={stageSize.height}>
+        <GridLayer
+          width={stageSize.width}
+          height={stageSize.height}
+          visible={gridVisible}
+          scale={layerTransform.scale}
+          offsetX={layerTransform.offsetX}
+          offsetY={layerTransform.offsetY}
+          gridSize={40}
+          subDiv={4}
+        />
+
+        <Layer ref={schemeLayerRef} id="scheme-layer">
+          {elements.map((el) => {
+            const Comp = GraphLibrary[el.type];
+            if (!Comp) return null;
+            return (
+              <Comp
+                key={el.id}
+                el={el}
+                // ВАЖЛИВО: передаємо snap-handlers один раз
+                onDragMove={onDragMove}
+                onDragEnd={onDragEnd}
+              />
+            );
+          })}
+        </Layer>
+
+        <GuidesLayer guides={guides} />
+      </Stage>
+    </>
+  );
+}
+```
+
+> Якщо в тебе `scale/x/y` змінюються від зума — краще тримати їх в `useDiagramStore` як `viewport`, а не читати з ref (бо ref не тригерить rerender). Але навіть так — snap працюватиме, а grid може не оновитися на zoom/pan без rerender. Тому **viewport у store** — правильний шлях.
+
+---
+
+# 6) Мінімальні правки у графічних елементах (щоб snap працював)
+
+Ти маєш додати:
+
+* `name="snap-target"` (або клас через Konva `name`)
+* прокинути `onDragMove/onDragEnd` пропсами (і викликати їх)
+
+Наприклад твій `LineElement`:
+
+```jsx
+import React from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({ el, onDragMove, onDragEnd, onClickEl, onTransformEnd }) {
+  return (
+    <Line
+      name="snap-target"
+      key={el.id}
+      x={el.x}
+      y={el.y}
+      points={el.points}
+      stroke="black"
+      strokeWidth={2}
+      rotation={el.rotation}
+      draggable
+      onDragMove={onDragMove}
+      onDragEnd={(e) => {
+        onDragEnd?.(e);
+        // тут твій store update позиції (якщо треба)
+      }}
+      onClick={() => onClickEl?.(el.id)}
+      onTransformEnd={(e) => onTransformEnd?.(el.id, e)}
+    />
+  );
+}
+```
+
+---
+
+# 7) Як зробити “архітектурно правильно” для Next.js 16 (коротко)
+
+* **UI-компоненти (layers, stage, toolbar)** — в `app/(editor)/.../_components/`
+* **стан/логіка редактора** — в `app/diagram/store` + `app/diagram/hooks`
+* **чисті алгоритми** (grid lines, snap compute) — в `app/diagram/utils`
+
+Так ти не розмазуєш grid/snap по кожній фігурі, а просто:
+
+* один раз підключив `useGuidesSnap`
+* один раз підключив `GuidesLayer`
+* кожному елементу дав `name="snap-target"` + передав handlers
+
+---
+
+Якщо ти зараз скинеш **реальну структуру твого editor-компонента** (1 файл: де `Stage`, де `Layer`, де zoom/pan), я одразу підставлю це **точно у твої назви файлів** і підкажу, **куди саме винести viewport (scale/x/y)** в `useDiagramStore`, щоб grid **ідеально оновлювався** при zoom/pan.

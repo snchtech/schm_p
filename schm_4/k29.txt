@@ -1,0 +1,150 @@
+Ок, якщо в тебе є **scale** (і потенційно ще rotation), тоді просте `world = el.x + localX` вже **не гарантує** правильність. Треба робити **перетворення local → world** через трансформ Konva.
+
+Найнадійніше — брати абсолютний трансформ **Group** і просити його порахувати точку.
+
+## 1) Хелпер local → world через Konva Transform
+
+```js
+// src/shared/diagram/konva/transform.js
+import Konva from "konva";
+
+/**
+ * Перетворює локальну точку (в координатах Group) у світову (Stage).
+ * Працює з x/y, scale, rotation, offset, parent transforms.
+ */
+export function localToWorld(groupNode, localPoint) {
+  const tr = groupNode.getAbsoluteTransform().copy();
+  return tr.point(localPoint); // {x,y}
+}
+
+/**
+ * Якщо треба навпаки: world -> local
+ */
+export function worldToLocal(groupNode, worldPoint) {
+  const tr = groupNode.getAbsoluteTransform().copy();
+  tr.invert();
+  return tr.point(worldPoint);
+}
+```
+
+> `Konva` імпорт тут не обов’язковий, але часто зручно мати під рукою.
+
+---
+
+## 2) Як це використовувати для anchor’ів у Circle (з Group + scale)
+
+### Circle рендериться як у тебе: `Circle x={0} y={0}` в `Group`
+
+```jsx
+import React, { useRef, useMemo } from "react";
+import { Group, Circle as KCircle } from "react-konva";
+import { localToWorld } from "@/shared/diagram/konva/transform";
+
+export default function CircleElement({ el, isSelected, onAnchorDown }) {
+  const groupRef = useRef(null);
+  const r = el.radius ?? 30;
+
+  // локальні anchors (всередині Group)
+  const localAnchors = useMemo(() => ([
+    { id: "left", dir: "left", x: -r, y: 0 },
+    { id: "right", dir: "right", x: r, y: 0 },
+  ]), [r]);
+
+  return (
+    <Group
+      ref={groupRef}
+      x={el.x}
+      y={el.y}
+      scaleX={el.scaleX ?? 1}
+      scaleY={el.scaleY ?? 1}
+      rotation={el.rotation ?? 0}
+    >
+      <KCircle
+        x={0}
+        y={0}
+        radius={r}
+        fill={el.fill}
+        stroke={el.stroke}
+        strokeWidth={el.strokeWidth}
+      />
+
+      {isSelected && localAnchors.map((a) => (
+        <KCircle
+          key={a.id}
+          x={a.x}
+          y={a.y}
+          radius={5}
+          fill="white"
+          stroke="black"
+          strokeWidth={2}
+          onMouseDown={(e) => {
+            const group = groupRef.current;
+            if (!group) return;
+
+            const world = localToWorld(group, { x: a.x, y: a.y });
+
+            onAnchorDown({
+              elementId: el.id,
+              anchorId: a.id,
+              dir: a.dir,
+              // координати в Stage (правильні з scale/rotation)
+              x: world.x,
+              y: world.y,
+              // локальні теж інколи корисні
+              localX: a.x,
+              localY: a.y,
+            }, e);
+          }}
+        />
+      ))}
+    </Group>
+  );
+}
+```
+
+✅ Це **100% коректно** при будь-яких `scaleX/scaleY`, `rotation`, вкладених group’ах і т.д.
+
+---
+
+## 3) Якщо anchors малюєш окремим `AnchorsLayer` (не всередині фігури)
+
+Тоді тобі все одно треба дістати `groupNode` відповідної фігури. Найкращий патерн:
+
+* завести `elementsRefs = useRef(new Map())`
+* у кожній фігурі: `ref={(node)=> register(el.id,node)}`
+
+### Реєстр ref’ів
+
+```js
+// у сторі/хук-стані
+const elementNodesRef = useRef(new Map());
+
+const registerElementNode = (id, node) => {
+  if (!id) return;
+  if (node) elementNodesRef.current.set(id, node);
+  else elementNodesRef.current.delete(id);
+};
+```
+
+### У компоненті фігури
+
+```jsx
+<Group ref={(node) => registerElementNode(el.id, node)} ...>
+```
+
+### В AnchorsLayer
+
+```js
+const node = elementNodesRef.current.get(el.id);
+const world = localToWorld(node, { x: localX, y: localY });
+```
+
+---
+
+## 4) Важливий момент: stage zoom/pan
+
+Якщо ти робиш zoom/pan через **Layer scale/position**, то `getAbsoluteTransform()` дасть координати **в системі Stage**, уже з урахуванням трансформів. Це саме те, що потрібно, щоб лінія/конектор “потрапляв” в точку на екрані.
+
+---
+
+Якщо ти покажеш, **де саме** ти зараз зберігаєш `scale` (в `el.scale`, `scaleX/scaleY`, чи це масштаб всієї сцени через layer), я підкажу найправильніше місце для `localToWorld` у твоїй архітектурі (щоб без “танців” при drag/transform).

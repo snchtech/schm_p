@@ -1,0 +1,181 @@
+Добре 👍 Додамо **чітку, ізольовану кнопку вмикання / вимикання сітки**, так щоб це було:
+
+* архітектурно правильно для **Next.js 16 (App Router)**
+* без “протягування пропсів”
+* керувалося через **store**
+* легко розширювалось (гарячі клавіші, іконка, tooltip)
+
+Нижче — **мінімальні та правильні зміни**, без переписування всього коду.
+
+---
+
+# 1️⃣ Store: стан сітки (ти вже майже готовий)
+
+У тебе **вже є** `showGrid` у `editorStore.js`. Переконайся, що він виглядає так:
+
+```js
+// store/editorStore.js
+export const useEditorStore = create((set) => ({
+  showGrid: true,
+
+  toggleGrid: () =>
+    set((state) => ({ showGrid: !state.showGrid })),
+
+  // інше...
+}));
+```
+
+👉 **Ключовий момент**: окрема action `toggleGrid`, а не логіка в UI.
+
+---
+
+# 2️⃣ Окремий UI-компонент кнопки (правильно)
+
+❌ **НЕ** пхати кнопку прямо в `EditorStage`
+✅ **ТАК** — винести в `components/editor/ui/GridToggle.jsx`
+
+### `components/editor/ui/GridToggle.jsx`
+
+```jsx
+"use client";
+import React from "react";
+import { useEditorStore } from "@/store/editorStore";
+
+export default function GridToggle() {
+  const showGrid = useEditorStore((s) => s.showGrid);
+  const toggleGrid = useEditorStore((s) => s.toggleGrid);
+
+  return (
+    <button
+      onClick={toggleGrid}
+      title="Показати / сховати сітку"
+      style={{
+        padding: "6px 10px",
+        borderRadius: 6,
+        border: "1px solid #ccc",
+        background: showGrid ? "#e8f0ff" : "#fff",
+        cursor: "pointer",
+        fontSize: 13,
+      }}
+    >
+      {showGrid ? "▦ Сітка: ON" : "▦ Сітка: OFF"}
+    </button>
+  );
+}
+```
+
+📌 Тепер кнопка **нічого не знає** про GridLayer — лише про стан.
+
+---
+
+# 3️⃣ Toolbar: підключаємо кнопку
+
+### `components/editor/ui/EditorToolbar.jsx`
+
+```jsx
+"use client";
+import React from "react";
+import GridToggle from "./GridToggle";
+
+export default function EditorToolbar() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        padding: 10,
+        borderBottom: "1px solid #ddd",
+        alignItems: "center",
+        background: "#fff",
+      }}
+    >
+      <GridToggle />
+
+      {/* далі можна додавати */}
+      {/* Zoom buttons */}
+      {/* Undo / Redo */}
+    </div>
+  );
+}
+```
+
+👉 Toolbar тепер **композиційний**, а не “знає про все”.
+
+---
+
+# 4️⃣ EditorStage: тільки читає showGrid
+
+### `components/editor/stage/EditorStage.jsx`
+
+Зміни **мінімальні** — нічого не керуємо тут.
+
+```jsx
+import { useEditorStore } from "@/store/editorStore";
+
+// ...
+const showGrid = useEditorStore((s) => s.showGrid);
+const viewport = useEditorStore((s) => s.viewport);
+
+// ...
+<GridLayer
+  width={stageSize.width}
+  height={stageSize.height}
+  viewport={viewport}
+  visible={showGrid}
+/>
+```
+
+❗ **EditorStage не має кнопок і логіки UI** — тільки рендер.
+
+---
+
+# 5️⃣ Результат (як це працює)
+
+* Кнопка → `toggleGrid()`
+* Store змінює `showGrid`
+* `GridLayer` автоматично:
+
+  * або рендериться
+  * або повертає `null`
+* Ніяких `props drilling`, ніяких `useEffect`
+
+---
+
+# 6️⃣ (Бонус) Гарячі клавіші — 2 рядки
+
+Якщо хочеш як у Visio (`G`):
+
+```js
+useEffect(() => {
+  const onKey = (e) => {
+    if (e.key.toLowerCase() === "g") {
+      useEditorStore.getState().toggleGrid();
+    }
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, []);
+```
+
+📌 Краще винести в `useEditorHotkeys.js`, але логіка та сама.
+
+---
+
+# 7️⃣ Архітектурне правило (запам’ятати)
+
+> **UI кнопка → store → рендер**
+>
+> ❌ UI → напряму керує GridLayer
+> ❌ EditorStage містить кнопки
+> ✅ UI не знає про Konva
+> ✅ Konva не знає про UI
+
+---
+
+Як наступний крок рекомендую:
+
+* додати **Snap to grid (Shift)**
+* додати **grid size selector (10 / 20 / 40)**
+* або зробити **окремий LayerSettings popover**
+
+Скажи, що хочеш далі — під це одразу дам правильну реалізацію 👌

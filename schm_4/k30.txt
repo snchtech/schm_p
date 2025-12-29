@@ -1,0 +1,146 @@
+Так, **нема різниці**, чи ти малюєш коло через `<Circle/>`, чи через **універсальний `<Shape/>`** (`sceneFunc`) — anchors все одно можна контролювати **на рівні компонента фігури**.
+
+Ключове: **anchors рахуються в локальних координатах Group**, а у “світові” (з урахуванням `scale/rotation`) переводяться через `groupRef.current.getAbsoluteTransform().point(...)`.
+
+Нижче — максимально “під твій стиль”: і фігура, і анкори — через **`Shape`**.
+
+---
+
+## 1) Хелпер local → world (працює з scale/rotation)
+
+```js
+// src/shared/diagram/konva/transform.js
+export function localToWorld(groupNode, localPoint) {
+  const tr = groupNode.getAbsoluteTransform().copy();
+  return tr.point(localPoint); // { x, y }
+}
+```
+
+---
+
+## 2) Компонент `CircleElement`, але намальований через універсальний `Shape`
+
+> Умова: у тебе `Circle` зараз малюється як `Shape` всередині `<Group x={el.x} y={el.y} ... scale...>`
+
+```jsx
+import React, { useMemo, useRef } from "react";
+import { Group, Shape } from "react-konva";
+import { localToWorld } from "@/shared/diagram/konva/transform";
+
+function AnchorDot({ x, y, onDown }) {
+  return (
+    <Shape
+      x={x}
+      y={y}
+      listening
+      onMouseDown={onDown}
+      sceneFunc={(ctx, shape) => {
+        ctx.beginPath();
+        ctx.arc(0, 0, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#fff";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#000";
+        ctx.stroke();
+        ctx.closePath();
+        ctx.fillStrokeShape(shape);
+      }}
+    />
+  );
+}
+
+export default function CircleElement({ el, isSelected, onAnchorDown }) {
+  const groupRef = useRef(null);
+
+  const r = el.radius ?? 30;
+
+  // локальні анкори відносно Group (бо фігура в 0,0)
+  const anchors = useMemo(
+    () => [
+      { id: "left", dir: "left", x: -r, y: 0 },
+      { id: "right", dir: "right", x: r, y: 0 },
+    ],
+    [r]
+  );
+
+  return (
+    <Group
+      ref={groupRef}
+      x={el.x}
+      y={el.y}
+      scaleX={el.scaleX ?? el.scale ?? 1}
+      scaleY={el.scaleY ?? el.scale ?? 1}
+      rotation={el.rotation ?? 0}
+    >
+      {/* ТВОЄ універсальне коло через Shape */}
+      <Shape
+        x={0}
+        y={0}
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fillStyle = el.fill ?? "transparent";
+          ctx.fill();
+          ctx.lineWidth = el.strokeWidth ?? 2;
+          ctx.strokeStyle = el.stroke ?? "#000";
+          ctx.stroke();
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+      />
+
+      {/* Точки прив’язки: теж Shape */}
+      {isSelected &&
+        anchors.map((a) => (
+          <AnchorDot
+            key={a.id}
+            x={a.x}
+            y={a.y}
+            onDown={(e) => {
+              const group = groupRef.current;
+              if (!group) return;
+
+              // ✅ правильні координати з урахуванням scale/rotation
+              const world = localToWorld(group, { x: a.x, y: a.y });
+
+              onAnchorDown?.(
+                {
+                  elementId: el.id,
+                  anchorId: a.id,
+                  dir: a.dir,
+                  x: world.x,
+                  y: world.y,
+                  localX: a.x,
+                  localY: a.y,
+                },
+                e
+              );
+            }}
+          />
+        ))}
+    </Group>
+  );
+}
+```
+
+---
+
+## 3) Як “контролювати точки прив’язки на рівні компонента”
+
+Ти просто **в CircleElement визначаєш anchors** як тобі треба:
+
+* для circle: 2 точки (left/right)
+* для rect: 4 точки (top/bottom/left/right)
+* для symbolX: хоч 8 точок — залежить від компонента
+
+Тобто “універсальні 4 точки” стають **дефолтом**, а конкретний компонент може **перевизначити**.
+
+---
+
+## 4) Важлива ремарка про stage/layer scale
+
+Якщо ти робиш zoom/pan **через layer scale/position**, то `getAbsoluteTransform()` **врахує і це**. Тобто `world.x/world.y` будуть вже в координатах Stage (і це те, що треба для ліній, які малюються в тій же сцені).
+
+---
+
+Якщо покажеш (1) як у тебе виглядає твій універсальний `ShapeElement` / `GraphLibrary` і (2) де саме живе `scale` (в `el.scale` чи `layer.scale()`), я піджену цей код 1-в-1 під твої файли (щоб ти просто вставив без переробок).

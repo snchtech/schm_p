@@ -1,0 +1,162 @@
+Вийде ✅. Просто треба пам’ятати: якщо ти рендериш так:
+
+```jsx
+<Group x={el.x} y={el.y}>
+  <Circle x={0} y={0} ... />
+</Group>
+```
+
+то **координати anchor’ів ти теж задаєш відносно Group**, тобто **всередині компонента** вони будуть не “глобальні”, а “локальні” (для group).
+
+І це навіть зручніше: для Circle локальні анкори — просто `(-r, 0)` і `(r, 0)`.
+
+---
+
+## Варіант 1: Circle сам рендерить анкори (локально в Group)
+
+```jsx
+import React from "react";
+import { Group, Circle as KCircle } from "react-konva";
+
+export default function CircleElement({ el, isSelected, onAnchorDown }) {
+  const r = el.radius ?? 30;
+
+  // локальні координати відносно Group (бо Circle у тебе x=0 y=0)
+  const anchors = [
+    { id: "left", dir: "left", x: -r, y: 0 },
+    { id: "right", dir: "right", x: r, y: 0 },
+  ];
+
+  return (
+    <Group x={el.x} y={el.y}>
+      <KCircle
+        x={0}
+        y={0}
+        radius={r}
+        fill={el.fill}
+        stroke={el.stroke}
+        strokeWidth={el.strokeWidth}
+      />
+
+      {isSelected &&
+        anchors.map((a) => (
+          <KCircle
+            key={a.id}
+            x={a.x}
+            y={a.y}
+            radius={5}
+            fill="white"
+            stroke="black"
+            strokeWidth={2}
+            onMouseDown={(e) =>
+              onAnchorDown(
+                {
+                  elementId: el.id,
+                  anchorId: a.id,
+                  dir: a.dir,
+                  // якщо треба віддати "світові" координати — додаємо el.x/el.y
+                  x: el.x + a.x,
+                  y: el.y + a.y,
+                  localX: a.x,
+                  localY: a.y,
+                },
+                e
+              )
+            }
+          />
+        ))}
+    </Group>
+  );
+}
+```
+
+✅ Працює прямо зараз з твоїм підходом `Circle x=0 y=0`.
+
+---
+
+## Варіант 2: Краще архітектурно — Circle **повертає anchors як дані**, а рендерить їх `AnchorsLayer`
+
+Тут Circle НЕ малює анкори, але “контролює” їх.
+
+### Circle anchors (локальні + перерахунок в world)
+
+```js
+// Circle/anchors.js
+export function getCircleAnchors(el) {
+  const r = el.radius ?? 30;
+
+  const local = [
+    { id: "left", dir: "left", x: -r, y: 0 },
+    { id: "right", dir: "right", x: r, y: 0 },
+  ];
+
+  // AnchorsLayer зазвичай малює у world coords
+  return local.map((a) => ({
+    ...a,
+    worldX: el.x + a.x,
+    worldY: el.y + a.y,
+  }));
+}
+```
+
+### AnchorsLayer малює `worldX/worldY`
+
+```jsx
+import React from "react";
+import { Group, Circle as KCircle } from "react-konva";
+
+export function AnchorsLayer({ elements, graphLibrary, selectedId, onAnchorDown }) {
+  if (!selectedId) return null;
+
+  const el = elements.find((e) => e.id === selectedId);
+  if (!el) return null;
+
+  const def = graphLibrary[el.type];
+  const anchors = def?.getAnchors ? def.getAnchors(el) : [];
+
+  return (
+    <Group>
+      {anchors.map((a) => (
+        <KCircle
+          key={`${el.id}:${a.id}`}
+          x={a.worldX}
+          y={a.worldY}
+          radius={5}
+          fill="white"
+          stroke="black"
+          strokeWidth={2}
+          onMouseDown={(e) =>
+            onAnchorDown(
+              { elementId: el.id, anchorId: a.id, dir: a.dir, x: a.worldX, y: a.worldY },
+              e
+            )
+          }
+        />
+      ))}
+    </Group>
+  );
+}
+```
+
+✅ Плюс цього варіанту: anchors завжди відмальовуються **в одному шарі**, незалежно від того, як фігури побудовані через Group.
+
+---
+
+## Ключова відповідь на твоє питання
+
+> “через Group і Circle x=0 y=0 — не вийде задавати анкори через компонент?”
+
+Вийде **на 100%**. Просто:
+
+* **всередині компонента** anchor координати будуть **локальні** (відносно Group)
+* якщо для з’єднань тобі потрібні **світові координати**, ти додаєш `el.x/el.y` (і ще rotation/scale — якщо потім увімкнеш)
+
+---
+
+### Якщо в тебе є rotation у Group
+
+Тоді просте `el.x + localX` вже не достатньо. Треба перетворення “local → world” через Konva API:
+
+* або `groupRef.current.getAbsoluteTransform().point({x:localX,y:localY})`.
+
+Якщо скажеш, чи є у тебе `rotation/scale` для елементів — я дам точний хелпер `localToWorld()` і ти будеш готовий до повної геометрії.
