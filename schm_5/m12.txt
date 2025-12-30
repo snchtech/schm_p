@@ -1,0 +1,258 @@
+Ок, робимо **“виноску” (callout)** як окремий елемент у твоїй бібліотеці, який можна:
+
+* додати **через контекстне меню (ПКМ) по елементу** → “Додати виноску”
+* мати **номер** (цифра/текст)
+* **позиціонувати** (drag за “якір” і/або за поличку)
+* зберігати в стані як звичайний елемент схеми
+
+Нижче — робочий каркас під **Next.js + react-konva + MUI**.
+
+---
+
+## 1) Модель даних (element типу `callout`)
+
+```js
+// приклад структури елемента в store
+{
+  id: "c_123",
+  type: "callout",
+  targetId: "el_55",          // до якого елемента прив’язана виноска
+  number: "1",                // номер (текст)
+  // геометрія виноски:
+  ax: 120, ay: 80,            // anchor (точка-кінець лінії біля елемента)
+  bx: 220, by: 140,           // kink (точка зламу, де починається поличка)
+  shelfLen: 40,               // довжина полички вправо (може бути +/-)
+  stroke: "#111",
+  strokeWidth: 2,
+  fontSize: 14,
+}
+```
+
+**Логіка:** лінія йде `A -> B`, потім “поличка” `B -> (B.x + shelfLen, B.y)`, а цифра стоїть над/біля полички.
+
+---
+
+## 2) Додавання через контекстне меню (ПКМ)
+
+### 2.1. Виклик ПКМ на елементі
+
+У твоєму `onElementContextMenu(el, e)` збережи `contextTargetId`.
+
+```js
+function onElementContextMenu(el, e) {
+  e.evt.preventDefault();
+
+  setContextMenu({
+    open: true,
+    x: e.evt.clientX,
+    y: e.evt.clientY,
+    targetId: el.id,
+  });
+}
+```
+
+### 2.2. MUI Menu пункт “Додати виноску”
+
+```jsx
+import { Menu, MenuItem } from "@mui/material";
+
+<Menu
+  open={contextMenu.open}
+  onClose={() => setContextMenu((s) => ({ ...s, open: false }))}
+  anchorReference="anchorPosition"
+  anchorPosition={
+    contextMenu.open ? { top: contextMenu.y, left: contextMenu.x } : undefined
+  }
+>
+  <MenuItem
+    onClick={() => {
+      addCalloutForElement(contextMenu.targetId);
+      setContextMenu((s) => ({ ...s, open: false }));
+    }}
+  >
+    Додати виноску
+  </MenuItem>
+</Menu>
+```
+
+---
+
+## 3) Функція `addCalloutForElement(targetId)`
+
+Ідея: беремо **позицію елемента** (через `nodeRef.getClientRect()` або твою модель `el.x/y`) і створюємо виноску зі стартом біля нього.
+
+```js
+function addCalloutForElement(targetId) {
+  const target = elements.find((x) => x.id === targetId);
+  if (!target) return;
+
+  // базово — справа внизу від елемента (потім перетягнеш)
+  const ax = (target.x ?? 0) + 20;
+  const ay = (target.y ?? 0) + 20;
+
+  const bx = ax + 60;
+  const by = ay + 40;
+
+  const nextNumber = String(getNextCalloutNumber(elements)); // 1,2,3...
+
+  const callout = {
+    id: `c_${crypto.randomUUID()}`,
+    type: "callout",
+    targetId,
+    number: nextNumber,
+    ax,
+    ay,
+    bx,
+    by,
+    shelfLen: 40,
+    stroke: "#111",
+    strokeWidth: 2,
+    fontSize: 14,
+  };
+
+  setElements((prev) => [...prev, callout]);
+}
+
+function getNextCalloutNumber(all) {
+  const nums = all
+    .filter((e) => e.type === "callout")
+    .map((e) => parseInt(e.number, 10))
+    .filter((n) => Number.isFinite(n));
+  return nums.length ? Math.max(...nums) + 1 : 1;
+}
+```
+
+> Якщо ти вже маєш `registerNodeRef(id,node)` — краще брати `getClientRect()` у реальних координатах (особливо при transform/scale). Але цей каркас вже дає базову роботу.
+
+---
+
+## 4) React-Konva компонент `CalloutElement`
+
+* малює 2 відрізки: лінія + поличка
+* показує текст-номер
+* дає перетягувати **B** (поличку) і **A** (якір) окремо
+
+```jsx
+import React, { useMemo } from "react";
+import { Group, Line, Circle, Text } from "react-konva";
+
+export default function CalloutElement({ el, onChange, isSelected, onSelect }) {
+  const shelfX = el.bx + (el.shelfLen ?? 40);
+  const shelfY = el.by;
+
+  const pointsMain = useMemo(() => [el.ax, el.ay, el.bx, el.by], [el.ax, el.ay, el.bx, el.by]);
+  const pointsShelf = useMemo(() => [el.bx, el.by, shelfX, shelfY], [el.bx, el.by, shelfX, shelfY]);
+
+  return (
+    <Group
+      onMouseDown={() => onSelect?.(el.id)}
+      onClick={() => onSelect?.(el.id)}
+    >
+      <Line points={pointsMain} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+      <Line points={pointsShelf} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+
+      {/* номер */}
+      <Text
+        x={Math.min(el.bx, shelfX) + 4}
+        y={el.by - (el.fontSize ?? 14) - 2}
+        text={String(el.number ?? "")}
+        fontSize={el.fontSize ?? 14}
+        fontStyle="bold"
+        fill={el.stroke ?? "#111"}
+        listening={false}
+      />
+
+      {/* ручка A */}
+      {isSelected && (
+        <Circle
+          x={el.ax}
+          y={el.ay}
+          radius={6}
+          fill="#fff"
+          stroke="#333"
+          strokeWidth={2}
+          draggable
+          onDragMove={(e) => {
+            const { x, y } = e.target.position();
+            onChange({ ...el, ax: x, ay: y });
+          }}
+        />
+      )}
+
+      {/* ручка B */}
+      {isSelected && (
+        <Circle
+          x={el.bx}
+          y={el.by}
+          radius={6}
+          fill="#fff"
+          stroke="#333"
+          strokeWidth={2}
+          draggable
+          onDragMove={(e) => {
+            const { x, y } = e.target.position();
+            onChange({ ...el, bx: x, by: y });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+### Підключення в `GraphLibrary`
+
+```js
+import CalloutElement from "./CalloutElement";
+
+const GraphLibrary = {
+  rect: RectElement,
+  circle: CircleElement,
+  line: LineElement,
+  text: TextElement,
+  callout: CalloutElement,
+};
+export default GraphLibrary;
+```
+
+### Оновлення елемента в store
+
+У `DiagramSymbols` коли рендериш `callout`, передай `onChange`:
+
+```jsx
+const Comp = ELEMENT_COMPONENTS[el.type];
+return (
+  <Comp
+    key={el.id}
+    el={el}
+    isSelected={isSelected(el.id)}
+    onSelect={onMouseDown}
+    onChange={(next) => updateElement(el.id, next)}
+  />
+);
+```
+
+---
+
+## 5) Редагування номера (ПКМ по виносці)
+
+Додаєш у контекстне меню для `callout`:
+
+* “Змінити номер” → відкриває MUI Dialog з TextField
+* “Повернути поличку” (shelfLen *= -1)
+* “Видалити”
+
+Каркас функцій:
+
+```js
+function setCalloutNumber(id, number) {
+  setElements((prev) => prev.map((e) => (e.id === id ? { ...e, number } : e)));
+}
+function flipShelf(id) {
+  setElements((prev) => prev.map((e) => (e.id === id ? { ...e, shelfLen: -(e.shelfLen ?? 40) } : e)));
+}
+```
+
+---
+
+Якщо хочеш — наступним кроком я дам **правильну геометрію з урахуванням zoom/scale та offset**, щоб виноска при додаванні “ставала” саме біля елемента незалежно від масштабу, і щоб можна було тягнути поличку **тільки по осі X** (ідеально як у кресленнях).

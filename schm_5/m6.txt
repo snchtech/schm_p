@@ -1,0 +1,246 @@
+Нижче — робочий “скелет”, як у тебе `rect / circle`, тільки для **лінії-переходу зі стрілкою** (transition arrow). Воно:
+
+* малюється як звичайна лінія, але зі **стрілкою на кінці** (від anchor → до стрілки)
+* підтримує **різні типи стрілки**: “контурна” (без заливки) і “залита”
+* має **клікабельність + link-параметри** (перехід між листами/сторінками)
+* враховує, що **блок “Параметри” в контекстному меню спільний для всіх елементів**
+
+---
+
+## 1) Модель даних елемента (приклад)
+
+```js
+// el (element) приклад для transition arrow
+{
+  id: "tr_101",
+  type: "transition",              // новий тип
+  layerType: "scheme",
+  points: [x1, y1, x2, y2],         // як у звичайної Line
+  stroke: "#000",
+  strokeWidth: 2,
+
+  // стилі стрілки
+  arrow: {
+    variant: "outline",            // "outline" | "filled"
+    pointerLength: 14,
+    pointerWidth: 12,
+  },
+
+  // клікабельність/перехід
+  interaction: {
+    clickable: true,               // редактор в "Параметри"
+    openMode: "sameTab",           // "sameTab" | "newTab" (за потреби)
+  },
+
+  // link параметри (переходи між листами/схемами)
+  link: {
+    fromSchemeId: 10,
+    fromElementId: "rect_5",
+    toSchemeId: 25,
+    toElementId: "circle_9",
+    // можна розширювати:
+    extra: {
+      // будь-які додаткові параметри
+    },
+  },
+}
+```
+
+> `points` можна генерувати з anchor’ів (ліва/права/верх/низ) так само, як у тебе для ліній/конекторів. Тут важливо: **стрілка завжди на кінці**, тобто `pointerAtEnding: true`.
+
+---
+
+## 2) Компонент `TransitionArrowElement.js` (react-konva)
+
+Використаємо `Arrow` з Konva (це найпростіше).
+Для “контурної” стрілки — `fill="rgba(0,0,0,0)"`, для “залитої” — `fill="#000"`.
+
+```jsx
+// app/components/graph/TransitionArrowElement.js
+import React, { useMemo } from "react";
+import { Arrow } from "react-konva";
+
+const DEFAULT_ARROW = {
+  variant: "outline", // outline | filled
+  pointerLength: 14,
+  pointerWidth: 12,
+};
+
+export default function TransitionArrowElement({
+  el,
+  onSelect,          // (id) => void
+  onClickEl,         // (id, e) => void (або тільки id)
+  onContextMenu,     // (id, e) => void
+  onDragEnd,         // якщо зробиш draggable
+  onTransformEnd,    // якщо даєш трансформер
+  onOpenLink,        // (el) => void  <-- важливо для переходу
+  isSelected,
+  draggable = false,
+}) {
+  const arrowCfg = el.arrow || DEFAULT_ARROW;
+
+  const fill = arrowCfg.variant === "filled" ? "#000" : "rgba(0,0,0,0)";
+  const stroke = el.stroke || "#000";
+  const strokeWidth = el.strokeWidth ?? 2;
+
+  // Щоб лінія нормально “ловилась” мишкою, навіть якщо тонка
+  const hitStrokeWidth = useMemo(() => Math.max(12, strokeWidth * 6), [strokeWidth]);
+
+  const clickable = el?.interaction?.clickable === true;
+
+  const handleClick = (e) => {
+    e.cancelBubble = true;
+    onSelect?.(el.id);
+    onClickEl?.(el.id, e);
+
+    // Переходимо тільки якщо елемент клікабельний
+    if (clickable) {
+      onOpenLink?.(el);
+    }
+  };
+
+  return (
+    <Arrow
+      id={el.id}
+      points={el.points}
+      stroke={stroke}
+      strokeWidth={strokeWidth}
+      lineCap="round"
+      lineJoin="round"
+
+      // Стрілка тільки на кінці
+      pointerAtBeginning={false}
+      pointerAtEnding={true}
+
+      pointerLength={arrowCfg.pointerLength ?? 14}
+      pointerWidth={arrowCfg.pointerWidth ?? 12}
+
+      // Контур/заливка
+      fill={fill}
+
+      // “зона кліку”
+      hitStrokeWidth={hitStrokeWidth}
+
+      // щоб при zoom товщина лінії не “роздувалась” (за бажанням)
+      strokeScaleEnabled={false}
+
+      draggable={draggable}
+      onClick={handleClick}
+      onTap={handleClick}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        e.cancelBubble = true;
+        onSelect?.(el.id);
+        onContextMenu?.(el.id, e);
+      }}
+      onDragEnd={(e) => onDragEnd?.(el.id, e)}
+      onTransformEnd={(e) => onTransformEnd?.(el.id, e)}
+
+      // трохи візуального фідбеку для selection (не обов’язково)
+      opacity={isSelected ? 0.95 : 1}
+    />
+  );
+}
+```
+
+---
+
+## 3) Додай в `GraphLibrary` як `rect/circle`
+
+```js
+// app/components/graph/index.js
+import RectElement from "./Rect";
+import CircleElement from "./Circle";
+import LineElement from "./LineElement";
+import TransitionArrowElement from "./TransitionArrowElement";
+
+const GraphLibrary = {
+  rect: RectElement,
+  circle: CircleElement,
+  line: LineElement,
+
+  // новий тип
+  transition: TransitionArrowElement,
+};
+
+export default GraphLibrary;
+```
+
+І в мапі компонентів:
+
+```js
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  transition: GraphLibrary.transition,
+};
+```
+
+---
+
+## 4) Відкриття “переходу” (Next.js pages router)
+
+Ти просив: `id елемента`, `id схеми з якої`, `id схеми в яку`, і можливість розширення.
+
+```js
+// приклад хендлера, який передаси як onOpenLink
+import Router from "next/router";
+
+export function openTransitionLink(el) {
+  const link = el.link;
+  if (!link?.toSchemeId) return;
+
+  Router.push({
+    pathname: "/albums/[albumId]", // або твій маршрут листа/схеми
+    query: {
+      albumId: link.toSchemeId,
+      fromSchemeId: link.fromSchemeId,
+      fromElementId: link.fromElementId,
+      toElementId: link.toElementId,
+      // додаткові:
+      ...link.extra,
+    },
+  });
+}
+```
+
+> Дуже зручно зробити правило: **в режимі editor клік просто виділяє**, а перехід — наприклад по `Ctrl+Click` або через кнопку “Перейти” у контекстному меню. Але це вже твоя UX-логіка.
+
+---
+
+## 5) “Параметри” в контекстному меню спільні для всіх елементів
+
+Щоб не плодити різні меню, зроби **єдиний опис “schema” параметрів**, а для transition просто додається секція.
+
+Приклад “універсальної” структури:
+
+```js
+// будь-який елемент має:
+el.params = {
+  common: {
+    name: "…",
+    description: "…",
+    clickable: true,
+  },
+  transition: {  // тільки для type="transition"
+    arrowVariant: "outline",
+    toSchemeId: 25,
+    toElementId: "circle_9",
+  },
+};
+```
+
+А контекстне меню рендерить:
+
+* секцію **Common** для всіх
+* секцію **Type-specific** залежно від `el.type`
+
+Це дозволить легко додавати нові типи (і нові параметри), не переписуючи меню.
+
+---
+
+Якщо хочеш — скидай, як у тебе зараз виглядає структура `elements` (і де саме ти формуєш `points` від anchor’ів), і я під твою поточну архітектуру:
+
+* додам **створення transition-стрілки від кліку по anchor’ах**,
+* і логіку **Ctrl+Click для переходу**, щоб у редакторі не заважало виділенню.

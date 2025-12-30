@@ -1,0 +1,218 @@
+Супер. Тоді робимо “правильну” геометрію **в координатах Layer**, щоб усе ставало **точно під клік** незалежно від `zoom/scale/pan`, і додаємо **ручку кінця полички**, яку можна тягнути **тільки по X**.
+
+---
+
+## 1) Хелпер: координати курсора в системі Layer (з урахуванням scale + pan)
+
+Створи `app/diagram/utils/konva/coords.js`:
+
+```js
+// app/diagram/utils/konva/coords.js
+export function getPointerPosInNode(node) {
+  if (!node) return { x: 0, y: 0 };
+  const stage = node.getStage?.();
+  if (!stage) return { x: 0, y: 0 };
+
+  const p = stage.getPointerPosition();
+  if (!p) return { x: 0, y: 0 };
+
+  // переводимо координати зі stage у координати node (layer/group)
+  const tr = node.getAbsoluteTransform().copy();
+  tr.invert();
+  return tr.point(p);
+}
+```
+
+> `node` тут — саме той контейнер, на який ти застосовуєш zoom/pan (у тебе це Layer або Group-контейнер схеми).
+
+---
+
+## 2) Додавання виноски “під клік” + прив’язка A біля елемента
+
+### 2.1. Передай у `onElementContextMenu` ще `stage/layer` координати кліку
+
+```js
+import { getPointerPosInNode } from "@/app/diagram/utils/konva/coords";
+
+function onElementContextMenu(el, e, schemeLayerRef) {
+  e.evt.preventDefault();
+
+  const pos = getPointerPosInNode(schemeLayerRef.current); // <-- координати layer
+  setContextMenu({
+    open: true,
+    x: e.evt.clientX,
+    y: e.evt.clientY,
+    targetId: el.id,
+    layerPos: pos, // {x,y} в координатах layer
+  });
+}
+```
+
+### 2.2. Створення callout: B ставимо там, де клік, A — біля елемента
+
+```js
+function addCalloutForElement(targetId, layerPos, getNodeRefById) {
+  const targetNode = getNodeRefById?.(targetId); // твій registry refs
+  if (!targetNode) return;
+
+  // bbox елемента в координатах того ж layer/group контейнера
+  const r = targetNode.getClientRect(); // якщо targetNode лежить у тому ж контейнері, координати співпадуть
+
+  // A — на найближчому боці bbox до точки кліку (layerPos)
+  const ax = clamp(layerPos.x, r.x, r.x + r.width);
+  const ay = clamp(layerPos.y, r.y, r.y + r.height);
+
+  // B — там, де клікнули (точка зламу/початок полички)
+  const bx = layerPos.x;
+  const by = layerPos.y;
+
+  const shelfLen = 50; // дефолт
+  const number = String(getNextCalloutNumber(elements));
+
+  const callout = {
+    id: `c_${crypto.randomUUID()}`,
+    type: "callout",
+    targetId,
+    number,
+    ax,
+    ay,
+    bx,
+    by,
+    shelfLen,
+    stroke: "#111",
+    strokeWidth: 2,
+    fontSize: 14,
+  };
+
+  setElements((prev) => [...prev, callout]);
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+```
+
+І в MenuItem:
+
+```jsx
+<MenuItem
+  onClick={() => {
+    addCalloutForElement(
+      contextMenu.targetId,
+      contextMenu.layerPos,
+      getNodeRefById // твоя функція доступу до refs
+    );
+    setContextMenu((s) => ({ ...s, open: false }));
+  }}
+>
+  Додати виноску
+</MenuItem>
+```
+
+---
+
+## 3) Ручки: A (вільно), B (вільно), кінець полички (тільки X)
+
+Онови `CalloutElement` так, щоб була **третя ручка** — `S` (shelf end). Вона змінює тільки `shelfLen`.
+
+```jsx
+import React, { useMemo } from "react";
+import { Group, Line, Circle, Text } from "react-konva";
+
+export default function CalloutElement({ el, onChange, isSelected, onSelect }) {
+  const shelfLen = el.shelfLen ?? 40;
+  const shelfX = el.bx + shelfLen;
+  const shelfY = el.by;
+
+  const pointsMain = useMemo(() => [el.ax, el.ay, el.bx, el.by], [el.ax, el.ay, el.bx, el.by]);
+  const pointsShelf = useMemo(() => [el.bx, el.by, shelfX, shelfY], [el.bx, el.by, shelfX, shelfY]);
+
+  const textX = Math.min(el.bx, shelfX) + 4;
+  const textY = el.by - (el.fontSize ?? 14) - 2;
+
+  return (
+    <Group onMouseDown={() => onSelect?.(el.id)} onClick={() => onSelect?.(el.id)}>
+      <Line points={pointsMain} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+      <Line points={pointsShelf} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+
+      <Text
+        x={textX}
+        y={textY}
+        text={String(el.number ?? "")}
+        fontSize={el.fontSize ?? 14}
+        fontStyle="bold"
+        fill={el.stroke ?? "#111"}
+        listening={false}
+      />
+
+      {isSelected && (
+        <>
+          {/* A */}
+          <Circle
+            x={el.ax}
+            y={el.ay}
+            radius={6}
+            fill="#fff"
+            stroke="#333"
+            strokeWidth={2}
+            draggable
+            onDragMove={(e) => {
+              const { x, y } = e.target.position();
+              onChange({ ...el, ax: x, ay: y });
+            }}
+          />
+
+          {/* B */}
+          <Circle
+            x={el.bx}
+            y={el.by}
+            radius={6}
+            fill="#fff"
+            stroke="#333"
+            strokeWidth={2}
+            draggable
+            onDragMove={(e) => {
+              const { x, y } = e.target.position();
+              onChange({ ...el, bx: x, by: y });
+            }}
+          />
+
+          {/* S (кінець полички) — тягнеться тільки по X */}
+          <Circle
+            x={shelfX}
+            y={shelfY}
+            radius={6}
+            fill="#fff"
+            stroke="#333"
+            strokeWidth={2}
+            draggable
+            dragBoundFunc={(pos) => ({ x: pos.x, y: shelfY })} // фіксуємо Y
+            onDragMove={(e) => {
+              const { x } = e.target.position();
+              onChange({ ...el, shelfLen: x - el.bx }); // тільки довжина
+            }}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+## 4) Важливий момент про `getClientRect()`
+
+Щоб `getClientRect()` давав коректні координати **в одному просторі**, бажано:
+
+* щоб **і callout, і target елемент** були в **одній “схемній” Group/Layer**, на яку накладено zoom/pan
+* і ти реєстрував `ref` саме на `Group`, який рухається/скейлиться разом із схемою
+
+Якщо у тебе targetNode може бути вкладений глибше (Group у Group), то все одно ок — `getClientRect()` повертає координати в системі Stage, але тоді ми зробимо варіант “relativeTo контейнеру”. Скажеш — і я дам точний код під твою ієрархію (`getClientRect({ relativeTo: schemeContainer })`).
+
+---
+
+Якщо хочеш, наступним кроком додамо:
+
+* автоматичне “підтягування” A до елемента при його переміщенні (щоб виноска “їхала” за елементом),
+* редагування номера по даблкліку на цифрі (або через ПКМ).

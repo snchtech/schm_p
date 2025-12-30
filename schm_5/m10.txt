@@ -1,0 +1,406 @@
+Ок, тоді робимо **інтеграцію в GraphLibrary + повний цикл “контекстне меню → параметри підпису → рендер”**. Нижче — готові файли/вставки.
+
+---
+
+## 1) Додаємо shared-компонент підпису
+
+📁 `app/diagram/components/LabelText.js`
+
+```jsx
+"use client";
+import React, { useMemo } from "react";
+import { Text } from "react-konva";
+
+const WEIGHT_TO_NUM = {
+  light: 300,
+  regular: 400,
+  medium: 500,
+  bold: 700,
+};
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+export default function LabelText({
+  label,
+  elementRect, // { x:0,y:0,width,height } у локальних координатах групи
+}) {
+  const cfg = label || {};
+  const visible = !!cfg.visible;
+  if (!visible) return null;
+
+  const text = (cfg.text ?? "").toString();
+  if (!text.trim()) return null;
+
+  const position = cfg.position || "top"; // top|bottom|left|right
+  const offset = Number.isFinite(cfg.offset) ? cfg.offset : 6;
+  const fontSize = clamp(Number(cfg.fontSize ?? 14), 6, 72);
+  const color = cfg.color || "#000";
+  const fontFamily = cfg.fontFamily || "Inter";
+  const weightKey = cfg.fontWeight || "regular";
+
+  const fontStyle = weightKey === "bold" ? "bold" : "normal";
+  const fontVariant = WEIGHT_TO_NUM[weightKey] || 400; // для логіки/метаданих
+
+  const { x, y, rotation, align, offsetX, offsetY } = useMemo(() => {
+    const w = elementRect?.width ?? 0;
+    const h = elementRect?.height ?? 0;
+
+    // Позиціонуємо відносно прямокутника елемента в межах Group
+    // Для top/bottom центруємо по X, для left/right центруємо по Y.
+    if (position === "top") {
+      return {
+        x: w / 2,
+        y: -offset,
+        rotation: 0,
+        align: "center",
+        offsetX: 0,
+        offsetY: 0,
+      };
+    }
+    if (position === "bottom") {
+      return {
+        x: w / 2,
+        y: h + offset,
+        rotation: 0,
+        align: "center",
+        offsetX: 0,
+        offsetY: 0,
+      };
+    }
+    if (position === "left") {
+      return {
+        x: -offset,
+        y: h / 2,
+        rotation: -90,
+        align: "center",
+        offsetX: 0,
+        offsetY: 0,
+      };
+    }
+    // right
+    return {
+      x: w + offset,
+      y: h / 2,
+      rotation: 90,
+      align: "center",
+      offsetX: 0,
+      offsetY: 0,
+    };
+  }, [position, offset, elementRect]);
+
+  return (
+    <Text
+      text={text}
+      x={x}
+      y={y}
+      rotation={rotation}
+      fill={color}
+      fontSize={fontSize}
+      fontFamily={fontFamily}
+      fontStyle={fontStyle}
+      // важливо: не заважає selection/drag
+      listening={false}
+      align={align}
+      verticalAlign="middle"
+      // keep for future, якщо будеш додавати вимірювання/вирівнювання
+      data-font-weight={fontVariant}
+      offsetX={offsetX}
+      offsetY={offsetY}
+    />
+  );
+}
+```
+
+> **Вертикальний підпис** — саме `rotation: ±90`, не “літера під літерою”.
+
+---
+
+## 2) Вносимо label у дефолтний стан елемента
+
+Коли створюєш будь-який елемент (rect/circle/…), додавай дефолт:
+
+```js
+label: {
+  text: "Назва",
+  visible: true,
+  position: "top",
+  fontSize: 14,
+  fontWeight: "regular", // light|regular|medium|bold
+  fontFamily: "Inter",
+  color: "#000",
+  offset: 6,
+}
+```
+
+---
+
+## 3) Підключаємо підпис у компонентах бібліотеки
+
+### Rect
+
+📁 `app/components/graph/Rect.js` (або твій шлях)
+
+```jsx
+"use client";
+import React from "react";
+import { Group, Rect } from "react-konva";
+import LabelText from "@/app/diagram/components/LabelText";
+
+export default function RectElement({ el, onContextMenu, onClickEl, onDragEnd }) {
+  return (
+    <Group
+      x={el.x}
+      y={el.y}
+      draggable
+      onClick={() => onClickEl?.(el.id)}
+      onDragEnd={(e) => onDragEnd?.(el.id, e)}
+      onContextMenu={(e) => onContextMenu?.(e, el)}
+    >
+      <Rect
+        x={0}
+        y={0}
+        width={el.width}
+        height={el.height}
+        fill={el.fill}
+        stroke={el.stroke}
+        strokeWidth={el.strokeWidth}
+      />
+
+      <LabelText
+        label={el.label}
+        elementRect={{ x: 0, y: 0, width: el.width, height: el.height }}
+      />
+    </Group>
+  );
+}
+```
+
+### Circle (важливо: треба “bounding box”)
+
+📁 `app/components/graph/Circle.js`
+
+```jsx
+"use client";
+import React from "react";
+import { Group, Circle } from "react-konva";
+import LabelText from "@/app/diagram/components/LabelText";
+
+export default function CircleElement({ el, onContextMenu, onClickEl, onDragEnd }) {
+  const r = el.radius || 20;
+  const w = r * 2;
+  const h = r * 2;
+
+  return (
+    <Group
+      x={el.x}
+      y={el.y}
+      draggable
+      onClick={() => onClickEl?.(el.id)}
+      onDragEnd={(e) => onDragEnd?.(el.id, e)}
+      onContextMenu={(e) => onContextMenu?.(e, el)}
+    >
+      <Circle x={r} y={r} radius={r} fill={el.fill} stroke={el.stroke} strokeWidth={el.strokeWidth} />
+
+      <LabelText
+        label={el.label}
+        elementRect={{ x: 0, y: 0, width: w, height: h }}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+## 4) Додаємо “Text (підпис елемента)” як тип у GraphLibrary
+
+📁 `app/components/graph/index.js`
+
+```js
+import RectElement from "./Rect";
+import CircleElement from "./Circle";
+import TextLabelElement from "./TextLabelElement"; // ⬅️ новий
+
+const GraphLibrary = {
+  rect: RectElement,
+  circle: CircleElement,
+  label: TextLabelElement, // ⬅️ якщо хочеш окремий елемент-підпис (не обов’язково)
+};
+
+export default GraphLibrary;
+```
+
+⚠️ Я рекомендую **НЕ робити підпис окремим елементом**, а тримати його як `el.label` (як вище).
+Але якщо тобі треба ще й **вільний “текст на полотні”** — тоді `TextLabelElement` доречний.
+
+---
+
+## 5) Контекстне меню: “Параметри → Підпис”
+
+### 5.1. Стан меню (приклад)
+
+У `useDiagramStore`/state додай:
+
+```js
+const [contextMenu, setContextMenu] = useState({
+  visible: false,
+  x: 0,
+  y: 0,
+  elementId: null,
+});
+```
+
+### 5.2. Відкриття по ПКМ
+
+У елементі ми вже передали `onContextMenu={(e)=>...}`. Реалізація:
+
+```js
+function handleElementContextMenu(e, el) {
+  e.evt.preventDefault();
+  const stage = e.target.getStage();
+  const pos = stage.getPointerPosition();
+
+  setContextMenu({
+    visible: true,
+    x: pos.x,
+    y: pos.y,
+    elementId: el.id,
+  });
+}
+```
+
+---
+
+## 6) Панель “Параметри підпису” (UI в меню)
+
+Нижче — “чистий” мінімальний UI без прив’язки до MUI (але легко адаптується).
+
+📁 `app/diagram/components/LabelSettingsPanel.js`
+
+```jsx
+"use client";
+import React from "react";
+
+export default function LabelSettingsPanel({ element, updateElement }) {
+  const label = element?.label || {};
+
+  const setLabel = (patch) => {
+    updateElement(element.id, {
+      label: { ...label, ...patch },
+    });
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 8, padding: 10, minWidth: 260 }}>
+      <div style={{ fontWeight: 600 }}>Підпис</div>
+
+      <label style={{ display: "grid", gap: 4 }}>
+        Назва
+        <input
+          value={label.text || ""}
+          onChange={(e) => setLabel({ text: e.target.value })}
+          placeholder="Вкажіть назву"
+        />
+      </label>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={!!label.visible}
+          onChange={(e) => setLabel({ visible: e.target.checked })}
+        />
+        Відображати підпис
+      </label>
+
+      <label style={{ display: "grid", gap: 4 }}>
+        Позиція
+        <select
+          value={label.position || "top"}
+          onChange={(e) => setLabel({ position: e.target.value })}
+        >
+          <option value="top">Зверху</option>
+          <option value="bottom">Знизу</option>
+          <option value="left">Зліва</option>
+          <option value="right">Справа</option>
+        </select>
+      </label>
+
+      <label style={{ display: "grid", gap: 4 }}>
+        Розмір шрифту
+        <input
+          type="number"
+          min={6}
+          max={72}
+          value={label.fontSize ?? 14}
+          onChange={(e) => setLabel({ fontSize: Number(e.target.value) })}
+        />
+      </label>
+
+      <label style={{ display: "grid", gap: 4 }}>
+        Товщина (weight)
+        <select
+          value={label.fontWeight || "regular"}
+          onChange={(e) => setLabel({ fontWeight: e.target.value })}
+        >
+          <option value="light">Light</option>
+          <option value="regular">Regular</option>
+          <option value="medium">Medium</option>
+          <option value="bold">Bold</option>
+        </select>
+      </label>
+
+      <label style={{ display: "grid", gap: 4 }}>
+        Колір
+        <input
+          type="color"
+          value={label.color || "#000000"}
+          onChange={(e) => setLabel({ color: e.target.value })}
+        />
+      </label>
+    </div>
+  );
+}
+```
+
+---
+
+## 7) updateElement — одна функція, яка все вирішує
+
+У store:
+
+```js
+function updateElement(id, patch) {
+  setSymbols((prev) =>
+    prev.map((el) => (el.id === id ? { ...el, ...patch } : el))
+  );
+}
+```
+
+---
+
+## 8) Важливий момент про Ctrl+Click і selection
+
+Ти вже просив, щоб елементи “не заважали виділенню”.
+Тому для `LabelText` я виставив `listening={false}` — він **не ловить кліки** взагалі.
+
+---
+
+# Готово ✅
+
+Тепер у тебе:
+
+* підпис як системна частина елемента (`el.label`)
+* контекстне меню відкривається по ПКМ
+* у меню змінюються **назва + visible + позиція + size + weight**
+* вертикальний текст — правильний (через `rotation`)
+
+---
+
+Як наступний крок я одразу можу дописати:
+
+1. **Material-UI версію** цього `LabelSettingsPanel` (гарно в твоєму стилі)
+2. Підпис для **ліній/стрілок переходу** (там ще anchor і mid-point треба)
+
+Скажи: **MUI чи поки plain?**

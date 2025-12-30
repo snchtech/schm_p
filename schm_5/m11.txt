@@ -1,0 +1,309 @@
+Ок ✅ Нижче — **готовий MUI-панельний блок** для налаштувань підпису, який можна вставити в твоє контекстне меню / праву панель параметрів.
+
+> Підтримує: **назва**, **показувати/ховати**, **позиція** (top/bottom/left/right), **розмір шрифту**, **вага** (light/regular/medium/bold), **колір**, **відступ**.
+
+---
+
+## 1) MUI-компонент `LabelSettingsPanelMUI`
+
+📁 `app/diagram/components/LabelSettingsPanelMUI.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import {
+  Box,
+  Stack,
+  Typography,
+  TextField,
+  FormControlLabel,
+  Checkbox,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Slider,
+  ToggleButtonGroup,
+  ToggleButton,
+  Divider,
+} from "@mui/material";
+
+const POSITIONS = [
+  { value: "top", label: "Зверху" },
+  { value: "bottom", label: "Знизу" },
+  { value: "left", label: "Зліва" },
+  { value: "right", label: "Справа" },
+];
+
+const WEIGHTS = [
+  { value: "light", label: "Light (300)" },
+  { value: "regular", label: "Regular (400)" },
+  { value: "medium", label: "Medium (500)" },
+  { value: "bold", label: "Bold (700)" },
+];
+
+export default function LabelSettingsPanelMUI({
+  element,         // поточний елемент (selected / contextMenu element)
+  updateElement,   // (id, patch) => void
+  dense = false,
+}) {
+  const label = element?.label || {};
+
+  const disabledAll = !element;
+
+  const setLabel = (patch) => {
+    if (!element) return;
+    updateElement(element.id, {
+      label: { ...label, ...patch },
+    });
+  };
+
+  const fontSize = Number.isFinite(label.fontSize) ? label.fontSize : 14;
+  const offset = Number.isFinite(label.offset) ? label.offset : 6;
+
+  const previewText = useMemo(() => {
+    const t = (label.text ?? "").toString().trim();
+    return t || "Підпис";
+  }, [label.text]);
+
+  return (
+    <Box sx={{ p: dense ? 1 : 2, width: 320 }}>
+      <Stack spacing={dense ? 1 : 1.5}>
+        <Stack spacing={0.5}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            Підпис елемента
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Налаштуй відображення та стиль назви.
+          </Typography>
+        </Stack>
+
+        <Divider />
+
+        <TextField
+          size="small"
+          label="Назва"
+          value={label.text ?? ""}
+          disabled={disabledAll}
+          onChange={(e) => setLabel({ text: e.target.value })}
+          placeholder="Вкажіть назву елемента"
+          fullWidth
+        />
+
+        <FormControlLabel
+          disabled={disabledAll}
+          control={
+            <Checkbox
+              checked={!!label.visible}
+              onChange={(e) => setLabel({ visible: e.target.checked })}
+            />
+          }
+          label="Відображати підпис"
+        />
+
+        <FormControl size="small" fullWidth disabled={disabledAll}>
+          <InputLabel id="label-position">Позиція</InputLabel>
+          <Select
+            labelId="label-position"
+            label="Позиція"
+            value={label.position || "top"}
+            onChange={(e) => setLabel({ position: e.target.value })}
+          >
+            {POSITIONS.map((p) => (
+              <MenuItem key={p.value} value={p.value}>
+                {p.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+
+        <FormControl size="small" fullWidth disabled={disabledAll}>
+          <InputLabel id="label-weight">Вага шрифту</InputLabel>
+          <Select
+            labelId="label-weight"
+            label="Вага шрифту"
+            value={label.fontWeight || "regular"}
+            onChange={(e) => setLabel({ fontWeight: e.target.value })}
+          >
+            {WEIGHTS.map((w) => (
+              <MenuItem key={w.value} value={w.value}>
+                {w.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+
+        <Stack spacing={0.5}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Розмір тексту: {fontSize}px
+          </Typography>
+          <Slider
+            value={fontSize}
+            min={6}
+            max={72}
+            step={1}
+            disabled={disabledAll}
+            onChange={(_, v) => setLabel({ fontSize: v })}
+          />
+        </Stack>
+
+        <Stack spacing={0.5}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Відступ від елемента: {offset}px
+          </Typography>
+          <Slider
+            value={offset}
+            min={0}
+            max={40}
+            step={1}
+            disabled={disabledAll}
+            onChange={(_, v) => setLabel({ offset: v })}
+          />
+        </Stack>
+
+        <Stack direction="row" spacing={1} alignItems="center">
+          <TextField
+            size="small"
+            label="Колір"
+            type="color"
+            value={label.color || "#000000"}
+            disabled={disabledAll}
+            onChange={(e) => setLabel({ color: e.target.value })}
+            sx={{
+              width: 110,
+              "& input": { padding: "8px 10px", height: 24 },
+            }}
+          />
+          <Box sx={{ flex: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Preview
+            </Typography>
+            <Typography
+              variant="body1"
+              sx={{
+                fontFamily: label.fontFamily || "Inter",
+                fontWeight:
+                  label.fontWeight === "bold"
+                    ? 700
+                    : label.fontWeight === "medium"
+                      ? 500
+                      : label.fontWeight === "light"
+                        ? 300
+                        : 400,
+                color: label.color || "#000",
+                border: "1px solid",
+                borderColor: "divider",
+                borderRadius: 1,
+                px: 1,
+                py: 0.5,
+                display: "inline-block",
+              }}
+            >
+              {previewText}
+            </Typography>
+          </Box>
+        </Stack>
+
+        <Divider />
+
+        {/* Опційно: швидкі кнопки позиції (зручно) */}
+        <Stack spacing={0.5}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Швидке позиціювання
+          </Typography>
+          <ToggleButtonGroup
+            exclusive
+            size="small"
+            value={label.position || "top"}
+            disabled={disabledAll}
+            onChange={(_, v) => {
+              if (!v) return;
+              setLabel({ position: v });
+            }}
+            fullWidth
+          >
+            <ToggleButton value="top">Top</ToggleButton>
+            <ToggleButton value="bottom">Bottom</ToggleButton>
+            <ToggleButton value="left">Left</ToggleButton>
+            <ToggleButton value="right">Right</ToggleButton>
+          </ToggleButtonGroup>
+        </Stack>
+      </Stack>
+    </Box>
+  );
+}
+```
+
+---
+
+## 2) Як підключити в контекстне меню (MUI Menu/Popover)
+
+Якщо ти відкриваєш меню по ПКМ і маєш `contextMenu = {open,x,y,elementId}`, то приклад з `Popover`:
+
+```jsx
+import { Popover } from "@mui/material";
+import LabelSettingsPanelMUI from "@/app/diagram/components/LabelSettingsPanelMUI";
+
+export default function DiagramContextPopover({
+  contextMenu,
+  closeMenu,
+  symbols,
+  updateElement,
+}) {
+  const element = symbols.find((x) => x.id === contextMenu.elementId) || null;
+
+  return (
+    <Popover
+      open={!!contextMenu.open}
+      onClose={closeMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu.open ? { top: contextMenu.y, left: contextMenu.x } : undefined
+      }
+      PaperProps={{ sx: { borderRadius: 2 } }}
+    >
+      <LabelSettingsPanelMUI
+        element={element}
+        updateElement={updateElement}
+      />
+    </Popover>
+  );
+}
+```
+
+---
+
+## 3) Важливе: шрифт “вузький” + ваги
+
+Щоб реально були **light/regular/medium/bold**, підключи шрифт з вагами.
+
+Напр., **Inter**:
+
+```html
+<link
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap"
+  rel="stylesheet"
+/>
+```
+
+Якщо хочеш **саме вузький (condensed)** — бери Roboto Condensed:
+
+```html
+<link
+  href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@300;400;500;700&display=swap"
+  rel="stylesheet"
+/>
+```
+
+І в `label.fontFamily` став `"Roboto Condensed"`.
+
+---
+
+## 4) Нагадування: LabelText має читати offset
+
+Перевір, що у твоєму `LabelText` використовується `label.offset` (в моїй реалізації — так).
+
+---
+
+Якщо ти покажеш, **де саме у тебе зараз реалізований контекстний menu (MUI Menu чи самописний div)**, я одразу піджену код 1-в-1 під твою структуру (без зайвих переробок).

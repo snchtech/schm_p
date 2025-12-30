@@ -1,0 +1,197 @@
+Зрозумів: ти хочеш **“як у Visio”** — під час drag підсвічувати **тільки релевантні вирівнювання**:
+
+* по **Y**: `top-top`, `bottom-bottom`, `centerY-centerY`
+* по **X**: `left-left`, `right-right`, `centerX-centerX`
+
+І **не показувати** “постійні” лінії — тільки коли різниця в межах `tolerance`.
+Також зараз у тебе схоже, що алгоритм “завжди бере першу лінію”, тому виглядає як прив’язка до верх/ліво.
+
+Нижче — правильна реалізація: **знаходимо найкраще співпадіння** окремо по X і Y з трьох варіантів (край/центр/край), і показуємо guide тільки для того типу, який реально “зачепився”.
+
+---
+
+## 1) Онови `computeSnap` так, щоб він шукав найкращу пару “тип-тип”
+
+Заміни твій `lib/konva/snap/snapMath.js` на цей варіант (або заміни лише `computeSnap` + helpers).
+
+```js
+// lib/konva/snap/snapMath.js
+
+function getNodeBox(node) {
+  return node.getClientRect({ relativeTo: node.getLayer() });
+}
+
+function getSelfLines(node) {
+  const b = getNodeBox(node);
+  return {
+    box: b,
+    x: [
+      { key: "left", value: b.x },
+      { key: "centerX", value: b.x + b.width / 2 },
+      { key: "right", value: b.x + b.width },
+    ],
+    y: [
+      { key: "top", value: b.y },
+      { key: "centerY", value: b.y + b.height / 2 },
+      { key: "bottom", value: b.y + b.height },
+    ],
+  };
+}
+
+function collectOtherLines(layer, movingNode, selector = ".snap-target") {
+  const nodes = layer.find(selector).filter((n) => n !== movingNode);
+
+  const lines = { x: [], y: [] };
+
+  for (const n of nodes) {
+    const s = getSelfLines(n);
+    // зберігаємо і value, і type/key — щоб робити top-top, center-center, etc.
+    for (const lx of s.x) lines.x.push({ key: lx.key, value: lx.value });
+    for (const ly of s.y) lines.y.push({ key: ly.key, value: ly.value });
+  }
+
+  return lines;
+}
+
+// шукає найкраще співпадіння саме по типу (left-left, right-right, center-center)
+function bestMatchByType(selfLines, otherLines, tolerance) {
+  let best = null;
+
+  for (const s of selfLines) {
+    for (const o of otherLines) {
+      if (s.key !== o.key) continue; // <-- головне: тільки тип-тип
+      const diff = Math.abs(o.value - s.value);
+      if (diff <= tolerance && (!best || diff < best.diff)) {
+        best = {
+          key: s.key,
+          selfValue: s.value,
+          targetValue: o.value,
+          diff,
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Visio-like snapping:
+ * - only same-type alignment (top-top, bottom-bottom, center-center)
+ * - choose the closest match within tolerance
+ * - return guides only when matched
+ */
+export function computeSnap({
+  movingNode,
+  layer,
+  tolerance = 6,
+  selector = ".snap-target",
+  snapEnabled = true, // можна вимкнути snap, залишити тільки підсвітку
+}) {
+  const moving = getSelfLines(movingNode);
+  const others = collectOtherLines(layer, movingNode, selector);
+
+  const bestX = bestMatchByType(moving.x, others.x, tolerance);
+  const bestY = bestMatchByType(moving.y, others.y, tolerance);
+
+  const absPos = movingNode.absolutePosition();
+  let dx = 0;
+  let dy = 0;
+
+  const guides = [];
+
+  if (bestX) {
+    dx = bestX.targetValue - bestX.selfValue;
+    guides.push({
+      axis: "x",
+      key: bestX.key, // left | centerX | right
+      points: [bestX.targetValue, -100000, bestX.targetValue, 100000],
+    });
+  }
+
+  if (bestY) {
+    dy = bestY.targetValue - bestY.selfValue;
+    guides.push({
+      axis: "y",
+      key: bestY.key, // top | centerY | bottom
+      points: [-100000, bestY.targetValue, 100000, bestY.targetValue],
+    });
+  }
+
+  return {
+    newAbsPos: snapEnabled ? { x: absPos.x + dx, y: absPos.y + dy } : absPos,
+    guides,               // пустий масив => нічого не підсвічувати
+    matched: { x: bestX, y: bestY }, // на майбутнє: показ тексту/іконки
+  };
+}
+```
+
+### Що це дає
+
+✅ Якщо ти перетинаєш по вертикалі **верх-верх** — підсвітиться тільки `top`
+✅ Якщо **низ-низ** — тільки `bottom`
+✅ Якщо **центр-центр** — тільки `centerY`
+І так само по X (`left/right/centerX`).
+
+---
+
+## 2) Зроби так, щоб guides НЕ “висіли” постійно
+
+У `EditorStage.jsx` в `handleDragMove` постав логіку:
+
+* якщо `guides.length === 0` → `setGuides([])` (гасимо підсвітку)
+* інакше показуємо
+
+```jsx
+const handleDragMove = (e) => {
+  const node = e.target;
+  const layer = node.getLayer();
+  if (!layer) return;
+
+  const { newAbsPos, guides } = computeSnap({
+    movingNode: node,
+    layer,
+    tolerance: 6,
+    selector: ".snap-target",
+    snapEnabled: true,
+  });
+
+  node.absolutePosition(newAbsPos);
+
+  // ВАЖЛИВО: не тримати старі guides
+  setGuides(guides.length ? guides : []);
+
+  layer.batchDraw();
+};
+```
+
+---
+
+## 3) Якщо хочеш “Visio-ефект” ще точніше
+
+У Visio часто:
+
+* при наближенні в tolerance — показує guide
+* “підлипання” може бути трохи сильнішим/слабшим
+
+Тому можна розділити:
+
+* `guideTolerance = 8`
+* `snapTolerance = 5`
+
+і викликати computeSnap двічі (або розширити функцію).
+
+---
+
+## 4) Чому в тебе зараз “верх/ліво” і “постійно”
+
+Найчастіше так стається, коли:
+
+1. береться **перший** знайдений варіант (left/top) і одразу `break`
+2. guides не очищаються, коли вже нема збігу (залишається попередній стан)
+
+Код вище вирішує обидві проблеми.
+
+---
+
+Якщо хочеш — наступним кроком додам ще **“Snap to grid”** (наприклад при затиснутому `Alt`/`Shift`) і зроблю так, щоб guides враховували **рамку сторінки (A3/A4)** як ще один “об’єкт” вирівнювання.

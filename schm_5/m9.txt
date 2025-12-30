@@ -1,0 +1,235 @@
+Чудове питання 👍
+**Підпис (Text / Label)** — це *ключовий системний елемент* для схем, тому покажу **правильну архітектуру**, а не просто `Text`.
+
+Нижче — **готове рішення**, яке добре лягає у твою поточну концепцію **GraphLibrary + react-konva**.
+
+---
+
+## 1️⃣ Концепція елемента “Підпис”
+
+### Підпис — це:
+
+* **НЕ окремий текст на canvas**
+* **частина елемента**, яка:
+
+  * може **вмикатись / вимикатись**
+  * має **позицію відносно елемента**
+  * має **поворот на 90° / -90°**
+  * має **власні параметри стилю**
+
+---
+
+## 2️⃣ Модель даних елемента (обовʼязково)
+
+```js
+label: {
+  text: "Назва елемента",
+  visible: true,
+  position: "top", // top | bottom | left | right
+  fontSize: 14,
+  fontWeight: "regular", // light | regular | medium | bold
+  color: "#000",
+  offset: 6, // відступ від фігури
+}
+```
+
+➡️ **label — частина будь-якого елемента** (rect, circle, symbol…)
+
+---
+
+## 3️⃣ Шрифт (вузький, професійний)
+
+### Рекомендую:
+
+* **Inter**
+* **Roboto Condensed**
+* **IBM Plex Sans Condensed**
+
+#### Підключення (Next.js):
+
+```html
+<link
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap"
+  rel="stylesheet"
+/>
+```
+
+---
+
+## 4️⃣ Універсальний компонент `LabelText`
+
+📁 `app/diagram/components/LabelText.js`
+
+```jsx
+"use client";
+import React from "react";
+import { Text } from "react-konva";
+
+const FONT_WEIGHT_MAP = {
+  light: 300,
+  regular: 400,
+  medium: 500,
+  bold: 700,
+};
+
+export default function LabelText({
+  text,
+  position,
+  elementWidth,
+  elementHeight,
+  offset = 6,
+  fontSize = 14,
+  fontWeight = "regular",
+  color = "#000",
+}) {
+  let x = 0;
+  let y = 0;
+  let rotation = 0;
+
+  switch (position) {
+    case "top":
+      x = elementWidth / 2;
+      y = -offset;
+      break;
+
+    case "bottom":
+      x = elementWidth / 2;
+      y = elementHeight + offset;
+      break;
+
+    case "left":
+      x = -offset;
+      y = elementHeight / 2;
+      rotation = -90;
+      break;
+
+    case "right":
+      x = elementWidth + offset;
+      y = elementHeight / 2;
+      rotation = 90;
+      break;
+  }
+
+  return (
+    <Text
+      text={text}
+      x={x}
+      y={y}
+      offsetX={position === "top" || position === "bottom" ? 0 : 0}
+      offsetY={0}
+      rotation={rotation}
+      fontSize={fontSize}
+      fontFamily="Inter"
+      fontStyle={fontWeight === "bold" ? "bold" : "normal"}
+      fill={color}
+      align="center"
+      verticalAlign="middle"
+      listening={false} // ❗ не заважає виділенню елемента
+    />
+  );
+}
+```
+
+✔️ **Вертикальний текст — через `rotation`, а не символами**
+✔️ Працює з zoom / scale
+✔️ Не ламає selection
+
+---
+
+## 5️⃣ Використання в елементі (Rect / Circle)
+
+### Приклад: `RectElement`
+
+```jsx
+import React from "react";
+import { Group, Rect } from "react-konva";
+import LabelText from "./LabelText";
+
+const RectElement = ({ el }) => {
+  return (
+    <Group x={el.x} y={el.y} draggable>
+      <Rect
+        width={el.width}
+        height={el.height}
+        fill={el.fill}
+        stroke={el.stroke}
+        strokeWidth={el.strokeWidth}
+      />
+
+      {el.label?.visible && (
+        <LabelText
+          text={el.label.text}
+          position={el.label.position}
+          elementWidth={el.width}
+          elementHeight={el.height}
+          fontSize={el.label.fontSize}
+          fontWeight={el.label.fontWeight}
+          color={el.label.color}
+        />
+      )}
+    </Group>
+  );
+};
+
+export default RectElement;
+```
+
+---
+
+## 6️⃣ Контекстне меню → Параметри підпису
+
+### Мінімальний набір:
+
+* ✏️ Назва (input)
+* ☑ Показувати підпис
+* 📍 Position (top / bottom / left / right)
+* 🔠 Font size
+* 🔤 Weight (light / regular / medium / bold)
+
+### Дані, які міняє меню:
+
+```js
+updateElement(id, {
+  label: {
+    ...old.label,
+    text,
+    visible,
+    position,
+    fontSize,
+    fontWeight,
+  }
+});
+```
+
+---
+
+## 7️⃣ Чому це правильна архітектура
+
+✅ Підпис — **частина елемента**, а не окремий обʼєкт
+✅ Не заважає drag / select
+✅ Працює з scale / zoom
+✅ Легко серіалізується в БД
+✅ Готово для:
+
+* шаблонів
+* стилів
+* експорту (PDF / SVG)
+
+---
+
+## 8️⃣ Далі (логічні наступні кроки)
+
+1. 🔗 Підписи для **ліній / конекторів**
+2. 📐 Auto-offset при зміні масштабу
+3. 🎨 Стилі підписів (theme)
+4. 🧩 Drag label (advanced)
+
+---
+
+Якщо хочеш — **наступним кроком** можу:
+
+* інтегрувати це у **твою GraphLibrary**
+* показати **context menu UI**
+* зробити **підпис для стрілок переходу**
+
+Просто скажи 👉 *“йдемо далі”* 🚀

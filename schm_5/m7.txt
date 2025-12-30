@@ -1,0 +1,126 @@
+Ок — робимо правило:
+
+* **Звичайний клік** → тільки **виділення елемента** (ніяких переходів)
+* **Ctrl+Click** (Windows/Linux) або **Cmd+Click** (macOS) → **перехід**, але **тільки якщо** елемент `interaction.clickable === true` і має `link`
+
+Нижче готова логіка, яка не заважає виділенню в редакторі.
+
+---
+
+## 1) Хелпер: визначити “модифікований клік” (Ctrl/Cmd)
+
+```js
+// app/diagram/utils/input/isNavClick.js
+export function isNavClick(konvaEvt) {
+  const evt = konvaEvt?.evt; // <-- native MouseEvent
+  if (!evt) return false;
+
+  // Ctrl для Win/Linux, Meta(Cmd) для macOS
+  return evt.ctrlKey === true || evt.metaKey === true;
+}
+```
+
+---
+
+## 2) Хелпер: умова “можна переходити”
+
+```js
+// app/diagram/utils/navigation/canOpenTransition.js
+export function canOpenTransition(el) {
+  if (!el) return false;
+  if (el.type !== "transition") return false;
+
+  const clickable = el?.interaction?.clickable === true;
+  const hasTarget = Boolean(el?.link?.toSchemeId);
+
+  return clickable && hasTarget;
+}
+```
+
+---
+
+## 3) Єдиний handler кліку для елементів (у store / state hook)
+
+Ідея: у тебе є `handleElementClick(id, e)` — робимо так:
+
+* завжди **select**
+* якщо `Ctrl/Cmd` і це `transition` → `openTransitionLink(el)`
+
+```js
+// app/diagram/hooks/useSelection.js (або де у тебе selection logic)
+import { isNavClick } from "@/app/diagram/utils/input/isNavClick";
+import { canOpenTransition } from "@/app/diagram/utils/navigation/canOpenTransition";
+import { openTransitionLink } from "@/app/diagram/utils/navigation/openTransitionLink";
+
+export function makeHandleElementClick({ getElementById, selectElement }) {
+  return function handleElementClick(elementId, konvaEvent) {
+    // 1) завжди виділяємо
+    selectElement(elementId);
+
+    // 2) Ctrl/Cmd+Click → перехід (але тільки для transition і якщо дозволено)
+    const el = getElementById(elementId);
+    if (isNavClick(konvaEvent) && canOpenTransition(el)) {
+      // щоб не спрацьовували інші "onClick" вище (stage/layer)
+      konvaEvent?.cancelBubble && (konvaEvent.cancelBubble = true);
+
+      openTransitionLink(el);
+    }
+  };
+}
+```
+
+> `getElementById` — просто доступ до твоєї мапи/масиву `symbols/elements`.
+> `selectElement` — твоя існуюча логіка вибору.
+
+---
+
+## 4) Підключаємо в `TransitionArrowElement` (та інші елементи)
+
+Тобі важливо: **перехід тільки на Ctrl/Cmd**. Тому сам компонент *не* повинен вирішувати “чи переходити” — він просто викликає загальний `onClickEl(id, e)`.
+
+Ось мінімальна правка в `TransitionArrowElement.js`:
+
+```jsx
+// всередині компонента:
+const handleClick = (e) => {
+  e.cancelBubble = true;
+  onClickEl?.(el.id, e); // <-- все вирішить центральний handler
+};
+
+return (
+  <Arrow
+    ...
+    onClick={handleClick}
+    onTap={handleClick}
+  />
+);
+```
+
+Для `Rect/Circle/Line` — аналогічно: викликають `onClickEl(el.id, e)`.
+
+---
+
+## 5) Важливе: stage “клік по пустому місцю” не має збивати Ctrl+Click
+
+Якщо у тебе є `Stage onMouseDown` що чистить selection при кліку по фону — зроби так, щоб **не чистити**, якщо клікнули по елементу:
+
+```js
+function handleStageMouseDown(e) {
+  const clickedOnEmpty = e.target === e.target.getStage();
+  if (!clickedOnEmpty) return; // клік по елементу → нічого не чистимо
+
+  // клік по фону → clear selection
+  clearSelection();
+}
+```
+
+---
+
+## 6) (Опціонально) UX-підказка курсором
+
+Коли наводиш на transition і натиснутий Ctrl/Cmd — можна робити cursor “pointer”.
+Це вже косметика, але класно відчувається.
+
+---
+
+Якщо ти покажеш свій поточний `DiagramSymbols` (де ти рендериш `ELEMENT_COMPONENTS[type]` і прокидуєш `onClickEl` / `onSelect`) — я вбудую ці 3 шматки прямо в твою структуру (без “вигаданих” функцій), щоб вставив 1-в-1.

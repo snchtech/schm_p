@@ -1,0 +1,163 @@
+Ок. Робимо це **універсально** для `line` і `connector/transition`:
+
+* у даних елемента зберігаємо `stroke`, `strokeWidth`
+* в “Параметри” (спільний блок) додаємо поля **Колір** + **Товщина**
+* при зміні — оновлюємо element у store і перерендерюється Konva
+
+Нижче — готові шматки.
+
+---
+
+## 1) Структура елемента (line / connector / transition)
+
+```js
+{
+  id: "ln_1",
+  type: "line",               // або "connector" / "transition"
+  points: [x1, y1, x2, y2],
+  style: {
+    stroke: "#000000",
+    strokeWidth: 2,
+    dash: [],                 // опціонально
+  },
+}
+```
+
+> Рекомендую звести все в `style`, тоді “Параметри” реально спільні.
+
+---
+
+## 2) Використання в компонентах (Line / Arrow / Connector)
+
+### LineElement
+
+```jsx
+import React, { useMemo } from "react";
+import { Line } from "react-konva";
+
+export default function LineElement({ el, onClickEl, onContextMenu, isSelected }) {
+  const stroke = el?.style?.stroke ?? "#000";
+  const strokeWidth = el?.style?.strokeWidth ?? 2;
+  const dash = el?.style?.dash ?? [];
+
+  const hitStrokeWidth = useMemo(() => Math.max(12, strokeWidth * 6), [strokeWidth]);
+
+  return (
+    <Line
+      id={el.id}
+      points={el.points}
+      stroke={stroke}
+      strokeWidth={strokeWidth}
+      dash={dash}
+      lineCap="round"
+      lineJoin="round"
+      strokeScaleEnabled={false}
+      hitStrokeWidth={hitStrokeWidth}
+      onClick={(e) => {
+        e.cancelBubble = true;
+        onClickEl?.(el.id, e);
+      }}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        e.cancelBubble = true;
+        onContextMenu?.(el.id, e);
+      }}
+      opacity={isSelected ? 0.95 : 1}
+    />
+  );
+}
+```
+
+### TransitionArrowElement (або connector-arrow)
+
+```jsx
+import React, { useMemo } from "react";
+import { Arrow } from "react-konva";
+
+export default function TransitionArrowElement({ el, onClickEl, onContextMenu }) {
+  const stroke = el?.style?.stroke ?? "#000";
+  const strokeWidth = el?.style?.strokeWidth ?? 2;
+  const hitStrokeWidth = useMemo(() => Math.max(12, strokeWidth * 6), [strokeWidth]);
+
+  const arrow = el.arrow || {};
+  const fill =
+    arrow.variant === "filled" ? (arrow.fill ?? "#000") : "rgba(0,0,0,0)";
+
+  return (
+    <Arrow
+      id={el.id}
+      points={el.points}
+      stroke={stroke}
+      strokeWidth={strokeWidth}
+      fill={fill}
+      pointerAtBeginning={false}
+      pointerAtEnding={true}
+      pointerLength={arrow.pointerLength ?? 14}
+      pointerWidth={arrow.pointerWidth ?? 12}
+      lineCap="round"
+      lineJoin="round"
+      strokeScaleEnabled={false}
+      hitStrokeWidth={hitStrokeWidth}
+      onClick={(e) => {
+        e.cancelBubble = true;
+        onClickEl?.(el.id, e);
+      }}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        e.cancelBubble = true;
+        onContextMenu?.(el.id, e);
+      }}
+    />
+  );
+}
+```
+
+---
+
+## 3) “Параметри” (спільний блок) — що показувати
+
+Універсально показуємо для типів `line | connector | transition`:
+
+* Color picker: `style.stroke`
+* Slider/Input number: `style.strokeWidth`
+
+**Правило:** товщина мін 1, макс наприклад 12 (або більше — як хочеш).
+
+---
+
+## 4) Оновлення елемента в store (універсальний update)
+
+Припустимо, у тебе є `updateElement(id, patch)`.
+
+```js
+// універсальний patch
+updateElement(id, {
+  style: {
+    ...el.style,
+    stroke: "#ff0000",
+    strokeWidth: 4,
+  },
+});
+```
+
+Щоб не тягнути `el` в UI-компонент, можна зробити “deep merge” в store:
+
+```js
+// updateElement(id, patch) має всередині робити merge
+// style: { ...prev.style, ...patch.style }
+```
+
+---
+
+## 5) Важливо для zoom/scale
+
+`strokeScaleEnabled={false}` — це те, що ти майже точно хочеш:
+
+* товщина лінії/стрілки виглядає стабільно при zoom
+* точки кліку (`hitStrokeWidth`) теж стабільні
+
+Якщо хочеш, щоб товщина **масштабувалась** разом зі схемою — прибери `strokeScaleEnabled={false}`.
+
+---
+
+Якщо покажеш, як у тебе зараз виглядає `useDiagramStore` (або де ти тримаєш `symbols/elements` і як робиш `updateElement`) — я дам точний код **для твого стору** + приклад JSX для блоку “Параметри” (Material-UI чи що ти використовуєш).

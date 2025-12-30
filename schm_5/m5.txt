@@ -1,0 +1,114 @@
+Це класична проблема при zoom у Konva: **ти зберігаєш/передаєш координати в одній системі**, а **клік (pointer) береш в іншій**. Коли `scale != 1`, це одразу дає “зсув” — і точка “прилипає” до країв/сегментів, бо `findClosestSegment()` отримує не ті координати.
+
+Найчастіше причина така:
+
+* `stage.getPointerPosition()` → **координати в пікселях екрану (stage container)**
+* `line.points` → **координати у системі Layer (world coords сцени)**, які змінюються через zoom/pan
+* ти порівнюєш їх напряму → при scale воно “пливе”
+
+---
+
+## ✅ Правильне правило
+
+Перед тим як шукати найближчий сегмент / фіксувати anchor — **переведи pointer у координати того Layer, де лежить лінія**.
+
+### 1) Хелпер: pointer → coords layer
+
+```js
+export function getPointerInLayer(layer) {
+  const stage = layer.getStage();
+  const p = stage?.getPointerPosition();
+  if (!p) return null;
+
+  const tr = layer.getAbsoluteTransform().copy();
+  tr.invert();
+  return tr.point(p); // {x,y} у координатах layer
+}
+```
+
+---
+
+## ✅ Фікс для твого кейсу “клік по лінії → поставити anchor”
+
+Там де ти робиш:
+
+* береш pointer
+* викликаєш `findClosestSegment(line.points, px, py)`
+* записуєш `{segIndex, t, ...}`
+
+Треба замінити `px/py` на координати **в layer**:
+
+```js
+function handleLineClickForAttach(e, line) {
+  const stage = e.target.getStage();
+
+  // якщо лінія в конкретному layer — бери його так:
+  const layer = e.target.getLayer(); // ✅ той layer де клікнули
+
+  const p = getPointerInLayer(layer); // ✅ важливо при zoom
+  if (!p) return;
+
+  const best = findClosestSegment(line.points, p.x, p.y);
+  if (!best) return;
+
+  // best = {segIndex, x,y,t,dist2} у КООРДИНАТАХ ЛІНІЇ (layer coords)
+  // зберігай segIndex + t (цього достатньо)
+  setAttachment({
+    type: "line",
+    connectionId: line.id,
+    segIndex: best.segIndex,
+    t: best.t,
+  });
+}
+```
+
+> Якщо ти зараз використовуєш `e.evt.offsetX / offsetY` або `clientX/clientY` — вони майже гарантовано зламаються при zoom.
+
+---
+
+## ✅ Другий важливий момент: де ти малюєш anchors
+
+Ти пишеш: “виставляються по краям ліній” — це часто означає, що:
+
+* при кліку ти обчислюєш **world point** правильно,
+* але малюєш anchor **в іншому layer** або **в іншій системі координат**.
+
+Правильно так:
+
+### Якщо anchor малюється в тому ж Layer що й лінії
+
+→ використовуй **layer coords** і все.
+
+### Якщо anchor малюється в “overlay layer” без zoom (наприклад UI layer)
+
+→ треба навпаки: **перевести точку з layer coords у screen coords** (це рідше, але буває).
+
+---
+
+## ✅ Швидка перевірка, що саме в тебе
+
+Скажу простий тест:
+
+1. Zoom = 1 → клік по середині сегмента → anchor стає правильно.
+2. Zoom = 2 → клік по середині сегмента → anchor “з’їжджає”.
+
+Це 100% означає: **pointer не переведений в layer coords**.
+
+---
+
+## Що тобі зробити прямо зараз
+
+1. Додай `getPointerInLayer(layer)`
+2. У всіх місцях, де ти робиш “клік/drag → координати”, заміни на:
+
+* `const p = getPointerInLayer(e.target.getLayer())`
+* використовуй `p.x/p.y` для геометрії (findClosestSegment, snapping, routing)
+
+---
+
+Якщо скинеш маленький фрагмент з:
+
+* (а) де ти обробляєш клік по лінії (або кнопку “attach to line”)
+* (б) де ти малюєш anchor (в якому layer)
+
+я підкажу **точно**, чи тобі треба тільки pointer→layer, чи ще є мікс “різні layer’и для ліній і anchor’ів”.

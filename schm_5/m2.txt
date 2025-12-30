@@ -1,0 +1,137 @@
+### Чому grid не масштабується при zoom
+
+У тебе зум/пан, швидше за все, застосовується **до “робочого” layer** (де елементи), а **GridLayer рендериться в іншому Layer**, який **не трансформується**. У Konva **кожен Layer має свої transform’и**, тому грід і “зависає” в одному масштабі.
+
+Є 3 правильні варіанти (як у проф. редакторах):
+
+#### Варіант A (найпростіший і найнадійніший): **грід у тому ж transform-контейнері, що й елементи**
+
+* Робиш **один “world” контейнер** (Layer або Group), і всередині нього:
+
+  * grid (listening=false)
+  * елементи
+* Тоді scale/position застосовуються однаково.
+
+#### Варіант B: **синхронізувати transform GridLayer з основним layer**
+
+* Залишаєш GridLayer окремим Layer, але при кожному zoom/pan:
+
+  * `gridLayer.scale(mainLayer.scale())`
+  * `gridLayer.position(mainLayer.position())`
+
+#### Варіант C: **рахувати лінії гріда в “екранних” координатах через viewport**
+
+* Ти це вже частково робив (через viewport), але якщо в тебе grid “прикручений” до Stage, треба дуже уважно тримати математику.
+* Я б радив A або B, бо це стабільніше.
+
+---
+
+## Як швидко полагодити зараз (Варіант B)
+
+Ти можеш лишити GridLayer окремим Layer, але додай ref і синхронізацію:
+
+```jsx
+const gridLayerRef = useRef(null);
+const worldLayerRef = useRef(null); // твій layer зі схемою
+
+// коли міняється viewport або після wheel/pan:
+const syncGrid = () => {
+  const grid = gridLayerRef.current;
+  const world = worldLayerRef.current;
+  if (!grid || !world) return;
+
+  grid.scale({ x: world.scaleX(), y: world.scaleY() });
+  grid.position({ x: world.x(), y: world.y() });
+  grid.batchDraw();
+};
+```
+
+І викликай `syncGrid()`:
+
+* після zoom/pan (в `onViewportChange`)
+* або в `useEffect`, який слухає `viewport`
+
+Тоді грід **буде scaling разом зі схемою**.
+
+---
+
+# Оцінка твоєї структури файлів
+
+Твій підхід **features/page-name/... + shared** — нормальний і навіть кращий для великих проектів.
+
+Те, що ти зробив:
+
+### ✅ Добре розміщено
+
+**`featured/ui/canvas/`**
+
+* `GridLayer.js`
+* `GuidesLayer.js`
+
+Це UI-компоненти → логічно тримати у feature/UI.
+
+**`shared/konva/grid/`**
+
+* `buildGridLines.js`
+* `computeSnap.js`
+
+Це “движок/математика” → логічно в shared/konva.
+
+---
+
+### ⚠️ Що б я поправив (не критично, але “архітектурно чистіше”)
+
+#### 1) `useGrid.js` і `useGuidesSnap.js` — це hooks
+
+Їх краще тримати не в `shared/konva/grid/`, а в одному з варіантів:
+
+* `shared/hooks/konva/useGrid.js`
+* `shared/hooks/useGrid.js`
+* або якщо вони **специфічні для editor-page**, тоді:
+
+  * `features/<page>/hooks/useGrid.js`
+
+Правило:
+
+* **pure functions** → `shared/konva/**`
+* **React hooks** → `shared/hooks/**` або `features/**/hooks/**`
+
+#### 2) Назва папки
+
+Ти написав `featured/...` — зазвичай використовують `features/...` (без “d”). Якщо це не принципово — ок, але щоб в проекті було єдино.
+
+---
+
+# Рекомендована версія твоєї структури (майже як у тебе)
+
+```
+features/
+  ui/canvas/
+    GridLayer.js
+    GuidesLayer.js
+
+  editor/
+    hooks/
+      useGrid.js
+      useGuidesSnap.js
+
+shared/
+  konva/
+    grid/
+      buildGridLines.js
+    snap/
+      computeSnap.js
+```
+
+> `computeSnap.js` я б виніс у `shared/konva/snap/`, бо це не “grid”, це окрема фіча (snap/guides).
+
+---
+
+## Що мені треба від тебе, щоб сказати точно “чому grid не zoom”
+
+Скинь (без зайвого) 2 речі:
+
+1. де саме ти робиш zoom/pan — **stage** чи **layer/group** (фрагмент коду `setupLayerZoomPan` використання)
+2. як саме рендериш GridLayer відносно “world layer” (порядок Layer у Stage)
+
+І я скажу: **краще A чи B**, і дам точний патч під твою структуру (`useGrid`, `buildGridLines`, `GridLayer`).
