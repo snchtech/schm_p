@@ -1,0 +1,307 @@
+Нижче — робочий “скелет” як зробити **ліву панель інструментів, що НАВИСАЄ над canvas**, у **Next.js (app router) + MUI + react-konva**:
+
+* Панель **не зменшує** область креслення (overlay).
+* Є кнопка-стрілка **згорнути/розгорнути**.
+* Клік по іконці → активує інструмент.
+* Клік по полотну → **додає елемент у точку кліку** (rect або circle).
+* Canvas займає **максимум екрану**.
+
+---
+
+## 1) `src/app/scheme-editor/page.js`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box } from "@mui/material";
+import EditorShell from "@/features/scheme-editor/ui/EditorShell";
+
+export default function SchemeEditorPage() {
+  return (
+    <Box sx={{ width: "100vw", height: "100vh", overflow: "hidden" }}>
+      <EditorShell />
+    </Box>
+  );
+}
+```
+
+---
+
+## 2) `src/features/scheme-editor/ui/EditorShell.jsx`
+
+Це контейнер: **canvas на весь екран + Drawer overlay зліва**.
+
+```jsx
+"use client";
+
+import React, { useCallback, useMemo, useState } from "react";
+import { Box, Drawer, IconButton, Paper, Tooltip, Divider } from "@mui/material";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import CropSquareIcon from "@mui/icons-material/CropSquare";
+import CircleOutlinedIcon from "@mui/icons-material/CircleOutlined";
+
+import EditorCanvas from "./canvas/EditorCanvas";
+
+// простий генератор id (можеш замінити на uuid)
+const uid = () => Math.random().toString(16).slice(2) + Date.now().toString(16);
+
+const DRAWER_W = 92; // вузька панель тільки під іконки
+
+export default function EditorShell() {
+  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [activeTool, setActiveTool] = useState(null); // "rect" | "circle" | null
+  const [elements, setElements] = useState([]);
+
+  const tools = useMemo(
+    () => [
+      { id: "rect", label: "Rect", icon: <CropSquareIcon /> },
+      { id: "circle", label: "Circle", icon: <CircleOutlinedIcon /> },
+    ],
+    [],
+  );
+
+  const addElementAt = useCallback(
+    (toolId, pos) => {
+      if (!toolId) return;
+
+      const base = { id: uid(), type: toolId, x: pos.x, y: pos.y, rotation: 0 };
+      if (toolId === "rect") {
+        setElements((prev) => [
+          ...prev,
+          {
+            ...base,
+            width: 120,
+            height: 70,
+            fill: "#ffffff",
+            stroke: "#111",
+            strokeWidth: 2,
+          },
+        ]);
+      }
+      if (toolId === "circle") {
+        setElements((prev) => [
+          ...prev,
+          {
+            ...base,
+            radius: 40,
+            fill: "#ffffff",
+            stroke: "#111",
+            strokeWidth: 2,
+          },
+        ]);
+      }
+    },
+    [],
+  );
+
+  const handleCanvasClick = useCallback(
+    (pos) => {
+      // додаємо елемент у точку кліку
+      addElementAt(activeTool, pos);
+
+      // якщо хочеш режим “додав раз — і вихід з інструмента”:
+      // setActiveTool(null);
+    },
+    [activeTool, addElementAt],
+  );
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", position: "relative" }}>
+      {/* Canvas (на весь екран) */}
+      <EditorCanvas elements={elements} onCanvasClick={handleCanvasClick} />
+
+      {/* Ліва панель overlay */}
+      <Drawer
+        anchor="left"
+        open={drawerOpen}
+        variant="temporary"
+        // важливо: без затемнення, щоб це було саме overlay
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: {
+            width: DRAWER_W,
+            height: "100%",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            borderRight: "1px solid",
+            borderColor: "divider",
+          },
+        }}
+      >
+        <Box sx={{ display: "flex", justifyContent: "flex-end", p: 1 }}>
+          <Tooltip title="Згорнути">
+            <IconButton size="small" onClick={() => setDrawerOpen(false)}>
+              <ChevronLeftIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Divider />
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 1 }}>
+          {tools.map((t) => {
+            const selected = activeTool === t.id;
+            return (
+              <Tooltip key={t.id} title={t.label} placement="right">
+                <IconButton
+                  onClick={() => setActiveTool(t.id)}
+                  sx={{
+                    borderRadius: 2,
+                    border: "1px solid",
+                    borderColor: selected ? "primary.main" : "divider",
+                    bgcolor: selected ? "action.selected" : "transparent",
+                  }}
+                >
+                  {t.icon}
+                </IconButton>
+              </Tooltip>
+            );
+          })}
+        </Box>
+      </Drawer>
+
+      {/* Згорнутий “хвостик” (кнопка розгортання), коли Drawer закритий */}
+      {!drawerOpen && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: "fixed",
+            top: 16,
+            left: 12,
+            borderRadius: 3,
+            overflow: "hidden",
+          }}
+        >
+          <Tooltip title="Відкрити панель інструментів" placement="right">
+            <IconButton onClick={() => setDrawerOpen(true)}>
+              <ChevronRightIcon />
+            </IconButton>
+          </Tooltip>
+        </Paper>
+      )}
+    </Box>
+  );
+}
+```
+
+---
+
+## 3) `src/features/scheme-editor/ui/canvas/EditorCanvas.jsx`
+
+Canvas у вигляді `Stage` на весь екран. При кліку беремо позицію курсора і віддаємо в `onCanvasClick`.
+
+```jsx
+"use client";
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Stage, Layer, Rect, Circle } from "react-konva";
+
+export default function EditorCanvas({ elements, onCanvasClick }) {
+  const stageRef = useRef(null);
+  const [size, setSize] = useState({ width: 800, height: 600 });
+
+  // Canvas на весь viewport
+  useEffect(() => {
+    const update = () => setSize({ width: window.innerWidth, height: window.innerHeight });
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  const getPointer = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    const p = stage.getPointerPosition();
+    if (!p) return null;
+    return { x: p.x, y: p.y };
+  }, []);
+
+  const handleStageMouseDown = useCallback(
+    (e) => {
+      // щоб не “додавало” при кліку по фігурі, а лише по фону:
+      const clickedOnEmpty = e.target === e.target.getStage();
+      if (!clickedOnEmpty) return;
+
+      const p = getPointer();
+      if (!p) return;
+      onCanvasClick?.(p);
+    },
+    [getPointer, onCanvasClick],
+  );
+
+  return (
+    <Stage
+      ref={stageRef}
+      width={size.width}
+      height={size.height}
+      onMouseDown={handleStageMouseDown}
+      style={{ background: "#f6f7fb" }}
+    >
+      <Layer>
+        {elements.map((el) => {
+          if (el.type === "rect") {
+            return (
+              <Rect
+                key={el.id}
+                x={el.x}
+                y={el.y}
+                width={el.width}
+                height={el.height}
+                fill={el.fill}
+                stroke={el.stroke}
+                strokeWidth={el.strokeWidth}
+                draggable
+              />
+            );
+          }
+          if (el.type === "circle") {
+            return (
+              <Circle
+                key={el.id}
+                x={el.x}
+                y={el.y}
+                radius={el.radius}
+                fill={el.fill}
+                stroke={el.stroke}
+                strokeWidth={el.strokeWidth}
+                draggable
+              />
+            );
+          }
+          return null;
+        })}
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+## Що ти отримаєш одразу
+
+* **Максимальний простір** під креслення (Stage на весь екран).
+* Лівий тулбар **не “з’їдає” ширину** — він поверх.
+* **Згортання/розгортання** одним кліком.
+* Додавання елементів **у точку кліку**.
+* Елементи **draggable** (можеш потім підв’язати selection/transformer/контекст-меню).
+
+---
+
+## Як це акуратно “під твою структуру”
+
+У тебе вже є `features/scheme-editor/model/...` і `useDiagramState`. Найчистіше:
+
+* `elements` та `setElements` перенести у твій `useDiagramState`/store.
+* `activeTool` зробити частиною editor state (або окремим ui-state).
+* `addElementAt()` винести в `model/domain/` (наприклад `addSymbol.js`).
+
+Якщо хочеш — я одразу перероблю цей код так, щоб він:
+
+* використовував **твій store** (`useDiagramState.js` / `initialState.js`),
+* додавав елементи у форматі твоїх “symbols”,
+* і працював коректно з твоїм zoom/pan (координати кліку з урахуванням scale/offset).

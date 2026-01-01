@@ -1,0 +1,413 @@
+Нижче — як зробити **окрему секцію “Конектори” з заголовком** у тому ж **лівому overlay-тулбарі (MUI)** + мінімальна логіка в editor state: вибір інструмента **line / arrow**, і старт базового “режиму конектора” (поки що без anchor-ів — просто каркас, щоб ти далі підв’язав до своїх connection-модулів).
+
+---
+
+## 1) Розширюємо `ui`-стан: активний tool + підгрупа
+
+`src/features/scheme-editor/model/state/initialState.js`
+
+```js
+export const initialState = {
+  // ...
+  ui: {
+    toolbarOpen: true,
+    activeTool: null, // "rect" | "circle" | "conn_line" | "conn_arrow"
+    toolGroup: "symbols", // "symbols" | "connectors" (не обов’язково, але зручно)
+  },
+};
+```
+
+---
+
+## 2) Додаємо actions для вибору групи/інструмента
+
+`src/features/scheme-editor/model/domain/useDiagramState.js` (фрагмент)
+
+```js
+const setToolGroup = useCallback((group) => {
+  setState((prev) => ({
+    ...prev,
+    ui: { ...prev.ui, toolGroup: group },
+  }));
+}, []);
+
+const setActiveTool = useCallback((tool) => {
+  setState((prev) => ({
+    ...prev,
+    ui: {
+      ...prev.ui,
+      activeTool: tool,
+      toolGroup: tool?.startsWith("conn_") ? "connectors" : "symbols",
+    },
+  }));
+}, []);
+```
+
+і додай в `return.actions`:
+
+```js
+setToolGroup,
+setActiveTool,
+```
+
+---
+
+## 3) Оновлюємо тулбар: секції “Елементи” та “Конектори” з заголовками
+
+Створи/онови `src/features/scheme-editor/ui/toolbar/ToolPalette.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import {
+  Box,
+  Drawer,
+  Divider,
+  IconButton,
+  Paper,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+
+import CropSquareIcon from "@mui/icons-material/CropSquare";
+import CircleOutlinedIcon from "@mui/icons-material/CircleOutlined";
+import HorizontalRuleIcon from "@mui/icons-material/HorizontalRule";
+import ArrowRightAltIcon from "@mui/icons-material/ArrowRightAlt";
+
+const DRAWER_W = 120; // трохи ширше, щоб заголовки читались
+
+function Section({ title, children }) {
+  return (
+    <Box sx={{ px: 1.25, py: 1 }}>
+      <Typography
+        variant="caption"
+        sx={{ display: "block", opacity: 0.7, mb: 1, fontWeight: 600 }}
+      >
+        {title}
+      </Typography>
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+        {children}
+      </Box>
+    </Box>
+  );
+}
+
+function ToolButton({ selected, onClick, title, icon }) {
+  return (
+    <Tooltip title={title} placement="right">
+      <IconButton
+        onClick={onClick}
+        sx={{
+          width: 44,
+          height: 44,
+          borderRadius: 2,
+          border: "1px solid",
+          borderColor: selected ? "primary.main" : "divider",
+          bgcolor: selected ? "action.selected" : "transparent",
+        }}
+      >
+        {icon}
+      </IconButton>
+    </Tooltip>
+  );
+}
+
+export default function ToolPalette({ open, activeTool, onToggle, onSelectTool }) {
+  return (
+    <>
+      <Drawer
+        anchor="left"
+        open={open}
+        variant="temporary"
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: {
+            width: DRAWER_W,
+            height: "100%",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            borderRight: "1px solid",
+            borderColor: "divider",
+          },
+        }}
+      >
+        {/* Header */}
+        <Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+          <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 700 }}>
+            Tools
+          </Typography>
+          <Tooltip title="Згорнути">
+            <IconButton size="small" onClick={onToggle}>
+              <ChevronLeftIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Divider />
+
+        {/* Sections */}
+        <Section title="Елементи">
+          <ToolButton
+            title="Rect"
+            icon={<CropSquareIcon />}
+            selected={activeTool === "rect"}
+            onClick={() => onSelectTool("rect")}
+          />
+          <ToolButton
+            title="Circle"
+            icon={<CircleOutlinedIcon />}
+            selected={activeTool === "circle"}
+            onClick={() => onSelectTool("circle")}
+          />
+        </Section>
+
+        <Divider />
+
+        <Section title="Конектори">
+          <ToolButton
+            title="Лінія"
+            icon={<HorizontalRuleIcon />}
+            selected={activeTool === "conn_line"}
+            onClick={() => onSelectTool("conn_line")}
+          />
+          <ToolButton
+            title="Стрілка"
+            icon={<ArrowRightAltIcon />}
+            selected={activeTool === "conn_arrow"}
+            onClick={() => onSelectTool("conn_arrow")}
+          />
+        </Section>
+      </Drawer>
+
+      {/* collapsed open button */}
+      {!open && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: "fixed",
+            top: 16,
+            left: 12,
+            borderRadius: 3,
+            overflow: "hidden",
+            zIndex: 1301,
+          }}
+        >
+          <Tooltip title="Відкрити панель інструментів" placement="right">
+            <IconButton onClick={onToggle}>
+              <ChevronRightIcon />
+            </IconButton>
+          </Tooltip>
+        </Paper>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+## 4) Мінімальна логіка “режиму конектора” в `EditorShell`
+
+Тут два режими:
+
+* `rect/circle` → додати елемент по кліку на фоні
+* `conn_*` → перший клік ставить **start**, другий — **end** і створює connection
+
+`src/features/scheme-editor/ui/EditorShell.jsx` (фрагмент)
+
+```jsx
+"use client";
+
+import React, { useCallback, useRef } from "react";
+import { Box } from "@mui/material";
+import ToolPalette from "./toolbar/ToolPalette";
+import EditorCanvas from "./canvas/EditorCanvas";
+import { useDiagramState } from "../model/domain/useDiagramState";
+import { DiagramSymbols } from "./canvas/DiagramSymbols/DiagramSymbols";
+import DiagramConnections from "./canvas/DiagramConnections"; // якщо є, або створиш
+
+export default function EditorShell() {
+  const { state, actions } = useDiagramState();
+
+  // тимчасово тримаємо start-point для конектора (краще потім перенести в store)
+  const connectorStartRef = useRef(null);
+
+  const handleEmptyCanvasClick = useCallback(
+    (worldPos) => {
+      const tool = state.ui.activeTool;
+
+      // --- 1) Symbols ---
+      if (tool === "rect" || tool === "circle") {
+        actions.addSymbolAt(tool, worldPos);
+        return;
+      }
+
+      // --- 2) Connectors (каркас) ---
+      if (tool === "conn_line" || tool === "conn_arrow") {
+        if (!connectorStartRef.current) {
+          connectorStartRef.current = worldPos;
+          return;
+        }
+
+        const start = connectorStartRef.current;
+        const end = worldPos;
+        connectorStartRef.current = null;
+
+        // TODO: тут підв’яжеш свою domain-логіку connectionCreate.js
+        // зараз просто додаємо connection як data (приклад)
+        actions.addConnection?.({
+          id: crypto?.randomUUID?.() || String(Date.now()),
+          type: tool === "conn_arrow" ? "arrow" : "line",
+          points: [start.x, start.y, end.x, end.y],
+          stroke: "#111",
+          strokeWidth: 2,
+        });
+
+        return;
+      }
+    },
+    [actions, state.ui.activeTool],
+  );
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", position: "relative" }}>
+      <EditorCanvas
+        symbols={state.symbols || []}
+        connections={state.connections || []}
+        onEmptyCanvasClick={handleEmptyCanvasClick}
+        renderLayers={({ symbols, connections }) => (
+          <>
+            <DiagramConnections connections={connections} />
+            <DiagramSymbols symbols={symbols} />
+          </>
+        )}
+      />
+
+      <ToolPalette
+        open={state.ui.toolbarOpen}
+        activeTool={state.ui.activeTool}
+        onToggle={actions.toggleToolbar}
+        onSelectTool={actions.setActiveTool}
+      />
+    </Box>
+  );
+}
+```
+
+> Якщо в тебе ще немає `actions.addConnection` і `state.connections` — додай їх (нижче).
+
+---
+
+## 5) Додаємо `connections` в state + `addConnection` action
+
+### `initialState.js`
+
+```js
+export const initialState = {
+  // ...
+  symbols: [],
+  connections: [],
+
+  ui: {
+    toolbarOpen: true,
+    activeTool: null,
+    toolGroup: "symbols",
+  },
+};
+```
+
+### `useDiagramState.js` (додай action)
+
+```js
+const addConnection = useCallback((conn) => {
+  setState((prev) => ({
+    ...prev,
+    connections: [...(prev.connections || []), conn],
+  }));
+}, []);
+```
+
+і в `actions`:
+
+```js
+addConnection,
+```
+
+---
+
+## 6) Простий рендер конекторів (якщо ще немає)
+
+`src/features/scheme-editor/ui/canvas/DiagramConnections.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Line, Arrow } from "react-konva";
+
+export default function DiagramConnections({ connections }) {
+  return (
+    <>
+      {(connections || []).map((c) => {
+        if (c.type === "arrow") {
+          return (
+            <Arrow
+              key={c.id}
+              points={c.points}
+              stroke={c.stroke || "#111"}
+              fill={c.stroke || "#111"}
+              strokeWidth={c.strokeWidth || 2}
+              pointerLength={12}
+              pointerWidth={12}
+            />
+          );
+        }
+        return (
+          <Line
+            key={c.id}
+            points={c.points}
+            stroke={c.stroke || "#111"}
+            strokeWidth={c.strokeWidth || 2}
+          />
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# Підсумок: що вже працює
+
+✅ В одному тулбарі є секції **“Елементи”** і **“Конектори”** з заголовками
+✅ Вибір інструмента зберігається централізовано (`state.ui.activeTool`)
+✅ Конектори мають режим **2 кліки: start/end** (каркас)
+✅ Тулбар — **overlay**, canvas завжди максимум екрану
+
+---
+
+# Наступний крок (дуже логічний для тебе)
+
+Ти ж хочеш “як у Visio”: конектор від **anchor** одного елемента до **anchor** іншого.
+Тоді я підв’яжу цей `conn_*` режим до твоїх:
+
+* `connectionAnchors.js`
+* `connectionCreate.js`
+* `getAnchorPoints.js`
+* `useNodeRefs.js`
+
+і замість “клік по пустому” буде:
+
+1. hover anchor → підсвітка
+2. click anchor → start anchor
+3. move → preview line
+4. click інший anchor → create connection
+
+Скажи тільки 1 річ: **зум/пан ти застосовуєш до Layer чи до Group?** (щоб правильно рахувати pointer/anchor координати без зміщень).

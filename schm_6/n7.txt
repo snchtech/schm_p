@@ -1,0 +1,396 @@
+Ок — робимо 2 речі:
+
+1. **EditorContextMenu підв’язуємо до `features/scheme-editor/lib/useContextMenu.js`** (без “саморобних” state в `useDiagramState`).
+2. **Праву панель** робимо як **MUI Drawer** (right), зі **sticky header** і **scrolling** контентом.
+
+Нижче — готові файли/правки під твою структуру.
+
+---
+
+# 1) `useContextMenu.js`: універсальний хук під Konva + MUI Menu
+
+> Якщо в тебе `useContextMenu.js` вже існує — просто заміни вміст на цей (або звір і підтягни поля).
+
+`src/features/scheme-editor/lib/useContextMenu.js`
+
+```js
+"use client";
+
+import { useCallback, useState } from "react";
+
+/**
+ * Контекст-меню для react-konva:
+ * - openAt(e, payload) — відкриває меню в позиції курсора (clientX/clientY)
+ * - close() — закриває
+ *
+ * payload: { type, id, extra? } — будь-яка інфа про елемент
+ */
+export default function useContextMenu() {
+  const [state, setState] = useState({
+    open: false,
+    x: 0,
+    y: 0,
+    payload: null,
+  });
+
+  const close = useCallback(() => {
+    setState((s) => ({ ...s, open: false }));
+  }, []);
+
+  const openAt = useCallback((e, payload) => {
+    // Konva event: e.evt — це DOM MouseEvent
+    const evt = e?.evt || e;
+    if (evt?.preventDefault) evt.preventDefault();
+
+    const x = evt?.clientX ?? 0;
+    const y = evt?.clientY ?? 0;
+
+    setState({ open: true, x, y, payload: payload ?? null });
+  }, []);
+
+  return {
+    contextMenu: state, // {open,x,y,payload}
+    openAt,
+    close,
+  };
+}
+```
+
+---
+
+# 2) `EditorContextMenu.js`: MUI Menu + дії “Параметри” і “Видалити”
+
+`src/features/scheme-editor/ui/context-menu/EditorContextMenu.js`
+
+```js
+"use client";
+
+import React from "react";
+import { Menu, MenuItem, ListItemIcon, ListItemText, Divider } from "@mui/material";
+import TuneIcon from "@mui/icons-material/Tune";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+
+export default function EditorContextMenu({
+  contextMenu, // {open,x,y,payload}
+  onClose,
+  onOpenParams,
+  onDelete,
+}) {
+  const open = !!contextMenu?.open;
+  const x = contextMenu?.x ?? 0;
+  const y = contextMenu?.y ?? 0;
+
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={open ? { top: y, left: x } : undefined}
+      slotProps={{ paper: { sx: { minWidth: 220 } } }}
+    >
+      <MenuItem onClick={onOpenParams}>
+        <ListItemIcon>
+          <TuneIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Параметри</ListItemText>
+      </MenuItem>
+
+      <Divider />
+
+      <MenuItem onClick={onDelete}>
+        <ListItemIcon>
+          <DeleteOutlineIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Видалити</ListItemText>
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+# 3) UI store для інспектора: додамо “sticky title” і payload елемента
+
+`src/features/scheme-editor/model/state/useEditorUiStore.js`
+
+```js
+"use client";
+
+import { create } from "zustand";
+
+export const useEditorUiStore = create((set) => ({
+  inspectorOpen: false,
+  inspectorTitle: "Параметри елемента",
+  inspectorTarget: null, // payload з contextMenu: {type,id,...}
+
+  openInspector: (title = "Параметри елемента", target = null) =>
+    set({ inspectorOpen: true, inspectorTitle: title, inspectorTarget: target }),
+
+  closeInspector: () => set({ inspectorOpen: false }),
+}));
+```
+
+---
+
+# 4) Правий інспектор як Drawer + sticky header + scrolling
+
+`src/features/scheme-editor/ui/page/EditorInspectorDrawerRight.js`
+
+```js
+"use client";
+
+import React from "react";
+import {
+  Drawer,
+  Box,
+  Typography,
+  IconButton,
+  Divider,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { useEditorUiStore } from "../../model/state/useEditorUiStore";
+
+export default function EditorInspectorDrawerRight({ enabled }) {
+  const {
+    inspectorOpen,
+    inspectorTitle,
+    inspectorTarget,
+    closeInspector,
+  } = useEditorUiStore();
+
+  const open = enabled && inspectorOpen;
+
+  return (
+    <Drawer
+      anchor="right"
+      open={open}
+      onClose={closeInspector}
+      variant="temporary"
+      ModalProps={{ keepMounted: true }}
+      PaperProps={{
+        sx: {
+          width: 380,
+          display: "flex",
+          flexDirection: "column",
+        },
+      }}
+    >
+      {/* Sticky header */}
+      <Box
+        sx={{
+          position: "sticky",
+          top: 0,
+          zIndex: 2,
+          bgcolor: "background.paper",
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Box sx={{ p: 2, display: "flex", alignItems: "center", gap: 1 }}>
+          <Typography variant="subtitle1" sx={{ flex: 1, fontWeight: 700 }}>
+            {inspectorTitle}
+          </Typography>
+          <IconButton size="small" onClick={closeInspector}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Box>
+
+        <Divider />
+      </Box>
+
+      {/* Scrolling content */}
+      <Box sx={{ p: 2, overflow: "auto", flex: 1 }}>
+        <Typography variant="body2" color="text.secondary">
+          Тут з’являться поля параметрів (select/inputs) для вибраного елемента.
+        </Typography>
+
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="caption" color="text.secondary">
+            Debug target:
+          </Typography>
+          <Box
+            component="pre"
+            sx={{
+              m: 0,
+              p: 1,
+              mt: 0.5,
+              borderRadius: 1,
+              bgcolor: "action.hover",
+              fontSize: 12,
+              overflow: "auto",
+            }}
+          >
+            {JSON.stringify(inspectorTarget, null, 2)}
+          </Box>
+        </Box>
+      </Box>
+    </Drawer>
+  );
+}
+```
+
+---
+
+# 5) `DiagramEditorPage.js`: замінюємо правий Box на Drawer
+
+`src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+
+```js
+"use client";
+
+import React, { useEffect, useMemo } from "react";
+import { Box } from "@mui/material";
+import { useEditorMode } from "../../lib/useEditorMode";
+import { useCanEdit } from "../../lib/useCanEdit";
+
+import EditorTopBar from "../top-bar/EditorTopBar";
+import EditorCanvas from "../canvas/EditorCanvas";
+import EditorInspectorDrawerRight from "./EditorInspectorDrawerRight";
+
+export default function DiagramEditorPage({ schemeId }) {
+  const { mode, setMode } = useEditorMode();
+  const canEdit = useCanEdit();
+
+  const isEdit = useMemo(() => mode === "edit" && canEdit, [mode, canEdit]);
+
+  useEffect(() => {
+    if (mode === "edit" && !canEdit) setMode("view");
+  }, [mode, canEdit, setMode]);
+
+  return (
+    <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+      <EditorTopBar
+        canEdit={canEdit}
+        isEdit={isEdit}
+        onEnterEdit={() => setMode("edit")}
+        onExitEdit={() => setMode("view")}
+      />
+
+      <Box sx={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <EditorCanvas schemeId={schemeId} isEdit={isEdit} />
+      </Box>
+
+      <EditorInspectorDrawerRight enabled={isEdit} />
+    </Box>
+  );
+}
+```
+
+---
+
+# 6) `EditorCanvas.js`: підключаємо `useContextMenu` + відкриваємо Drawer з меню “Параметри”
+
+`src/features/scheme-editor/ui/canvas/EditorCanvas.js`
+
+> Тут ключове: `openAt(e, payload)` викликаємо з `DiagramSymbols` (ПКМ на елементі).
+
+```js
+"use client";
+
+import React, { useCallback } from "react";
+import { Box } from "@mui/material";
+
+import useContextMenu from "../../lib/useContextMenu";
+import EditorContextMenu from "../context-menu/EditorContextMenu";
+import { useEditorUiStore } from "../../model/state/useEditorUiStore";
+
+// твої компоненти полотна
+import DiagramSymbols from "./DiagramSymbols/DiagramSymbols";
+import DiagramConnections from "./DiagramConnections";
+
+// твій diagram state
+import { useDiagramState } from "../../model/domain/useDiagramState";
+
+export default function EditorCanvas({ schemeId, isEdit }) {
+  const { contextMenu, openAt, close } = useContextMenu();
+  const openInspector = useEditorUiStore((s) => s.openInspector);
+
+  const {
+    symbols,
+    connections,
+    deleteGraphElementById, // <- підстав свою реальну функцію видалення
+  } = useDiagramState({ schemeId });
+
+  const onOpenParams = useCallback(() => {
+    // payload з контекст-меню (type/id/...)
+    openInspector("Параметри елемента", contextMenu?.payload ?? null);
+    close();
+  }, [openInspector, contextMenu?.payload, close]);
+
+  const onDelete = useCallback(() => {
+    if (!isEdit) return;
+    const id = contextMenu?.payload?.id;
+    if (id) deleteGraphElementById?.(id);
+    close();
+  }, [isEdit, contextMenu?.payload, deleteGraphElementById, close]);
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", position: "relative" }}>
+      <DiagramConnections connections={connections} isEdit={isEdit} />
+
+      <DiagramSymbols
+        symbols={symbols}
+        isEdit={isEdit}
+        // ВАЖЛИВО: ПКМ відкриває меню
+        onElementContextMenu={(e, payload) => {
+          if (!isEdit) return;
+          openAt(e, payload);
+        }}
+      />
+
+      {isEdit && (
+        <EditorContextMenu
+          contextMenu={contextMenu}
+          onClose={close}
+          onOpenParams={onOpenParams}
+          onDelete={onDelete}
+        />
+      )}
+    </Box>
+  );
+}
+```
+
+> `deleteGraphElementById` — просто назва-замінник. У тебе це може бути `deleteGraph(...)`, `graph/delete.js`, або метод зі `useDiagramState`. Підстав свою функцію, яка реально видаляє елемент по `id`.
+
+---
+
+# 7) `DiagramSymbols`: тригер контекст-меню (ПКМ) + payload
+
+У файлі `src/features/scheme-editor/ui/canvas/DiagramSymbols/DiagramSymbols.js` (або `SymbolGroup.js`) додай, щоб при ПКМ на елементі викликався `onElementContextMenu(e, payload)`.
+
+Приклад у `SymbolGroup.js`:
+
+```js
+<Group
+  draggable={isEdit}
+  onContextMenu={(e) => {
+    // payload — те, що зручно далі: id, type, і т.д.
+    onElementContextMenu?.(e, { id: el.id, type: el.type });
+  }}
+>
+  {/* ...shape */}
+</Group>
+```
+
+---
+
+## Що в результаті вже працює
+
+* ПКМ по елементу в edit → відкривається MUI Menu
+* “Параметри” → відкриває **Drawer справа** (sticky header, scroll)
+* “Видалити” → викликає твою delete-функцію
+* У view — все це не спрацьовує (бо `isEdit=false`)
+
+---
+
+## Далі (коли будеш готовий)
+
+Я можу одразу підключити в Drawer:
+
+* вкладки (General / Link / Style),
+* стандартні поля (stroke, fill, strokeWidth, fontSize…),
+* і унікальні поля для `TransitionArrow` (link to scheme/page + params).
+
+Скинь лише назву твоєї реальної delete-функції (або файл/експорт), і я підставлю точний імпорт/виклик у `EditorCanvas.js` без “псевдоніма”.

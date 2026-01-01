@@ -1,0 +1,130 @@
+Можеш зробити це **дуже чисто** як “двошаровий режим”:
+
+* **View mode (за замовчуванням)**: можна пан/зум/перехід по лінках, але **не можна** рухати/трансформити/додавати/видаляти.
+* **Edit mode (тільки якщо role=editor і натиснули “Редагувати”)**: включаються drag/transform/контекстне меню/панелі праворуч/гарячі клавіші.
+
+Нижче 3 робочі формати, які добре лягають на **react-konva + Next.js**.
+
+---
+
+## Формат A (рекомендую): один маршрут, режим у URL + стан у store
+
+**URL:** `/schemes/[id]`
+**Перегляд:** `/schemes/123`
+**Редагування:** `/schemes/123?mode=edit`
+
+### Як працює
+
+1. Сторінка завжди відкривається в `view`.
+2. Якщо у користувача в state є роль `editor` → показуєш кнопку **«Редагувати»**.
+3. Натиснув → робиш `router.replace({ query: { mode: 'edit' } })` і вмикаєш edit-UI.
+4. Якщо хтось напряму відкрив `?mode=edit` без ролі → **форсиш назад у view** (router.replace без mode).
+
+✅ Плюси:
+
+* можна легко копіювати посилання “відкрити в режимі редагування”;
+* при оновленні сторінки режим не “скидається”;
+* просто робити middleware/guard.
+
+### Що перемикаєш у Konva
+
+* `draggable` у всіх елементів = `isEdit`
+* `Transformer` показуєш тільки в edit
+* `onDragMove / onTransformEnd / onContextMenu` — підключаєш тільки в edit
+* `stage.listening()` можна лишати, але всі edit-хендлери гейтити через `if (!isEdit) return;`
+
+---
+
+## Формат B: два маршрути (view та edit окремо)
+
+* `/schemes/[id]` — перегляд
+* `/schemes/[id]/edit` — редагування (guard по ролі)
+
+✅ Плюси: найпростіший mental model + легко захищати middleware’ом.
+⚠️ Мінуси: дублювання компонента сторінки (або треба робити спільний `SchemePageShell`).
+
+---
+
+## Формат C: режим тільки у клієнтському state (без URL)
+
+* `/schemes/[id]` завжди один
+* “Редагувати” просто ставить `isEdit=true` у zustand/context
+
+✅ Плюси: мінімум роутингу.
+⚠️ Мінуси: refresh сторінки скидає режим; посиланням режим не поділишся.
+
+---
+
+# Як це виглядає в архітектурі (практично)
+
+## 1) Role guard (Next.js)
+
+* Роль і userData ти вже зберігаєш у cookies/token (в твоїй схемі auth).
+* На клієнті: `const canEdit = user?.roles?.includes('editor')`
+* При переході в edit: якщо `!canEdit` → не вмикати edit UI і прибрати mode з URL.
+
+> Якщо хочеш “залізобетонно” — додай server-side перевірку в middleware або в API для save.
+
+---
+
+## 2) “Editor UI” як overlay + права панель параметрів
+
+Те, що ти планував (права скрольована панель MUI) — ідеально:
+
+* **View mode:** показуєш лише мінімальні кнопки (Back, Zoom, Search…)
+* **Edit mode:** додаєш Toolbar, контекстні меню, праву панель “Параметри елемента”, сітку, снап, шари, undo/redo.
+
+Це зручно робити як:
+
+* `<TopBar mode />`
+* `<RightInspector open={isEdit && inspectorOpen} />`
+* `<CanvasStage mode />`
+
+---
+
+## 3) Гейти в Konva — просте правило
+
+У кожного елемента:
+
+* `draggable={isEdit}`
+* `onDragMove={isEdit ? handleDragMove : undefined}`
+* `onTransformEnd={isEdit ? handleTransformEnd : undefined}`
+* `onContextMenu={isEdit ? onElementContextMenu : undefined}`
+* `onClick` лишаєш для selection і в view, і в edit (але різна поведінка)
+
+Для Stage:
+
+* у view дозволяєш `wheel zoom`, `pan`
+* у edit дозволяєш те саме + selection рамкою, anchors, routing, etc.
+
+---
+
+# Мінімальний “контракт режимів” (щоб не розповзалось)
+
+Зроби один хелпер/селектор:
+
+```js
+const isEdit = mode === "edit" && canEdit;
+```
+
+І всюди використовуй **тільки його**.
+
+---
+
+# Що я б вибрав для твого проєкту
+
+**Формат A (query mode)** — найкращий баланс для “альбому схем”:
+
+* ти зможеш робити Ctrl+Click переходи у view,
+* не ламатимеш редактор,
+* і зможеш давати посилання “відкрити в редагуванні” тільки для editor’ів.
+
+---
+
+Якщо хочеш — я одразу накину **готовий skeleton** під твою структуру (Next.js + MUI + react-konva):
+
+* `useAuthStore`/`useUserStore` (role),
+* `useUiStore` (mode, inspectorOpen),
+* `SchemePage.jsx` з кнопкою “Редагувати”,
+* `CanvasStage.jsx` з гейтами для view/edit,
+* * підключення правої панелі “Параметри елемента”.

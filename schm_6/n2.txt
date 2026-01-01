@@ -1,0 +1,173 @@
+Так і має статись у твоїй поточній реалізації: ти намалював грід як **“скінченний прямокутник”** у world-layer. Коли ти зум-аутиш, цей прямокутник **зменшується**, і стає видно “порожні поля” поза ним.
+
+У Visio/Figma грід виглядає “безкінечним”, бо він **або**:
+
+1. малюється в **екранних координатах** (не масштабується, але “щільність” зберігається), **або**
+2. малюється в world-координатах, але **покриває видиму область + запас** (динамічно під viewport), **або**
+3. малюється великим “килимом” (дуже великий rect), щоб при будь-якому zoom не було країв.
+
+Тобі потрібен варіант **2** (найправильніший) або **3** (найпростіший).
+
+---
+
+## Варіант 2 (рекомендую): “Безкінечний” грід, який покриває видиму область
+
+Ідея: на кожний `zoom/pan` (не на drag елементів!) ми обчислюємо **видимий прямокутник у world-координатах** і малюємо грід тільки в ньому (із запасом), тому порожніх смуг не буде.
+
+### 1) Функція: видимий rect у world-координатах
+
+(поклади в `shared/konva/grid/getWorldViewportRect.js`)
+
+```js
+export function getWorldViewportRect({ stage, world }) {
+  const scale = world.scaleX() || 1;
+  const pos = world.position(); // x/y world контейнера відносно stage
+
+  const w = stage.width();
+  const h = stage.height();
+
+  // верх-лівий кут сцени у world coords
+  const x1 = (0 - pos.x) / scale;
+  const y1 = (0 - pos.y) / scale;
+
+  // ниж-правий кут сцени у world coords
+  const x2 = (w - pos.x) / scale;
+  const y2 = (h - pos.y) / scale;
+
+  return { x1, y1, x2, y2, scale };
+}
+```
+
+### 2) Грід як один Shape, але малюємо в межах viewport + padding
+
+(це вирішує смуги і сильно прискорює)
+
+```jsx
+"use client";
+import React, { useMemo } from "react";
+import { Shape } from "react-konva";
+
+function roundDown(v, step) {
+  return Math.floor(v / step) * step;
+}
+function roundUp(v, step) {
+  return Math.ceil(v / step) * step;
+}
+
+export default function GridLayerInfinite({
+  visible,
+  viewportRect,      // {x1,y1,x2,y2,scale} з getWorldViewportRect
+  gridSize = 40,
+  subDiv = 4,
+  padding = 400,     // запас у world units
+}) {
+  if (!visible || !viewportRect) return null;
+
+  const minor = gridSize / subDiv;
+
+  const { x1, y1, x2, y2 } = viewportRect;
+
+  const startX = roundDown(x1 - padding, minor);
+  const endX = roundUp(x2 + padding, minor);
+  const startY = roundDown(y1 - padding, minor);
+  const endY = roundUp(y2 + padding, minor);
+
+  return (
+    <Shape
+      listening={false}
+      perfectDrawEnabled={false}
+      sceneFunc={(ctx, shape) => {
+        // minor lines
+        ctx.beginPath();
+        for (let x = startX; x <= endX; x += minor) {
+          ctx.moveTo(x, startY);
+          ctx.lineTo(x, endY);
+        }
+        for (let y = startY; y <= endY; y += minor) {
+          ctx.moveTo(startX, y);
+          ctx.lineTo(endX, y);
+        }
+        ctx.strokeStyle = "#e9e9e9";
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+
+        // major lines
+        ctx.beginPath();
+        for (let x = roundDown(startX, gridSize); x <= endX; x += gridSize) {
+          ctx.moveTo(x, startY);
+          ctx.lineTo(x, endY);
+        }
+        for (let y = roundDown(startY, gridSize); y <= endY; y += gridSize) {
+          ctx.moveTo(startX, y);
+          ctx.lineTo(endX, y);
+        }
+        ctx.strokeStyle = "#cfcfcf";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStrokeShape(shape);
+      }}
+    />
+  );
+}
+```
+
+### 3) Де брати `viewportRect`
+
+У твоєму editor stage / hook, де ти робиш zoom/pan, при кожному зміненні transform:
+
+```js
+const [viewportRect, setViewportRect] = useState(null);
+
+const updateViewportRect = () => {
+  const stage = stageRef.current;
+  const world = worldLayerRef.current; // або worldGroupRef
+  if (!stage || !world) return;
+  setViewportRect(getWorldViewportRect({ stage, world }));
+};
+
+// викликати:
+- після wheel zoom
+- після pan move
+- після resize stage
+```
+
+**ВАЖЛИВО:** viewportRect НЕ оновлювати на drag елементів.
+
+---
+
+## Варіант 3 (простий): зроби “килим” гріда дуже великим
+
+Якщо не хочеш зараз viewport-математику:
+
+* намалюй грід на площі типу `20000 x 20000` у центрі
+* і все — смуг не буде при звичайних зумах
+
+Мінус: якщо ти сильно відпанишся/відзумиш — край все одно можна побачити.
+
+---
+
+## Що краще саме для твого редактора
+
+Для “Альбом схем” редактора найкраще:
+
+✅ **Infinite grid по viewport (Варіант 2)**
+
+* немає смуг
+* не малює зайве
+* найкраща продуктивність
+
+---
+
+## Коротко: чому з’являються смуги
+
+Бо грід — це не “сітка”, а **прямокутник**. При зум-ауті прямокутник стає меншим за видиму сцену.
+
+---
+
+Якщо скажеш, де саме в тебе зараз zoom/pan (на Layer чи на Group) і як ти називаєш цей контейнер (`worldLayerRef` чи `layerRef`), я одразу напишу тобі 2 маленькі файли під твою структуру:
+
+* `shared/konva/grid/getWorldViewportRect.js`
+* `shared/konva/grid/GridLayerInfinite.js`
+
+і покажу точний імпорт у твій `features/ui/canvas/GridLayer.js`.

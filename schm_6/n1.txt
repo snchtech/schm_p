@@ -1,0 +1,288 @@
+Ок, тут дві типові “visio-проблеми”, і вони вирішуються **одним правильним підходом**:
+
+1. **Snap при zoom** має рахуватись у *світових координатах*, але **tolerance** має бути у *пікселях екрана* → значить треба робити `toleranceWorld = tolerancePx / scale`.
+
+2. “Спрацьовує на всі елементи зліва” → зараз ти береш всі лінії і вибираєш перше/будь-яке попадання. У Visio snap робиться до **найближчого кандидата**, і ще важливо: **по X вирівнюємо тільки ті елементи, які “перетинаються” по Y** (overlap по ортогоналі), і навпаки.
+
+Нижче даю готову логіку.
+
+---
+
+# 1) Фікс snap при zoom: правильні координати + tolerance
+
+### Правило
+
+* `getClientRect({ relativeTo: worldLayer })` → дає координати в “світі” (незалежно від zoom)
+* але `tolerance` треба відчувати в пікселях екрана:
+
+  * якщо zoom = 2 (приближення), то 6px на екрані = 3 “world units”
+  * тому: `tol = tolerancePx / worldScale`
+
+> Важливо: worldScale — це `worldLayer.scaleX()` (якщо zoom робиш саме на world layer / group)
+
+---
+
+# 2) “Тільки до найближчого” як у Visio
+
+Замість “всі лінії всіх фігур” робимо:
+
+### Крок A — на `dragstart` кешуємо кандидати
+
+Щоб не робити `layer.find()` 60 раз/сек.
+
+Для кожного елемента зліва/справа зберігаємо:
+
+* `rect` (box)
+* лінії `left/center/right` та `top/center/bottom`
+
+### Крок B — на `dragmove` обчислюємо **кращий** кандидат
+
+Окремо по X і Y:
+
+* **X-вирівнювання** (`left-left`, `right-right`, `centerX-centerX`):
+
+  * беремо тільки ті елементи, з якими є **overlap по Y** (візуально “на одній горизонталі”)
+  * далі серед них шукаємо мінімальну `abs(targetX - movingX)` у межах tolerance
+  * якщо кілька — беремо той, у кого **відстань між прямокутниками** менша (найближчий)
+
+* **Y-вирівнювання** аналогічно, але фільтруємо по **overlap по X**.
+
+---
+
+# 3) Готовий код `computeSnapVisio` (з zoom + nearest)
+
+Поклади це в `shared/konva/snap/computeSnapVisio.js` (або як у тебе `shared/konva/grid/computeSnap.js`, але краще винести в `snap/`).
+
+```js
+// shared/konva/snap/computeSnapVisio.js
+
+function getBox(node, relativeTo) {
+  return node.getClientRect({ relativeTo });
+}
+
+function linesFromBox(box) {
+  return {
+    x: {
+      left: box.x,
+      centerX: box.x + box.width / 2,
+      right: box.x + box.width,
+    },
+    y: {
+      top: box.y,
+      centerY: box.y + box.height / 2,
+      bottom: box.y + box.height,
+    },
+  };
+}
+
+function overlap1D(a1, a2, b1, b2) {
+  return Math.min(a2, b2) - Math.max(a1, b1);
+}
+
+function boxesDistance(a, b) {
+  // відстань між прямокутниками (0 якщо перетинаються)
+  const dx = Math.max(0, Math.max(b.x - (a.x + a.width), a.x - (b.x + b.width)));
+  const dy = Math.max(0, Math.max(b.y - (a.y + a.height), a.y - (b.y + b.height)));
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * Build cache on dragstart (швидко)
+ */
+export function buildSnapCache({ worldLayer, movingNode, selector = ".snap-target" }) {
+  const nodes = worldLayer.find(selector).filter((n) => n !== movingNode);
+
+  return nodes.map((n) => {
+    const box = getBox(n, worldLayer);
+    return {
+      id: n.id?.() || null,
+      node: n,
+      box,
+      lines: linesFromBox(box),
+    };
+  });
+}
+
+/**
+ * Visio-like snap:
+ * - tolerance in SCREEN px, converted to world units with scale
+ * - only same-type (left-left, right-right, center-center)
+ * - choose nearest candidate (by diff, then by boxes distance)
+ * - filter candidates by overlap on orthogonal axis
+ */
+export function computeSnapVisio({
+  worldLayer,
+  movingNode,
+  cache,                 // from buildSnapCache
+  tolerancePx = 6,       // "як у Visio"
+  overlapPx = 8,         // наскільки має співпадати по ортогоналі
+  snapEnabled = true,
+}) {
+  const scale = worldLayer.scaleX() || 1;
+  const tol = tolerancePx / scale;
+  const overlapTol = overlapPx / scale;
+
+  const mBox = getBox(movingNode, worldLayer);
+  const mLines = linesFromBox(mBox);
+
+  // --- helpers to score candidates ---
+  const score = (diffAbs, candBoxDist) => diffAbs * 1000 + candBoxDist; // diff важливіший
+
+  let bestX = null; // { key, target, diff, candBox, candDist }
+  let bestY = null;
+
+  for (const c of cache) {
+    const cBox = c.box;
+
+    // для X вирівнювання потрібен overlap по Y
+    const yOv = overlap1D(mBox.y, mBox.y + mBox.height, cBox.y, cBox.y + cBox.height);
+    const okForX = yOv >= -overlapTol; // дозволяємо трохи "поруч"
+
+    // для Y вирівнювання потрібен overlap по X
+    const xOv = overlap1D(mBox.x, mBox.x + mBox.width, cBox.x, cBox.x + cBox.width);
+    const okForY = xOv >= -overlapTol;
+
+    const candDist = boxesDistance(mBox, cBox);
+
+    // --- X: left-left / center-center / right-right ---
+    if (okForX) {
+      for (const key of ["left", "centerX", "right"]) {
+        const diff = c.lines.x[key] - mLines.x[key];
+        const diffAbs = Math.abs(diff);
+        if (diffAbs <= tol) {
+          const sc = score(diffAbs, candDist);
+          if (!bestX || sc < bestX.sc) {
+            bestX = { key, target: c.lines.x[key], diff, diffAbs, sc, candBox: cBox };
+          }
+        }
+      }
+    }
+
+    // --- Y: top-top / center-center / bottom-bottom ---
+    if (okForY) {
+      for (const key of ["top", "centerY", "bottom"]) {
+        const diff = c.lines.y[key] - mLines.y[key];
+        const diffAbs = Math.abs(diff);
+        if (diffAbs <= tol) {
+          const sc = score(diffAbs, candDist);
+          if (!bestY || sc < bestY.sc) {
+            bestY = { key, target: c.lines.y[key], diff, diffAbs, sc, candBox: cBox };
+          }
+        }
+      }
+    }
+  }
+
+  // guides only when matched
+  const guides = [];
+  let dx = 0, dy = 0;
+
+  if (bestX) {
+    dx = bestX.diff;
+    guides.push({
+      axis: "x",
+      key: bestX.key,
+      points: [bestX.target, -100000, bestX.target, 100000],
+    });
+  }
+  if (bestY) {
+    dy = bestY.diff;
+    guides.push({
+      axis: "y",
+      key: bestY.key,
+      points: [-100000, bestY.target, 100000, bestY.target],
+    });
+  }
+
+  const absPos = movingNode.absolutePosition();
+
+  return {
+    guides,
+    newAbsPos: snapEnabled ? { x: absPos.x + dx, y: absPos.y + dy } : absPos,
+    matched: { x: bestX, y: bestY },
+  };
+}
+```
+
+---
+
+# 4) Як підключити це у твоєму `useGuidesSnap.js` (правильно)
+
+Ідея:
+
+* `cacheRef.current = buildSnapCache(...)` на `dragstart`
+* на `dragmove` викликаємо `computeSnapVisio(...)`
+* `tolerancePx` лишається в пікселях — працює коректно при zoom
+
+```js
+// shared/konva/grid/useGuidesSnap.js (або features/.../hooks/useGuidesSnap.js)
+"use client";
+import { useRef, useCallback } from "react";
+import { buildSnapCache, computeSnapVisio } from "@/shared/konva/snap/computeSnapVisio";
+
+export function useGuidesSnap({ setGuides }) {
+  const cacheRef = useRef([]);
+
+  const onDragStart = useCallback((e) => {
+    const node = e.target;
+    const worldLayer = node.getLayer(); // якщо zoom/pan на цьому layer
+    cacheRef.current = buildSnapCache({ worldLayer, movingNode: node, selector: ".snap-target" });
+  }, []);
+
+  const onDragMove = useCallback((e) => {
+    const node = e.target;
+    const worldLayer = node.getLayer();
+
+    const { newAbsPos, guides } = computeSnapVisio({
+      worldLayer,
+      movingNode: node,
+      cache: cacheRef.current,
+      tolerancePx: 6,
+      overlapPx: 8,
+      snapEnabled: true,
+    });
+
+    node.absolutePosition(newAbsPos);
+    setGuides(guides.length ? guides : []);
+    worldLayer.batchDraw();
+  }, [setGuides]);
+
+  const onDragEnd = useCallback(() => {
+    setGuides([]);
+    cacheRef.current = [];
+  }, [setGuides]);
+
+  return { onDragStart, onDragMove, onDragEnd };
+}
+```
+
+> Якщо у тебе є **worldGroup** всередині Layer (краще для архітектури), тоді замість `node.getLayer()` треба використовувати саме `worldGroupRef.current` як `relativeTo`. Скажи — підкажу точну прив’язку.
+
+---
+
+# 5) Важлива ремарка про zoom: де саме у тебе zoom/pan?
+
+Цей код буде 100% коректним при zoom, якщо:
+
+* **zoom/pan робиться на тому ж контейнері**, який ти передаєш як `relativeTo` (наприклад `worldLayer` або `worldGroup`)
+* і `tolerancePx / scale` береться з цього ж контейнера
+
+Якщо ти зумуєш **інший** layer, а елементи і snap рахуються по `getLayer()` — тоді буде “криво”.
+
+✅ Найчистіша схема:
+
+* `worldLayerRef` або `worldGroupRef` — **єдиний контейнер**, який зумиться/паниться
+* grid + elements + guides — всередині нього
+* snapping `relativeTo: worldContainer`
+
+---
+
+## Що вийде після цього
+
+* Snap буде стабільний при будь-якому zoom
+* Вирівнювання буде як Visio: **тільки найближчий** кандидат + тільки `top-top / center-center / bottom-bottom` та `left-left / center-center / right-right`
+* Не буде “масового” підсвічування від усіх елементів зліва
+
+---
+
+Якщо кинеш 10–15 рядків, де ти робиш zoom/pan (на якому node) — я скажу точно, що передавати як `worldLayer` / `relativeTo`, щоб snap при zoom був ідеальний у твоїй структурі.

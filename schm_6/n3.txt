@@ -1,0 +1,311 @@
+Ок — робимо **централізоване контекстне меню для всіх елементів** + пункт **“Параметри”**, який відкриває **праву панель (MUI Drawer)**. Зараз панель порожня (тільки заголовок “Параметри елемента”), але архітектуру одразу закладемо так, щоб потім легко додати **спільні поля** + **унікальні для типів (rect/circle/arrow/connector/…)**.
+
+Нижче — робочий “каркас” під Next.js + react-konva + MUI.
+
+---
+
+## 1) Стан/контролери: `useContextUi.js`
+
+Створюємо єдиний контролер для:
+
+* відкриття контекстного меню (позиція курсора + target елемент),
+* відкриття/закриття Drawer,
+* “delete”, “parameters”, і т.д.
+
+```js
+// app/diagram/hooks/useContextUi.js
+"use client";
+
+import { useCallback, useMemo, useState } from "react";
+
+export function useContextUi() {
+  // target: { id, type, layerType?, data? }
+  const [ctxTarget, setCtxTarget] = useState(null);
+
+  // MUI Menu anchorPosition (absolute page coords)
+  const [menuPos, setMenuPos] = useState(null); // { top, left } | null
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const openContextMenu = useCallback((e, target) => {
+    // e can be Konva event or native event
+    const evt = e?.evt || e;
+    if (!evt) return;
+
+    evt.preventDefault?.();
+    evt.stopPropagation?.();
+
+    setCtxTarget(target);
+    setMenuPos({ top: evt.clientY, left: evt.clientX });
+  }, []);
+
+  const closeContextMenu = useCallback(() => {
+    setMenuPos(null);
+  }, []);
+
+  const openDrawer = useCallback(() => setDrawerOpen(true), []);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
+  const api = useMemo(
+    () => ({
+      ctxTarget,
+      menuPos,
+      drawerOpen,
+      openContextMenu,
+      closeContextMenu,
+      openDrawer,
+      closeDrawer,
+      setCtxTarget, // інколи корисно зовні
+    }),
+    [ctxTarget, menuPos, drawerOpen, openContextMenu, closeContextMenu, openDrawer, closeDrawer]
+  );
+
+  return api;
+}
+```
+
+---
+
+## 2) Контекстне меню (MUI): `ElementContextMenu.jsx`
+
+Меню — централізовано. Сюди потім додаси багато пунктів.
+
+```jsx
+// app/diagram/ui/ElementContextMenu.jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Menu, MenuItem, ListItemIcon, ListItemText, Divider } from "@mui/material";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import TuneIcon from "@mui/icons-material/Tune";
+
+export default function ElementContextMenu({
+  menuPos,
+  ctxTarget,
+  onClose,
+  onDelete,
+  onOpenParams,
+}) {
+  const open = Boolean(menuPos);
+
+  const disabled = useMemo(() => !ctxTarget, [ctxTarget]);
+
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={menuPos ? { top: menuPos.top, left: menuPos.left } : undefined}
+      // щоб не “крало” фокус з канвасу зайвий раз — опційно:
+      disableAutoFocusItem
+    >
+      <MenuItem
+        disabled={disabled}
+        onClick={() => {
+          onOpenParams?.(ctxTarget);
+          onClose?.();
+        }}
+      >
+        <ListItemIcon><TuneIcon fontSize="small" /></ListItemIcon>
+        <ListItemText primary="Параметри" />
+      </MenuItem>
+
+      <Divider />
+
+      <MenuItem
+        disabled={disabled}
+        onClick={() => {
+          onDelete?.(ctxTarget);
+          onClose?.();
+        }}
+      >
+        <ListItemIcon><DeleteOutlineIcon fontSize="small" /></ListItemIcon>
+        <ListItemText primary="Видалити" />
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+## 3) Права панель параметрів (MUI Drawer): `ElementParamsDrawer.jsx`
+
+Зараз тільки заголовок + скрол по висоті. Потім тут з’являться “common fields” + “type fields”.
+
+```jsx
+// app/diagram/ui/ElementParamsDrawer.jsx
+"use client";
+
+import React from "react";
+import {
+  Drawer,
+  Box,
+  Typography,
+  IconButton,
+  Divider,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+
+export default function ElementParamsDrawer({ open, onClose, ctxTarget }) {
+  const title = ctxTarget
+    ? `Параметри елемента (${ctxTarget.type}, id: ${ctxTarget.id})`
+    : "Параметри елемента";
+
+  return (
+    <Drawer
+      anchor="right"
+      open={open}
+      onClose={onClose}
+      PaperProps={{
+        sx: { width: 360, maxWidth: "90vw" },
+      }}
+    >
+      <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        {/* Header */}
+        <Box sx={{ px: 2, py: 1.5, display: "flex", alignItems: "center", gap: 1 }}>
+          <Typography variant="subtitle1" sx={{ flex: 1, fontWeight: 600 }}>
+            {title}
+          </Typography>
+          <IconButton size="small" onClick={onClose}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Box>
+
+        <Divider />
+
+        {/* Scrollable content */}
+        <Box sx={{ p: 2, overflowY: "auto", flex: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            Тут будуть поля параметрів (спільні + унікальні для типу).
+          </Typography>
+        </Box>
+      </Box>
+    </Drawer>
+  );
+}
+```
+
+---
+
+## 4) Як підключити це в твою сторінку редактора
+
+Приклад інтеграції: у компоненті Editor/Canvas тримаєш `useContextUi()`, і прокидуєш `onContextMenu` в кожен елемент (або в групу).
+
+```jsx
+// app/diagram/DiagramEditor.jsx
+"use client";
+
+import React, { useCallback } from "react";
+import { Stage, Layer } from "react-konva";
+import ElementContextMenu from "./ui/ElementContextMenu";
+import ElementParamsDrawer from "./ui/ElementParamsDrawer";
+import { useContextUi } from "./hooks/useContextUi";
+
+export default function DiagramEditor({ elements, setElements }) {
+  const ctx = useContextUi();
+
+  // 1) delete централізовано
+  const handleDelete = useCallback(
+    (target) => {
+      if (!target?.id) return;
+      setElements((prev) => prev.filter((el) => el.id !== target.id));
+    },
+    [setElements]
+  );
+
+  // 2) open params
+  const handleOpenParams = useCallback(
+    (target) => {
+      if (!target) return;
+      ctx.openDrawer();
+    },
+    [ctx]
+  );
+
+  // 3) контекстне меню на “порожньому місці” (опційно: закривати)
+  const onStageContextMenu = useCallback(
+    (e) => {
+      // якщо клікнули по Stage/Layer без елемента — можна закрити меню/або показати “Canvas menu”
+      // тут просто закриємо
+      e.evt.preventDefault();
+      ctx.closeContextMenu();
+    },
+    [ctx]
+  );
+
+  return (
+    <>
+      <Stage width={1200} height={800} onContextMenu={onStageContextMenu}>
+        <Layer>
+          {elements.map((el) => (
+            <YourElementRenderer
+              key={el.id}
+              el={el}
+              onContextMenu={(e) => ctx.openContextMenu(e, { id: el.id, type: el.type, layerType: el.layerType })}
+            />
+          ))}
+        </Layer>
+      </Stage>
+
+      <ElementContextMenu
+        menuPos={ctx.menuPos}
+        ctxTarget={ctx.ctxTarget}
+        onClose={ctx.closeContextMenu}
+        onDelete={handleDelete}
+        onOpenParams={handleOpenParams}
+      />
+
+      <ElementParamsDrawer
+        open={ctx.drawerOpen}
+        onClose={ctx.closeDrawer}
+        ctxTarget={ctx.ctxTarget}
+      />
+    </>
+  );
+}
+```
+
+> `YourElementRenderer` — це твій рендерер (GraphLibrary/DiagramSymbols). Головне: **на кожному елементі (або Group)** повісити `onContextMenu`.
+
+---
+
+## 5) Важлива деталь для Konva: ставити handler на Group (рекомендовано)
+
+Ти часто рендериш елементи через `<Group x={el.x} y={el.y}> ...shape... </Group>`.
+Тоді контекстне меню краще вішати на **Group**, щоб воно працювало однаково для всіх типів:
+
+```jsx
+<Group
+  x={el.x}
+  y={el.y}
+  draggable
+  onContextMenu={(e) => onContextMenu(e, el)}
+>
+  {/* Shape всередині */}
+</Group>
+```
+
+---
+
+## 6) Як ми закладемо “спільні поля + унікальні для типів” (без реалізації поки)
+
+Коли дійдемо до полів, зробимо так:
+
+* `commonFields(el)` — наприклад: назва, видимість, колір, товщина, layerType, тощо
+* `typeFields[el.type]` — наприклад:
+
+  * для `arrow/connector`: link (schemeIdFrom, schemeIdTo, elementId, mode ctrl+click…)
+  * для `text`: font, weight, size, align…
+  * для `rect`: radius, fill, stroke…
+
+І у Drawer просто:
+
+```jsx
+{renderCommonFields(ctxTarget)}
+{renderTypeSpecificFields(ctxTarget)}
+```
+
+---
+
+Якщо даси фрагмент твого поточного `DiagramSymbols` (де ти вже робив delete-меню), я одразу покажу **точно куди** вставити `onContextMenu` і як **не ламати** selection/drag/transform (щоб ПКМ не збивав виділення).

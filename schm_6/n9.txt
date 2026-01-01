@@ -1,0 +1,388 @@
+Ок — переробляю під **твою структуру** `src/app/scheme-editor/page.js` + `src/features/scheme-editor/...` і **під твій store** (`model/domain/useDiagramState.js` / `state/*`). Нижче — готові файли/патчі.
+
+> Головна ідея: тулбар — **overlay Drawer** зліва (не забирає ширину canvas), активний tool зберігаємо в store, клік по пустому canvas додає елемент у **“світові” координати** (правильно навіть при zoom/pan через invert transform).
+
+---
+
+## 0) Нова структура UI
+
+Додай:
+
+```
+src/features/scheme-editor/ui/toolbar/
+  ToolPalette.jsx
+```
+
+---
+
+## 1) `model/state/initialState.js` — додай ui-стан
+
+```js
+export const initialState = {
+  // ...твій існуючий state
+
+  ui: {
+    toolbarOpen: true,
+    activeTool: null, // "rect" | "circle" | ...
+  },
+};
+```
+
+---
+
+## 2) `model/domain/useDiagramState.js` — додай actions для тулбару + додавання елементів
+
+Нижче фрагмент (встав у свій store там, де ти описуєш state + actions). Я показую стиль “hook-store” (якщо у тебе Zustand/Reducer — логіка та сама).
+
+```js
+"use client";
+
+import { useCallback, useState } from "react";
+import { initialState } from "../state/initialState";
+
+// якщо вже маєш генератор — використовуй його
+const uid = () => Math.random().toString(16).slice(2) + Date.now().toString(16);
+
+export function useDiagramState() {
+  const [state, setState] = useState(initialState);
+
+  // --- UI тулбар ---
+  const toggleToolbar = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      ui: { ...prev.ui, toolbarOpen: !prev.ui.toolbarOpen },
+    }));
+  }, []);
+
+  const setActiveTool = useCallback((tool) => {
+    setState((prev) => ({
+      ...prev,
+      ui: { ...prev.ui, activeTool: tool },
+    }));
+  }, []);
+
+  // --- Додавання символу ---
+  const addSymbolAt = useCallback((tool, pos) => {
+    if (!tool) return;
+
+    const base = {
+      id: uid(),
+      layerType: "scheme",     // <- якщо у тебе інша назва, підстав
+      type: tool,              // "rect" | "circle"
+      x: pos.x,
+      y: pos.y,
+      rotation: 0,
+    };
+
+    const newEl =
+      tool === "rect"
+        ? {
+            ...base,
+            width: 120,
+            height: 70,
+            fill: "#ffffff",
+            stroke: "#111",
+            strokeWidth: 2,
+          }
+        : tool === "circle"
+          ? {
+              ...base,
+              radius: 40,
+              fill: "#ffffff",
+              stroke: "#111",
+              strokeWidth: 2,
+            }
+          : null;
+
+    if (!newEl) return;
+
+    setState((prev) => ({
+      ...prev,
+      // якщо у тебе масив називається symbols — заміни тут
+      symbols: [...(prev.symbols || []), newEl],
+    }));
+  }, []);
+
+  return {
+    state,
+    actions: {
+      toggleToolbar,
+      setActiveTool,
+      addSymbolAt,
+    },
+  };
+}
+```
+
+> Якщо у тебе `symbols` лежать не в `state.symbols`, а в іншому полі — просто підстав правильний ключ.
+
+---
+
+## 3) UI: `ui/toolbar/ToolPalette.jsx` (MUI Drawer overlay)
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, Drawer, Divider, IconButton, Paper, Tooltip } from "@mui/material";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import CropSquareIcon from "@mui/icons-material/CropSquare";
+import CircleOutlinedIcon from "@mui/icons-material/CircleOutlined";
+
+const DRAWER_W = 92;
+
+export default function ToolPalette({ open, activeTool, onToggle, onSelectTool }) {
+  const tools = [
+    { id: "rect", label: "Rect", icon: <CropSquareIcon /> },
+    { id: "circle", label: "Circle", icon: <CircleOutlinedIcon /> },
+  ];
+
+  return (
+    <>
+      <Drawer
+        anchor="left"
+        open={open}
+        variant="temporary"
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: {
+            width: DRAWER_W,
+            height: "100%",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            borderRight: "1px solid",
+            borderColor: "divider",
+          },
+        }}
+      >
+        <Box sx={{ display: "flex", justifyContent: "flex-end", p: 1 }}>
+          <Tooltip title="Згорнути">
+            <IconButton size="small" onClick={onToggle}>
+              <ChevronLeftIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Divider />
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 1 }}>
+          {tools.map((t) => {
+            const selected = activeTool === t.id;
+            return (
+              <Tooltip key={t.id} title={t.label} placement="right">
+                <IconButton
+                  onClick={() => onSelectTool(t.id)}
+                  sx={{
+                    borderRadius: 2,
+                    border: "1px solid",
+                    borderColor: selected ? "primary.main" : "divider",
+                    bgcolor: selected ? "action.selected" : "transparent",
+                  }}
+                >
+                  {t.icon}
+                </IconButton>
+              </Tooltip>
+            );
+          })}
+        </Box>
+      </Drawer>
+
+      {!open && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: "fixed",
+            top: 16,
+            left: 12,
+            borderRadius: 3,
+            overflow: "hidden",
+            zIndex: 1301, // над canvas
+          }}
+        >
+          <Tooltip title="Відкрити панель інструментів" placement="right">
+            <IconButton onClick={onToggle}>
+              <ChevronRightIcon />
+            </IconButton>
+          </Tooltip>
+        </Paper>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+## 4) Підв’язка в твоєму `EditorCanvas` — правильні координати при zoom/pan
+
+У тебе вже є `EditorCanvas` (в `ui/canvas/EditorCanvas`). Тобі треба:
+
+1. передати `layerRef` (контейнер, на якому scale/position)
+2. при кліку по пустому місцю — конвертувати pointer → world coords через invert transform
+3. викликати `actions.addSymbolAt(state.ui.activeTool, worldPos)`
+
+Ось **приклад** `EditorCanvas.jsx` (адаптуй під твої props/компоненти):
+
+```jsx
+"use client";
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+
+export default function EditorCanvas({
+  symbols,
+  onEmptyCanvasClick, // (worldPos) => void
+  renderSymbols,      // твоя DiagramSymbols / GraphLibrary рендерилка
+}) {
+  const stageRef = useRef(null);
+  const schemeLayerRef = useRef(null); // <- layer, який зумиться/паниться
+  const [size, setSize] = useState({ width: 800, height: 600 });
+
+  useEffect(() => {
+    const update = () => setSize({ width: window.innerWidth, height: window.innerHeight });
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  const getWorldPointer = useCallback(() => {
+    const stage = stageRef.current;
+    const layer = schemeLayerRef.current;
+    if (!stage || !layer) return null;
+
+    const p = stage.getPointerPosition();
+    if (!p) return null;
+
+    // ✅ головне: інвертуємо transform layer (враховує scale + position + offset)
+    const tr = layer.getAbsoluteTransform().copy();
+    tr.invert();
+    return tr.point(p);
+  }, []);
+
+  const onMouseDown = useCallback(
+    (e) => {
+      // тільки якщо клік по "пустому" місцю (фон stage)
+      const clickedOnEmpty = e.target === e.target.getStage();
+      if (!clickedOnEmpty) return;
+
+      const worldPos = getWorldPointer();
+      if (!worldPos) return;
+
+      onEmptyCanvasClick?.(worldPos);
+    },
+    [getWorldPointer, onEmptyCanvasClick],
+  );
+
+  return (
+    <Stage
+      ref={stageRef}
+      width={size.width}
+      height={size.height}
+      onMouseDown={onMouseDown}
+      style={{ background: "#f6f7fb" }}
+    >
+      {/* Це може бути gridLayer окремо, а зум/пан — на schemeLayer */}
+      <Layer ref={schemeLayerRef}>
+        {renderSymbols({ symbols })}
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+> Якщо у тебе zoom/pan застосовується НЕ на Layer, а на Group всередині Layer — тоді ref має бути саме на той контейнер (Group), який масштабується/переміщується.
+
+---
+
+## 5) `ui/EditorShell.jsx` — з’єднуємо тулбар + canvas + store
+
+Створи/онови `src/features/scheme-editor/ui/EditorShell.jsx`:
+
+```jsx
+"use client";
+
+import React, { useCallback } from "react";
+import { Box } from "@mui/material";
+
+import ToolPalette from "./toolbar/ToolPalette";
+import EditorCanvas from "./canvas/EditorCanvas";
+import { useDiagramState } from "../model/domain/useDiagramState";
+import { DiagramSymbols } from "./canvas/DiagramSymbols/DiagramSymbols"; // якщо у тебе так
+
+export default function EditorShell() {
+  const { state, actions } = useDiagramState();
+
+  const handleEmptyCanvasClick = useCallback(
+    (worldPos) => {
+      actions.addSymbolAt(state.ui.activeTool, worldPos);
+      // якщо треба “одноразово додати і вимкнути tool”:
+      // actions.setActiveTool(null);
+    },
+    [actions, state.ui.activeTool],
+  );
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", position: "relative" }}>
+      <EditorCanvas
+        symbols={state.symbols || []}
+        onEmptyCanvasClick={handleEmptyCanvasClick}
+        renderSymbols={({ symbols }) => (
+          <DiagramSymbols
+            symbols={symbols}
+            // ...інші твої пропси
+          />
+        )}
+      />
+
+      <ToolPalette
+        open={state.ui.toolbarOpen}
+        activeTool={state.ui.activeTool}
+        onToggle={actions.toggleToolbar}
+        onSelectTool={actions.setActiveTool}
+      />
+    </Box>
+  );
+}
+```
+
+---
+
+## 6) `src/app/scheme-editor/page.js` — просто рендер `EditorShell`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box } from "@mui/material";
+import EditorShell from "@/features/scheme-editor/ui/EditorShell";
+
+export default function Page() {
+  return (
+    <Box sx={{ width: "100vw", height: "100vh", overflow: "hidden" }}>
+      <EditorShell />
+    </Box>
+  );
+}
+```
+
+---
+
+# Важливий момент про “максимум простору”
+
+Ми зробили `Drawer` як **overlay** (`variant="temporary"`, `hideBackdrop`, `position: fixed`). Тому canvas завжди 100% width/height.
+
+---
+
+# Далі (дуже доречно для твого редактора)
+
+Коли будеш готовий, наступні кроки робляться буквально за 1–2 файли:
+
+1. **Drag&drop з панелі** (не клік-інструмент, а “перетягнув і кинув” на canvas)
+2. **Preview елемента під курсором** (ghost) поки активний tool
+3. **Скасування (Esc)**, та блокування додавання, якщо відкрито контекстне меню/панель параметрів
+4. Інструменти для **конекторів** (стрілки/лінії) в тому ж тулбарі
+
+Якщо скажеш, як у тебе зараз реалізований zoom/pan (на Layer чи Group, і де саме тримаєш scale/pos), я одразу піджену `EditorCanvas` 1:1 під твій існуючий код, без “адаптуй під себе”.

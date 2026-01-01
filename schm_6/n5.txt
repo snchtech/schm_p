@@ -1,0 +1,295 @@
+Ок, під твою структуру можна зробити **режим view/edit без “ламання” react-konva** так:
+
+* `app/scheme-editor/page.js` (Server Component) читає `searchParams.mode`
+* `features/scheme-editor/ui/page/DiagramEditorPage.js` (Client Component) вирішує **чи можна редагувати** (`canEdit`) і рахує `isEdit = mode==='edit' && canEdit`
+* Весь Konva-UI (drag/transform/context-menu/панель параметрів) вмикається тільки коли `isEdit===true`
+* Перемикання режиму — просто зміна query `?mode=edit`
+
+Нижче — skeleton файлів саме під твою структуру.
+
+---
+
+## 1) `src/app/scheme-editor/page.js` (Server)
+
+> Тут ми лише передаємо `mode` з URL у клієнтський компонент.
+
+```js
+// src/app/scheme-editor/page.js
+import DiagramEditorPage from "@/features/scheme-editor/ui/page/DiagramEditorPage";
+
+export default function Page({ searchParams }) {
+  const mode = searchParams?.mode === "edit" ? "edit" : "view"; // default view
+  const schemeId = searchParams?.id ?? null; // якщо в тебе id в query
+  // або якщо в тебе буде маршрут /scheme-editor/[id] — тоді береш params.id
+
+  return <DiagramEditorPage initialMode={mode} schemeId={schemeId} />;
+}
+```
+
+---
+
+## 2) Хук для керування режимом через URL
+
+Створимо в `features/scheme-editor/lib/useEditorMode.js`:
+
+```js
+// src/features/scheme-editor/lib/useEditorMode.js
+"use client";
+
+import { useCallback, useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+export function useEditorMode() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const mode = useMemo(() => {
+    const m = searchParams.get("mode");
+    return m === "edit" ? "edit" : "view";
+  }, [searchParams]);
+
+  const setMode = useCallback(
+    (nextMode) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextMode === "edit") params.set("mode", "edit");
+      else params.delete("mode");
+
+      const qs = params.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
+
+  return { mode, setMode };
+}
+```
+
+---
+
+## 3) `DiagramEditorPage.js` (Client) — guard + кнопка “Редагувати”
+
+Файл: `src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+
+```js
+// src/features/scheme-editor/ui/page/DiagramEditorPage.js
+"use client";
+
+import React, { useEffect, useMemo } from "react";
+import { Box } from "@mui/material";
+import { useEditorMode } from "../../lib/useEditorMode";
+import EditorTopBar from "../top-bar/EditorTopBar";
+import EditorCanvas from "../canvas/EditorCanvas";
+
+// IMPORTANT: підстав сюди реальний хук/селектор ролей зі свого auth state
+function useUserRolesMock() {
+  // приклад: return { roles: ["viewer"] } або ["editor"]
+  return { roles: ["editor"] };
+}
+
+export default function DiagramEditorPage({ initialMode = "view", schemeId }) {
+  const { mode, setMode } = useEditorMode();
+
+  // якщо хочеш: при першому рендері підхопити initialMode (з server) — можна,
+  // але в app-router useSearchParams вже містить актуальний mode.
+  // Тому initialMode тут скоріше “для форми”.
+  const { roles } = useUserRolesMock();
+
+  const canEdit = useMemo(() => roles?.includes("editor"), [roles]);
+  const isEdit = mode === "edit" && canEdit;
+
+  // Guard: якщо хтось відкрив ?mode=edit без ролі — прибираємо edit
+  useEffect(() => {
+    if (mode === "edit" && !canEdit) setMode("view");
+  }, [mode, canEdit, setMode]);
+
+  return (
+    <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+      <EditorTopBar
+        mode={mode}
+        canEdit={canEdit}
+        isEdit={isEdit}
+        onEnterEdit={() => setMode("edit")}
+        onExitEdit={() => setMode("view")}
+      />
+
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
+        {/* Canvas */}
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <EditorCanvas schemeId={schemeId} mode={mode} canEdit={canEdit} />
+        </Box>
+
+        {/* Права панель параметрів — тільки в edit */}
+        {/* Можеш тут підключити MUI Drawer або Box position:fixed */}
+      </Box>
+    </Box>
+  );
+}
+```
+
+---
+
+## 4) TopBar: показує “Редагувати” тільки якщо editor
+
+`src/features/scheme-editor/ui/top-bar/EditorTopBar.js`
+
+```js
+// src/features/scheme-editor/ui/top-bar/EditorTopBar.js
+"use client";
+
+import React from "react";
+import { AppBar, Toolbar, Typography, Button, Stack } from "@mui/material";
+
+export default function EditorTopBar({
+  mode,
+  canEdit,
+  isEdit,
+  onEnterEdit,
+  onExitEdit,
+}) {
+  return (
+    <AppBar position="static" elevation={1}>
+      <Toolbar sx={{ gap: 2 }}>
+        <Typography variant="h6" sx={{ flex: 1 }}>
+          Scheme editor
+        </Typography>
+
+        <Stack direction="row" spacing={1}>
+          {canEdit && !isEdit && (
+            <Button color="inherit" variant="outlined" onClick={onEnterEdit}>
+              Редагувати
+            </Button>
+          )}
+
+          {canEdit && isEdit && (
+            <>
+              {/* Мінімум: “Вийти з редагування”.
+                  Далі додаси Save / Undo / Redo */}
+              <Button color="inherit" variant="outlined" onClick={onExitEdit}>
+                Перегляд
+              </Button>
+            </>
+          )}
+        </Stack>
+      </Toolbar>
+    </AppBar>
+  );
+}
+```
+
+---
+
+## 5) EditorCanvas: один прапорець `isEdit` і гейти в Konva
+
+`src/features/scheme-editor/ui/canvas/EditorCanvas.js`
+
+```js
+// src/features/scheme-editor/ui/canvas/EditorCanvas.js
+"use client";
+
+import React, { useMemo } from "react";
+import { Box } from "@mui/material";
+import DiagramSymbols from "./DiagramSymbols";
+import DiagramConnections from "./DiagramConnections";
+import GridLayer from "./GridLayer";
+import GuidesLayer from "./GuidesLayer";
+
+// твої хуки
+import { useDiagramState } from "../../model/domain/useDiagramState";
+// import { useContextMenu } from "../../lib/useContextMenu"; // якщо є
+
+export default function EditorCanvas({ schemeId, mode, canEdit }) {
+  const isEdit = useMemo(() => mode === "edit" && canEdit, [mode, canEdit]);
+
+  const {
+    symbols,
+    connections,
+    // selection,
+    // handlers:
+    onElementContextMenu,
+    onDragMove,
+    onDragEnd,
+    onTransformEnd,
+    onMouseDownStage,
+    onSelectElement,
+    // ...
+  } = useDiagramState({ schemeId });
+
+  // Гейт: якщо не edit — не даємо контекстне меню
+  const safeContextMenu = isEdit ? onElementContextMenu : undefined;
+
+  return (
+    <Box sx={{ width: "100%", height: "100%" }}>
+      {/* Тут у тебе буде Stage/Layer всередині,
+          я показую тільки ідею пропсів у твої компоненти */}
+
+      {/* Grid/Guides ти можеш показувати і у view, але snapping — тільки в edit */}
+      <GridLayer /* ... */ />
+
+      <GuidesLayer /* ... */ />
+
+      <DiagramConnections
+        connections={connections}
+        isEdit={isEdit}
+        // on... = isEdit ? handler : undefined
+      />
+
+      <DiagramSymbols
+        symbols={symbols}
+        isEdit={isEdit}
+        onContextMenu={safeContextMenu}
+        onDragMove={isEdit ? onDragMove : undefined}
+        onDragEnd={isEdit ? onDragEnd : undefined}
+        onTransformEnd={isEdit ? onTransformEnd : undefined}
+        onSelect={onSelectElement} // selection можна залишати і у view
+        onMouseDownStage={onMouseDownStage}
+      />
+    </Box>
+  );
+}
+```
+
+---
+
+## 6) Гейт “draggable/transformer” у SymbolGroup / Shape
+
+Наприклад у `SymbolGroup.js` або в конкретних shape-компонентах:
+
+```js
+<Group
+  draggable={isEdit}
+  onDragMove={isEdit ? handleDragMove : undefined}
+  onDragEnd={isEdit ? handleDragEnd : undefined}
+  onContextMenu={isEdit ? onContextMenu : undefined}
+/>
+```
+
+І `SelectionTransformer`:
+
+```jsx
+{isEdit && selectedId && (
+  <SelectionTransformer selectedId={selectedId} /* ... */ />
+)}
+```
+
+---
+
+# Важливі правила, щоб нічого не “поїхало”
+
+1. **Усі “мутатори” стану** (drag, transform, delete, create connection, context menu actions) — тільки під `isEdit`.
+2. **Перегляд** лишає: zoom/pan, hover, Ctrl+Click переходи, selection (якщо хочеш).
+3. Guard: якщо `mode=edit`, але `!canEdit` — моментально `setMode('view')`.
+4. “Зберегти” робити через API з server-перевіркою ролі (навіть якщо UI схований).
+
+---
+
+# Що мені треба від тебе, щоб я дописав “під ключ” без заглушок
+
+Я не питатиму додаткових уточнень, просто дам найреалістичніший варіант, але якщо ти одразу кинеш:
+
+* де саме в тебе лежить user state/roles (який хук/стор),
+* як ти отримуєш `schemeId` (query чи буде `/scheme-editor/[id]`),
+
+— тоді я одразу підставлю це в код і покажу точні імпорти/файли **без mock**.
+
+Якщо хочеш — наступним кроком зробимо **праву MUI панель “Параметри елемента”**: в view вона не існує, в edit відкривається з контекстного меню “Параметри”.

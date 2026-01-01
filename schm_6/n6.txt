@@ -1,0 +1,449 @@
+Ок — роблю **“під ключ” skeleton** під твою структуру: **view за замовчуванням**, кнопка **“Редагувати”** тільки для `editor`, перемикання через `?mode=edit`, і **правий інспектор MUI** (поки порожній з заголовком), який відкривається з контекстного меню **“Параметри”**.
+
+Нижче — що саме створити/замінити.
+
+---
+
+# 0) Що отримаєш після вставки
+
+* `/scheme-editor` → **view**
+* `/scheme-editor?mode=edit` → якщо **не editor** → автоматично поверне у view
+* У **view**: елементи НЕ draggable, НЕ трансформуються, контекст-меню можна залишити “читальне” або вимкнути (я вимкну edit-дії)
+* У **edit**: draggable + контекстне меню (Видалити/Параметри), праворуч відкривається панель
+
+---
+
+# 1) `src/app/scheme-editor/page.js` (оновити)
+
+```js
+// src/app/scheme-editor/page.js
+import DiagramEditorPage from "@/features/scheme-editor/ui/page/DiagramEditorPage";
+
+export default function Page({ searchParams }) {
+  const mode = searchParams?.mode === "edit" ? "edit" : "view";
+  // якщо schemeId у тебе в query (поки так):
+  const schemeId = searchParams?.id ?? null;
+
+  return <DiagramEditorPage initialMode={mode} schemeId={schemeId} />;
+}
+```
+
+---
+
+# 2) Додай хук режиму: `features/scheme-editor/lib/useEditorMode.js`
+
+```js
+// src/features/scheme-editor/lib/useEditorMode.js
+"use client";
+
+import { useCallback, useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+export function useEditorMode() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const mode = useMemo(() => {
+    const m = searchParams.get("mode");
+    return m === "edit" ? "edit" : "view";
+  }, [searchParams]);
+
+  const setMode = useCallback(
+    (nextMode) => {
+      const params = new URLSearchParams(searchParams.toString());
+
+      if (nextMode === "edit") params.set("mode", "edit");
+      else params.delete("mode");
+
+      const qs = params.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
+
+  return { mode, setMode };
+}
+```
+
+---
+
+# 3) Додай адаптер ролі: `features/scheme-editor/lib/useCanEdit.js`
+
+Тут **одне місце**, де ти підставиш свій реальний store (zustand/ctx).
+Я даю безпечний варіант: якщо не знайшли роль — вважаємо, що **не editor**.
+
+```js
+// src/features/scheme-editor/lib/useCanEdit.js
+"use client";
+
+import { useMemo } from "react";
+
+/**
+ * ПІДСТАВ СВІЙ СЕЛЕКТОР РОЛЕЙ.
+ * Ідея: у тебе десь є State з user/roles.
+ *
+ * Приклад під zustand:
+ * import { useAuthStore } from "@/features/auth/model/useAuthStore";
+ * const roles = useAuthStore(s => s.user?.roles || []);
+ */
+export function useCanEdit() {
+  // TODO: замінити на реальний селектор
+  const roles = []; // <- зараз "не editor" за замовчуванням
+
+  return useMemo(() => Array.isArray(roles) && roles.includes("editor"), [roles]);
+}
+```
+
+> ВАЖЛИВО: як тільки ти вставиш реальний селектор ролей у `roles = ...`, все запрацює автоматично.
+
+---
+
+# 4) UI store для правої панелі: `features/scheme-editor/model/state/useEditorUiStore.js`
+
+```js
+// src/features/scheme-editor/model/state/useEditorUiStore.js
+"use client";
+
+import { create } from "zustand";
+
+export const useEditorUiStore = create((set) => ({
+  inspectorOpen: false,
+  inspectorTitle: "Параметри елемента",
+  openInspector: (title = "Параметри елемента") =>
+    set({ inspectorOpen: true, inspectorTitle: title }),
+  closeInspector: () => set({ inspectorOpen: false }),
+}));
+```
+
+---
+
+# 5) Права панель (Inspector): `features/scheme-editor/ui/page/EditorInspectorRight.js`
+
+```js
+// src/features/scheme-editor/ui/page/EditorInspectorRight.js
+"use client";
+
+import React from "react";
+import { Box, Typography, Divider, IconButton } from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { useEditorUiStore } from "../../model/state/useEditorUiStore";
+
+export default function EditorInspectorRight({ enabled }) {
+  const { inspectorOpen, inspectorTitle, closeInspector } = useEditorUiStore();
+
+  if (!enabled || !inspectorOpen) return null;
+
+  return (
+    <Box
+      sx={{
+        width: 360,
+        borderLeft: "1px solid",
+        borderColor: "divider",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        bgcolor: "background.paper",
+      }}
+    >
+      <Box sx={{ p: 2, display: "flex", alignItems: "center", gap: 1 }}>
+        <Typography variant="subtitle1" sx={{ flex: 1, fontWeight: 600 }}>
+          {inspectorTitle}
+        </Typography>
+        <IconButton size="small" onClick={closeInspector}>
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Box>
+
+      <Divider />
+
+      <Box sx={{ p: 2, overflow: "auto", flex: 1 }}>
+        {/* Поки порожньо */}
+        <Typography variant="body2" color="text.secondary">
+          Тут з’являться поля параметрів (select/inputs) для вибраного елемента.
+        </Typography>
+      </Box>
+    </Box>
+  );
+}
+```
+
+---
+
+# 6) Онови `DiagramEditorPage.js`: режим + guard + topbar + inspector
+
+`src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+
+```js
+// src/features/scheme-editor/ui/page/DiagramEditorPage.js
+"use client";
+
+import React, { useEffect, useMemo } from "react";
+import { Box } from "@mui/material";
+import { useEditorMode } from "../../lib/useEditorMode";
+import { useCanEdit } from "../../lib/useCanEdit";
+
+import EditorTopBar from "../top-bar/EditorTopBar";
+import EditorCanvas from "../canvas/EditorCanvas";
+import EditorInspectorRight from "./EditorInspectorRight";
+
+export default function DiagramEditorPage({ initialMode = "view", schemeId }) {
+  const { mode, setMode } = useEditorMode();
+  const canEdit = useCanEdit();
+
+  const isEdit = useMemo(() => mode === "edit" && canEdit, [mode, canEdit]);
+
+  // Guard: якщо хтось відкрив ?mode=edit без ролі — прибираємо
+  useEffect(() => {
+    if (mode === "edit" && !canEdit) setMode("view");
+  }, [mode, canEdit, setMode]);
+
+  return (
+    <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+      <EditorTopBar
+        canEdit={canEdit}
+        isEdit={isEdit}
+        onEnterEdit={() => setMode("edit")}
+        onExitEdit={() => setMode("view")}
+      />
+
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <Box sx={{ flex: 1, minWidth: 0, position: "relative" }}>
+          <EditorCanvas schemeId={schemeId} isEdit={isEdit} />
+        </Box>
+
+        <EditorInspectorRight enabled={isEdit} />
+      </Box>
+    </Box>
+  );
+}
+```
+
+> `initialMode` зараз не потрібен (бо URL рулить), але лишив — не заважає.
+
+---
+
+# 7) Онови `EditorTopBar.js`: кнопки “Редагувати / Перегляд”
+
+`src/features/scheme-editor/ui/top-bar/EditorTopBar.js`
+
+```js
+// src/features/scheme-editor/ui/top-bar/EditorTopBar.js
+"use client";
+
+import React from "react";
+import { AppBar, Toolbar, Typography, Button, Stack } from "@mui/material";
+
+export default function EditorTopBar({ canEdit, isEdit, onEnterEdit, onExitEdit }) {
+  return (
+    <AppBar position="static" elevation={1}>
+      <Toolbar sx={{ gap: 2 }}>
+        <Typography variant="h6" sx={{ flex: 1 }}>
+          Схема
+        </Typography>
+
+        <Stack direction="row" spacing={1}>
+          {canEdit && !isEdit && (
+            <Button color="inherit" variant="outlined" onClick={onEnterEdit}>
+              Редагувати
+            </Button>
+          )}
+
+          {canEdit && isEdit && (
+            <Button color="inherit" variant="outlined" onClick={onExitEdit}>
+              Перегляд
+            </Button>
+          )}
+        </Stack>
+      </Toolbar>
+    </AppBar>
+  );
+}
+```
+
+---
+
+# 8) Гейти в `EditorCanvas` + контекст-меню “Параметри”
+
+Твій `EditorCanvas.js` вже існує. Зараз треба:
+
+* прийняти `isEdit`
+* у `DiagramSymbols` передавати `isEdit`
+* у context menu додати дію “Параметри” → відкрити інспектор
+
+## 8.1) Онови `EditorCanvas.js` (приклад-скелет)
+
+`src/features/scheme-editor/ui/canvas/EditorCanvas.js`
+
+```js
+// src/features/scheme-editor/ui/canvas/EditorCanvas.js
+"use client";
+
+import React, { useCallback } from "react";
+import { Box } from "@mui/material";
+
+import DiagramSymbols from "./DiagramSymbols";
+import DiagramConnections from "./DiagramConnections";
+import EditorContextMenu from "../context-menu/EditorContextMenu";
+
+import { useEditorUiStore } from "../../model/state/useEditorUiStore";
+
+// твій state хук
+import { useDiagramState } from "../../model/domain/useDiagramState";
+
+export default function EditorCanvas({ schemeId, isEdit }) {
+  const openInspector = useEditorUiStore((s) => s.openInspector);
+
+  const {
+    symbols,
+    connections,
+    selectedId,
+    setSelectedId,
+    deleteElementById, // припускаю, або твоя deleteGraph
+    // + твій контекст-меню хук:
+    contextMenu,
+    openContextMenu,
+    closeContextMenu,
+  } = useDiagramState({ schemeId });
+
+  // Дія "Параметри"
+  const handleOpenParams = useCallback(() => {
+    openInspector("Параметри елемента");
+    closeContextMenu?.();
+  }, [openInspector, closeContextMenu]);
+
+  const handleDelete = useCallback(() => {
+    if (!isEdit) return;
+    if (contextMenu?.targetId) {
+      deleteElementById?.(contextMenu.targetId);
+    }
+    closeContextMenu?.();
+  }, [isEdit, contextMenu, deleteElementById, closeContextMenu]);
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", position: "relative" }}>
+      {/* Тут у тебе Stage/Layer всередині EditorCanvas (як вже зроблено) */}
+      <DiagramConnections connections={connections} isEdit={isEdit} />
+
+      <DiagramSymbols
+        symbols={symbols}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        isEdit={isEdit}
+        onElementContextMenu={isEdit ? openContextMenu : undefined}
+      />
+
+      {/* Контекстне меню — показуємо тільки в edit */}
+      {isEdit && (
+        <EditorContextMenu
+          open={!!contextMenu?.open}
+          x={contextMenu?.x}
+          y={contextMenu?.y}
+          onClose={closeContextMenu}
+          onDelete={handleDelete}
+          onOpenParams={handleOpenParams}
+        />
+      )}
+    </Box>
+  );
+}
+```
+
+> **Примітка:** я не знаю точний shape твого `useDiagramState` і `useContextMenu`.
+> Але логіка така: `openContextMenu(e, targetId)` → зберігає координати та `targetId`.
+> Якщо в тебе інакше — ти просто підставиш свої назви змінних/методів, а структура режимів лишається.
+
+---
+
+# 9) Контекстне меню (MUI) з “Видалити” і “Параметри”
+
+У тебе вже є `features/scheme-editor/ui/context-menu/EditorContextMenu.js` і `shared/ui/GraphContextMenuMui.js`.
+
+Я дам простий варіант прямо в `EditorContextMenu.js`, який використовує MUI `Menu`:
+
+```js
+// src/features/scheme-editor/ui/context-menu/EditorContextMenu.js
+"use client";
+
+import React from "react";
+import { Menu, MenuItem, ListItemIcon, ListItemText } from "@mui/material";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import TuneIcon from "@mui/icons-material/Tune";
+
+export default function EditorContextMenu({
+  open,
+  x = 0,
+  y = 0,
+  onClose,
+  onDelete,
+  onOpenParams,
+}) {
+  return (
+    <Menu
+      open={open}
+      onClose={onClose}
+      anchorReference="anchorPosition"
+      anchorPosition={open ? { top: y, left: x } : undefined}
+    >
+      <MenuItem onClick={onOpenParams}>
+        <ListItemIcon>
+          <TuneIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Параметри</ListItemText>
+      </MenuItem>
+
+      <MenuItem onClick={onDelete}>
+        <ListItemIcon>
+          <DeleteOutlineIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Видалити</ListItemText>
+      </MenuItem>
+    </Menu>
+  );
+}
+```
+
+---
+
+# 10) Мінімальні гейти у `DiagramSymbols / SymbolGroup`
+
+У `DiagramSymbols.js` передай `isEdit` далі й зроби:
+
+* `draggable={isEdit}`
+* drag handlers тільки якщо `isEdit`
+* контекст-меню — тільки якщо `isEdit`
+
+Приклад прямо у `SymbolGroup.js` (ідея):
+
+```js
+<Group
+  draggable={isEdit}
+  onDragMove={isEdit ? handleDragMove : undefined}
+  onDragEnd={isEdit ? handleDragEnd : undefined}
+  onContextMenu={isEdit ? (e) => onElementContextMenu?.(e, el.id) : undefined}
+>
+```
+
+---
+
+# Найважливіше: підключити реальну роль editor
+
+Зараз `useCanEdit()` повертає `false` (бо `roles=[]`).
+
+Ти просто замінюєш одну лінію в `useCanEdit.js`:
+
+```js
+const roles = useAuthStore(s => s.userData?.roles || []);
+```
+
+або що у тебе там реально є.
+
+---
+
+## Якщо хочеш — наступним кроком (без питань) я одразу:
+
+1. Підв’яжу `EditorContextMenu` до твого `useContextMenu.js` (який у тебе вже є в `lib`)
+2. Додам “читальний” контекст-меню у view (наприклад “Копіювати ID”, “Відкрити посилання”)
+3. Зроблю праву панель як **MUI Drawer** з sticky-header і scrolling
+
+Скажи тільки: **де саме у тебе лежить user state з roles** (шлях до файла/хука) — і я вставлю точний імпорт і селектор без заглушок.
