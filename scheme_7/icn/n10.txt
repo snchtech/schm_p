@@ -1,0 +1,119 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Circle } from "react-konva";
+
+/**
+ * DashedTwoTriangles (react-konva)
+ * - 2 трикутники назустріч (контур пунктиром)
+ * + 2 anchor-точки для конекторів по центру основ:
+ *    leftBase  = центр відрізка (40,40)-(40,80)  => (40,60)
+ *    rightBase = центр відрізка (160,40)-(160,80)=> (160,60)
+ *
+ * Props:
+ *  x, y, scale
+ *  stroke, strokeWidth
+ *  dash (default [10,8])
+ *  showAnchors (default true)
+ *  onAnchorClick, onAnchorHover
+ */
+export default function DashedTwoTriangles({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+  dash = [10, 8],
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // viewBox 0 0 200 120
+  const APEX = { x: 100, y: 60 };
+
+  const LEFT_BASE = { id: "leftBase", x: 40, y: 60 };
+  const RIGHT_BASE = { id: "rightBase", x: 160, y: 60 };
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+
+  const handleEnter = (a) => {
+    document.body.style.cursor = "crosshair";
+    onAnchorHover?.(a);
+  };
+  const handleLeave = () => {
+    document.body.style.cursor = "default";
+    onAnchorHover?.(null);
+  };
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Left dashed triangle */}
+      <Line
+        points={[40, 40, 40, 80, APEX.x, APEX.y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        dash={dash}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Right dashed triangle */}
+      <Line
+        points={[160, 40, 160, 80, APEX.x, APEX.y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        dash={dash}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Connector anchors (centers of bases) */}
+      {showAnchors && (
+        <>
+          <Circle
+            x={LEFT_BASE.x}
+            y={LEFT_BASE.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(LEFT_BASE)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(LEFT_BASE);
+            }}
+          />
+
+          <Circle
+            x={RIGHT_BASE.x}
+            y={RIGHT_BASE.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(RIGHT_BASE)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(RIGHT_BASE);
+            }}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо треба, зроблю anchor-и **невидимими** (`opacity={0}`) і збільшу “зону кліку” через `hitStrokeWidth`, щоб легше було підчепити конектор.

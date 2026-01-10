@@ -1,0 +1,181 @@
+Точно, вибач — ти зараз скинув **`utils/api.js`**, а я “поїхав” в бік EditorCanvas. Давай виправляю і розбираю **саме цей файл**.
+
+## 1) Що це за файл і куди його класти в новій структурі
+
+`utils/api.js` — це **загальні API-хелпери** (fetchData + набір функцій для albums/schemes/довідників).
+Він не прив’язаний прямо до `scheme-editor` UI, тому логічно винести в **shared**.
+
+✅ Рекомендований новий шлях:
+
+```
+src/shared/api/api.js
+```
+
+Або якщо ти хочеш лишити ближче до альбомів/схем — тоді:
+
+```
+src/features/scheme-editor/lib/api.js
+```
+
+Я виберу **shared**, бо в тебе вже є `shared/` і ці методи можуть використовуватись не лише редактором.
+
+---
+
+## 2) Зібраний файл з твоїх 3 скрінів (як є)
+
+### ✅ `src/shared/api/api.js`
+
+```js
+export const fetchData = async (url, method = "GET", data = {}) => {
+  try {
+    const res = await fetch("/api/rest/customfetch", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, options: { method, body: data } }),
+    });
+
+    if (!res.ok) {
+      console.log(await res.json());
+      throw new Error(`Failed to fetch ${url}`);
+    }
+
+    return await res.json();
+  } catch (error) {
+    console.error(`Error fetching ${url}:`, error);
+    return null;
+  }
+};
+
+// Отримання списку підрозділів
+export const fetchDepartments = async () => {
+  return fetchData("/api/departments", "GET");
+};
+
+// Отримання списку блоків
+export const fetchUnits = async () => {
+  return fetchData("/api/units", "GET");
+};
+
+/* АЛЬБОМИ */
+
+// Отримання списку альбомів
+export const fetchAlbums = async () => {
+  return fetchData("/api/album/get-albums", "GET");
+};
+
+// Створення альбому
+export const createAlbum = async (data) => {
+  return fetchData("/api/album/create-album", "POST", data);
+};
+
+// Отримуємо статуси альбомів
+export const fetchAlbumStatuses = async () => {
+  return fetchData("/api/album/get-albums-status", "GET");
+};
+
+// Зміна статусу альбому на архівний
+export const archiveAlbum = async (albumeId) => {
+  return fetchData("/api/album/archive-album", "PUT", { albumeId: albumeId });
+};
+
+// Отримаємо альбом по ID
+export const fetchAlbumById = async (albumId) => {
+  return fetchData("/api/album/get-albums-by-id", "POST", { albumId: albumId });
+};
+
+// Оновлення даних альбому
+export const updateAlbum = async (albumId, albumData) => {
+  return fetchData("/api/album/update-album", "PUT", {
+    albumId: albumId,
+    albumData: albumData,
+  });
+};
+
+// Отримання відфільтрованого списку альбомів згідно вибраного фільтра
+export const fetchAlbumFilterOptions = async () => {
+  return fetchData("/api/album/get-album-filter-options", "GET");
+};
+
+/* СХЕМИ */
+
+// Отримання списку схем
+export const fetchSchemes = async () => {
+  return fetchData("/api/scheme/get-schemes", "GET");
+};
+
+// Отримуємо ID стабільної версії схеми
+export const getStableSchemeVersion = async (schemeId) => {
+  return fetchData("/api/scheme/get-schemes-stable", "POST", {
+    schemeId: schemeId,
+  });
+};
+
+// Отримання редагованої версії схеми
+export const getEditSchemeVersion = async (schemeId) => {
+  return fetchData("/api/scheme/get-schemes-editable", "POST", {
+    schemeId: schemeId,
+  });
+};
+
+// Зміна статусу схеми на архівний
+export const archiveScheme = async (schemeId) => {
+  return fetchData("/api/scheme/archive-scheme", "PUT", { schemeId: schemeId });
+};
+
+// Створення альбому  (⚠️ у тебе так написано на скріні, але по факту це схема)
+export const createScheme = async (data) => {
+  return fetchData("/api/scheme/create-scheme", "POST", data);
+};
+
+// Отримання даних для побудови дерева навігації
+export const fetchNavigationTree = async () => {
+  return fetchData("/api/getNavigationTree", "GET");
+};
+```
+
+---
+
+## 3) Важливі помилки/покращення (але НЕ змінюю без потреби)
+
+### ✅ (1) `archiveAlbum(albumeId)` — опечатка
+
+Тут назва параметра `albumeId`. Якщо бекенд теж так очікує — ок.
+Якщо бекенд очікує `albumId`, то тут буде баг.
+
+Я **не міняю** зараз, бо ти можеш мати так на сервері.
+
+### ✅ (2) `fetchData` передає `body: data` навіть для GET
+
+Зараз `options: { method, body: data }`.
+Для GET зазвичай body не потрібен і інколи може ламати проксі.
+Але знову ж — якщо твій `/api/rest/customfetch` це нормально обробляє — лишаємо.
+
+---
+
+## 4) Як тепер імпортувати з нового місця
+
+Якщо десь було:
+
+```js
+import { fetchAlbums } from "@/utils/api";
+```
+
+Стане:
+
+```js
+import { fetchAlbums } from "@/shared/api/api";
+```
+
+(або зробимо `src/shared/api/index.js` для короткого імпорту — скажеш, і я додам.)
+
+---
+
+## 5) Що потрібно від тебе далі (без зайвих питань)
+
+Ти сказав: “Я буду скидати назву файлу, старий шлях…” — ок.
+
+Наступним кидай:
+
+* або ще один файл зі старого `utils/`
+* або файл, який **імпортує `utils/api.js`**, щоб я одразу показав, які імпорти треба змінити під новий шлях.

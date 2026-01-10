@@ -1,0 +1,147 @@
+Тут треба зробити 2 речі: **(1) перенести файл у нову структуру**, **(2) виправити під App Router** (у тебе `app/`, а значить `useRouter` має бути з `next/navigation`, і обов’язково `"use client"`).
+
+Нижче даю готовий варіант.
+
+---
+
+## ✅ Куди покласти файл (нова структура)
+
+Рекомендовано так:
+
+```
+src/features/shared/ui/SearchBar/
+  SearchBar.js
+  index.js
+```
+
+Тобто:
+
+* `src/features/shared/ui/SearchBar/SearchBar.js`
+* `src/features/shared/ui/SearchBar/index.js`
+
+---
+
+## ✅ `SearchBar.js` (виправлений)
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  TextField,
+  Button,
+  Paper,
+  List,
+  ListItemButton,
+  ListItemText,
+  Divider,
+  Box,
+} from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
+import { useRouter } from "next/navigation";
+
+export default function SearchBar({ placeholder = "Пошук", onSearch }) {
+  const [query, setQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const router = useRouter();
+
+  const handleSearch = async () => {
+    const q = query.trim();
+    if (!q) return;
+
+    setLoading(true);
+    try {
+      // на випадок спецсимволів
+      const response = await fetch(`/api/rest/search?query=${encodeURIComponent(q)}`);
+
+      if (!response.ok) {
+        throw new Error(`Search request failed: ${response.status}`);
+      }
+
+      const results = await response.json();
+      setSearchResults(Array.isArray(results) ? results : []);
+      onSearch?.(results);
+    } catch (error) {
+      console.error("Error fetching search results:", error);
+      setSearchResults([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleItemClick = (item) => {
+    const url = item.type === "album" ? `/albums/${item.id}` : `/editor/${item.id}`;
+    router.push(url);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") handleSearch();
+  };
+
+  return (
+    <Box>
+      {/* Пошуковий блок */}
+      <Box display="flex" gap={1} alignItems="center">
+        <TextField
+          label={placeholder}
+          variant="outlined"
+          fullWidth
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+
+        <Button
+          variant="contained"
+          startIcon={<SearchIcon />}
+          onClick={handleSearch}
+          disabled={loading}
+        >
+          Пошук
+        </Button>
+      </Box>
+
+      {/* Результати */}
+      {searchResults.length > 0 && (
+        <Paper elevation={3} sx={{ mt: 1, maxHeight: 240, overflowY: "auto" }}>
+          <List dense>
+            {searchResults.map((item, index) => (
+              <React.Fragment key={item.id ?? index}>
+                <ListItemButton onClick={() => handleItemClick(item)}>
+                  <ListItemText
+                    primary={`${item.name} (${item.type === "album" ? "Альбом" : "Схема"})`}
+                    secondary={`${item.department_name ?? ""}${item.unit_name ? ` - ${item.unit_name}` : ""}`}
+                  />
+                </ListItemButton>
+                {index < searchResults.length - 1 && <Divider />}
+              </React.Fragment>
+            ))}
+          </List>
+        </Paper>
+      )}
+    </Box>
+  );
+}
+```
+
+---
+
+## ✅ `index.js`
+
+```js
+export { default } from "./SearchBar";
+```
+
+---
+
+## ✅ Імпорт у коді
+
+```js
+import SearchBar from "@/features/shared/ui/SearchBar";
+```
+
+---
+
+Якщо ти скажеш, **який саме маршрут у тебе для редактора** (`/scheme-editor/[id]` чи `/editor/[id]`), я піджену `handleItemClick` під твою реальну маршрутизацію, щоб не було “404”.

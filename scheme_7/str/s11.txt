@@ -1,0 +1,200 @@
+Ок, це була **сторінка редактора** зі старого `pages/scheme/[schemeId].js`. У твоїй новій структурі для редактора вже є:
+
+* `src/app/scheme-editor/page.js` (app router)
+* `src/features/scheme-editor/ui/page/DiagramEditorPage.js` (page-компонент)
+
+Тому ми робимо так:
+
+## ✅ Куди переносимо логіку
+
+### 1) Route-сторінка (App Router)
+
+✅ **NEW:** `src/app/scheme-editor/page.js`
+(вона просто рендерить `DiagramEditorPage`)
+
+### 2) Сам UI сторінки редактора
+
+✅ **NEW / UPDATE:** `src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+(тут буде заміна твого `SchemePage`)
+
+> Важливо: у App Router `[schemeId]` має бути сегментом маршруту. Тобто правильніше:
+> `src/app/scheme-editor/[schemeId]/page.js`
+> Якщо ти вже вирішив, що схема відкривається як `/scheme-editor?schemeId=...` — тоді лишаємо `src/app/scheme-editor/page.js`.
+> Я дам **обидва варіанти** (вибереш який у тебе зараз).
+
+---
+
+# 1) Відновлений код зі скріну (як було)
+
+```jsx
+'use client'
+import React, { useState } from 'react'
+import dynamic from 'next/dynamic'
+import LeftSidebar from '../../app/components/Scheme/LeftSidebar'
+import TopToolbar from '../../app/components/Scheme/TopToolbar'
+
+const EditorCanvas = dynamic(() => import('../../app/components/Scheme/CanvasArea'), {
+  ssr: false,
+})
+
+function SchemePage() {
+  const handleZoomIn = () => console.log('Zoom In')
+  const handleZoomOut = () => console.log('Zoom Out')
+  const handleDelete = () => console.log('Delete Element')
+  const handleRefresh = () => console.log('Refresh Data')
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', flex: 1 }}>
+        <LeftSidebar />
+        <div className="main-block">
+          <TopToolbar
+            onZoomIn={handleZoomIn}
+            onZoomOut={handleZoomOut}
+            onDelete={handleDelete}
+            onRefresh={handleRefresh}
+          />
+          <EditorCanvas />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default SchemePage
+```
+
+---
+
+# 2) Нова реалізація під твою структуру
+
+## Варіант A (рекомендований): URL як `/scheme-editor/[schemeId]`
+
+### ✅ `src/app/scheme-editor/[schemeId]/page.js`
+
+```jsx
+import DiagramEditorPage from '@/features/scheme-editor/ui/page/DiagramEditorPage'
+
+export default function Page({ params }) {
+  return <DiagramEditorPage schemeId={params.schemeId} />
+}
+```
+
+### ✅ `src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+
+(переписуємо, щоб відповідало новій структурі: left toolbar + top bar + canvas)
+
+```jsx
+'use client'
+
+import dynamic from 'next/dynamic'
+import { Box } from '@mui/material'
+import EditorTopBar from '../top-bar/EditorTopBar'
+
+// якщо у тебе вже є лівий тулбар елементів (ти просив окремо)
+import LeftSidebar from '../left-bar/LeftSidebar' // <- якщо такого ще немає, тимчасово прибери
+
+const EditorCanvas = dynamic(() => import('../canvas/EditorCanvas'), { ssr: false })
+
+export default function DiagramEditorPage({ schemeId }) {
+  // поки лишаємо заглушки, потім підв’яжемо до useZoomPan/useSelection/deleteGraph і т.д.
+  const handleZoomIn = () => console.log('Zoom In')
+  const handleZoomOut = () => console.log('Zoom Out')
+  const handleDelete = () => console.log('Delete Element')
+  const handleRefresh = () => console.log('Refresh Data')
+
+  return (
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      {/* Ліва панель інструментів */}
+      {/* Якщо компоненту ще нема — тимчасово заміни на <Box sx={{ width: 56 }} /> */}
+      <LeftSidebar />
+
+      {/* Основна зона */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+        <EditorTopBar
+          schemeId={schemeId}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+          onDelete={handleDelete}
+          onRefresh={handleRefresh}
+        />
+        <Box sx={{ flex: 1, minHeight: 0 }}>
+          <EditorCanvas schemeId={schemeId} />
+        </Box>
+      </Box>
+    </Box>
+  )
+}
+```
+
+---
+
+## Варіант B: якщо у тебе зараз маршрут просто `/scheme-editor/page.js`
+
+Тоді `schemeId` береться з query params (`useSearchParams`).
+
+### ✅ `src/app/scheme-editor/page.js`
+
+```jsx
+import DiagramEditorPage from '@/features/scheme-editor/ui/page/DiagramEditorPage'
+
+export default function Page() {
+  return <DiagramEditorPage />
+}
+```
+
+### ✅ `src/features/scheme-editor/ui/page/DiagramEditorPage.js`
+
+```jsx
+'use client'
+
+import dynamic from 'next/dynamic'
+import { useSearchParams } from 'next/navigation'
+import { Box } from '@mui/material'
+import EditorTopBar from '../top-bar/EditorTopBar'
+
+const EditorCanvas = dynamic(() => import('../canvas/EditorCanvas'), { ssr: false })
+
+export default function DiagramEditorPage() {
+  const sp = useSearchParams()
+  const schemeId = sp.get('schemeId')
+
+  const handleZoomIn = () => console.log('Zoom In')
+  const handleZoomOut = () => console.log('Zoom Out')
+  const handleDelete = () => console.log('Delete Element')
+  const handleRefresh = () => console.log('Refresh Data')
+
+  return (
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      <Box sx={{ width: 56 }} />
+      <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+        <EditorTopBar
+          schemeId={schemeId}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+          onDelete={handleDelete}
+          onRefresh={handleRefresh}
+        />
+        <Box sx={{ flex: 1, minHeight: 0 }}>
+          <EditorCanvas schemeId={schemeId} />
+        </Box>
+      </Box>
+    </Box>
+  )
+}
+```
+
+---
+
+## 3) Що з `LeftSidebar` і `TopToolbar` зі старого коду?
+
+* `TopToolbar` → у тебе вже є `EditorTopBar.js` (в `features/scheme-editor/ui/top-bar/`)
+* `LeftSidebar` → у новій структурі логічно зробити `features/scheme-editor/ui/left-bar/LeftSidebar.js` або використати твій тулбар інструментів зліва (який ти вже планував)
+
+---
+
+Далі скидай, будь ласка, **старі файли `LeftSidebar`, `TopToolbar`, `CanvasArea`** (скрінами) — і я їх:
+
+1. відновлю в текст,
+2. розіб’ю на компоненти,
+3. розкидаю по твоїй `features/scheme-editor/ui/*` + `shared/*`.

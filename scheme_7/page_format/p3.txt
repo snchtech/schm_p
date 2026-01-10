@@ -1,0 +1,283 @@
+Ідеально — у тебе zoom/pan сидить **саме на layer** (`setupLayerZoomPan(stage, layer, ...)`). Це означає, що мій попередній підхід з “тимчасово скинути transform layer → зробити toDataURL → повернути transform” буде **правильний і стабільний**.
+
+Нижче даю **готовий, максимально прямий варіант**:
+
+1. як обчислювати `pageRect` один раз (щоб export і canvas мали ту саму правду)
+2. як експортувати A3/A4 у 300 DPI незалежно від zoom
+3. як додати кнопку в `EditorTopBar`
+
+---
+
+# 1) Єдине джерело правди: pageRect в DiagramEditorPage
+
+Додай в `DiagramEditorPage.jsx` pageConfig + pageRect:
+
+```jsx
+import React, { useMemo, useState } from "react";
+import { getPaperPx, mmToPx } from "../../model/page/pageFormat";
+import { exportPagePng } from "../../model/export/exportPagePng";
+
+export default function DiagramEditorPage() {
+  const S = useDiagramState();
+
+  const { stageRef, layerRef, zoomApiRef, isReady } = useZoomPan({
+    panMode: "mmb_or_space",
+  });
+
+  const [pageConfig, setPageConfig] = useState({
+    paper: "A3",
+    orientation: "landscape",
+    screenDpi: 96,
+    marginsMm: { top: 10, right: 10, bottom: 10, left: 10 },
+  });
+
+  const stageSize = useMemo(() => ({ w: 1000, h: 600 }), []);
+
+  const paperPx = useMemo(() => {
+    return getPaperPx({
+      paper: pageConfig.paper,
+      orientation: pageConfig.orientation,
+      dpi: pageConfig.screenDpi,
+    });
+  }, [pageConfig.paper, pageConfig.orientation, pageConfig.screenDpi]);
+
+  const pageRect = useMemo(() => {
+    const x = Math.round((stageSize.w - paperPx.w) / 2);
+    const y = Math.round((stageSize.h - paperPx.h) / 2);
+    return { x, y, width: paperPx.w, height: paperPx.h };
+  }, [stageSize.w, stageSize.h, paperPx.w, paperPx.h]);
+
+  const marginsPx = useMemo(() => {
+    const dpi = pageConfig.screenDpi;
+    const m = pageConfig.marginsMm;
+    return {
+      top: Math.round(mmToPx(m.top, dpi)),
+      right: Math.round(mmToPx(m.right, dpi)),
+      bottom: Math.round(mmToPx(m.bottom, dpi)),
+      left: Math.round(mmToPx(m.left, dpi)),
+    };
+  }, [pageConfig.marginsMm, pageConfig.screenDpi]);
+
+  const handleExport300 = () => {
+    const dataUrl = exportPagePng({
+      stageRef,
+      layerRef,
+      pageRect,
+      pageConfig,
+      dpi: 300,
+    });
+
+    if (!dataUrl) return;
+
+    // швидкий download без серверу
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `scheme_${pageConfig.paper}_${pageConfig.orientation}_300dpi.png`;
+    a.click();
+  };
+
+  return (
+    <>
+      <EditorTopBar
+        // ...
+        zoomApiRef={zoomApiRef}
+        isZoomReady={isReady}
+        pageConfig={pageConfig}
+        setPageConfig={setPageConfig}
+        onExport300dpi={handleExport300}
+      />
+
+      <EditorCanvas
+        stageRef={stageRef}
+        layerRef={layerRef}
+        S={S}
+        stageSize={stageSize}
+        pageRect={pageRect}
+        marginsPx={marginsPx}
+        selectedKonvaNode={selectedKonvaNode}
+        registerNodeRef={registerNodeRef}
+        onElementContextMenu={handleElementContextMenu}
+      />
+
+      <EditorContextMenu ... />
+    </>
+  );
+}
+```
+
+✅ Тепер `pageRect` рахується в одному місці і використовується і для відображення, і для експорту.
+
+---
+
+# 2) Онови EditorCanvas: отримує stageSize/pageRect/marginsPx через props
+
+```jsx
+"use client";
+
+import React from "react";
+import { Stage, Layer, Group } from "react-konva";
+
+import PageLayer from "./PageLayer";
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import SelectionTransformer from "./SelectionTransformer";
+
+export default function EditorCanvas({
+  stageRef,
+  layerRef,
+  S,
+  stageSize,
+  pageRect,
+  marginsPx,
+  selectedKonvaNode,
+  registerNodeRef,
+  onElementContextMenu,
+}) {
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage
+        ref={stageRef}
+        width={stageSize.w}
+        height={stageSize.h}
+        style={{ border: "1px solid #ccc" }}
+      >
+        <Layer ref={layerRef}>
+          <PageLayer pageRect={pageRect} marginsPx={marginsPx} />
+
+          <Group
+            clipX={pageRect.x}
+            clipY={pageRect.y}
+            clipWidth={pageRect.width}
+            clipHeight={pageRect.height}
+          >
+            <DiagramConnections {.../* як було */} />
+            <DiagramSymbols {.../* як було */} />
+          </Group>
+
+          <SelectionTransformer selectedNode={selectedKonvaNode} enabled={!!selectedKonvaNode} />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+---
+
+# 3) Експорт: точний і незалежний від zoom (бо zoom на layer)
+
+Ось “готовий” файл, який ти можеш вставити:
+
+### `features/scheme-editor/model/export/exportPagePng.js`
+
+```js
+// features/scheme-editor/model/export/exportPagePng.js
+
+export function exportPagePng({ stageRef, layerRef, pageRect, pageConfig, dpi = 300 }) {
+  const stage = stageRef?.current;
+  const layer = layerRef?.current;
+  if (!stage || !layer) return null;
+
+  // zoom/pan сидить на layer => зберігаємо та скидаємо
+  const prevScale = layer.scale();
+  const prevPos = layer.position();
+
+  try {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+
+    const screenDpi = pageConfig?.screenDpi || 96;
+    const pixelRatio = dpi / screenDpi;
+
+    return stage.toDataURL({
+      x: pageRect.x,
+      y: pageRect.y,
+      width: pageRect.width,
+      height: pageRect.height,
+      pixelRatio,
+      mimeType: "image/png",
+      quality: 1,
+    });
+  } finally {
+    layer.scale(prevScale);
+    layer.position(prevPos);
+    layer.batchDraw();
+  }
+}
+```
+
+**Чому це дає чіткість:** `pixelRatio = 300/96 ≈ 3.125`, тобто експорт у ~3.125 рази більше px по кожній осі → значно чіткіше для друку.
+
+---
+
+# 4) Кнопка “Export 300 DPI” в EditorTopBar
+
+Онови `EditorTopBar.jsx` (мінімально):
+
+```jsx
+export default function EditorTopBar({
+  // ...
+  onExport300dpi,
+  pageConfig,
+  setPageConfig,
+}) {
+  return (
+    <>
+      {/* ... твої кнопки ... */}
+
+      <nav style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        {/* zoom buttons */}
+        {/* ... */}
+
+        <button onClick={onExport300dpi}>
+          Export 300 DPI
+        </button>
+
+        {/* (опційно) формат сторінки */}
+        <select
+          value={pageConfig.paper}
+          onChange={(e) => setPageConfig((p) => ({ ...p, paper: e.target.value }))}
+        >
+          <option value="A3">A3</option>
+          <option value="A4">A4</option>
+        </select>
+
+        <select
+          value={pageConfig.orientation}
+          onChange={(e) => setPageConfig((p) => ({ ...p, orientation: e.target.value }))}
+        >
+          <option value="landscape">landscape</option>
+          <option value="portrait">portrait</option>
+        </select>
+      </nav>
+    </>
+  );
+}
+```
+
+---
+
+# 5) Важливі нюанси саме під “щоб гарно читалося на A3”
+
+1. **Текст**: бажано тримати розміри не “на око”, а в “документних px”. Якщо `screenDpi=96`, то:
+
+   * 3 мм висоти тексту ≈ `mmToPx(3, 96) ≈ 11 px` (мінімум для читабельності).
+2. **Лінії**: strokeWidth 1px на екрані при експорті з pixelRatio 3.125 стане ~3px у файлі — це ок.
+3. **Вектор**: якщо пізніше захочеш PDF/SVG-вектор — це окрема гілка (можна), але PNG 300 DPI для друку зазвичай достатньо.
+
+---
+
+# 6) Що далі (щоб довести до “ідеалу”)
+
+Якщо хочеш “як в AutoCAD/Visio”:
+
+* додати режим **“не випускати елементи за pageRect”** (clamp на dragend)
+* додати **warning**, якщо елемент частково поза pageRect
+* додати “fit page” кнопку: автоматично `zoomApiRef.current.fitRect(pageRect)`
+
+Але базова інфраструктура формату + друку у тебе вже буде правильною.
+
+---
+
+Якщо кинеш `setupLayerZoomPan` (або просто скажеш: він змінює `layer.position/scale` чи ще `stage.draggable`), я додам **fit-to-page** кнопку без гадань.

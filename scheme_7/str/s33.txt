@@ -1,0 +1,207 @@
+Точно — під твою **нову структуру (`src/features/...`)** цей файл має лежати **не в `app/components/...`**, а тут:
+
+✅ **`src/features/scheme-editor/ui/sidebar/SchemeInfoCard/SchemeInfoCard.js`**
+(або, якщо ти тримаєш все в одному каталозі сайдбару: `src/features/scheme-editor/ui/sidebar/SchemeInfoCard.js`)
+
+Нижче даю **готовий варіант під “папка-компонент” (рекомендовано)** + `index.js`, щоб імпорти були короткі.
+
+---
+
+## 1) Файлова структура
+
+```
+src/
+  features/
+    scheme-editor/
+      ui/
+        sidebar/
+          SchemeInfoCard/
+            SchemeInfoCard.js
+            index.js
+```
+
+---
+
+## 2) `SchemeInfoCard.js`
+
+```jsx
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  TextField,
+  Select,
+  MenuItem,
+  Typography,
+  InputLabel,
+  FormControl,
+} from "@mui/material";
+
+import { fetchDepartments, fetchUnits } from "@/utils/api";
+
+const formats = ["A3", "A4", "A2", "A1", "A0"];
+
+export default function SchemeInfoCard({ value, onChange }) {
+  const [album, setAlbum] = useState(value?.album ?? "");
+  const [sheetNumber, setSheetNumber] = useState(value?.sheetNumber ?? "");
+  const [schemeName, setSchemeName] = useState(value?.schemeName ?? "");
+  const [department, setDepartment] = useState(value?.department ?? "");
+  const [unit, setUnit] = useState(value?.unit ?? "");
+  const [format, setFormat] = useState(value?.format ?? "A3");
+
+  const [departments, setDepartments] = useState([]);
+  const [units, setUnits] = useState([]);
+
+  useEffect(() => {
+    let alive = true;
+
+    const load = async () => {
+      try {
+        const [deps, uns] = await Promise.all([fetchDepartments(), fetchUnits()]);
+        if (!alive) return;
+
+        setDepartments(Array.isArray(deps) ? deps : []);
+        setUnits(Array.isArray(uns) ? uns : []);
+      } catch (e) {
+        console.error("SchemeInfoCard: load LOV error", e);
+        if (!alive) return;
+        setDepartments([]);
+        setUnits([]);
+      }
+    };
+
+    load();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const filteredUnits = useMemo(() => {
+    if (!department) return units;
+    // якщо поле інше — заміни DEPARTMENT_ID
+    return units.filter((u) => String(u.DEPARTMENT_ID) === String(department));
+  }, [units, department]);
+
+  useEffect(() => {
+    if (!department || !unit) return;
+    const ok = filteredUnits.some((u) => String(u.ID) === String(unit));
+    if (!ok) setUnit("");
+  }, [department, filteredUnits, unit]);
+
+  useEffect(() => {
+    onChange?.({ album, sheetNumber, schemeName, department, unit, format });
+  }, [album, sheetNumber, schemeName, department, unit, format, onChange]);
+
+  return (
+    <Box sx={{ p: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+        Інформація про схему
+      </Typography>
+
+      <FormControl fullWidth>
+        <InputLabel id="album-label">Альбом</InputLabel>
+        <Select
+          labelId="album-label"
+          label="Альбом"
+          value={album}
+          onChange={(e) => setAlbum(e.target.value)}
+        >
+          <MenuItem value="">
+            <em>Не вибрано</em>
+          </MenuItem>
+          {/* TODO: albums.map(...) */}
+        </Select>
+      </FormControl>
+
+      <TextField
+        fullWidth
+        label="Номер аркуша"
+        value={sheetNumber}
+        onChange={(e) => setSheetNumber(e.target.value)}
+      />
+
+      <TextField
+        fullWidth
+        label="Назва схеми"
+        value={schemeName}
+        onChange={(e) => setSchemeName(e.target.value)}
+      />
+
+      <FormControl fullWidth>
+        <InputLabel id="department-label">Відділ</InputLabel>
+        <Select
+          labelId="department-label"
+          label="Відділ"
+          value={department}
+          onChange={(e) => setDepartment(e.target.value)}
+        >
+          <MenuItem value="">
+            <em>Не вибрано</em>
+          </MenuItem>
+
+          {departments.map((dep) => (
+            <MenuItem key={dep.ID} value={dep.ID}>
+              {dep.SHORT_NAME ?? dep.NAME ?? dep.ID}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      <FormControl fullWidth disabled={!filteredUnits.length}>
+        <InputLabel id="unit-label">Блочність</InputLabel>
+        <Select
+          labelId="unit-label"
+          label="Блочність"
+          value={unit}
+          onChange={(e) => setUnit(e.target.value)}
+        >
+          <MenuItem value="">
+            <em>Не вибрано</em>
+          </MenuItem>
+
+          {filteredUnits.map((u) => (
+            <MenuItem key={u.ID} value={u.ID}>
+              {u.NAME ?? u.SHORT_NAME ?? u.ID}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      <FormControl fullWidth>
+        <InputLabel id="format-label">Формат</InputLabel>
+        <Select
+          labelId="format-label"
+          label="Формат"
+          value={format}
+          onChange={(e) => setFormat(e.target.value)}
+        >
+          {formats.map((fmt) => (
+            <MenuItem key={fmt} value={fmt}>
+              {fmt}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    </Box>
+  );
+}
+```
+
+---
+
+## 3) `index.js`
+
+```js
+export { default } from "./SchemeInfoCard";
+```
+
+---
+
+## 4) Як імпортувати в `LeftSidebar.js`
+
+```js
+import SchemeInfoCard from "@/features/scheme-editor/ui/sidebar/SchemeInfoCard";
+```
+
+Якщо покажеш твій актуальний шлях до `LeftSidebar.js` у **новій структурі** (він у тебе вже є на скрінах, але не бачу точний шлях у `src/features/...`), я підкажу **точний import** без здогадок.

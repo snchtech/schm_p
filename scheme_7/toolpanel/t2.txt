@@ -1,0 +1,423 @@
+Нижче — практичний варіант **без категорій**, але дуже зручний для 70 елементів:
+
+* зверху **Search**
+* секція **⭐ Favorites** (закріплені)
+* секція **🕘 Recent** (останні використані)
+* далі **All elements** у **grid** з прокруткою
+* кожна іконка — **твій Konva preview** (міні Stage)
+* ⭐ кнопка на кожній іконці для додавання/зняття з Favorites
+* Favorites/Recent зберігаємо в `localStorage`
+
+Це прямо “як у реальних редакторах”, тільки без категорій.
+
+---
+
+## 1) Додай meta в реєстр (опційно keywords)
+
+`registry.js` (приклад для одного елемента):
+
+```js
+twoTrianglesArrowDown: {
+  title: "Two Triangles + Arrow",
+  keywords: ["triangle", "arrow", "signal", "down"],
+  Component: TwoTrianglesArrowDown,
+  preview: { w: 200, h: 150 },
+  defaults: { scale: 0.35, stroke: "#111", strokeWidth: 8, arrowFill: "#111", showAnchors: false },
+},
+```
+
+---
+
+## 2) Новий тулбар: Favorites / Recent / All + grid + search
+
+`src/features/scheme-editor/ui/toolbar/ToolPalette.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Drawer,
+  Divider,
+  IconButton,
+  Paper,
+  Tooltip,
+  Typography,
+  TextField,
+  Collapse,
+} from "@mui/material";
+
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import StarIcon from "@mui/icons-material/Star";
+import StarBorderIcon from "@mui/icons-material/StarBorder";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+
+import ToolPreviewIcon from "./ToolPreviewIcon";
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+const DRAWER_W = 180;
+const STORAGE_FAV = "etls_toolbar_favorites";
+const STORAGE_REC = "etls_toolbar_recent";
+const RECENT_LIMIT = 12;
+
+// маленький helper
+function loadArray(key, fallback = []) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || "null");
+    return Array.isArray(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function saveArray(key, arr) {
+  try {
+    localStorage.setItem(key, JSON.stringify(arr));
+  } catch {}
+}
+
+function SectionHeader({ title, right, onToggle, open }) {
+  return (
+    <Box sx={{ px: 1.25, py: 1, display: "flex", alignItems: "center" }}>
+      <Typography variant="caption" sx={{ opacity: 0.75, fontWeight: 700, flex: 1 }}>
+        {title}
+      </Typography>
+      {right}
+      <IconButton size="small" onClick={onToggle}>
+        {open ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+      </IconButton>
+    </Box>
+  );
+}
+
+function ToolCard({ type, item, active, isFav, onPick, onToggleFav }) {
+  const Preview = item.Component;
+
+  return (
+    <Box
+      sx={{
+        position: "relative",
+        width: 56,
+        height: 56,
+        borderRadius: 2,
+        border: "1px solid",
+        borderColor: active ? "primary.main" : "divider",
+        bgcolor: active ? "action.selected" : "transparent",
+        overflow: "hidden",
+      }}
+    >
+      <IconButton
+        onClick={() => onPick(type)}
+        sx={{ width: "100%", height: "100%", borderRadius: 2, p: 0 }}
+      >
+        <ToolPreviewIcon
+          PreviewComponent={Preview}
+          previewW={item.preview.w}
+          previewH={item.preview.h}
+          props={item.defaults}
+        />
+      </IconButton>
+
+      {/* ⭐ */}
+      <Tooltip title={isFav ? "Remove from favorites" : "Add to favorites"} placement="top">
+        <IconButton
+          size="small"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFav(type);
+          }}
+          sx={{
+            position: "absolute",
+            top: 2,
+            right: 2,
+            bgcolor: "background.paper",
+            border: "1px solid",
+            borderColor: "divider",
+            "&:hover": { bgcolor: "background.paper" },
+          }}
+        >
+          {isFav ? <StarIcon fontSize="inherit" /> : <StarBorderIcon fontSize="inherit" />}
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+}
+
+export default function ToolPalette({ open, activeTool, onToggle, onSelectTool }) {
+  const allTypes = useMemo(() => Object.keys(ELEMENT_REGISTRY), []);
+
+  // local state для UI
+  const [query, setQuery] = useState("");
+  const [fav, setFav] = useState([]);
+  const [recent, setRecent] = useState([]);
+
+  const [showFav, setShowFav] = useState(true);
+  const [showRecent, setShowRecent] = useState(true);
+
+  // init from localStorage
+  useEffect(() => {
+    setFav(loadArray(STORAGE_FAV, []));
+    setRecent(loadArray(STORAGE_REC, []));
+  }, []);
+
+  // search filter
+  const filteredTypes = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return allTypes;
+
+    return allTypes.filter((type) => {
+      const item = ELEMENT_REGISTRY[type];
+      const title = (item.title || type).toLowerCase();
+      const kws = (item.keywords || []).join(" ").toLowerCase();
+      return title.includes(q) || kws.includes(q) || type.toLowerCase().includes(q);
+    });
+  }, [allTypes, query]);
+
+  const favSet = useMemo(() => new Set(fav), [fav]);
+
+  const favVisible = useMemo(
+    () => fav.filter((t) => ELEMENT_REGISTRY[t]).filter((t) => filteredTypes.includes(t)),
+    [fav, filteredTypes],
+  );
+
+  const recentVisible = useMemo(
+    () => recent.filter((t) => ELEMENT_REGISTRY[t]).filter((t) => filteredTypes.includes(t)),
+    [recent, filteredTypes],
+  );
+
+  const allVisible = useMemo(() => {
+    // щоб у “All” не дублювати фав/рісент (не обов’язково, але приємно)
+    const hide = new Set([...favVisible, ...recentVisible]);
+    return filteredTypes.filter((t) => !hide.has(t));
+  }, [filteredTypes, favVisible, recentVisible]);
+
+  const toggleFav = (type) => {
+    setFav((prev) => {
+      const s = new Set(prev);
+      if (s.has(type)) s.delete(type);
+      else s.add(type);
+      const next = Array.from(s);
+      saveArray(STORAGE_FAV, next);
+      return next;
+    });
+  };
+
+  const pickTool = (type) => {
+    onSelectTool(type);
+
+    // recent update
+    setRecent((prev) => {
+      const next = [type, ...prev.filter((x) => x !== type)].slice(0, RECENT_LIMIT);
+      saveArray(STORAGE_REC, next);
+      return next;
+    });
+  };
+
+  // grid style (2–3 колонки залежно від ширини)
+  const gridSx = {
+    px: 1.25,
+    pb: 1.25,
+    display: "grid",
+    gridTemplateColumns: "repeat(3, 56px)",
+    gap: 1,
+    justifyContent: "start",
+  };
+
+  return (
+    <>
+      <Drawer
+        anchor="left"
+        open={open}
+        variant="temporary"
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: {
+            width: DRAWER_W,
+            height: "100%",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            borderRight: "1px solid",
+            borderColor: "divider",
+            display: "flex",
+            flexDirection: "column",
+          },
+        }}
+      >
+        {/* Header */}
+        <Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+          <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 800 }}>
+            Shapes
+          </Typography>
+          <Tooltip title="Згорнути">
+            <IconButton size="small" onClick={onToggle}>
+              <ChevronLeftIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        {/* Search */}
+        <Box sx={{ px: 1.25, pb: 1 }}>
+          <TextField
+            size="small"
+            placeholder="Search…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            fullWidth
+          />
+        </Box>
+
+        <Divider />
+
+        {/* Scrollable content */}
+        <Box sx={{ flex: 1, overflowY: "auto" }}>
+          {/* Favorites */}
+          <SectionHeader
+            title="⭐ Favorites"
+            right={
+              <Typography variant="caption" sx={{ opacity: 0.6, mr: 0.5 }}>
+                {favVisible.length}
+              </Typography>
+            }
+            open={showFav}
+            onToggle={() => setShowFav((v) => !v)}
+          />
+          <Collapse in={showFav} timeout="auto" unmountOnExit>
+            <Box sx={gridSx}>
+              {favVisible.length === 0 ? (
+                <Typography variant="caption" sx={{ opacity: 0.6, gridColumn: "1 / -1" }}>
+                  Add stars to pin shapes here
+                </Typography>
+              ) : (
+                favVisible.map((type) => {
+                  const item = ELEMENT_REGISTRY[type];
+                  return (
+                    <ToolCard
+                      key={type}
+                      type={type}
+                      item={item}
+                      active={activeTool === type}
+                      isFav={favSet.has(type)}
+                      onPick={pickTool}
+                      onToggleFav={toggleFav}
+                    />
+                  );
+                })
+              )}
+            </Box>
+          </Collapse>
+
+          <Divider />
+
+          {/* Recent */}
+          <SectionHeader
+            title="🕘 Recent"
+            right={
+              <Typography variant="caption" sx={{ opacity: 0.6, mr: 0.5 }}>
+                {recentVisible.length}
+              </Typography>
+            }
+            open={showRecent}
+            onToggle={() => setShowRecent((v) => !v)}
+          />
+          <Collapse in={showRecent} timeout="auto" unmountOnExit>
+            <Box sx={gridSx}>
+              {recentVisible.length === 0 ? (
+                <Typography variant="caption" sx={{ opacity: 0.6, gridColumn: "1 / -1" }}>
+                  Your recently used shapes will appear here
+                </Typography>
+              ) : (
+                recentVisible.map((type) => {
+                  const item = ELEMENT_REGISTRY[type];
+                  return (
+                    <ToolCard
+                      key={type}
+                      type={type}
+                      item={item}
+                      active={activeTool === type}
+                      isFav={favSet.has(type)}
+                      onPick={pickTool}
+                      onToggleFav={toggleFav}
+                    />
+                  );
+                })
+              )}
+            </Box>
+          </Collapse>
+
+          <Divider />
+
+          {/* All */}
+          <Box sx={{ px: 1.25, py: 1 }}>
+            <Typography variant="caption" sx={{ opacity: 0.75, fontWeight: 700 }}>
+              All ({filteredTypes.length})
+            </Typography>
+          </Box>
+          <Box sx={gridSx}>
+            {allVisible.map((type) => {
+              const item = ELEMENT_REGISTRY[type];
+              return (
+                <ToolCard
+                  key={type}
+                  type={type}
+                  item={item}
+                  active={activeTool === type}
+                  isFav={favSet.has(type)}
+                  onPick={pickTool}
+                  onToggleFav={toggleFav}
+                />
+              );
+            })}
+          </Box>
+        </Box>
+      </Drawer>
+
+      {/* Collapsed open button */}
+      {!open && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: "fixed",
+            top: 16,
+            left: 12,
+            borderRadius: 3,
+            overflow: "hidden",
+            zIndex: 1301,
+          }}
+        >
+          <Tooltip title="Відкрити панель інструментів" placement="right">
+            <IconButton onClick={onToggle}>
+              <ChevronRightIcon />
+            </IconButton>
+          </Tooltip>
+        </Paper>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+## 3) Як це виглядає для 70 елементів
+
+* Основний список “All” стане довгим, але **скролиться**.
+* Користувач майже завжди працює через **Favorites/Recent**, а “All” потрібен рідко.
+* Пошук вирішує “не пам’ятаю де” за 1–2 секунди.
+
+---
+
+## 4) Два практичні нюанси для продуктивності
+
+1. Якщо відчуєш лаги від 70 Konva-preview:
+
+   * або додаємо **віртуалізацію** (`react-window`) лише для “All”
+   * або робимо **кешовані SVG/PNG іконки** (найшвидше в проді)
+2. В прев’ю тримай `showAnchors:false`, `listening:false`, мінімум подій — ти це вже робиш.
+
+---
+
+Якщо скажеш, чи хочеш **3 колонки** як зараз, чи **2 колонки більші іконки**, я піджену `DRAWER_W` і `gridTemplateColumns` під твій дизайн.

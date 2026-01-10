@@ -1,0 +1,122 @@
+Так, бачу. Це **`AuthContext.js` зі старого `Context/AuthContext.js`**. Зі скрінів код відновився повністю.
+
+## Куди покласти в новій структурі
+
+Це **глобальний** контекст (не тільки для `scheme-editor`), тому логічно винести в `shared`.
+
+✅ **Новий шлях (рекомендовано):**
+`src/shared/auth/AuthContext.js`
+
+(у твоїй структурі `shared` вже є — тому це “в стилі” нового проєкту)
+
+---
+
+## ✅ Відновлений файл `src/shared/auth/AuthContext.js`
+
+```js
+'use client'
+
+import { createContext, useContext, useEffect, useState } from 'react'
+// import { jwtVerify } from 'jose'
+// import { useRouter } from 'next/router'
+// import jwt from 'jsonwebtoken'
+
+const AuthContext = createContext()
+
+export const AuthProvider = ({ children }) => {
+  console.log('AuthProvider START')
+  const [user, setUser] = useState(null) // useState(initialUserData || null)
+  // const router = useRouter()
+  // const [authStatus, setAuthStatus] = useState('nobody')
+
+  // Використовується для ініціалізації контексту при першому рендері
+  useEffect(() => {
+    const fetchUserData = async () => {
+      try {
+        // Викликаємо API Next.js, щоб отримати userData із cookies
+        const res = await fetch('/api/auth/get-user', {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            // Cookie: `refreshToken=${refreshToken}`,
+          },
+        })
+
+        if (!res.ok) {
+          throw new Error('Failed to fetch user data')
+        }
+
+        const { userData } = await res.json()
+        setUser(userData)
+      } catch (error) {
+        console.error('Error fetching user data:', error)
+      }
+    }
+
+    fetchUserData()
+  }, [])
+
+  return (
+    <AuthContext.Provider value={{ user, setUser }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export const useAuth = () => useContext(AuthContext)
+```
+
+---
+
+## Як тепер імпортувати
+
+Було:
+
+```js
+import { AuthProvider, useAuth } from '@/Context/AuthContext'
+```
+
+Стає:
+
+```js
+import { AuthProvider, useAuth } from '@/shared/auth/AuthContext'
+```
+
+---
+
+## Як підключити в `app` (щоб працювало скрізь)
+
+У `App Router` зазвичай роблять клієнтський wrapper.
+
+✅ `src/app/providers.js`
+
+```js
+'use client'
+
+import { AuthProvider } from '@/shared/auth/AuthContext'
+
+export default function Providers({ children }) {
+  return <AuthProvider>{children}</AuthProvider>
+}
+```
+
+✅ `src/app/layout.js` (server component — але може обгортати `Providers`)
+
+```js
+import Providers from './providers'
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="uk">
+      <body>
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  )
+}
+```
+
+---
+
+Якщо ок — кидай наступний файл (назва + старий шлях + скріни), і я так само: **відновлю код → розіб’ю/розкладу в нову структуру → дам оновлені імпорти.**

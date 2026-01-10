@@ -1,0 +1,130 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Circle } from "react-konva";
+
+/**
+ * ThreeTrianglesHalfFilled (react-konva)
+ * - 3 трикутники зі спільною вершиною (apex)
+ * - 2 напівзафарбовані (лівий верх + нижній лівий)
+ * - центральний "cap" (коло), щоб прибрати miter-шип
+ * + 3 anchor-точки: по центру основ кожного трикутника
+ *   leftBase   = центр відрізка (40,50)-(40,90)   => (40,70)
+ *   rightBase  = центр відрізка (160,50)-(160,90)=> (160,70)
+ *   bottomBase = центр відрізка (80,130)-(120,130)=> (100,130)
+ *
+ * Props:
+ *  x, y, scale
+ *  stroke, strokeWidth
+ *  fill (default "black")
+ *  showAnchors (default true)
+ *  onAnchorClick, onAnchorHover
+ */
+export default function ThreeTrianglesHalfFilled({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+  fill = "black",
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // viewBox 0 0 200 140
+  const APEX = { x: 100, y: 70 };
+
+  // anchors (centers of bases)
+  const ANCHORS = [
+    { id: "leftBase", x: 40, y: 70 },
+    { id: "rightBase", x: 160, y: 70 },
+    { id: "bottomBase", x: 100, y: 130 },
+  ];
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+  const capR = Math.max(4, strokeWidth * 0.8);
+
+  const handleEnter = (a) => {
+    document.body.style.cursor = "crosshair";
+    onAnchorHover?.(a);
+  };
+  const handleLeave = () => {
+    document.body.style.cursor = "default";
+    onAnchorHover?.(null);
+  };
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* ---- outlines ---- */}
+      {/* left triangle outline */}
+      <Line
+        points={[40, 50, 40, 90, APEX.x, APEX.y]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* right triangle outline */}
+      <Line
+        points={[160, 50, 160, 90, APEX.x, APEX.y]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* bottom triangle outline */}
+      <Line
+        points={[80, 130, 120, 130, APEX.x, APEX.y]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* ---- half fills (no stroke) ---- */}
+      {/* left half-fill (upper half) */}
+      <Line points={[40, 50, 40, 70, APEX.x, APEX.y]} closed fill={fill} strokeEnabled={false} />
+
+      {/* bottom half-fill (left half) */}
+      <Line points={[80, 130, 100, 130, APEX.x, APEX.y]} closed fill={fill} strokeEnabled={false} />
+
+      {/* ---- central cap to kill spike ---- */}
+      <Circle x={APEX.x} y={APEX.y} radius={capR} fill={fill} strokeEnabled={false} />
+
+      {/* ---- anchors (centers of bases) ---- */}
+      {showAnchors &&
+        ANCHORS.map((a) => (
+          <Circle
+            key={a.id}
+            x={a.x}
+            y={a.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(a)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(a);
+            }}
+          />
+        ))}
+    </Group>
+  );
+}
+```
+
+Якщо хочеш, можу:
+
+* зробити anchor-и **невидимими**, але клікабельними (`opacity={0}` + більший hit area),
+* або додати ще **center anchor** в точці з’єднання `(100,70)` (на самому “cap”).

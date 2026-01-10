@@ -1,0 +1,164 @@
+Чудово, це **CanvasHeader.js** зі старого
+`app/components/Scheme/CanvasArea/CanvasHeader.js`.
+
+Це **чистий UI-компонент**, який:
+
+* не має залежностей від konva,
+* не містить бізнес-логіки,
+* відображає метадані схеми поверх canvas.
+
+Тому переносимо його в **ui/canvas** нової структури.
+
+---
+
+## 1) Куди класти в новій структурі
+
+✅ **Новий шлях:**
+
+```
+src/features/scheme-editor/ui/canvas/CanvasHeader.js
+```
+
+(Поруч з `EditorCanvas.js`, `GridLayer.js`, `GuidesLayer.js` — логічно і правильно.)
+
+---
+
+## 2) Зібраний та адаптований код `CanvasHeader.js`
+
+Я **нічого концептуально не міняю**, лише:
+
+* додаю `"use client"`
+* трохи вирівнюю стиль
+* залишаю API компонента ідентичним
+
+```jsx
+"use client";
+
+import React from "react";
+import {
+  Box,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableRow,
+  Paper,
+} from "@mui/material";
+
+const CanvasHeader = ({
+  albumCode,
+  point,
+  system,
+  schemeName,
+  sheetNumber,
+}) => {
+  return (
+    <Box
+      sx={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        width: "100%",
+        zIndex: 10,
+        pointerEvents: "none", // важливо: не блокує canvas
+      }}
+    >
+      <TableContainer
+        component={Paper}
+        sx={{
+          boxShadow: "none",
+          borderBottom: "1px solid black",
+        }}
+      >
+        <Table size="small">
+          <TableBody>
+            <TableRow>
+              <TableCell sx={{ border: "1px solid black", fontWeight: "bold" }}>
+                Шифр альбому
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black", fontWeight: "bold" }}>
+                Пункт
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black", fontWeight: "bold" }}>
+                Система
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black", fontWeight: "bold" }}>
+                Назва схеми
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black", fontWeight: "bold" }}>
+                Аркуш
+              </TableCell>
+            </TableRow>
+
+            <TableRow>
+              <TableCell sx={{ border: "1px solid black" }}>
+                {albumCode}
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black" }}>
+                {point}
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black" }}>
+                {system}
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black" }}>
+                {schemeName}
+              </TableCell>
+              <TableCell sx={{ border: "1px solid black" }}>
+                {sheetNumber}
+              </TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Box>
+  );
+};
+
+export default CanvasHeader;
+```
+
+---
+
+## 3) Як тепер імпортувати в `EditorCanvas.js`
+
+**Було (умовно):**
+
+```js
+import CanvasHeader from "./CanvasArea/CanvasHeader";
+```
+
+**Стає:**
+
+```js
+import CanvasHeader from "@/features/scheme-editor/ui/canvas/CanvasHeader";
+```
+
+---
+
+## 4) Важливий нюанс (я спеціально додав)
+
+```js
+pointerEvents: "none"
+```
+
+✅ Це **критично важливо** для react-konva:
+
+* header лежить поверх canvas
+* але **не перехоплює drag / click / wheel**
+* zoom, pan, selection працюють коректно
+
+(Якщо захочеш зробити клікабельні поля — можна локально ввімкнути `pointerEvents: auto`.)
+
+---
+
+## 5) Статус файлу
+
+✔ Повністю перенесений
+✔ Вписується в нову архітектуру
+✔ Готовий до використання
+
+---
+
+Наступний логічний крок — **EditorCanvas.js** або **GridLayer / GuidesLayer**.
+Кидай будь-який наступний файл зі старої `CanvasArea` 👌

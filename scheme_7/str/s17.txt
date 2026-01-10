@@ -1,0 +1,221 @@
+Нижче — **розпізнаний код `NewSchemeModal.js` зі скрінів** і **куди його покласти** у твоїй новій структурі.
+
+---
+
+## 1) Нова локація файлу
+
+Старе:
+
+* `app/components/album/NewSchemeModal.js`
+
+Нове (логічно для каталогу альбомів/схем):
+
+* `src/features/albums/ui/modals/NewSchemeModal.js`
+
+> Якщо ти принципово все хочеш тримати в `features/scheme-editor`, тоді можна:
+> `src/features/scheme-editor/ui/modals/NewSchemeModal.js` — але цей компонент по факту **про альбоми/створення схем**, а не про канву редактора.
+
+---
+
+## 2) Оновлений код під App Router (Next.js `app/`)
+
+Ключові правки при переносі:
+
+* додаємо `'use client'`
+* `useRouter` беремо з **`next/navigation`** (бо ти переходиш на `src/app/...`)
+* `albumId` краще передавати **пропсом** (у тебе він і так вже підхоплювався в initialValues), але я лишив fallback: якщо `albumId` не передали — буде порожньо.
+
+```jsx
+'use client'
+
+import { useState, useEffect } from 'react'
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  MenuItem,
+} from '@mui/material'
+import { Formik, Form, Field } from 'formik'
+import * as Yup from 'yup'
+import { useRouter } from 'next/navigation'
+
+import { fetchAlbums, fetchDepartments, fetchUnits, createScheme } from '@/utils/api'
+import { useAuth } from '@/context/AuthContext'
+
+export default function NewSchemeModal({ open, onClose, onSchemeCreated, albumId }) {
+  const { user } = useAuth()
+  const [albums, setAlbums] = useState([])
+  // const [departments, setDepartments] = useState([])
+  // const [units, setUnits] = useState([])
+  const router = useRouter()
+
+  useEffect(() => {
+    async function loadData() {
+      setAlbums(await fetchAlbums())
+      // setDepartments(await fetchDepartments())
+      // setUnits(await fetchUnits())
+    }
+    loadData()
+  }, [])
+
+  const validationSchema = Yup.object().shape({
+    album_id: Yup.number().required('Оберіть альбом'),
+    name: Yup.string().required('Введіть назву'),
+    pagenumber: Yup.string().required('Введіть номер аркушу'),
+    system: Yup.string().required('Введіть систему'),
+    // depart_id: Yup.number().required('Оберіть відділ'),
+    // unit_id: Yup.number().required('Оберіть підрозділ'),
+    format: Yup.string().required('Оберіть формат'),
+  })
+
+  const handleSubmit = async (values, { setSubmitting, resetForm }) => {
+    try {
+      const response = await createScheme({ ...values, editor_id: user?.tab_no }) // ID тимчасово
+      onClose()
+      onSchemeCreated?.()
+      resetForm()
+      router.push(`/scheme/${response.scheme_id}`) // Перенаправлення на Editor
+    } catch (error) {
+      console.error('Error creating scheme:', error)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onClose={onClose}>
+      <DialogTitle>Створення нової схеми</DialogTitle>
+
+      <Formik
+        initialValues={{
+          name: '',
+          album_id: albumId || '',
+          // depart_id: '',
+          description: '',
+          // unit_id: '',
+          format: 'A3', // Формат за замовчуванням A3
+          pagenumber: '',
+          system: '',
+        }}
+        validationSchema={validationSchema}
+        onSubmit={handleSubmit}
+      >
+        {({ isSubmitting, errors, touched }) => (
+          <Form>
+            <DialogContent>
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Назва"
+                name="name"
+                fullWidth
+                error={touched.name && !!errors.name}
+                helperText={touched.name && errors.name}
+              />
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                select
+                label="Виберіть альбом"
+                name="album_id"
+                fullWidth
+                error={touched.album_id && !!errors.album_id}
+                helperText={touched.album_id && errors.album_id}
+              >
+                {albums.map((album) => (
+                  <MenuItem key={`album-${album.ALBUM_ID}`} value={album.ALBUM_ID}>
+                    {album.NAME}
+                  </MenuItem>
+                ))}
+              </Field>
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Опис"
+                name="description"
+                fullWidth
+                multiline
+                rows={3}
+              />
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                select
+                label="Формат"
+                name="format"
+                fullWidth
+                error={touched.format && !!errors.format}
+                helperText={touched.format && errors.format}
+              >
+                {['A4', 'A3', 'A2', 'A1', 'A0'].map((format) => (
+                  <MenuItem key={`format-${format}`} value={format}>
+                    {format}
+                  </MenuItem>
+                ))}
+              </Field>
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Номер аркушу"
+                name="pagenumber"
+                fullWidth
+                error={touched.pagenumber && !!errors.pagenumber}
+                helperText={touched.pagenumber && errors.pagenumber}
+              />
+
+              <Field
+                as={TextField}
+                label="Система"
+                name="system"
+                fullWidth
+                error={touched.system && !!errors.system}
+                helperText={touched.system && errors.system}
+              />
+            </DialogContent>
+
+            <DialogActions>
+              <Button onClick={onClose} color="secondary">
+                Скасувати
+              </Button>
+              <Button
+                type="submit"
+                color="primary"
+                variant="contained"
+                disabled={isSubmitting}
+              >
+                Створити
+              </Button>
+            </DialogActions>
+          </Form>
+        )}
+      </Formik>
+    </Dialog>
+  )
+}
+```
+
+---
+
+## 3) Як тепер викликати компонент зі сторінки в `app/`
+
+У `src/app/albums/[albumId]/page.js` (або де ти його відкриваєш) передавай `albumId` пропсом:
+
+```jsx
+<NewSchemeModal
+  open={open}
+  onClose={() => setOpen(false)}
+  onSchemeCreated={() => reload()}
+  albumId={params.albumId}
+/>
+```
+
+---
+
+Якщо хочеш — наступним кроком так само перенесу зі скрінів **`SchemeReport.js` / `AlbumsReport.js` / `AlbumsFilter.js` / `NewAlbumModal.js`** в `src/features/albums/...` (або в яку структуру ти скажеш), але **по одному файлу за раз**, як ти і задав правила.

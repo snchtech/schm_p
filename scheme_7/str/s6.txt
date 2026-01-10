@@ -1,0 +1,197 @@
+Ок, це **`pages/api/auth/loginByToken.js`**. У App Router переносимо як Route Handler:
+
+✅ **NEW:** `src/app/api/auth/login-by-token/route.js`
+(можна і `loginByToken`, але в app/api краще kebab-case або як у тебе прийнято)
+
+Тут знову ключове: **не збираємо Set-Cookie через join**, а ставимо cookies через `response.cookies.set()`.
+
+---
+
+## 1) Відновлений код зі скрінів (як є)
+
+> **OLD:** `pages/api/auth/loginByToken.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { SignJWT } from 'jose'
+export const runtime = 'edge'
+//import Logger from '@/utils/logger'
+
+const REMOTE_API = process.env.MAIN_API_URL
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+const EXPIRES_IN_ACCESS_ETLS = parseInt(process.env.ETLS_ACCESS_EXPIRE_TIME)
+const EXPIRES_IN_REFRESH_ETLS = parseInt(process.env.ETLS_REFRESH_EXPIRE_TIME)
+
+export default async function POST(req) {
+  try {
+    const { accessToken, redirectTo } = await req.json()
+    if (!accessToken) {
+      return NextResponse.json({ error: 'No accessToken provided' }, { status: 400 })
+    }
+
+    // Відправляємо `accessToken` на REMOTE API /login
+    const apiResponse = await fetch(`${REMOTE_API}/api/auth/tokenlogin`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessToken }),
+    })
+
+    if (!apiResponse.ok) {
+      return NextResponse.json({ error: 'Invalid accessToken' }, { status: 401 })
+    }
+
+    // Отримуємо user data та нові токени
+    const { accessToken: newAccessToken, refreshToken, user } = await apiResponse.json()
+
+    // Генеруємо `accessTokenEtls`, `refreshTokenEtls`, `etlsUser`
+    const accessTokenEtls = await new SignJWT({ username: user.login })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const refreshTokenEtls = await new SignJWT({ username: user.login })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    const etlsUser = await new SignJWT(user)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    // Зберігаємо токени у cookies
+    const response = NextResponse.json({
+      message: 'Login successful',
+      newAccessToken,
+      refreshToken,
+      accessTokenEtls,
+      refreshTokenEtls,
+      etlsUser,
+    })
+
+    response.headers.set(
+      'Set-Cookie',
+      [
+        `accessToken=${newAccessToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshToken=${refreshToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `accessTokenEtls=${accessTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshTokenEtls=${refreshTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `etlsUser=${etlsUser}; HttpOnly; Path=/; Max-Age=43200`,
+      ].join('; ')
+    )
+
+    return response
+
+    // Перекидаємо користувача на його цільову сторінку
+    // return NextResponse.redirect(new URL(redirectUrl, req.url))
+  } catch (error) {
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 })
+  }
+}
+```
+
+---
+
+## 2) Нова версія під App Router
+
+✅ **NEW:** `src/app/api/auth/login-by-token/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { SignJWT } from 'jose'
+
+export const runtime = 'edge'
+
+const REMOTE_API = process.env.MAIN_API_URL
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+
+const EXPIRES_IN_ACCESS_ETLS = Number(process.env.ETLS_ACCESS_EXPIRE_TIME || 0)
+const EXPIRES_IN_REFRESH_ETLS = Number(process.env.ETLS_REFRESH_EXPIRE_TIME || 0)
+
+const COOKIE_MAX_AGE = 43200 // 12 год
+
+export async function POST(req) {
+  try {
+    const { accessToken, redirectTo } = await req.json()
+
+    if (!accessToken) {
+      return NextResponse.json({ error: 'No accessToken provided' }, { status: 400 })
+    }
+
+    const apiResponse = await fetch(`${REMOTE_API}/api/auth/tokenlogin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessToken }),
+    })
+
+    if (!apiResponse.ok) {
+      return NextResponse.json({ error: 'Invalid accessToken' }, { status: 401 })
+    }
+
+    const { accessToken: newAccessToken, refreshToken, user } = await apiResponse.json()
+
+    const username = user?.login
+
+    const accessTokenEtls = await new SignJWT({ username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const refreshTokenEtls = await new SignJWT({ username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    const etlsUser = await new SignJWT(user)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    // Якщо redirectTo потрібен — краще повертати його як поле,
+    // а редірект робити на клієнті (бо cookies мають встигнути зберегтись).
+    const response = NextResponse.json({
+      message: 'Login successful',
+      redirectTo: redirectTo || null,
+      user,
+    })
+
+    const common = {
+      httpOnly: true,
+      path: '/',
+      maxAge: COOKIE_MAX_AGE,
+      sameSite: 'lax',
+      // secure: true, // увімкнути в проді
+    }
+
+    response.cookies.set('accessToken', newAccessToken, common)
+    response.cookies.set('refreshToken', refreshToken, common)
+    response.cookies.set('accessTokenEtls', accessTokenEtls, common)
+    response.cookies.set('refreshTokenEtls', refreshTokenEtls, common)
+    response.cookies.set('etlsUser', etlsUser, common)
+
+    return response
+  } catch (error) {
+    console.error('login-by-token error:', error)
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 })
+  }
+}
+```
+
+---
+
+## 3) Коментар про `redirectTo`
+
+У твоєму коді `redirectTo` зчитується, але редірект закоментований. Практично найстабільніше:
+
+* **API**: ставить cookies і повертає `{ redirectTo }`
+* **клієнт**: після `response.ok` робить `router.push(redirectTo || '/')`
+
+Бо якщо зробити `NextResponse.redirect(...)` одразу — інколи браузер може піти на редірект ще до того, як cookie надійно “приклеїться”.
+
+---
+
+Кидай наступний файл: підозрюю далі буде `refreshresttokens` або `customfetch`/`logout` — перенесемо в `src/app/api/.../route.js` + за потреби винесемо спільну логіку генерації ETLS-токенів в `src/shared/auth/*` щоб не дублювати.

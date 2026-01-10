@@ -1,0 +1,216 @@
+Круто, це **LeftSidebar.js** зі старого `app/components/Scheme/LeftSidebar.js`.
+Я зібрав файл в текст (по скрінах) і **переніс у нову структуру** як UI-компонент лівої панелі.
+
+## 1) Куди покласти в новій структурі
+
+**Новий шлях:**
+`src/features/scheme-editor/ui/left-sidebar/LeftSidebar.js`
+
+(Це логічно, бо це чистий UI-компонент, не canvas/model/shared.)
+
+---
+
+## 2) Готовий файл `LeftSidebar.js` (нова структура)
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  Box,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Typography,
+  IconButton,
+} from "@mui/material";
+
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ArrowBackIosNewIcon from "@mui/icons-material/ArrowBackIosNew";
+import ArrowForwardIosIcon from "@mui/icons-material/ArrowForwardIos";
+
+import SchemeSelector from "./SchemeSelector";
+import SchemeInfoCard from "./SchemeInfoCard";
+import PersonalElements from "./PersonalElements";
+import StandardElements from "./StandardElements";
+import DepartmentElements from "./DepartmentElements";
+import TextElements from "./TextElements";
+import LayersVisibility from "./LayersVisibility";
+
+const LeftSidebar = ({ onLayerChange }) => {
+  const [expanded, setExpanded] = useState(["schemeSelector", "infoCard"]);
+  const [isSidebarVisible, setIsSidebarVisible] = useState(true);
+
+  const handleExpand = (panel) => (_event, isExpanded) => {
+    setExpanded((prev) =>
+      isExpanded ? [...prev, panel] : prev.filter((p) => p !== panel),
+    );
+  };
+
+  const toggleSidebar = () => {
+    setIsSidebarVisible((v) => !v);
+  };
+
+  return (
+    <Box sx={{ display: "flex" }}>
+      {isSidebarVisible && (
+        <Box
+          sx={{
+            width: 300,
+            height: "100vh",
+            overflowY: "auto",
+            backgroundColor: "#f5f5f5",
+            p: 2,
+          }}
+        >
+          {/* Вибір схеми */}
+          <Accordion
+            expanded={expanded.includes("schemeSelector")}
+            onChange={handleExpand("schemeSelector")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Вибір схеми</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <SchemeSelector />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Інформаційна картка схеми */}
+          <Accordion
+            expanded={expanded.includes("infoCard")}
+            onChange={handleExpand("infoCard")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Інформаційна картка схеми</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <SchemeInfoCard />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Особисті елементи */}
+          <Accordion
+            expanded={expanded.includes("personalElements")}
+            onChange={handleExpand("personalElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Особисті елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <PersonalElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Стандартні елементи */}
+          <Accordion
+            expanded={expanded.includes("standardElements")}
+            onChange={handleExpand("standardElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Стандартні елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <StandardElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Віддільні елементи */}
+          <Accordion
+            expanded={expanded.includes("departmentElements")}
+            onChange={handleExpand("departmentElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Віддільні елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <DepartmentElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Текстові елементи */}
+          <Accordion
+            expanded={expanded.includes("textElements")}
+            onChange={handleExpand("textElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Текстові елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <TextElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Шари для відображення */}
+          <Accordion
+            expanded={expanded.includes("layersVisibility")}
+            onChange={handleExpand("layersVisibility")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Шари для відображення</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <LayersVisibility onLayerChange={onLayerChange} />
+            </AccordionDetails>
+          </Accordion>
+        </Box>
+      )}
+
+      {/* Кнопка згортання/розгортання */}
+      <IconButton
+        onClick={toggleSidebar}
+        sx={{
+          height: "40px",
+          width: "40px",
+          m: "10px",
+          backgroundColor: "#ddd",
+        }}
+      >
+        {isSidebarVisible ? <ArrowBackIosNewIcon /> : <ArrowForwardIosIcon />}
+      </IconButton>
+    </Box>
+  );
+};
+
+export default LeftSidebar;
+```
+
+---
+
+## 3) Що треба оновити в імпортах по проекту
+
+Де б ти не підключав старий файл, заміни:
+
+**було:**
+
+```js
+import LeftSidebar from "app/components/Scheme/LeftSidebar";
+```
+
+**стане:**
+
+```js
+import LeftSidebar from "@/features/scheme-editor/ui/left-sidebar/LeftSidebar";
+```
+
+> Якщо в тебе ще нема alias `@/` — тоді буде відносний імпорт від конкретного файлу, але краще alias.
+
+---
+
+## 4) Важлива примітка по підкомпонентах
+
+Я навмисно **не переносив** зараз:
+
+* `SchemeSelector`
+* `SchemeInfoCard`
+* `PersonalElements`
+* `StandardElements`
+* `DepartmentElements`
+* `TextElements`
+* `LayersVisibility`
+
+бо ти їх ще не скидав. Але я вже зробив правильну логіку: вони тепер очікуються **поруч** із `LeftSidebar.js` в цій папці.
+
+---
+
+Надсилай наступним кроком будь-який з цих підфайлів (наприклад `LayersVisibility.js` або `SchemeSelector.js`) — і я так само **зі скрінів зберу код + правильно розкладу** по `features/shared`.

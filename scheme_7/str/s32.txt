@@ -1,0 +1,100 @@
+Добре, давай одразу зробимо **нормальний `PersonalElements.js`**, який логічно ляже у твою структуру
+`app/components/Scheme/LeftSidebar/`.
+
+Нижче — **робочий компонент**:
+
+* без помилок JSX
+* з місцем під персональні елементи
+* з прикладом кнопки елемента (іконка + назва)
+* готовий до підключення логіки “додати елемент на canvas”
+
+---
+
+## ✅ `PersonalElements.js`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, Typography, IconButton, Tooltip } from "@mui/material";
+import MonitorIcon from "@mui/icons-material/DesktopWindows"; 
+// ⬆️ тимчасова MUI-іконка, пізніше заміниш на SVG / Konva preview
+
+const PersonalElements = ({ onAddElement }) => {
+  return (
+    <Box
+      sx={{
+        p: 1,
+        display: "flex",
+        flexDirection: "column",
+        gap: 1,
+      }}
+    >
+      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+        Персональні елементи
+      </Typography>
+
+      {/* === приклад персонального елемента === */}
+      <Tooltip title="Монітор / вузол переходу">
+        <IconButton
+          size="small"
+          onClick={() =>
+            onAddElement?.({
+              type: "monitor-cross",
+            })
+          }
+          sx={{
+            border: "1px solid #ccc",
+            borderRadius: 1,
+          }}
+        >
+          <MonitorIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+
+      {/* тут далі будуть інші елементи */}
+    </Box>
+  );
+};
+
+export default PersonalElements;
+```
+
+---
+
+## 🔌 Як це підключається далі (логіка)
+
+У `LeftSidebar.js` ти зможеш зробити так:
+
+```jsx
+<PersonalElements
+  onAddElement={(el) => {
+    addSymbol({
+      type: el.type,
+      x: 200,
+      y: 200,
+    });
+  }}
+/>
+```
+
+А вже у `DiagramSymbols / GraphLibrary`:
+
+* `type: "monitor-cross"` → твій **Konva-компонент**, який ми щойно зробили
+* з anchor’ом
+* з логікою конекторів
+
+---
+
+## 🔜 Що логічно зробити наступним кроком
+
+1. Замість MUI-іконки показати **mini-preview Konva / SVG**
+2. Додати **drag-to-canvas** (не просто click)
+3. Розділити:
+
+   * стандартні елементи
+   * персональні (з БД)
+4. Додати категорії / accordion
+
+Якщо хочеш — наступним кроком:
+👉 **зроблю drag-&-drop з Sidebar прямо на Canvas (як у draw.io / Visio)**

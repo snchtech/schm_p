@@ -1,0 +1,77 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Path, Rect } from "react-konva";
+
+/**
+ * TwoTrianglesZigzag (react-konva)
+ * Еквівалент SVG:
+ * - 2 трикутники з'єднані вершинами (apex в центрі)
+ * - зверху вертикальна лінія із зигзагом + “ковпачок”
+ *
+ * Props:
+ *  x, y            — позиція
+ *  scale           — масштаб (default 1)
+ *  stroke          — колір лінії (default "black")
+ *  strokeWidth     — товщина (default 10)
+ */
+export default function TwoTrianglesZigzag({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 10,
+}) {
+  // viewBox 0 0 200 140
+  // Трикутники:
+  // left: (30,40) (30,110) (100,75)
+  // right:(170,40) (170,110) (100,75)
+  // zigzag path стартує з (100,75) вгору
+  // cap rect: x=90 y=0 w=20 h=14
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Left triangle */}
+      <Line
+        points={[30, 40, 30, 110, 100, 75]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Right triangle */}
+      <Line
+        points={[170, 40, 170, 110, 100, 75]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Zigzag line */}
+      <Path
+        data="M100 75 L100 60 L90 52 L110 44 L90 36 L110 28 L100 20 L100 12"
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+        fillEnabled={false}
+      />
+
+      {/* Top cap */}
+      <Rect x={90} y={0} width={20} height={14} fill={stroke} />
+    </Group>
+  );
+}
+```
+
+Якщо треба, додам:
+
+* **anchor-точку** (наприклад, в центрі `100,75` або на “ковпачку”),
+* або проп `onClick` / `onDragEnd` як у твоїх інших елементів (через `<Group draggable />`).

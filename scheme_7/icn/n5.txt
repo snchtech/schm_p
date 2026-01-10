@@ -1,0 +1,117 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Path } from "react-konva";
+
+/**
+ * CrossWithWaveCircle (react-konva)
+ * - 2 лінії перетинаються
+ * - у місці перетину чорна точка
+ * - від точки вгору шток, коло, всередині хвиля
+ * + Anchor (конектор) у точці перетину ліній
+ *
+ * Props:
+ *  x, y, scale
+ *  stroke, strokeWidth
+ *  showAnchors (default true)
+ *  onAnchorClick, onAnchorHover
+ */
+export default function CrossWithWaveCircle({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // viewBox: 0 0 200 160
+  const JX = 100;
+  const JY = 95;
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Horizontal line */}
+      <Line
+        points={[20, 95, 180, 95]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Diagonal line */}
+      <Line
+        points={[55, 125, 145, 65]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Vertical stem */}
+      <Line
+        points={[100, 95, 100, 48]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Top circle */}
+      <Circle
+        x={100}
+        y={30}
+        radius={20}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {/* Junction dot */}
+      <Circle x={JX} y={JY} radius={8} fill={stroke} strokeEnabled={false} />
+
+      {/* Smaller wave inside top circle */}
+      <Path
+        data="M90 30 C94 24, 98 24, 102 30 C106 36, 110 36, 114 30"
+        stroke={stroke}
+        strokeWidth={4}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Connector anchor at intersection */}
+      {showAnchors && (
+        <Circle
+          x={JX}
+          y={JY}
+          radius={anchorR}
+          fill="#fff"
+          stroke={stroke}
+          strokeWidth={2}
+          listening
+          onMouseEnter={() => {
+            document.body.style.cursor = "crosshair";
+            onAnchorHover?.({ id: "junction", x: JX, y: JY });
+          }}
+          onMouseLeave={() => {
+            document.body.style.cursor = "default";
+            onAnchorHover?.(null);
+          }}
+          onMouseDown={(e) => (e.cancelBubble = true)}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            onAnchorClick?.({ id: "junction", x: JX, y: JY });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо хочеш — можу зробити anchor **невидимим** (але “ловити” наведення/клік) або додати ще один anchor **на верхньому колі** для підключення зверху.

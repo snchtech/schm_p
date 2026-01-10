@@ -1,0 +1,124 @@
+Ок, тепер **точно те** 🙂
+Ти скинув: **`auth.js` (старий шлях `utils/auth.js`)**. Це **серверна утиліта для logout в middleware/route-handlers**, тому її краще винести в **shared/auth** (бо це не тільки для scheme-editor).
+
+---
+
+## 1) Куди класти в новій структурі
+
+✅ Новий шлях:
+
+```
+src/shared/auth/logoutUser.js
+```
+
+(Назву файлу роблю більш предметною, але якщо хочеш 1:1 — можна `src/shared/auth/auth.js`.)
+
+---
+
+## 2) Зібраний файл (1:1 зі скрінів) — `logoutUser.js`
+
+```js
+import { NextResponse } from "next/server";
+
+export async function logoutUser(req) {
+  const { pathname } = req.nextUrl;
+
+  // Якщо це сторінка логін, то просто очищаємо cookies (щоб не було рекурсії)
+  if (pathname === "/login") {
+    return NextResponse.next({
+      headers: {
+        "Set-Cookie": [
+          "accessTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+          "refreshTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+          "accessToken=; HttpOnly; Path=/; Max-Age=0",
+          "refreshToken=; HttpOnly; Path=/; Max-Age=0",
+          "etlsUser=; HttpOnly; Path=/; Max-Age=0",
+        ].join(", "),
+      },
+    });
+  } else {
+    try {
+      // Виконуємо запит на nextjs api logout
+      const logoutOnServerAPI = await fetch(
+        `${req.nextUrl.origin}/api/rest/logoutrest`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: req.headers.get("cookie") || "",
+          },
+        },
+      );
+
+      if (!logoutOnServerAPI.ok) {
+        console.error(
+          "Failed to logout on remote API, proceeding with local logout.",
+        );
+      }
+
+      console.info(
+        "User logged out successfully from API, clearing cookies...",
+      );
+
+      // Очищаємо cookies і робимо редірект на /login
+      return NextResponse.redirect(new URL("/login", req.url), {
+        headers: {
+          "Set-Cookie": [
+            "accessTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+            "refreshTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+            "userDataEtls=; HttpOnly; Path=/; Max-Age=0",
+            "etlsUser=; HttpOnly; Path=/; Max-Age=0",
+            "accessToken=; HttpOnly; Path=/; Max-Age=0",
+            "refreshToken=; HttpOnly; Path=/; Max-Age=0",
+          ].join(", "),
+        },
+      });
+    } catch (error) {
+      console.error("Logout error:", error);
+
+      // У разі помилки все одно очищаємо cookies і робимо редірект
+      return NextResponse.redirect(new URL("/login", req.url), {
+        headers: {
+          "Set-Cookie": [
+            "accessTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+            "refreshTokenEtls=; HttpOnly; Path=/; Max-Age=0",
+            "userDataEtls=; HttpOnly; Path=/; Max-Age=0",
+            "etlsUser=; HttpOnly; Path=/; Max-Age=0",
+            "accessToken=; HttpOnly; Path=/; Max-Age=0",
+            "refreshToken=; HttpOnly; Path=/; Max-Age=0",
+          ].join(", "),
+        },
+      });
+    }
+  }
+}
+```
+
+---
+
+## 3) Як міняється імпорт у коді
+
+Було:
+
+```js
+import { logoutUser } from "@/utils/auth";
+```
+
+Стає:
+
+```js
+import { logoutUser } from "@/shared/auth/logoutUser";
+```
+
+---
+
+## 4) Маленька (але важлива) рекомендація
+
+Ти робиш `"Set-Cookie": [...].join(", ")`.
+У Next/Edge це **інколи** працює, але більш надійно — виставляти cookies через `response.cookies.set(...)`.
+Я **не міняю зараз**, бо ти просив “перенести” як є, але якщо в тебе десь “не чистяться кукі” — це перша причина.
+
+---
+
+Кидай наступний файл зі старого `utils/` (або місце, де `logoutUser()` використовується — middleware), і я одразу підкажу правильний шлях/підключення в новій структурі.

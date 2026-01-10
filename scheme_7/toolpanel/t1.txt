@@ -1,0 +1,349 @@
+Так, робиться чисто й масштабовано: **кожен кастомний елемент** реєструємо в “бібліотеці” з метаданими (preview + defaultProps + розмір), тулбар показує **маленьке прев’ю** (міні-Stage Konva), а клік по іконці робить `activeTool = <type>` і далі клік по canvas **додає інстанс** цього type у `symbols`.
+
+Нижче — готовий каркас під твою структуру.
+
+---
+
+## 1) Реєстр елементів (GraphLibrary + meta)
+
+Створи файл:
+
+`src/features/scheme-editor/ui/graph/registry.js`
+
+```jsx
+"use client";
+
+import CropSquareIcon from "@mui/icons-material/CropSquare";
+import CircleOutlinedIcon from "@mui/icons-material/CircleOutlined";
+import ChangeHistoryIcon from "@mui/icons-material/ChangeHistory";
+
+import RectElement from "../canvas/DiagramSymbols/RectElement";     // або твій шлях
+import CircleElement from "../canvas/DiagramSymbols/CircleElement"; // або твій шлях
+import TwoTrianglesArrowDown from "../canvas/DiagramSymbols/TwoTrianglesArrowDown"; // твій custom
+
+/**
+ * Єдине місце, де ми описуємо:
+ * - type (ключ)
+ * - компонент для рендера на canvas
+ * - preview: як малювати в іконці (Konva component)
+ * - дефолтні props
+ * - bbox (для центрування/масштабування прев’ю)
+ */
+export const ELEMENT_REGISTRY = {
+  rect: {
+    title: "Rect",
+    icon: <CropSquareIcon />,
+    Component: RectElement,
+    preview: { w: 120, h: 80 },
+    defaults: {
+      width: 120,
+      height: 70,
+      fill: "#fff",
+      stroke: "#111",
+      strokeWidth: 2,
+    },
+  },
+
+  circle: {
+    title: "Circle",
+    icon: <CircleOutlinedIcon />,
+    Component: CircleElement,
+    preview: { w: 120, h: 80 },
+    defaults: {
+      radius: 35,
+      fill: "#fff",
+      stroke: "#111",
+      strokeWidth: 2,
+    },
+  },
+
+  twoTrianglesArrowDown: {
+    title: "Two Triangles + Arrow",
+    icon: <ChangeHistoryIcon />,
+    Component: TwoTrianglesArrowDown,
+
+    // ВАЖЛИВО: твій компонент намальований у координатах viewBox 200x150 (0..200, 0..150)
+    preview: { w: 200, h: 150 },
+
+    defaults: {
+      scale: 0.35,        // на canvas можеш змінити (це “внутрішній” scale компонента)
+      stroke: "#111",
+      strokeWidth: 8,
+      arrowFill: "#111",
+      showAnchors: false, // у прев’ю і при додаванні — без anchor’ів (в редакторі включиш окремо)
+    },
+  },
+};
+```
+
+> Якщо твої `RectElement/CircleElement` не існують — можна просто рендерити Konva `Rect/Circle` напряму, але ти вже маєш GraphLibrary — підстав свій шлях.
+
+---
+
+## 2) Компонент іконки-прев’ю (міні Konva Stage)
+
+`src/features/scheme-editor/ui/toolbar/ToolPreviewIcon.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Stage, Layer, Group } from "react-konva";
+
+/**
+ * Маленький canvas-іконка:
+ * - центрує фігуру по bbox preview.w/h
+ * - масштабує під квадрат 44x44
+ */
+export default function ToolPreviewIcon({ PreviewComponent, previewW, previewH, props }) {
+  const size = 44;
+  const pad = 6;
+  const s = useMemo(() => {
+    const sx = (size - pad * 2) / previewW;
+    const sy = (size - pad * 2) / previewH;
+    return Math.min(sx, sy);
+  }, [previewW, previewH]);
+
+  // центруємо bbox у квадраті
+  const offsetX = (size - previewW * s) / 2;
+  const offsetY = (size - previewH * s) / 2;
+
+  return (
+    <Stage width={size} height={size} listening={false}>
+      <Layer listening={false}>
+        <Group x={offsetX} y={offsetY} scaleX={s} scaleY={s} listening={false}>
+          <PreviewComponent x={0} y={0} {...props} />
+        </Group>
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+## 3) Оновлюємо тулбар: показуємо кастомні прев’ю-іконки
+
+`src/features/scheme-editor/ui/toolbar/ToolPalette.jsx`
+(показую тільки частину, що рендерить кнопки — інтегруй у твою секцію “Елементи”)
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, IconButton, Tooltip, Typography, Divider, Drawer, Paper } from "@mui/material";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+
+import ToolPreviewIcon from "./ToolPreviewIcon";
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+const DRAWER_W = 132;
+
+function ToolBtn({ selected, onClick, title, children }) {
+  return (
+    <Tooltip title={title} placement="right">
+      <IconButton
+        onClick={onClick}
+        sx={{
+          width: 54,
+          height: 54,
+          borderRadius: 2,
+          border: "1px solid",
+          borderColor: selected ? "primary.main" : "divider",
+          bgcolor: selected ? "action.selected" : "transparent",
+          p: 0,
+        }}
+      >
+        {children}
+      </IconButton>
+    </Tooltip>
+  );
+}
+
+export default function ToolPalette({ open, activeTool, onToggle, onSelectTool }) {
+  const elementTypes = Object.keys(ELEMENT_REGISTRY); // rect, circle, twoTrianglesArrowDown, ...
+
+  return (
+    <>
+      <Drawer
+        anchor="left"
+        open={open}
+        variant="temporary"
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: { width: DRAWER_W, height: "100%", position: "fixed", top: 0, left: 0 },
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+          <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 700 }}>
+            Tools
+          </Typography>
+          <IconButton size="small" onClick={onToggle}>
+            <ChevronLeftIcon />
+          </IconButton>
+        </Box>
+
+        <Divider />
+
+        <Box sx={{ px: 1, py: 1 }}>
+          <Typography variant="caption" sx={{ display: "block", opacity: 0.7, mb: 1, fontWeight: 600 }}>
+            Елементи
+          </Typography>
+
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+            {elementTypes.map((type) => {
+              const item = ELEMENT_REGISTRY[type];
+              const Preview = item.Component; // важливо: для прев’ю використовуємо той самий компонент
+              return (
+                <ToolBtn
+                  key={type}
+                  title={item.title}
+                  selected={activeTool === type}
+                  onClick={() => onSelectTool(type)}
+                >
+                  <ToolPreviewIcon
+                    PreviewComponent={Preview}
+                    previewW={item.preview.w}
+                    previewH={item.preview.h}
+                    props={item.defaults}
+                  />
+                </ToolBtn>
+              );
+            })}
+          </Box>
+        </Box>
+
+        {/* Далі твоя секція Конектори як було */}
+      </Drawer>
+
+      {!open && (
+        <Paper elevation={6} sx={{ position: "fixed", top: 16, left: 12, borderRadius: 3, overflow: "hidden", zIndex: 1301 }}>
+          <IconButton onClick={onToggle}>
+            <ChevronRightIcon />
+          </IconButton>
+        </Paper>
+      )}
+    </>
+  );
+}
+```
+
+✅ Тепер **будь-який** кастомний компонент, який ти додаси у `ELEMENT_REGISTRY`, автоматично з’явиться як **маленька іконка**.
+
+---
+
+## 4) Додавання кастомного елемента на canvas по кліку
+
+У store ми маємо `addSymbolAt(type, pos)` — зробимо його універсальним через `ELEMENT_REGISTRY[type].defaults`.
+
+`src/features/scheme-editor/model/domain/useDiagramState.js` (онови `addSymbolAt`)
+
+```jsx
+import { ELEMENT_REGISTRY } from "../../ui/graph/registry";
+
+const addSymbolAt = useCallback((type, pos) => {
+  if (!type) return;
+  const def = ELEMENT_REGISTRY[type];
+  if (!def) return;
+
+  const newEl = {
+    id: uid(),
+    layerType: "scheme",
+    type,
+    x: pos.x,
+    y: pos.y,
+    rotation: 0,
+    ...def.defaults,
+  };
+
+  setState((prev) => ({
+    ...prev,
+    symbols: [...(prev.symbols || []), newEl],
+  }));
+}, []);
+```
+
+---
+
+## 5) Рендер на полотні: мапінг `type -> Component`
+
+У твоєму `DiagramSymbols` (або де ти рендериш symbols) — дістаємо компонент з реєстру.
+
+`src/features/scheme-editor/ui/canvas/DiagramSymbols/DiagramSymbols.js` (ідея)
+
+```jsx
+"use client";
+
+import React from "react";
+import { ELEMENT_REGISTRY } from "../../graph/registry";
+
+export function DiagramSymbols({ symbols }) {
+  return (
+    <>
+      {(symbols || []).map((el) => {
+        const entry = ELEMENT_REGISTRY[el.type];
+        if (!entry) return null;
+        const Comp = entry.Component;
+
+        return (
+          <Comp
+            key={el.id}
+            // позиція інстанса
+            x={el.x}
+            y={el.y}
+            // далі — всі props елемента
+            {...el}
+            // у редакторі anchors вмикаємо керовано окремо:
+            showAnchors={false}
+          />
+        );
+      })}
+    </>
+  );
+}
+```
+
+> Важливо: твій `TwoTrianglesArrowDown` приймає `x,y,scale,stroke,...` — вони вже будуть в `el`.
+
+---
+
+## 6) Дуже важливий нюанс: “клік додає іконку в точку кліку”
+
+Ти вже робиш `worldPos` через invert transform (щоб працювало з zoom/pan). Це лишається як є. Тепер просто `addSymbolAt(activeTool, worldPos)`.
+
+---
+
+# Як бути з anchor’ами
+
+Ти правильно робиш, що anchor зараз `Rect`. Для тулбар-прев’ю і при вставці — `showAnchors:false`.
+Коли підеш у режим “конектори”, тоді:
+
+* для hover/select покажеш `showAnchors:true` тільки для потрібних елементів або коли активний connector tool.
+
+---
+
+# Швидкий рецепт “додати ще один custom component”
+
+1. Імпортни його в `registry.js`
+2. Додай запис:
+
+```js
+myCustom: {
+  title: "My Custom",
+  Component: MyCustomComponent,
+  preview: { w: 200, h: 150 },
+  defaults: { scale: 0.3, ... },
+}
+```
+
+Все: з’явився в панелі, і додається на canvas.
+
+---
+
+Якщо хочеш — я одразу:
+
+* заміню anchor `Rect` → `Circle` у `TwoTrianglesArrowDown`,
+* і додам **center anchor (100,85)**,
+* плюс зроблю “preview без draggable/listening” щоб міні-Stage працював максимально швидко.

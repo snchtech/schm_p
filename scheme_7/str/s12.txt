@@ -1,0 +1,298 @@
+Ок, це компонент **редагування альбому**.
+
+### ✅ Куди переносимо в новій структурі
+
+Це не `scheme-editor`, а “albums”. У твоїй новій структурі поки нема `features/albums`, але логічно винести туди.
+
+✅ **NEW (рекомендовано):**
+`src/features/albums/ui/album-edit/AlbumEditForm.js`
+
+Якщо ти поки не хочеш створювати `features/albums`, тимчасово можна:
+`src/app/(albums)/albums/_components/AlbumEditForm.js`
+але краще одразу в `features`.
+
+---
+
+## 1) Відновлений код зі скрінів (як було)
+
+```jsx
+import { useState, useEffect } from 'react'
+import { TextField, Button, Select, MenuItem, Typography, Box } from '@mui/material'
+import { fetchUnits, updateAlbum, fetchAlbumById } from '@/utils/api'
+//import { useRouter } from 'next/router'
+import { useAuth } from '../../../context/AuthContext'
+
+const AlbumEditForm = ({ albumId }) => {
+  const { user } = useAuth()
+  //const router = useRouter()
+  //const { mode } = router.query // Отримання mode (viewer/editor)
+
+  const [albumData, setAlbumData] = useState({
+    name: '',
+    unitId: '',
+    description: '',
+    dateUpdated: '',
+  })
+
+  const [units, setUnits] = useState([])
+
+  useEffect(() => {
+    const loadAlbumData = async () => {
+      try {
+        const data = await fetchAlbumById(albumId)
+
+        console.log(data, 'KKKK')
+
+        setAlbumData({
+          name: data.NAME,
+          unitId: data.UNIT_ID,
+          description: data.DESCRIPTION,
+          dateUpdated: data.LAST_UPDATE,
+        })
+      } catch (error) {
+        console.error('Помилка завантаження альбому:', error)
+      }
+    }
+
+    const loadUnits = async () => {
+      try {
+        const unitList = await fetchUnits()
+        setUnits(unitList)
+      } catch (error) {
+        console.error('Помилка завантаження unit:', error)
+      }
+    }
+
+    loadAlbumData()
+    loadUnits()
+  }, [albumId])
+
+  const handleUpdate = async () => {
+    try {
+      await updateAlbum(albumId, {
+        name: albumData.name,
+        unitId: albumData.unitId,
+        description: albumData.description,
+        date_update: albumData.dateUpdated,
+        updator_id: user.tab_no,
+      })
+      alert('Альбом оновлено!')
+    } catch (error) {
+      console.error('Помилка оновлення:', error)
+      alert('Помилка оновлення альбому!')
+    }
+  }
+
+  return (
+    <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 2 }}>
+      <Typography variant="h6" gutterBottom>
+        Редагування альбому
+      </Typography>
+
+      <TextField
+        fullWidth
+        label="Назва"
+        value={albumData.name ?? ''}
+        onChange={(e) => setAlbumData({ ...albumData, name: e.target.value })}
+        margin="dense"
+      />
+
+      <Select
+        fullWidth
+        value={albumData.unitId ?? ''}
+        onChange={(e) => setAlbumData({ ...albumData, unitId: e.target.value })}
+        displayEmpty
+        margin="dense"
+      >
+        <MenuItem value="" disabled>
+          Оберіть Unit
+        </MenuItem>
+
+        {units.map((unit) => (
+          <MenuItem key={`unit-${unit.ID}`} value={unit.ID}>
+            {unit.NAME}
+          </MenuItem>
+        ))}
+      </Select>
+
+      <TextField
+        fullWidth
+        label="Опис"
+        multiline
+        rows={3}
+        value={albumData.description ?? ''}
+        onChange={(e) => setAlbumData({ ...albumData, description: e.target.value })}
+        margin="dense"
+      />
+
+      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+        Останнє оновлення: {albumData.dateUpdated || 'Немає даних'}
+      </Typography>
+
+      <Button variant="contained" color="primary" onClick={handleUpdate} sx={{ mt: 2 }}>
+        Оновити
+      </Button>
+    </Box>
+  )
+}
+
+export default AlbumEditForm
+```
+
+---
+
+## 2) Рефактор під нову структуру (і під App Router)
+
+### Що підправляємо
+
+1. Додаємо `'use client'` (бо hooks, MUI)
+2. Прибираємо `alert` → краще `Snackbar` (але можу лишити як є)
+3. `useAuth` у новій архітектурі може бути іншим. Я зроблю “м’яко”: якщо `user` немає — `updator_id` не відправляємо.
+4. Для MUI `Select` правильніше використати `FormControl + InputLabel`, але твій код працює. Лишу мінімально.
+
+✅ **NEW:** `src/features/albums/ui/album-edit/AlbumEditForm.js`
+
+```jsx
+'use client'
+
+import { useEffect, useState } from 'react'
+import { TextField, Button, Select, MenuItem, Typography, Box } from '@mui/material'
+import { fetchUnits, updateAlbum, fetchAlbumById } from '@/utils/api'
+import { useAuth } from '@/context/AuthContext' // <-- якщо шлях інший, заміниш
+
+export default function AlbumEditForm({ albumId }) {
+  const { user } = useAuth?.() ?? { user: null }
+
+  const [albumData, setAlbumData] = useState({
+    name: '',
+    unitId: '',
+    description: '',
+    dateUpdated: '',
+  })
+
+  const [units, setUnits] = useState([])
+  const [isSaving, setIsSaving] = useState(false)
+
+  useEffect(() => {
+    if (!albumId) return
+
+    const load = async () => {
+      try {
+        const [album, unitList] = await Promise.all([fetchAlbumById(albumId), fetchUnits()])
+
+        setAlbumData({
+          name: album?.NAME ?? '',
+          unitId: album?.UNIT_ID ?? '',
+          description: album?.DESCRIPTION ?? '',
+          dateUpdated: album?.LAST_UPDATE ?? '',
+        })
+
+        setUnits(unitList ?? [])
+      } catch (error) {
+        console.error('AlbumEditForm load error:', error)
+      }
+    }
+
+    load()
+  }, [albumId])
+
+  const handleUpdate = async () => {
+    if (!albumId) return
+    setIsSaving(true)
+    try {
+      await updateAlbum(albumId, {
+        name: albumData.name,
+        unitId: albumData.unitId,
+        description: albumData.description,
+        date_update: albumData.dateUpdated,
+        ...(user?.tab_no ? { updator_id: user.tab_no } : {}),
+      })
+      // поки лишимо alert, потім замінимо на Snackbar
+      alert('Альбом оновлено!')
+    } catch (error) {
+      console.error('Помилка оновлення:', error)
+      alert('Помилка оновлення альбому!')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 2 }}>
+      <Typography variant="h6" gutterBottom>
+        Редагування альбому
+      </Typography>
+
+      <TextField
+        fullWidth
+        label="Назва"
+        value={albumData.name ?? ''}
+        onChange={(e) => setAlbumData((s) => ({ ...s, name: e.target.value }))}
+        margin="dense"
+      />
+
+      <Select
+        fullWidth
+        value={albumData.unitId ?? ''}
+        onChange={(e) => setAlbumData((s) => ({ ...s, unitId: e.target.value }))}
+        displayEmpty
+        margin="dense"
+      >
+        <MenuItem value="" disabled>
+          Оберіть Unit
+        </MenuItem>
+
+        {units.map((unit) => (
+          <MenuItem key={`unit-${unit.ID}`} value={unit.ID}>
+            {unit.NAME}
+          </MenuItem>
+        ))}
+      </Select>
+
+      <TextField
+        fullWidth
+        label="Опис"
+        multiline
+        rows={3}
+        value={albumData.description ?? ''}
+        onChange={(e) => setAlbumData((s) => ({ ...s, description: e.target.value }))}
+        margin="dense"
+      />
+
+      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+        Останнє оновлення: {albumData.dateUpdated || 'Немає даних'}
+      </Typography>
+
+      <Button
+        variant="contained"
+        color="primary"
+        onClick={handleUpdate}
+        sx={{ mt: 2 }}
+        disabled={isSaving}
+      >
+        Оновити
+      </Button>
+    </Box>
+  )
+}
+```
+
+---
+
+## 3) Як тепер імпортувати в сторінку альбому
+
+Там де було:
+
+```js
+import AlbumEditForm from '@/app/components/album/AlbumEditForm'
+```
+
+Стає:
+
+```js
+import AlbumEditForm from '@/features/albums/ui/album-edit/AlbumEditForm'
+```
+
+---
+
+Якщо скинеш ще **`NewSchemeModal` / `SchemeReport` / `NavigationTree`** — я так само перенесу в `features/albums/ui/*` і приб’ю старі `@/app/components/...` імпорти.

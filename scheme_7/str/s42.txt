@@ -1,0 +1,203 @@
+Бачу, чому ти пишеш “ти не те розбираєш”: ти зараз показав **`utils/auth.js` + `proxy.js` (middleware)**, а я “поїхав” у бік `utils/api.js`.
+
+Нижче — саме по **`proxy.js` + `utils/auth.js`**, бо там у тебе є 2 критичні баги, які потім викликають дивні редіректи/лупи і “не ставляться куки”.
+
+---
+
+## 1) Головний баг: `Set-Cookie` не можна робити через `.join(', ')`
+
+У тебе і в `logoutUser`, і в `proxy.js` є патерн:
+
+```js
+headers: {
+  'Set-Cookie': [
+    'a=...;',
+    'b=...;',
+  ].join(', ')
+}
+```
+
+Так **не можна**. Браузер/Next можуть “склеїти” це в один cookie-рядок, і частина кук зламається.
+
+✅ Правильно в Next.js: або `response.cookies.set(...)`, або `headers.append('Set-Cookie', ...)` для кожної куки окремо.
+
+### Як виправити `logoutUser(req)` (utils/auth.js)
+
+```js
+import { NextResponse } from "next/server";
+
+export async function logoutUser(req) {
+  const { pathname } = req.nextUrl;
+
+  // щоб не робити рекурсію на /login
+  const res = pathname === "/login"
+    ? NextResponse.next()
+    : NextResponse.redirect(new URL("/login", req.url));
+
+  // чистимо куки правильно
+  const cookieNames = [
+    "accessTokenEtls",
+    "refreshTokenEtls",
+    "userDataEtls",
+    "etlsUser",
+    "accessToken",
+    "refreshToken",
+    "refreshingToken",
+  ];
+
+  cookieNames.forEach((name) => {
+    res.cookies.set(name, "", { path: "/", maxAge: 0, httpOnly: true });
+  });
+
+  return res;
+}
+```
+
+> Якщо частина кук не `httpOnly` — можеш для них прибрати `httpOnly: true`, але у тебе вони всі виглядають як httpOnly.
+
+---
+
+## 2) `proxy.js` краще зробити нормальним `middleware.js` (і не “use server”)
+
+`'use server'` **не потрібен** для middleware. Middleware має бути у файлі **`middleware.js`** в корені `src/` або корені проєкту.
+
+✅ Варіант: залишаєш твою функцію `proxy(req)` як є, але експортуєш її як middleware.
+
+### middleware.js (корінь проєкту або `src/middleware.js`)
+
+```js
+import { proxy } from "./proxy"; // або правильний шлях
+export default proxy;
+
+export const config = {
+  matcher: ["/login", "/", "/editor", "/test", "/albums"],
+};
+```
+
+---
+
+## 3) У `proxy.js` теж треба перейти на `response.cookies.set`, а не `headers.set('Set-Cookie', ...)`
+
+Там де ти робиш:
+
+* логін по токену (`loginByToken`) → встановлюєш 4-5 cookie
+* refresh → виставляєш `refreshingToken=1`, потім прибираєш і ставиш нові токени
+
+✅ Робиться так:
+
+```js
+import { NextResponse } from "next/server";
+import * as jose from "jose";
+import { logoutUser } from "@/utils/auth";
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS);
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH);
+
+export async function proxy(req) {
+  const { pathname, searchParams } = req.nextUrl;
+
+  // читаємо cookies
+  const accessTokenEtls = req.cookies.get("accessTokenEtls")?.value;
+  const refreshTokenEtls = req.cookies.get("refreshTokenEtls")?.value;
+  const refreshingToken = req.cookies.get("refreshingToken")?.value;
+
+  // якщо є accessToken у заголовку або query — робиш loginByToken
+  let accessToken =
+    req.headers.get("Authorization")?.replace("Bearer ", "") ||
+    searchParams.get("t");
+
+  if (accessToken) {
+    const loginResponse = await fetch(`${req.nextUrl.origin}/api/auth/loginByToken`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessToken, redirectTo: pathname }),
+      credentials: "include",
+    });
+
+    if (!loginResponse.ok) return NextResponse.redirect(new URL("/login", req.url));
+
+    const data = await loginResponse.json();
+
+    const res = NextResponse.redirect(new URL(pathname, req.url));
+    res.cookies.set("accessToken", data.newAccessToken, { path: "/", httpOnly: true, maxAge: 43200 });
+    res.cookies.set("refreshToken", data.refreshToken, { path: "/", httpOnly: true, maxAge: 43200 });
+    res.cookies.set("accessTokenEtls", data.accessTokenEtls, { path: "/", httpOnly: true, maxAge: 43200 });
+    res.cookies.set("refreshTokenEtls", data.refreshTokenEtls, { path: "/", httpOnly: true, maxAge: 43200 });
+    res.cookies.set("etlsUser", data.etlsUser, { path: "/", httpOnly: true, maxAge: 43200 });
+    return res;
+  }
+
+  // захист всіх сторінок окрім /login
+  if (pathname !== "/login") {
+    if (!accessTokenEtls || !refreshTokenEtls) return logoutUser(req);
+
+    try {
+      await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS);
+      return NextResponse.next();
+    } catch {
+      // access прострочений → перевіряємо refresh
+      try {
+        await jose.jwtVerify(refreshTokenEtls, ETLS_REFRESH);
+
+        // якщо вже хтось оновлює — просто пропускаємо (або чекаємо 1 раз)
+        if (refreshingToken === "1") {
+          return NextResponse.next();
+        }
+
+        // ставимо прапорець “оновлюю”
+        const res = NextResponse.next();
+        res.cookies.set("refreshingToken", "1", { path: "/", httpOnly: true });
+
+        // робимо refresh
+        const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: req.headers.get("cookie") || "",
+          },
+          credentials: "include",
+        });
+
+        if (!rr.ok) return logoutUser(req);
+
+        const refreshed = await rr.json();
+
+        // прибираємо прапорець + ставимо нові токени
+        res.cookies.set("refreshingToken", "", { path: "/", httpOnly: true, maxAge: 0 });
+        res.cookies.set("accessTokenEtls", refreshed.newAccessTokenEtls, { path: "/", httpOnly: true, maxAge: 43200 });
+        res.cookies.set("refreshTokenEtls", refreshed.newRefreshTokenEtls, { path: "/", httpOnly: true, maxAge: 43200 });
+        res.cookies.set("accessToken", refreshed.newAccessToken, { path: "/", httpOnly: true, maxAge: 43200 });
+        res.cookies.set("refreshToken", refreshed.newRefreshToken, { path: "/", httpOnly: true, maxAge: 43200 });
+        res.cookies.set("etlsUser", refreshed.newEtlsUser, { path: "/", httpOnly: true, maxAge: 43200 });
+
+        return res;
+      } catch {
+        return logoutUser(req);
+      }
+    }
+  }
+
+  // логіка для /login: якщо є валідні токени — редірект на /
+  if (pathname === "/login" && accessTokenEtls) {
+    try {
+      await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS);
+      return NextResponse.redirect(new URL("/", req.url));
+    } catch {}
+  }
+
+  return NextResponse.next();
+}
+```
+
+---
+
+## 4) Ще один момент: у тебе **2 `export const config`** (runtime + matcher)
+
+У Next middleware має бути **один** `export const config = { matcher: ... }`.
+`runtime: 'nodejs'` в middleware зазвичай не використовують так, як у server actions.
+
+✅ Залиши тільки matcher (як у прикладі вище).
+
+---
+
+Якщо скажеш однією фразою, що саме зараз “ламається” (луп на `/login`, не оновлюються токени, не ставляться cookie, або 401 після рефреша) — я під це точково піджену логіку (особливо поведінку `refreshingToken`).

@@ -1,0 +1,153 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Path, Circle } from "react-konva";
+
+/**
+ * TwoTrianglesDashedLoop (react-konva)
+ * - 2 трикутники назустріч (apex в центрі)
+ * - суцільні горизонтальні лінії зліва/справа
+ * - пунктирна “петля” зверху + стрілка вниз у центр
+ * + 2 anchor-точки для конекторів на кінцях горизонтальних ліній:
+ *    leftEnd  = (10,80)
+ *    rightEnd = (210,80)
+ */
+export default function TwoTrianglesDashedLoop({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // geometry (viewBox 0 0 220 140)
+  const Y = 80;
+
+  const LEFT_END = { id: "leftEnd", x: 10, y: Y };
+  const RIGHT_END = { id: "rightEnd", x: 210, y: Y };
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+
+  const handleEnter = (a) => {
+    document.body.style.cursor = "crosshair";
+    onAnchorHover?.(a);
+  };
+  const handleLeave = () => {
+    document.body.style.cursor = "default";
+    onAnchorHover?.(null);
+  };
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* ---- Solid geometry ---- */}
+      {/* left line */}
+      <Line
+        points={[10, 80, 70, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* triangles (outlined) */}
+      <Line
+        points={[70, 60, 70, 100, 110, 80]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+      <Line
+        points={[150, 60, 150, 100, 110, 80]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* right solid line split */}
+      <Line
+        points={[150, 80, 175, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+      <Line
+        points={[175, 80, 210, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* ---- Dashed loop ---- */}
+      <Path
+        data="M175 80 L175 25 L110 25 L110 55"
+        stroke={stroke}
+        strokeWidth={5}
+        dash={[10, 8]}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Arrow head (filled) */}
+      <Line
+        points={[110, 80, 102, 60, 118, 60]}
+        closed
+        fill={stroke}
+        strokeEnabled={false}
+      />
+
+      {/* ---- Connector anchors ---- */}
+      {showAnchors && (
+        <>
+          {/* left end anchor */}
+          <Circle
+            x={LEFT_END.x}
+            y={LEFT_END.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(LEFT_END)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(LEFT_END);
+            }}
+          />
+
+          {/* right end anchor */}
+          <Circle
+            x={RIGHT_END.x}
+            y={RIGHT_END.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(RIGHT_END)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(RIGHT_END);
+            }}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо тобі треба, щоб anchor-и були **невидимі** (але клікабельні) — скажи, зроблю `opacity={0}` + більший `hitStrokeWidth` для зручного попадання.

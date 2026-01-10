@@ -1,0 +1,243 @@
+Так, бачу файл ✅ Це **`pages/login/index.js`** (старий Pages Router) і його логічно перенести в **App Router** як сторінку **`src/app/login/page.js`**.
+
+Я зроблю “чисте” рознесення: **UI-компонент у feature**, а **page.js** лише підключає його.
+
+---
+
+## 1) Відновлений код зі скрінів (оригінал файлу)
+
+> **OLD:** `pages/login/index.js`
+
+```jsx
+'use client'
+import React, { useState } from 'react'
+import { TextField, Button, Box, Typography, Alert } from '@mui/material'
+//import { useAuth } from '../../context/AuthContext'
+import { useRouter } from 'next/navigation'
+
+const LoginPage = () => {
+  // const { login, loading, authStatus, user } = useAuth()
+  const router = useRouter()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [capsLock, setCapsLock] = useState(false)
+  const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+
+    if (!username || !password) {
+      setError('Заповніть всі поля')
+      return
+    }
+
+    if (/[а-яА-ЯёЁ]/.test(password)) {
+      setError('Пароль не може містити кириличні символи')
+      return
+    }
+
+    try {
+      const response = await fetch(`${PROXY_URL}/api/auth/login`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+
+      if (response.ok) {
+        // Успішний логін
+        console.log('Login true')
+        router.push(`${PROXY_URL}/`)
+      } else {
+        const data = await response.json()
+        setError(data.error || 'Something went wrong')
+      }
+    } catch (error) {
+      setError('Помилка сервера')
+    }
+  }
+
+  const handleKeyPress = (e) => {
+    setCapsLock(e.getModifierState('CapsLock'))
+  }
+
+  return (
+    <Box
+      display="flex"
+      flexDirection="column"
+      alignItems="center"
+      justifyContent="center"
+      height="100vh"
+    >
+      <Typography variant="h4" gutterBottom>
+        Вхід в систему
+      </Typography>
+
+      {error && <Alert severity="error">{error}</Alert>}
+      {capsLock && <Alert severity="warning">Увімкнено CapsLock!</Alert>}
+
+      <Box component="form" onSubmit={handleSubmit} sx={{ width: 300 }}>
+        <TextField
+          fullWidth
+          label="Логін"
+          margin="normal"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          required
+        />
+
+        <TextField
+          fullWidth
+          label="Пароль"
+          type="password"
+          margin="normal"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={handleKeyPress}
+          required
+        />
+
+        <Button type="submit" fullWidth variant="contained" sx={{ mt: 2 }}>
+          Увійти
+        </Button>
+      </Box>
+    </Box>
+  )
+}
+
+export default LoginPage
+```
+
+---
+
+## 2) Нова структура (куди перенести)
+
+### ✅ NEW: UI компонент
+
+**`src/features/auth/ui/LoginPage.js`**
+
+```jsx
+'use client'
+import React, { useState } from 'react'
+import { TextField, Button, Box, Typography, Alert } from '@mui/material'
+import { useRouter } from 'next/navigation'
+
+export default function LoginPage() {
+  const router = useRouter()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [capsLock, setCapsLock] = useState(false)
+
+  const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+
+    if (!username || !password) {
+      setError('Заповніть всі поля')
+      return
+    }
+
+    if (/[а-яА-ЯёЁ]/.test(password)) {
+      setError('Пароль не може містити кириличні символи')
+      return
+    }
+
+    try {
+      const response = await fetch(`${PROXY_URL}/api/auth/login`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+
+      if (response.ok) {
+        console.log('Login true')
+        // краще вести на внутрішній роут:
+        router.push('/')
+      } else {
+        const data = await response.json()
+        setError(data?.error || 'Something went wrong')
+      }
+    } catch (err) {
+      setError('Помилка сервера')
+    }
+  }
+
+  const handleKeyPress = (e) => {
+    setCapsLock(e.getModifierState('CapsLock'))
+  }
+
+  return (
+    <Box
+      display="flex"
+      flexDirection="column"
+      alignItems="center"
+      justifyContent="center"
+      height="100vh"
+    >
+      <Typography variant="h4" gutterBottom>
+        Вхід в систему
+      </Typography>
+
+      {error && <Alert severity="error">{error}</Alert>}
+      {capsLock && <Alert severity="warning">Увімкнено CapsLock!</Alert>}
+
+      <Box component="form" onSubmit={handleSubmit} sx={{ width: 300 }}>
+        <TextField
+          fullWidth
+          label="Логін"
+          margin="normal"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          required
+        />
+
+        <TextField
+          fullWidth
+          label="Пароль"
+          type="password"
+          margin="normal"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={handleKeyPress}
+          required
+        />
+
+        <Button type="submit" fullWidth variant="contained" sx={{ mt: 2 }}>
+          Увійти
+        </Button>
+      </Box>
+    </Box>
+  )
+}
+```
+
+### ✅ NEW: сторінка App Router
+
+**`src/app/login/page.js`**
+
+```jsx
+import LoginPage from '@/features/auth/ui/LoginPage'
+
+export default function Page() {
+  return <LoginPage />
+}
+```
+
+> Якщо у тебе ще нема alias `@/` — тоді заміни імпорт на відносний шлях або додай `baseUrl`/`paths` у `jsconfig.json`.
+
+---
+
+## 3) Що видалити / оновити
+
+* Старий файл **`pages/login/index.js`** — можна **видалити** (бо тепер `/login` буде з `src/app/login/page.js`).
+* Переконайся, що є змінна:
+
+  * `NEXT_PUBLIC_PROXY_URL=...` в `.env.local`
+
+---
+
+Кидай наступний файл (назва + старий шлях + скріни 1,2,3…), і розкладемо так само.

@@ -1,0 +1,82 @@
+Ок, це **CheckSchemeControl.js** зі старого:
+`app/components/Scheme/TopToolbar/CheckSchemeControl.js`
+
+Переносимо в нову структуру як контрол верхньої панелі:
+
+✅ `src/features/scheme-editor/ui/top-bar/controls/CheckSchemeControl.js`
+
+---
+
+## 1) Новий файл: `CheckSchemeControl.js`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  IconButton,
+  Tooltip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  Typography,
+} from "@mui/material";
+
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+
+const CheckSchemeControl = () => {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <Typography variant="subtitle1" sx={{ mr: 1, color: "#000000" }}>
+        Перевірка тракту:
+      </Typography>
+
+      <Tooltip title="Перевірка тракту">
+        <IconButton color="success" onClick={() => setOpen(true)}>
+          <CheckCircleIcon />
+        </IconButton>
+      </Tooltip>
+
+      <Dialog open={open} onClose={() => setOpen(false)}>
+        <DialogTitle>Перевірка тракту</DialogTitle>
+        <DialogContent>Елементи форми для перевірки тракту</DialogContent>
+      </Dialog>
+    </>
+  );
+};
+
+export default CheckSchemeControl;
+```
+
+---
+
+## 2) Підключення в `EditorTopBar.js`
+
+У тебе вже так і є:
+
+```js
+import CheckSchemeControl from "./controls/CheckSchemeControl";
+```
+
+---
+
+## 3) Важлива рекомендація на майбутнє (щоб правильно “вписати” в архітектуру)
+
+Коли ти почнеш робити реальну перевірку трасування (ти це вже обговорював раніше), краще буде:
+
+* винести логіку перевірки в **model/domain**, наприклад:
+  `src/features/scheme-editor/model/domain/validateRouting.js`
+* а тут у UI тільки:
+
+  * кнопка
+  * відкриття діалогу
+  * показ результатів
+
+Тобто цей компонент стане “тонким”.
+
+---
+
+Кидай наступний файл з `TopToolbar/controls`:
+**ScaleControl.js** або **RefreshControl.js** (вони потрібні, щоб `EditorTopBar` повністю запрацював).

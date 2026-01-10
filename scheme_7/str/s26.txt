@@ -1,0 +1,292 @@
+Чудово, **SchemeTable.js** — це теж **UI-оверлей поверх canvas** (кнопка “додати таблицю” + таблиця + модалка додавання/редагування рядка). Це **не Konva**, тому воно має жити в `ui/canvas`.
+
+Тут є явний кандидат на **розбиття файлу**: всередині оголошений `AddTableModal` — винесемо його в окремий компонент.
+
+---
+
+## 1) Куди покласти в новій структурі
+
+✅ Пропоную таку структуру:
+
+```
+src/features/scheme-editor/ui/canvas/scheme-table/
+  SchemeTable.js
+  AddTableModal.js
+  index.js
+```
+
+---
+
+## 2) Новий файл: `AddTableModal.js`
+
+**Шлях:** `src/features/scheme-editor/ui/canvas/scheme-table/AddTableModal.js`
+
+```jsx
+"use client";
+
+import React, { useEffect, useState } from "react";
+import {
+  Button,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+} from "@mui/material";
+
+const emptyRow = {
+  position: "",
+  designation: "",
+  name: "",
+  quantity: "",
+  note: "",
+};
+
+const AddTableModal = ({ open, onClose, onAddRow, editableRow }) => {
+  const [row, setRow] = useState(emptyRow);
+
+  // Якщо редагуємо рядок — підставляємо дані
+  useEffect(() => {
+    if (editableRow) {
+      setRow(editableRow);
+    } else {
+      setRow(emptyRow);
+    }
+  }, [editableRow]);
+
+  const handleChange = (field) => (e) => {
+    setRow((prev) => ({ ...prev, [field]: e.target.value }));
+  };
+
+  const handleSubmit = () => {
+    onAddRow(row);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose}>
+      <DialogTitle>
+        {editableRow ? "Редагувати рядок" : "Додати рядок до таблиці"}
+      </DialogTitle>
+
+      <DialogContent>
+        <TextField
+          label="Позиція"
+          fullWidth
+          margin="dense"
+          value={row.position}
+          onChange={handleChange("position")}
+        />
+        <TextField
+          label="Позначення"
+          fullWidth
+          margin="dense"
+          value={row.designation}
+          onChange={handleChange("designation")}
+        />
+        <TextField
+          label="Найменування"
+          fullWidth
+          margin="dense"
+          value={row.name}
+          onChange={handleChange("name")}
+        />
+        <TextField
+          label="Кількість"
+          fullWidth
+          margin="dense"
+          value={row.quantity}
+          onChange={handleChange("quantity")}
+        />
+        <TextField
+          label="Примітка"
+          fullWidth
+          margin="dense"
+          value={row.note}
+          onChange={handleChange("note")}
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Скасувати</Button>
+        <Button onClick={handleSubmit} variant="contained" color="primary">
+          {editableRow ? "Оновити" : "Додати"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default AddTableModal;
+```
+
+---
+
+## 3) Новий файл: `SchemeTable.js`
+
+**Шлях:** `src/features/scheme-editor/ui/canvas/scheme-table/SchemeTable.js`
+
+```jsx
+"use client";
+
+import React, { useEffect, useState } from "react";
+import {
+  Box,
+  Button,
+  IconButton,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  Tooltip,
+} from "@mui/material";
+
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteIcon from "@mui/icons-material/Delete";
+import AddIcon from "@mui/icons-material/Add";
+
+import AddTableModal from "./AddTableModal";
+
+const SchemeTable = ({ onNotePositionUpdate }) => {
+  const [rows, setRows] = useState([]); // Дані таблиці
+  const [openModal, setOpenModal] = useState(false); // Стан модального вікна
+  const [editableRow, setEditableRow] = useState(null); // Рядок для редагування
+
+  // Додавання або оновлення рядка
+  const handleAddRow = (newRow) => {
+    if (editableRow) {
+      setRows((prev) => prev.map((r) => (r === editableRow ? newRow : r)));
+      setEditableRow(null);
+    } else {
+      setRows((prev) => [...prev, newRow]);
+    }
+  };
+
+  // Видалення рядка
+  const handleDeleteRow = (index) => {
+    setRows((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Відкрити модальне вікно для додавання
+  const handleOpenModal = () => {
+    setEditableRow(null);
+    setOpenModal(true);
+  };
+
+  // Відкрити модальне вікно для редагування
+  const handleEditRow = (row) => {
+    setEditableRow(row);
+    setOpenModal(true);
+  };
+
+  // Оновлення позиції примітки при зміні таблиці
+  useEffect(() => {
+    if (onNotePositionUpdate) {
+      onNotePositionUpdate(rows.length);
+    }
+  }, [rows, onNotePositionUpdate]);
+
+  return (
+    <Box sx={{ position: "absolute", bottom: 10, right: 10, zIndex: 10 }}>
+      <Button
+        variant="contained"
+        startIcon={<AddIcon />}
+        onClick={handleOpenModal}
+      >
+        Додати таблицю
+      </Button>
+
+      {/* Таблиця */}
+      {rows.length > 0 && (
+        <TableContainer component={Paper} sx={{ mt: 2 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Позиція</TableCell>
+                <TableCell>Позначення</TableCell>
+                <TableCell>Найменування</TableCell>
+                <TableCell>Кількість</TableCell>
+                <TableCell>Примітка</TableCell>
+                <TableCell align="center">Дії</TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {rows.map((row, index) => (
+                <TableRow key={index}>
+                  <TableCell>{row.position}</TableCell>
+                  <TableCell>{row.designation}</TableCell>
+                  <TableCell>{row.name}</TableCell>
+                  <TableCell>{row.quantity}</TableCell>
+                  <TableCell>{row.note}</TableCell>
+
+                  <TableCell align="center">
+                    <Tooltip title="Редагувати">
+                      <IconButton onClick={() => handleEditRow(row)}>
+                        <EditIcon />
+                      </IconButton>
+                    </Tooltip>
+
+                    <Tooltip title="Видалити">
+                      <IconButton onClick={() => handleDeleteRow(index)}>
+                        <DeleteIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+
+      {/* Модальне вікно */}
+      <AddTableModal
+        open={openModal}
+        onClose={() => setOpenModal(false)}
+        onAddRow={handleAddRow}
+        editableRow={editableRow}
+      />
+    </Box>
+  );
+};
+
+export default SchemeTable;
+```
+
+---
+
+## 4) `index.js` для зручних імпортів
+
+**Шлях:** `src/features/scheme-editor/ui/canvas/scheme-table/index.js`
+
+```js
+export { default as SchemeTable } from "./SchemeTable";
+```
+
+---
+
+## 5) Як тепер імпортувати в `EditorCanvas.js`
+
+```js
+import { SchemeTable } from "@/features/scheme-editor/ui/canvas/scheme-table";
+```
+
+І рендер (поверх Stage):
+
+```jsx
+<SchemeTable onNotePositionUpdate={...} />
+```
+
+---
+
+### Маленький коментар (важливий для майбутнього)
+
+Зараз редагування визначається через порівняння об’єктів `r === editableRow`. Це працює, але коли ти перейдеш на збереження/сервер/ID — краще зберігати `editableIndex` або `rowId`. Якщо захочеш — зроблю одразу “правильну” версію під `id`.
+
+---
+
+Кидай наступний файл із `CanvasArea` (найкраще **CanvasArea.js / EditorCanvas.js**) — і ми зведемо всі ці оверлеї (Header/Notes/Table) в один правильний контейнер поверх Konva Stage.

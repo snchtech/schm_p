@@ -1,0 +1,120 @@
+Супер. **KonvaStage.js** — це якраз “стара” обгортка навколо `<Stage><Layer>...</Layer></Stage>` і мапінг елементів через `el.component`.
+
+У **новій архітектурі** (яку ти вже маєш) це **не окремий файл**, бо:
+
+* `Stage` і базові `Layer` живуть у `ui/canvas/EditorCanvas.js`
+* відмалювання символів і конекторів вже винесено в:
+
+  * `ui/canvas/DiagramSymbols/DiagramSymbols.js`
+  * `ui/canvas/DiagramConnections.js`
+* реєстрація ref’ів/selection/zoom-pan/grid/guides — теж в EditorCanvas та model/lib
+
+Тому правильний перенос такий:
+
+✅ **KonvaStage.js НЕ переносимо як є**
+➡️ Його логіку **вбудовуємо в `EditorCanvas.js`**, а сам файл можна **видалити** після міграції.
+
+---
+
+## 1) Що саме з цього файлу куди “розкласти”
+
+### Було в KonvaStage.js
+
+1. `stageRef = useRef()`
+2. `<Stage width height style ref>`
+3. `<Layer> {elements.map(...)} </Layer>`
+
+### Стає в новій структурі
+
+1. `stageRef` → **в `EditorCanvas.js`** (там він реально потрібен для zoom/pan, selection, координат, viewport)
+2. `<Stage ...>` → **в `EditorCanvas.js`**
+3. `elements.map(el => <ElementComponent ...>)` → **в `DiagramSymbols.js`** (але у тебе вже інша модель: `symbols`, `GraphLibrary`, `SymbolGroup`, anchors і т.д.)
+
+---
+
+## 2) Мінімальний “перенос” (якщо треба тимчасово зберегти сумісність)
+
+Якщо ти ще десь використовуєш `KonvaStage` напряму і поки не готовий перепідключати `EditorCanvas`, можна зробити **тонкий wrapper** у новій структурі (тимчасовий), але я одразу підкреслю: це **перехідний файл**.
+
+✅ **Новий шлях (тимчасово):**
+`src/features/scheme-editor/ui/canvas/KonvaStageLegacy.js`
+
+```jsx
+"use client";
+
+import React, { useRef } from "react";
+import { Stage, Layer } from "react-konva";
+
+const KonvaStageLegacy = ({ width, height, elements, onSelectElement }) => {
+  const stageRef = useRef(null);
+
+  return (
+    <Stage
+      width={width}
+      height={height}
+      style={{ border: "1px solid black", backgroundColor: "#fff" }}
+      ref={stageRef}
+    >
+      <Layer>
+        {elements.map((el) => {
+          const ElementComponent = el.component;
+          return (
+            <ElementComponent
+              key={el.id}
+              {...el.props}
+              onClick={() => onSelectElement?.(el.id)}
+            />
+          );
+        })}
+      </Layer>
+    </Stage>
+  );
+};
+
+export default KonvaStageLegacy;
+```
+
+---
+
+## 3) Але правильний варіант (рекомендований)
+
+✅ **Видалити `KonvaStage.js` взагалі**, і в місці, де він використовувався, **використовувати `EditorCanvas`**.
+
+Тобто замість:
+
+```jsx
+<KonvaStage width={...} height={...} elements={...} onSelectElement={...} />
+```
+
+буде щось типу:
+
+```jsx
+<EditorCanvas />
+```
+
+де `EditorCanvas` вже бере `symbols/connections` зі `useDiagramState` та включає:
+
+* `GridLayer`, `GuidesLayer`
+* `DiagramSymbols`, `DiagramConnections`
+* zoom/pan
+* selection transformer
+
+---
+
+## 4) Що потрібно від тебе, щоб я зробив “остаточну” інтеграцію
+
+Щоб акуратно **викинути KonvaStage і перенести все в EditorCanvas**, мені потрібен **скрін/код старого `CanvasArea.js` або поточного `EditorCanvas.js`** (будь-який один):
+
+* `app/components/Scheme/CanvasArea/CanvasArea.js` (якщо існував)
+  або
+* `src/features/scheme-editor/ui/canvas/EditorCanvas.js` (поточний)
+
+Тоді я:
+
+1. покажу, **де саме** прибрати KonvaStage
+2. зроблю **коректний StageRef + підключення DiagramSymbols/Connections**
+3. одразу підв’яжу твій `useZoomPan/useGuidesSnap/useGrid` як у новій структурі
+
+---
+
+Надішли наступним **EditorCanvas.js** (або старий CanvasArea.js) — і ми повністю “закриємо” тему KonvaStage, щоб він більше не був потрібен.

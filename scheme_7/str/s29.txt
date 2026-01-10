@@ -1,0 +1,109 @@
+Ок, це **RefreshControl.js** зі старого
+`app/components/Scheme/TopToolbar/RefreshControl.js`.
+
+Переносимо його в нову структуру як контрол верхньої панелі:
+
+✅ **Новий шлях**
+
+```
+src/features/scheme-editor/ui/top-bar/controls/RefreshControl.js
+```
+
+---
+
+## 1) Новий файл: `RefreshControl.js`
+
+Я зберіг логіку, але зробив **дві невеликі архітектурні правки**:
+
+* додав `"use client"`
+* **коректно оновлюю `lastUpdated`** після `onRefresh()` (у тебе це було закоментовано)
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import { Tooltip, Typography, Box, Button } from "@mui/material";
+import RefreshIcon from "@mui/icons-material/Refresh";
+
+const RefreshControl = ({ onRefresh }) => {
+  const [lastUpdated, setLastUpdated] = useState(
+    new Date().toLocaleString(),
+  );
+
+  const handleRefresh = () => {
+    onRefresh?.();
+    setLastUpdated(new Date().toLocaleString());
+  };
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+      <Tooltip title="Оновити">
+        <Button
+          variant="outlined"
+          color="primary"
+          startIcon={<RefreshIcon />}
+          onClick={handleRefresh}
+        >
+          Оновити
+        </Button>
+      </Tooltip>
+
+      <Typography variant="caption" sx={{ color: "gray" }}>
+        Оновлено: {lastUpdated}
+      </Typography>
+    </Box>
+  );
+};
+
+export default RefreshControl;
+```
+
+---
+
+## 2) Підключення в `EditorTopBar.js`
+
+У тебе вже правильно:
+
+```js
+import RefreshControl from "./controls/RefreshControl";
+```
+
+---
+
+## 3) Нотатка на майбутнє (важливо)
+
+Зараз `RefreshControl`:
+
+* **UI-рівень** ✔
+* не знає, *що саме* оновлюється ✔
+
+Правильний підхід у майбутньому:
+
+* `onRefresh` → викликає action з `model/domain`
+
+  * наприклад: перезавантаження схеми, синхронізація з сервером, revalidate cache
+* цей компонент лишається максимально “тупим” (stateless UI)
+
+---
+
+## 4) Статус TopToolbar
+
+На цьому етапі в нас **повністю мігрований верхній тулбар**:
+
+* ✅ `EditorTopBar.js`
+* ✅ `ScaleControl.js` *(ще чекаю, якщо не скидав)*
+* ✅ `BindingsControl.js`
+* ✅ `CheckSchemeControl.js`
+* ✅ `RefreshControl.js`
+
+---
+
+### Наступний логічний крок
+
+Є два варіанти, обирай:
+
+1. **ScaleControl.js** (якщо ще не переносили)
+2. **EditorCanvas.js** — звести все разом:
+   Stage + Grid + Guides + Symbols + Header + Notes + Table + Zoom/Pan
+
+Кидай наступний файл 👌

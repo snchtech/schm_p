@@ -1,0 +1,249 @@
+Тут теж треба **перенести у нову структуру** + **переписати під App Router**. У тебе зараз змішані речі:
+
+* `useRouter` взято з `next/router` (це Pages Router) ❌
+* `router.query` (в App Router цього нема) ❌
+* але ти вже використовуєш `app/` і раніше ми переходили на `next/navigation` ✅
+
+Нижче — **правильна версія** `NavigationTree`, яка:
+
+* працює в **Next.js App Router**
+* бере `mode` з URL через `useSearchParams()`
+* керує `expanded` через `SimpleTreeView` (в тебе зараз воно закоментоване)
+* підтримує пошук, який розкриває потрібні вузли
+* має стабільні `itemId` (dep/unit/album/scheme)
+
+---
+
+## ✅ Де має лежати файл (нова структура)
+
+```
+src/features/shared/ui/NavigationTree/
+  NavigationTree.js
+  index.js
+```
+
+---
+
+## ✅ `NavigationTree.js` (оновлений під App Router)
+
+```jsx
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+
+import { SimpleTreeView } from "@mui/x-tree-view/SimpleTreeView";
+import { TreeItem } from "@mui/x-tree-view/TreeItem";
+
+import { Box, TextField, Paper } from "@mui/material";
+
+import IndeterminateCheckBoxRoundedIcon from "@mui/icons-material/IndeterminateCheckBoxRounded";
+import AddBoxRoundedIcon from "@mui/icons-material/AddBoxRounded";
+import RemoveRedEyeIcon from "@mui/icons-material/RemoveRedEye";
+
+import { fetchNavigationTree } from "@/utils/api";
+
+export default function NavigationTree() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // mode беремо з ?mode=viewer або ?mode=editor
+  const mode = searchParams.get("mode"); // null | "viewer" | "editor"
+
+  const [treeData, setTreeData] = useState([]);
+  const [expanded, setExpanded] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
+
+  // завантаження дерева
+  useEffect(() => {
+    let alive = true;
+
+    const loadData = async () => {
+      try {
+        const data = await fetchNavigationTree();
+        if (!alive) return;
+        setTreeData(Array.isArray(data) ? data : []);
+      } catch (e) {
+        console.error("NavigationTree load error:", e);
+        if (!alive) return;
+        setTreeData([]);
+      }
+    };
+
+    loadData();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // навігація
+  const handleNodeClick = (type, id) => {
+    const baseUrl = type === "albums" ? `/albums/${id}` : `/scheme/${id}`;
+    const url = mode ? `${baseUrl}?mode=${mode}` : baseUrl;
+    router.push(url);
+  };
+
+  // --- пошук + фільтрація дерева (збирання expanded ids)
+  const { filteredTree, autoExpanded } = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return { filteredTree: treeData, autoExpanded: [] };
+
+    const expandedSet = new Set();
+
+    const filterDepartments = (departments) =>
+      departments
+        .map((dep) => {
+          const depMatch = String(dep.name ?? "").toLowerCase().includes(q);
+
+          const units = (dep.units ?? [])
+            .map((unit) => {
+              const unitMatch = String(unit.name ?? "").toLowerCase().includes(q);
+
+              const albums = (unit.albums ?? [])
+                .map((album) => {
+                  const albumMatch = String(album.name ?? "").toLowerCase().includes(q);
+
+                  const schemes = (album.schemes ?? []).filter((scheme) =>
+                    String(scheme.name ?? "").toLowerCase().includes(q),
+                  );
+
+                  const keepAlbum = albumMatch || schemes.length > 0;
+                  if (!keepAlbum) return null;
+
+                  expandedSet.add(`unit-${unit.id}`);
+                  expandedSet.add(`dep-${dep.id}`);
+                  expandedSet.add(`album-${album.id}`);
+
+                  return { ...album, schemes };
+                })
+                .filter(Boolean);
+
+              const keepUnit = unitMatch || albums.length > 0;
+              if (!keepUnit) return null;
+
+              expandedSet.add(`dep-${dep.id}`);
+              expandedSet.add(`unit-${unit.id}`);
+
+              return { ...unit, albums };
+            })
+            .filter(Boolean);
+
+          const keepDep = depMatch || units.length > 0;
+          if (!keepDep) return null;
+
+          expandedSet.add(`dep-${dep.id}`);
+          return { ...dep, units };
+        })
+        .filter(Boolean);
+
+    const res = filterDepartments(treeData);
+    return { filteredTree: res, autoExpanded: [...expandedSet] };
+  }, [treeData, searchTerm]);
+
+  // коли вводимо пошук — автоматично розкриваємо знайдені вузли
+  useEffect(() => {
+    if (!searchTerm.trim()) return;
+    setExpanded(autoExpanded);
+  }, [autoExpanded, searchTerm]);
+
+  function ExpandIcon(props) {
+    return <AddBoxRoundedIcon {...props} sx={{ opacity: 0.85 }} />;
+  }
+  function CollapseIcon(props) {
+    return <IndeterminateCheckBoxRoundedIcon {...props} sx={{ opacity: 0.85 }} />;
+  }
+  function EndIcon(props) {
+    return <RemoveRedEyeIcon {...props} sx={{ opacity: 0.35 }} />;
+  }
+
+  const buildTree = () =>
+    filteredTree.map((department) => (
+      <TreeItem
+        key={`dep-${department.id}`}
+        itemId={`dep-${department.id}`}
+        label={department.name}
+      >
+        {(department.units ?? []).map((unit) => (
+          <TreeItem key={`unit-${unit.id}`} itemId={`unit-${unit.id}`} label={unit.name}>
+            {(unit.albums ?? []).map((album) => (
+              <TreeItem
+                key={`album-${album.id}`}
+                itemId={`album-${album.id}`}
+                label={album.name}
+                onClick={() => handleNodeClick("albums", album.id)}
+              >
+                {(album.schemes ?? []).map((scheme) => (
+                  <TreeItem
+                    key={`scheme-${scheme.id}`}
+                    itemId={`scheme-${scheme.id}`}
+                    label={scheme.name}
+                    onClick={() => handleNodeClick("scheme", scheme.id)}
+                  />
+                ))}
+              </TreeItem>
+            ))}
+          </TreeItem>
+        ))}
+      </TreeItem>
+    ));
+
+  return (
+    <Paper sx={{ p: 2 }}>
+      <TextField
+        label="Пошук"
+        variant="outlined"
+        fullWidth
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        sx={{ mb: 2 }}
+      />
+
+      <Box>
+        <SimpleTreeView
+          expandedItems={expanded}
+          onExpandedItemsChange={(event, nodeIds) => setExpanded(nodeIds)}
+          slots={{
+            expandIcon: ExpandIcon,
+            collapseIcon: CollapseIcon,
+            endIcon: EndIcon,
+          }}
+        >
+          {buildTree()}
+        </SimpleTreeView>
+      </Box>
+    </Paper>
+  );
+}
+```
+
+---
+
+## ✅ `index.js`
+
+`src/features/shared/ui/NavigationTree/index.js`
+
+```js
+export { default } from "./NavigationTree";
+```
+
+---
+
+## ✅ Як імпортувати
+
+```js
+import NavigationTree from "@/features/shared/ui/NavigationTree";
+```
+
+---
+
+### Важливий момент про `mode`
+
+Тепер **mode читається з `?mode=viewer`**, тому якщо ти формуєш посилання десь у коді — просто додавай `?mode=viewer|editor` у URL.
+
+---
+
+Якщо ти хочеш, я можу одразу зробити “правильну” поведінку кліку:
+
+* клік по **альбому** → тільки розкриття (без переходу)
+* окрема **іконка “перейти”** справа → переходить в `/albums/[id]`
+  Це буде набагато зручніше, бо зараз клік по TreeItem часто конфліктує з expand/collapse.

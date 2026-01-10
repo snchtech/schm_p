@@ -1,0 +1,114 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Rect } from "react-konva";
+
+/**
+ * TwoTrianglesArrowDown (react-konva)
+ * - 2 контурні трикутники з'єднані вершинами
+ * - стрілка вниз (заповнена)
+ * - anchor для конектора у ВЕРХНІЙ точці стрілки
+ *
+ * Props:
+ *  x, y, scale
+ *  stroke (для трикутників), strokeWidth
+ *  arrowFill (default "black")
+ *  showAnchors (default true)
+ *  onAnchorClick, onAnchorHover
+ */
+export default function TwoTrianglesArrowDown({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 8,
+  arrowFill = "black",
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // Координати з SVG viewBox 0 0 200 150
+  const APEX_X = 100;
+  const APEX_Y = 85;
+
+  // Arrow (filled)
+  const SHAFT_X = 96;
+  const SHAFT_Y = 10;
+  const SHAFT_W = 8;
+  const SHAFT_H = 55;
+
+  // Top anchor: "початок стрілки" = верхній центр прямокутника shaft
+  const TOP_ANCHOR_X = SHAFT_X + SHAFT_W / 2; // 100
+  const TOP_ANCHOR_Y = SHAFT_Y;               // 10
+
+  const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Left triangle (outline) */}
+      <Line
+        points={[30, 50, 30, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Right triangle (outline) */}
+      <Line
+        points={[170, 50, 170, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Arrow shaft (filled) */}
+      <Rect x={SHAFT_X} y={SHAFT_Y} width={SHAFT_W} height={SHAFT_H} fill={arrowFill} />
+
+      {/* Arrow head (filled) */}
+      <Line
+        points={[100, 90, 85, 65, 115, 65]}
+        closed
+        fill={arrowFill}
+        strokeEnabled={false}
+      />
+
+      {/* TOP connector anchor */}
+      {showAnchors && (
+        <Rect
+          x={TOP_ANCHOR_X - ANCHOR_R}
+          y={TOP_ANCHOR_Y - ANCHOR_R}
+          width={ANCHOR_R * 2}
+          height={ANCHOR_R * 2}
+          fill="#fff"
+          stroke={stroke}
+          strokeWidth={2}
+          listening
+          onMouseEnter={() => {
+            document.body.style.cursor = "crosshair";
+            onAnchorHover?.({ id: "arrowTop", x: TOP_ANCHOR_X, y: TOP_ANCHOR_Y });
+          }}
+          onMouseLeave={() => {
+            document.body.style.cursor = "default";
+            onAnchorHover?.(null);
+          }}
+          onMouseDown={(e) => (e.cancelBubble = true)}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            onAnchorClick?.({ id: "arrowTop", x: TOP_ANCHOR_X, y: TOP_ANCHOR_Y });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо хочеш, заміню anchor з `Rect` на `Circle` (виглядає м’якше), або додам ще **center anchor** в точці з’єднання трикутників `(100,85)`.

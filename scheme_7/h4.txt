@@ -1,0 +1,159 @@
+Почати впроваджувати логічні слої найкраще **з даних і рендера**, не чіпаючи поки UI-панель. Тобто:
+
+1. елемент отримує `layerId` при створенні,
+2. у стані з’являється `layersState` (які слої видимі),
+3. `DiagramSymbols` фільтрує елементи перед рендером.
+
+Нижче — “скелет” з чого стартувати у твоїй структурі (registry + Group + Shape).
+
+---
+
+## 1) Додай “довідник слоїв” (поки статично в коді)
+
+**`src/features/scheme-editor/model/state/layersConfig.js`**
+
+```js
+export const LAYERS = [
+  { id: "main", title: "Основні елементи", order: 10, defaultVisible: true },
+  { id: "labels", title: "Підписи", order: 20, defaultVisible: true },
+  { id: "places", title: "Місця/локації", order: 30, defaultVisible: true },
+  { id: "aux", title: "Допоміжне", order: 90, defaultVisible: false },
+];
+
+export const DEFAULT_LAYER_ID = "main";
+```
+
+> Потім це легко заміниться на дані з БД, але структура лишиться така ж.
+
+---
+
+## 2) У registry для кожного `kind` задай default layer
+
+Ти вже маєш registry компонентів. Додай туди **метадані** (не лише компонент).
+
+**`GraphLibrary/registry.js` (або де у тебе зібрані типи)**
+
+```js
+import RectElement from "./Rect";
+import CircleElement from "./Circle";
+import TextElement from "./TextElement";
+
+export const ELEMENT_REGISTRY = {
+  rect:   { Component: RectElement,  defaultLayerId: "main" },
+  circle: { Component: CircleElement, defaultLayerId: "main" },
+  text:   { Component: TextElement,  defaultLayerId: "labels" },
+
+  // приклад:
+  // placeLabel: { Component: PlaceLabel, defaultLayerId: "places" },
+};
+```
+
+---
+
+## 3) Розшир модель елемента: додай `layerId`
+
+У твоєму `el` зараз є `id, width, height, fill...`. Додай:
+
+* `layerId: string` (наприклад `"main"`)
+
+Правило: **на момент створення** елементу, якщо `layerId` не заданий — береш з registry.
+
+Псевдо-логіка при створенні:
+
+```js
+const meta = ELEMENT_REGISTRY[kind];
+const layerId = payload.layerId ?? meta.defaultLayerId ?? "main";
+
+const newEl = { id, kind, layerId, ...payload };
+```
+
+---
+
+## 4) Додай `layersState` у `useDiagramState` (або store)
+
+У `initialState.js` (або де в тебе початковий стан) додай:
+
+**`initialState.js`**
+
+```js
+import { LAYERS } from "./layersConfig";
+
+const layersState = Object.fromEntries(
+  LAYERS.map(l => [l.id, { visible: l.defaultVisible }])
+);
+
+export const initialState = {
+  // ...
+  elements: [], // або symbols
+  layersState,
+};
+```
+
+Потім дії:
+
+* `toggleLayerVisibility(layerId)`
+
+---
+
+## 5) Головне: фільтрація перед рендером у `DiagramSymbols`
+
+Там де ти мапиш `symbols.map(...)`, просто робиш:
+
+* якщо `layersState[el.layerId]?.visible === false` → не рендерити
+
+Концептуально так:
+
+```jsx
+const isLayerVisible = (el) => layersState?.[el.layerId]?.visible !== false;
+
+{symbols
+  .filter(isLayerVisible)
+  .map(el => (
+    <Group ...>
+      <ShapeComponent el={el} ... />
+    </Group>
+))}
+```
+
+**Це і є “точка старту” слоїв.** Поки нема UI — але механізм вже працює.
+
+---
+
+## 6) Не міняй поки RectElement (він ок)
+
+Твій `RectElement` нормальний як “shape” всередині Group:
+
+```jsx
+<Rect x={0} y={0} ... />
+```
+
+Layer-логіка НЕ в компоненті `RectElement`. Вона:
+
+* у даних (`el.layerId`)
+* у фільтрі рендера (`DiagramSymbols`)
+* у `layersState`
+
+Це важливо для масштабування: новий тип додаєш у registry + задаєш default layer — і все.
+
+---
+
+## 7) Наступний крок (коли будеш готовий): проста панель чекбоксів
+
+Після того як фільтрація вже працює, ти просто:
+
+* виводиш `LAYERS` у лівій/правій панелі
+* чекбокс міняє `layersState[layerId].visible`
+
+---
+
+### Мінімальний “стартовий” чек-лист
+
+1. ✅ `layersConfig.js`
+2. ✅ `ELEMENT_REGISTRY` з `defaultLayerId`
+3. ✅ `el.layerId` при створенні
+4. ✅ `layersState` в store
+5. ✅ `.filter()` в `DiagramSymbols`
+
+---
+
+Якщо скинеш фрагмент твого `DiagramSymbols.js` (де саме `Group` і як ти підключаєш `Shape`), я підставлю ці 5 пунктів **прямо в твою структуру файлів** (під `features/scheme-editor/...`) без зайвого рефакторингу.

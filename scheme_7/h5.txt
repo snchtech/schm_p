@@ -1,0 +1,186 @@
+Супер, по твоєму фрагменту видно головне місце, куди “вшиваються” логічні слої: **саме перед `symbols.map`** (фільтр), і **в модель елемента** (`el.layerId`). А ще важливе: у тебе зараз `useRef/useEffect` “всередині map” — так не можна (хуки мають викликатися на верхньому рівні компонента). Я покажу, як це поправити одразу, бо інакше слої ти додаси, але структура буде нестабільна.
+
+Нижче — з чого почати і що міняється мінімально.
+
+---
+
+## 1) Додай `layerId` в елемент (data model)
+
+У кожного `el` має бути `layerId`, наприклад:
+
+* `main`, `labels`, `places`, …
+
+На старті можна:
+
+* або при створенні елемента ставити `layerId` з registry (`defaultLayerId`)
+* або (тимчасово) робити “fallback” під час рендера: `el.layerId ?? defaultLayerId`
+
+---
+
+## 2) Додай `layersState` в стан діаграми
+
+Структура типу:
+
+```js
+layersState = {
+  main: { visible: true },
+  labels: { visible: true },
+  places: { visible: false },
+}
+```
+
+Поки без UI — просто захардкодь у initialState і зроби екшен `toggleLayer(layerId)`.
+
+---
+
+## 3) У DiagramSymbols: фільтруй `symbols` перед `.map`
+
+Це і є “впровадження слоїв №1”.
+
+Логіка:
+
+* якщо `layersState[el.layerId].visible === false` → не рендеримо цей елемент
+
+Важливо: **фільтр роби ДО map**, а не всередині JSX через `&&`, бо так легше оптимізувати і читати.
+
+---
+
+## 4) Виправ `ref + registerNodeRef` без хуків у map
+
+Замість `useRef` і `useEffect` всередині `symbols.map`, робимо **callback-ref фабрику** (ти це вже бачив у попередній гілці).
+
+Ідея:
+
+* для кожного `el.id` ми віддаємо `ref(node)` наверх (`registerNodeRef(el.id, node)`)
+* React сам викличе callback коли вузол з’явився/зник
+
+---
+
+## 5) Мінімально “правильний” скелет саме під твій код
+
+Ось як має виглядати цей шматок *після* стартового впровадження слоїв (і без хуків у map):
+
+```jsx
+import React, { useCallback, useMemo } from "react";
+import { Group, Rect, Circle } from "react-konva";
+
+export const DiagramSymbols = ({
+  symbols,
+  layersState,          // <- додай сюди
+  ELEMENT_COMPONENTS,   // <- або як у тебе називається registry
+  registerNodeRef,
+
+  // решта твоїх пропсів
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  isSelected,
+}) => {
+  // callback-ref фабрика (замість useRef/useEffect в map)
+  const makeGroupRef = useCallback(
+    (id) => (node) => {
+      if (!registerNodeRef) return;
+      registerNodeRef(id, node);
+    },
+    [registerNodeRef]
+  );
+
+  // 1) ЛОГІЧНІ СЛОЇ: фільтруємо ДО рендера
+  const visibleSymbols = useMemo(() => {
+    return symbols.filter((el) => {
+      const layerId = el.layerId ?? "main"; // fallback на старті
+      return layersState?.[layerId]?.visible !== false;
+    });
+  }, [symbols, layersState]);
+
+  return (
+    <>
+      {visibleSymbols.map((el) => {
+        const Shape = ELEMENT_COMPONENTS[el.type];
+        if (!Shape) return null;
+
+        return (
+          <Group
+            ref={makeGroupRef(el.id)}
+            key={el.id}
+            x={el.x}
+            y={el.y}
+            draggable
+            onDragMove={(e) => handleDragMove(el.id, e)}
+            onMouseEnter={() => isAddingConnector && setHoveredElement(el.id)}
+            onMouseLeave={() => isAddingConnector && setHoveredElement(null)}
+            onContextMenu={(e) => onElementContextMenu(e, { type: "node", id: el.id })}
+            onMouseDown={() => onMouseDown(el)}
+          >
+            <Shape el={el} />
+
+            {isSelected?.(el.id) && (
+              <Rect
+                x={-6}
+                y={-6}
+                width={(el.w ?? el.width) + 12}
+                height={(el.h ?? el.height) + 12}
+                cornerRadius={12}
+                strokeWidth={1}
+                dash={[6, 4]}
+                listening={false}
+              />
+            )}
+
+            {hoveredElement === el.id &&
+              getAnchorPoints(el).map((point, i) => (
+                <Circle
+                  key={i}
+                  x={point.x - el.x}
+                  y={point.y - el.y}
+                  radius={6}
+                  fill={
+                    hoveredAnchor &&
+                    hoveredAnchor.x === point.x &&
+                    hoveredAnchor.y === point.y
+                      ? "yellow"
+                      : "green"
+                  }
+                  stroke="black"
+                  strokeWidth={1}
+                  onMouseEnter={() => setHoveredAnchor(point)}
+                  onMouseLeave={() => setHoveredAnchor(null)}
+                  onClick={() => handleAnchorClick({ ...point, parentId: el.id, kind: "symbolAnchor" })}
+                />
+              ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+};
+```
+
+### Що тут важливо для “початку слоїв”
+
+* `visibleSymbols = symbols.filter(...)` — це перший реальний крок.
+* `el.layerId` — тепер ключова властивість у даних.
+* `makeGroupRef(el.id)` — стабільний спосіб реєстрації вузлів для Transformer.
+
+---
+
+## 6) Далі по плану (дуже коротко)
+
+1. Додай `layersConfig` (список слоїв) + ініціалізацію `layersState` у store.
+2. Зроби простий UI (чекбокси), який змінює `layersState[layerId].visible`.
+3. На етапі створення елемента: `layerId` береться з registry (`defaultLayerId`).
+
+---
+
+Якщо хочеш, наступним повідомленням я можу під твій `useDiagramState.js` показати **де саме** додати:
+
+* `layersState` у initialState
+* екшен `toggleLayerVisibility`
+* і як при створенні елемента підхопити `defaultLayerId` з registry (щоб ти не покладався на fallback `"main"`).

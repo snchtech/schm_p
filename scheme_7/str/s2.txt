@@ -1,0 +1,276 @@
+Ок, це **`pages/albums/index.js`** (старий Pages Router). Переносимо в **App Router** як **`src/app/albums/page.js`** і (як з login) виносимо логіку в feature-компонент.
+
+---
+
+## 1) Відновлений код зі скрінів (зібраний `pages/albums/index.js`)
+
+> **OLD:** `pages/albums/index.js`
+
+```jsx
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/router'
+import { fetchDepartments, fetchUnits, fetchAlbums, fetchAlbumStatuses } from '@/utils/api'
+import { Container, Box, Button, Paper } from '@mui/material'
+import { Add } from '@mui/icons-material'
+import NavigationTree from '@/app/components/shared/NavigationTree'
+import SearchBar from '@/app/components/shared/SearchBar'
+import AlbumsFilters from '@/app/components/albums/AlbumsFilters'
+import AlbumsReport from '@/app/components/albums/AlbumsReport'
+import NewAlbumModal from '@/app/components/albums/NewAlbumModal'
+import { RoleProtectedComponent } from '@/app/components/HOC/roleProtected'
+
+export default function AlbumsPage() {
+  const router = useRouter()
+  const { mode } = router.query
+
+  const [albums, setAlbums] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [units, setUnits] = useState([])
+  const [statuses, setStatuses] = useState([])
+  const [filteredAlbums, setFilteredAlbums] = useState([])
+  const [isModalOpen, setIsModalOpen] = useState(false)
+
+  useEffect(() => {
+    async function loadData() {
+      setDepartments(await fetchDepartments())
+      setUnits(await fetchUnits())
+      setAlbums(await fetchAlbums())
+      setStatuses(await fetchAlbumStatuses())
+    }
+    loadData()
+  }, [])
+
+  // Фільтрація альбомів
+  const handleFilterChange = ({ department, unit, status }) => {
+    let filtered = albums
+
+    console.log(department)
+
+    if (department) {
+      filtered = filtered.filter((album) => album.DEPARTMENT_ID === Number(department))
+    }
+    if (unit) {
+      filtered = filtered.filter((album) => album.UNIT_ID === Number(unit))
+    }
+    if (status) {
+      filtered = filtered.filter((album) => album.STATUS_ID === Number(status))
+    }
+
+    setFilteredAlbums(filtered)
+  }
+
+  return (
+    <Container maxWidth="xl">
+      <Box display="flex" gap={3}>
+        {/* Ліва панель (Дерево навігації) */}
+        <Box width="25%">
+          <Paper sx={{ padding: 2 }}>
+            <h3>Навігація</h3>
+            <NavigationTree />
+          </Paper>
+        </Box>
+
+        {/* Права частина (Основний контент) */}
+        <Box flex={1} display="flex" flexDirection="column" gap={2}>
+          {/* Блок 1: Пошук + Кнопка створення */}
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            <Box width="75%">
+              <SearchBar placeholder="Пошук альбомів" />
+            </Box>
+
+            <RoleProtectedComponent roles={['Editor']}>
+              <Button
+                variant="contained"
+                color="success"
+                startIcon={<Add />}
+                onClick={() => setIsModalOpen(true)}
+              >
+                Новий альбом
+              </Button>
+            </RoleProtectedComponent>
+          </Box>
+
+          {/* Блок 2: Фільтри */}
+          <AlbumsFilters
+            departments={departments}
+            units={units}
+            statuses={statuses}
+            onFilterChange={handleFilterChange}
+          />
+
+          {/* Блок 3: Таблиця звітів альбомів */}
+          <AlbumsReport
+            albums={filteredAlbums.length > 0 ? filteredAlbums : albums}
+            statuses={statuses}
+            mode={mode}
+          />
+        </Box>
+      </Box>
+
+      {/* Модальне вікно для створення альбому */}
+      <NewAlbumModal
+        open={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onAlbumCreated={() => setAlbums([...albums])}
+      />
+    </Container>
+  )
+}
+```
+
+---
+
+## 2) Розкладка по **новій структурі** (App Router + feature)
+
+### ✅ NEW: UI компонент (клієнтський)
+
+**`src/features/albums/ui/AlbumsPage.js`**
+
+```jsx
+'use client'
+
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
+import { fetchDepartments, fetchUnits, fetchAlbums, fetchAlbumStatuses } from '@/utils/api'
+import { Container, Box, Button, Paper } from '@mui/material'
+import { Add } from '@mui/icons-material'
+
+import NavigationTree from '@/app/components/shared/NavigationTree'
+import SearchBar from '@/app/components/shared/SearchBar'
+import AlbumsFilters from '@/app/components/albums/AlbumsFilters'
+import AlbumsReport from '@/app/components/albums/AlbumsReport'
+import NewAlbumModal from '@/app/components/albums/NewAlbumModal'
+import { RoleProtectedComponent } from '@/app/components/HOC/roleProtected'
+
+export default function AlbumsPage() {
+  const searchParams = useSearchParams()
+  const mode = useMemo(() => searchParams.get('mode'), [searchParams])
+
+  const [albums, setAlbums] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [units, setUnits] = useState([])
+  const [statuses, setStatuses] = useState([])
+  const [filteredAlbums, setFilteredAlbums] = useState([])
+  const [isModalOpen, setIsModalOpen] = useState(false)
+
+  const loadData = async () => {
+    const [deps, unitsRes, albumsRes, statusesRes] = await Promise.all([
+      fetchDepartments(),
+      fetchUnits(),
+      fetchAlbums(),
+      fetchAlbumStatuses(),
+    ])
+    setDepartments(deps)
+    setUnits(unitsRes)
+    setAlbums(albumsRes)
+    setStatuses(statusesRes)
+  }
+
+  useEffect(() => {
+    loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Фільтрація альбомів
+  const handleFilterChange = ({ department, unit, status }) => {
+    let filtered = albums
+
+    if (department) {
+      filtered = filtered.filter((album) => album.DEPARTMENT_ID === Number(department))
+    }
+    if (unit) {
+      filtered = filtered.filter((album) => album.UNIT_ID === Number(unit))
+    }
+    if (status) {
+      filtered = filtered.filter((album) => album.STATUS_ID === Number(status))
+    }
+
+    setFilteredAlbums(filtered)
+  }
+
+  const albumsToShow = filteredAlbums.length > 0 ? filteredAlbums : albums
+
+  return (
+    <Container maxWidth="xl">
+      <Box display="flex" gap={3}>
+        {/* Ліва панель */}
+        <Box width="25%">
+          <Paper sx={{ padding: 2 }}>
+            <h3>Навігація</h3>
+            <NavigationTree />
+          </Paper>
+        </Box>
+
+        {/* Права частина */}
+        <Box flex={1} display="flex" flexDirection="column" gap={2}>
+          {/* Блок 1 */}
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            <Box width="75%">
+              <SearchBar placeholder="Пошук альбомів" />
+            </Box>
+
+            <RoleProtectedComponent roles={['Editor']}>
+              <Button
+                variant="contained"
+                color="success"
+                startIcon={<Add />}
+                onClick={() => setIsModalOpen(true)}
+              >
+                Новий альбом
+              </Button>
+            </RoleProtectedComponent>
+          </Box>
+
+          {/* Блок 2 */}
+          <AlbumsFilters
+            departments={departments}
+            units={units}
+            statuses={statuses}
+            onFilterChange={handleFilterChange}
+          />
+
+          {/* Блок 3 */}
+          <AlbumsReport albums={albumsToShow} statuses={statuses} mode={mode} />
+        </Box>
+      </Box>
+
+      <NewAlbumModal
+        open={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onAlbumCreated={async () => {
+          // краще реально перезавантажити альбоми
+          const freshAlbums = await fetchAlbums()
+          setAlbums(freshAlbums)
+          setFilteredAlbums([])
+        }}
+      />
+    </Container>
+  )
+}
+```
+
+### ✅ NEW: сторінка App Router
+
+**`src/app/albums/page.js`**
+
+```jsx
+import AlbumsPage from '@/features/albums/ui/AlbumsPage'
+
+export default function Page() {
+  return <AlbumsPage />
+}
+```
+
+---
+
+## 3) Головні зміни, які важливо врахувати
+
+* `next/router` ➜ **в App Router** не працює. Замінили на:
+
+  * `useSearchParams()` і `mode = searchParams.get('mode')`
+* Додав `use client` у UI-компонент, бо там хуки.
+* `onAlbumCreated={() => setAlbums([...albums])}` було “порожнім тригером”. Зробив нормально: **після створення — перезапит `fetchAlbums()`**.
+
+---
+
+Кидай наступний файл (назва + старий шлях + скріни). Якщо далі буде код, який ще імпортує `@/app/components/...`, і ти хочеш паралельно переносити ці компоненти в `features/*` або `shared/*` — також розкладемо, але по одному кроку.

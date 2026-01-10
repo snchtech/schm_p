@@ -1,0 +1,135 @@
+Добре, працюємо **строго по скріну** 👍
+Розпізнаю файл і **коректно розкладаю його в нову структуру**, без зміни логіки.
+
+---
+
+## 1️⃣ Розпізнаний код (зі скріну)
+
+Файл **`roleProtected.js`** містить **HOC / guard-компонент** для перевірки ролей:
+
+```js
+import { useAuth } from '@/context/AuthContext'
+
+export function RoleProtectedComponent({ roles, children }) {
+  const { user } = useAuth()
+
+  const hasAccess = user?.roles?.some((role) => roles.includes(role))
+
+  if (!hasAccess) return null // не відображає children, якщо немає доступу
+
+  return children
+}
+```
+
+🔹 **Функція**: умовно рендерить `children`, якщо користувач має одну з дозволених ролей
+🔹 **Тип**: UI-level access guard (не domain, не model)
+
+---
+
+## 2️⃣ Куди його переносити в новій структурі
+
+### ❌ Старе розташування
+
+```
+app/components/HOC/roleProtected.js
+```
+
+---
+
+### ✅ Правильне місце в новій архітектурі
+
+Це **UI-допоміжний компонент**, який:
+
+* залежить від UI (`children`)
+* залежить від `AuthContext`
+* використовується в таблицях / кнопках / сторінках
+
+👉 **НЕ model, НЕ domain, НЕ shared**
+
+### 📌 Оптимальне місце:
+
+```
+src/shared/ui/RoleProtectedComponent.js
+```
+
+або (якщо хочеш групувати guards):
+
+```
+src/shared/ui/guards/RoleProtectedComponent.js
+```
+
+---
+
+## 3️⃣ Фінальна версія файлу (без змін логіки)
+
+### `src/shared/ui/RoleProtectedComponent.js`
+
+```js
+'use client'
+
+import { useAuth } from '@/context/AuthContext'
+
+export function RoleProtectedComponent({ roles, children }) {
+  const { user } = useAuth()
+
+  const hasAccess = user?.roles?.some((role) => roles.includes(role))
+
+  if (!hasAccess) return null
+
+  return children
+}
+```
+
+> 🔹 `'use client'` **обовʼязковий**, бо:
+>
+> * використовується `useAuth`
+> * використовується React context
+
+---
+
+## 4️⃣ Як тепер імпортувати (приклади)
+
+### Було:
+
+```js
+import { RoleProtectedComponent } from '@/app/components/HOC/roleProtected'
+```
+
+### Стало:
+
+```js
+import { RoleProtectedComponent } from '@/shared/ui/RoleProtectedComponent'
+```
+
+або (якщо guards):
+
+```js
+import { RoleProtectedComponent } from '@/shared/ui/guards/RoleProtectedComponent'
+```
+
+---
+
+## 5️⃣ Чому саме так (коротко, але по архітектурі)
+
+| Критерій                  | Відповідь |
+| ------------------------- | --------- |
+| UI                        | ✅         |
+| Залежить від Context      | ✅         |
+| Повторно використовується | ✅         |
+| Domain logic              | ❌         |
+| Editor-specific           | ❌         |
+
+➡️ **`shared/ui` — ідеальне місце**
+
+---
+
+## 6️⃣ Готовність до наступного кроку
+
+Можемо далі **в тому ж режимі**:
+
+* `AlbumsReport.js`
+* `SchemeReport.js`
+* `AlbumsFilter.js`
+* `NewAlbumModal.js`
+
+👉 Скидай **один файл → скріни → я розкладаю**.

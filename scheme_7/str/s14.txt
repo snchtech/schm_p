@@ -1,0 +1,210 @@
+Ок, працюю **тільки з тим, що видно на скрінах** `SchemeReport.js` і “розкладаю” під твою нову структуру.
+
+---
+
+## 1) Куди переносимо файл у новій структурі
+
+Було:
+
+* `app/components/album/SchemeReport.js`
+
+Стає (логічно для твого проєкту з `scheme-editor` як feature):
+
+* `src/features/scheme-editor/ui/album/SchemeReport.js`
+
+> (За бажанням пізніше можна винести в окремий feature `albums`, але зараз — кладемо сюди, бо ти просив орієнтуватися на показану структуру.)
+
+---
+
+## 2) Розпізнаний код зі скрінів → новий файл
+
+### `src/features/scheme-editor/ui/album/SchemeReport.js`
+
+```js
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/router'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  IconButton,
+  Paper,
+  TablePagination,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+} from '@mui/material'
+import { Visibility, Edit, Archive } from '@mui/icons-material'
+import {
+  fetchSchemes,
+  getStableSchemeVersion,
+  getEditSchemeVersion,
+  archiveScheme,
+} from '@/utils/api'
+import { RoleProtectedComponent } from '@/app/components/HOC/roleProtected'
+
+const SchemeReport = ({ albumId, userRole, mode }) => {
+  const router = useRouter()
+  const [schemes, setSchemes] = useState([])
+  const [page, setPage] = useState(0)
+  const [rowsPerPage] = useState(15)
+  const [archiveDialog, setArchiveDialog] = useState({ open: false, schemeId: null })
+
+  console.log(schemes)
+
+  useEffect(() => {
+    const loadSchemes = async () => {
+      try {
+        const data = await fetchSchemes(albumId)
+        setSchemes(data)
+      } catch (error) {
+        console.error('Помилка завантаження схем:', error)
+      }
+    }
+
+    loadSchemes()
+  }, [albumId])
+
+  // Перегляд схеми (відкриває стабільну версію)
+  const handleViewScheme = async (schemeId) => {
+    try {
+      const response = await getStableSchemeVersion(schemeId)
+      router.push(`/viewer/${response.scheme_version_id}?mode=viewer`)
+    } catch (error) {
+      console.error('Помилка відкриття стабільної версії:', error)
+    }
+  }
+
+  // Редагування схеми (відкриває активну редаговану версію або створює нову)
+  const handleEditScheme = async (schemeId) => {
+    try {
+      const response = await getEditSchemeVersion(schemeId)
+      router.push(`/editor/${response.scheme_version_id}?mode=editor`)
+    } catch (error) {
+      console.error('Помилка відкриття схеми:', error)
+    }
+  }
+
+  // Архівування схеми (відкриває модальне вікно для підтвердження)
+  const handleArchiveScheme = async () => {
+    try {
+      await archiveScheme(archiveDialog.schemeId)
+      setSchemes(schemes.filter((s) => s.id !== archiveDialog.schemeId))
+      setArchiveDialog({ open: false, schemeId: null })
+    } catch (error) {
+      console.error('Помилка архівування схеми:', error)
+    }
+  }
+
+  console.log(mode, ' MODE')
+  console.log(userRole, ' USER_ROLE')
+
+  return (
+    <>
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Перегляд</TableCell>
+              <TableCell>ID</TableCell>
+              <TableCell>Назва</TableCell>
+
+              <RoleProtectedComponent roles={['Editor']}>
+                <TableCell>Дії</TableCell>
+              </RoleProtectedComponent>
+            </TableRow>
+          </TableHead>
+
+          <TableBody>
+            {schemes
+              .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
+              .map((scheme) => (
+                <TableRow key={`scheme-${scheme.id}`}>
+                  <TableCell>
+                    <IconButton onClick={() => handleViewScheme(scheme.id)}>
+                      <Visibility />
+                    </IconButton>
+                  </TableCell>
+
+                  <TableCell>{scheme.SCHEME_ID}</TableCell>
+                  <TableCell>{scheme.NAME}</TableCell>
+
+                  {/* Дії для role editor */}
+                  <RoleProtectedComponent roles={['Editor']}>
+                    <TableCell>
+                      <IconButton onClick={() => handleEditScheme(scheme.id)}>
+                        <Edit />
+                      </IconButton>
+
+                      <IconButton
+                        onClick={() =>
+                          setArchiveDialog({
+                            open: true,
+                            schemeId: scheme.id,
+                          })
+                        }
+                      >
+                        <Archive />
+                      </IconButton>
+                    </TableCell>
+                  </RoleProtectedComponent>
+                </TableRow>
+              ))}
+          </TableBody>
+        </Table>
+
+        <TablePagination
+          component="div"
+          count={schemes.length}
+          page={page}
+          onPageChange={(e, newPage) => setPage(newPage)}
+          rowsPerPage={rowsPerPage}
+          rowsPerPageOptions={[15]}
+          onRowsPerPageChange={() => {}}
+        />
+      </TableContainer>
+
+      {/* Модальне вікно для підтвердження архівування */}
+      <Dialog
+        open={archiveDialog.open}
+        onClose={() => setArchiveDialog({ open: false, schemeId: null })}
+      >
+        <DialogTitle>Підтвердження архівування</DialogTitle>
+        <DialogContent>Ви точно хочете перенести цю схему в архів?</DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setArchiveDialog({ open: false, schemeId: null })}
+            color="secondary"
+          >
+            Відмінити
+          </Button>
+          <Button onClick={handleArchiveScheme} color="primary">
+            Так
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  )
+}
+
+export default SchemeReport
+```
+
+---
+
+## 3) (Опційно) index-реекспорт у feature (щоб імпорти були короткі)
+
+### `src/features/scheme-editor/ui/album/index.js`
+
+```js
+export { default as SchemeReport } from './SchemeReport'
+```
+
+---
+
+Якщо ти далі так само скинеш **стару назву + старий шлях + скріни** для наступного файлу — я аналогічно **розпізнаю код** і “розкидаю” по твоїй структурі.

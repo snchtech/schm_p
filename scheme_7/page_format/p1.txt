@@ -1,0 +1,186 @@
+Круто, у тебе вже фактично є “сторінка” A3 — **1123×794** дуже схоже на A3 landscape у ~96 DPI. Тепер треба зробити це **не магічними числами**, а керованим *pageConfig*, щоб:
+
+1. ти міг вибирати A3/A4 + орієнтацію
+2. Konva малювала **в межах аркуша**
+3. експорт/друк завжди був **чіткий (300 DPI)** і **не залежав від zoom**
+
+Нижче — як під твою поточну структуру.
+
+---
+
+## 1) Винеси формат сторінки в конфіг + перерахунок mm → px
+
+Створи простий helper (можеш покласти в `utils/pageFormat.js`):
+
+```js
+// utils/pageFormat.js
+const MM_PER_INCH = 25.4;
+
+export const PAPER_MM = {
+  A3: { w: 297, h: 420 },
+  A4: { w: 210, h: 297 },
+};
+
+export function getPageMm(paper = "A3", orientation = "landscape") {
+  const p = PAPER_MM[paper] || PAPER_MM.A3;
+  return orientation === "landscape"
+    ? { w: p.h, h: p.w }
+    : { w: p.w, h: p.h };
+}
+
+export function mmToPx(mm, dpi = 96) {
+  return Math.round((mm / MM_PER_INCH) * dpi);
+}
+
+export function getPagePx({ paper, orientation, dpi = 96 }) {
+  const mm = getPageMm(paper, orientation);
+  return { w: mmToPx(mm.w, dpi), h: mmToPx(mm.h, dpi) };
+}
+```
+
+### Як це лягає на твої 1123×794
+
+A3 landscape @96dpi:
+
+* 420 мм → ~1587 px
+* 297 мм → ~1123 px
+
+Тобто **1123 px — це висота**, а **ширина мала б бути ~1587**, а не 794.
+Твій контейнер 1123×794 виглядає як “половинний” масштаб або інша dpi/масштаб-логіка. Це не проблема — просто треба **узаконити** масштаб, щоб він був контрольований.
+
+---
+
+## 2) Розділи “контейнер UI” і “аркуш схеми”
+
+Зараз `div` одночасно і “сторінка”, і “viewport”. Краще так:
+
+* `CanvasArea` — **viewport** (екран, хоч 1200×800)
+* всередині Konva — **Page** (A3/A4 у px, з рамкою)
+
+Тоді UI можна залишити як є, а “аркуш” буде рахуватись окремо.
+
+---
+
+## 3) Додай pageConfig у CanvasArea
+
+```jsx
+const CanvasArea = () => {
+  const [pageConfig, setPageConfig] = useState({
+    paper: "A3",
+    orientation: "landscape",
+    marginsMm: { top: 10, right: 10, bottom: 10, left: 10 },
+    screenDpi: 96, // для відображення в редакторі
+  });
+
+  // ...
+  return (
+    <div style={{ position:"relative", width:"1200px", height:"900px", margin:"auto" }}>
+      <CanvasHeader ... />
+
+      <KonvaStage
+        width={1200}
+        height={900}
+        elements={elements}
+        pageConfig={pageConfig}
+      />
+
+      {/* решта як є */}
+    </div>
+  );
+};
+```
+
+> Тепер ти можеш зробити MUI select “A3/A4/…” і просто міняти `pageConfig`.
+
+---
+
+## 4) У KonvaStage намалюй “аркуш” як PageLayer + обрізку (clip)
+
+Ідея:
+
+* є `PageLayer` (білий прямокутник, рамка)
+* є `ContentLayer` (елементи схеми)
+* контент **кліпиться** межами аркуша, щоб “малювання лише в рамках формату”
+
+Концептуально:
+
+* `pagePx = getPagePx(pageConfig)`
+* page лежить, наприклад, по центру viewport: `pageX = (stageW - pageW)/2`, `pageY = (stageH - pageH)/2`
+* content layer використовує `clipX/clipY/clipWidth/clipHeight`
+
+Тобі не треба зараз повністю переписувати — достатньо додати page bounds.
+
+---
+
+## 5) Zoom/pan не чіпає page bounds
+
+Твій zoom має працювати як трансформація групи/шару (або stage), але експорт має бути незалежний.
+
+Правильно:
+
+* Візуалізація: користувач зумить “сцену”
+* Експорт: ти рендериш **page bounds** у 300 DPI без урахування поточного zoom.
+
+---
+
+## 6) Експорт на друк A3 у 300 DPI
+
+Сенс:
+
+* A3 landscape @300dpi = **4961×3508 px**
+* робимо експорт саме цього розміру
+* масштабуємо “мм → px” через `mmToPx(mm, 300)`
+
+Технічна схема (без прив’язки до твого коду з refs):
+
+1. Взяти page bounds у world/mm
+2. Зробити export-stage розміру pagePx(300dpi)
+3. Намалювати ті ж elements у нього (або тимчасово змінити scale/pos)
+4. `toDataURL()`
+
+Тобі для цього майже напевно потрібен `stageRef` у `KonvaStage`, щоб викликати `stage.toDataURL(...)` або зробити “export stage”.
+
+---
+
+## 7) Що мінімально зробити прямо зараз (без великого рефакторингу)
+
+### Мінімум-1: pageConfig + PageLayer + clip
+
+* ти вже “малюєш” у 1123×794 — додай реальний “page rect” і обрізку контенту.
+* навіть якщо залишиш A3 “візуально” не 1:1 — експорт зробиш окремо.
+
+### Мінімум-2: зберігання формату в схемі
+
+* збережи `{paper, orientation, margins}` разом зі схемою в БД
+* при відкритті схеми — виставляй pageConfig
+
+---
+
+## 8) Одна важлива річ про твої 1123×794
+
+Якщо ти реально хочеш **A3 landscape**, то в “екранних px” при 96 DPI це ближче до:
+
+* **1587×1123**, а не 1123×794.
+
+Тому я б зробив так:
+
+* viewport: будь-який (наприклад 1200×900)
+* pagePx(screenDpi=96): 1587×1123
+* але показувати в viewport можна зі стартовим scale < 1 (щоб влазило)
+
+Це дає правильну геометрію + комфортний стартовий зум.
+
+---
+
+## Наступний крок (я зроблю код під тебе)
+
+Щоб написати точно “в твої файли”, мені достатньо 2 речей (можеш просто вставити сюди шматок):
+
+1. `KonvaStage` — як у тебе зараз виглядає (особливо де stage/layer і як малюєш `elements`)
+2. як ти реалізував zoom (чи є `useZoomPan`, чи stage scale прямо)
+
+Після цього я:
+
+* додам `pageConfig` (A3/A4)
+* намалюю “аркуш” + clip
+* і дам `exportA3(300dpi)` кнопку, яка збере чіткий PNG для друку.

@@ -1,0 +1,152 @@
+Тут у тебе в модалці є кілька проблем зі скріна:
+
+* у `handleSubmit` зайва/неправильна дужка `)` після `useState`
+* `TextField` не прив’язані до `value` (зараз це “uncontrolled”)
+* форма не скидається при повторному відкритті
+* файл лежить у старому `app/components/...`, а треба в **`src/features/...`**
+
+Нижче — **виправлена версія** + **правильне розміщення**.
+
+---
+
+## ✅ Нова структура (рекомендовано)
+
+```
+src/features/scheme-editor/ui/modals/AddNoteModal/
+  AddNoteModal.js
+  index.js
+```
+
+---
+
+## ✅ `AddNoteModal.js`
+
+`src/features/scheme-editor/ui/modals/AddNoteModal/AddNoteModal.js`
+
+```jsx
+"use client";
+
+import React, { useEffect, useState } from "react";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+} from "@mui/material";
+
+/**
+ * AddNoteModal
+ *
+ * props:
+ *  open: boolean
+ *  onClose: () => void
+ *  onAddRow: (row) => void     // або перейменуєш на onAddNote — як зручніше
+ */
+export default function AddNoteModal({ open, onClose, onAddRow }) {
+  const emptyRow = {
+    position: "",
+    designation: "",
+    name: "",
+    quantity: "",
+    note: "",
+  };
+
+  const [row, setRow] = useState(emptyRow);
+
+  // Скидаємо форму при відкритті
+  useEffect(() => {
+    if (open) setRow(emptyRow);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const handleChange = (field) => (e) => {
+    setRow((prev) => ({ ...prev, [field]: e.target.value }));
+  };
+
+  const handleSubmit = () => {
+    onAddRow?.(row);
+    onClose?.();
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Додати рядок до таблиці</DialogTitle>
+
+      <DialogContent>
+        <TextField
+          label="Позиція"
+          fullWidth
+          margin="dense"
+          value={row.position}
+          onChange={handleChange("position")}
+        />
+
+        <TextField
+          label="Позначення"
+          fullWidth
+          margin="dense"
+          value={row.designation}
+          onChange={handleChange("designation")}
+        />
+
+        <TextField
+          label="Найменування"
+          fullWidth
+          margin="dense"
+          value={row.name}
+          onChange={handleChange("name")}
+        />
+
+        <TextField
+          label="Кількість"
+          fullWidth
+          margin="dense"
+          value={row.quantity}
+          onChange={handleChange("quantity")}
+        />
+
+        <TextField
+          label="Примітка"
+          fullWidth
+          margin="dense"
+          multiline
+          minRows={2}
+          value={row.note}
+          onChange={handleChange("note")}
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Скасувати</Button>
+        <Button variant="contained" onClick={handleSubmit}>
+          Додати
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+```
+
+---
+
+## ✅ `index.js`
+
+`src/features/scheme-editor/ui/modals/AddNoteModal/index.js`
+
+```js
+export { default } from "./AddNoteModal";
+```
+
+---
+
+## ✅ Як імпортувати
+
+```js
+import AddNoteModal from "@/features/scheme-editor/ui/modals/AddNoteModal";
+```
+
+---
+
+Якщо ти скажеш, **куди саме ти додаєш цей “рядок таблиці”** (в state схем, в таблицю на canvas, в notes list, тощо), я підв’яжу `onAddRow` до твого `useDiagramStore/useDiagramState` так, щоб після “Додати” реально з’являвся елемент/рядок у потрібному місці.

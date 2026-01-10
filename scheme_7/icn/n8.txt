@@ -1,0 +1,152 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Path, Circle } from "react-konva";
+
+/**
+ * TwoTrianglesDashedLoopMirrored (react-konva)
+ * Дзеркальний варіант:
+ * - 2 трикутники назустріч (apex в центрі)
+ * - суцільні горизонтальні лінії зліва/справа
+ * - пунктирна “петля” піднімається зліва + стрілка вниз у центр
+ * + 2 anchor-точки для конекторів на кінцях горизонтальних ліній:
+ *    leftEnd  = (10,80)
+ *    rightEnd = (210,80)
+ */
+export default function TwoTrianglesDashedLoopMirrored({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  const Y = 80;
+
+  const LEFT_END = { id: "leftEnd", x: 10, y: Y };
+  const RIGHT_END = { id: "rightEnd", x: 210, y: Y };
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+
+  const handleEnter = (a) => {
+    document.body.style.cursor = "crosshair";
+    onAnchorHover?.(a);
+  };
+  const handleLeave = () => {
+    document.body.style.cursor = "default";
+    onAnchorHover?.(null);
+  };
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* ---- Solid geometry ---- */}
+
+      {/* right line */}
+      <Line
+        points={[150, 80, 210, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* triangles (mirrored layout, apex at center 110,80) */}
+      <Line
+        points={[150, 60, 150, 100, 110, 80]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+      <Line
+        points={[70, 60, 70, 100, 110, 80]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* left solid line split (so dashed rises earlier at x=45) */}
+      <Line
+        points={[10, 80, 45, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+      <Line
+        points={[45, 80, 70, 80]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* ---- Dashed loop (mirrored) ---- */}
+      <Path
+        data="M45 80 L45 25 L110 25 L110 55"
+        stroke={stroke}
+        strokeWidth={5}
+        dash={[10, 8]}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Arrow head (filled) */}
+      <Line
+        points={[110, 80, 102, 60, 118, 60]}
+        closed
+        fill={stroke}
+        strokeEnabled={false}
+      />
+
+      {/* ---- Connector anchors ---- */}
+      {showAnchors && (
+        <>
+          <Circle
+            x={LEFT_END.x}
+            y={LEFT_END.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(LEFT_END)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(LEFT_END);
+            }}
+          />
+
+          <Circle
+            x={RIGHT_END.x}
+            y={RIGHT_END.y}
+            radius={anchorR}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            listening
+            onMouseEnter={() => handleEnter(RIGHT_END)}
+            onMouseLeave={handleLeave}
+            onMouseDown={(e) => (e.cancelBubble = true)}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              onAnchorClick?.(RIGHT_END);
+            }}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо хочеш — зроблю **один універсальний компонент** з пропсом `mirror={true/false}`, щоб не тримати два окремі файли.

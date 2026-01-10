@@ -1,0 +1,196 @@
+Добре, тут ситуація **аналогічна попереднім файлам**, але є **кілька критичних моментів**, які треба виправити, і **правильно розмістити файл у новій структурі**.
+
+Я зроблю це по кроках 👇
+
+---
+
+## ❌ Проблеми у поточному `TopHeaderLine.js`
+
+1. **Немає `"use client"`**
+   → `useRouter`, `useAuth` у `app/` без цього зламаються.
+
+2. ❌ `useRouter` імпортований з **`next/navigation`**, але:
+
+   ```js
+   import { useRouter } from 'next/navigation'
+   ```
+
+   ✔️ це правильно **для App Router**, але файл у `app/components/...` — ми його переносимо.
+
+3. ❌ Inline-стилі норм, але файл **лежить не там**, де має бути за новою архітектурою.
+
+4. ❌ `fetch(${PROXY_URL}/api/rest/logoutrest`
+   → добре, але варто додати `credentials: 'include'` (у тебе є 👍), і не тримати `logoutOnApp`, якщо не використовується.
+
+---
+
+## ✅ Нова правильна структура
+
+Оскільки це **спільний UI-компонент (header)**, логічно винести його сюди:
+
+```
+src/features/shared/ui/TopHeaderLine/
+  TopHeaderLine.js
+  index.js
+```
+
+---
+
+## ✅ Виправлений `TopHeaderLine.js`
+
+`src/features/shared/ui/TopHeaderLine/TopHeaderLine.js`
+
+```jsx
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/context/AuthContext";
+
+const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL;
+
+export default function TopHeaderLine() {
+  const { user } = useAuth();
+  const router = useRouter();
+
+  const handleLogout = async () => {
+    try {
+      await fetch(`${PROXY_URL}/api/rest/logoutrest`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+    } catch (error) {
+      console.error("Logout error:", error);
+    } finally {
+      router.push("/login");
+    }
+  };
+
+  return (
+    <div style={navBarStyle}>
+      {/* Ліва частина */}
+      <div style={menuStyle}>
+        <Link href="/" style={menuItemStyle}>
+          Main
+        </Link>
+
+        <Link href="/schemes" style={menuItemStyle}>
+          Scheme Catalog
+        </Link>
+
+        <Link href="/editor" style={menuItemStyle}>
+          Editor
+        </Link>
+
+        <Link href="/create-scheme" style={menuItemStyle}>
+          Add New
+        </Link>
+      </div>
+
+      {/* Права частина */}
+      <div style={userInfoStyle}>
+        {user?.login && <span style={userNameStyle}>{user.login}</span>}
+
+        <button onClick={handleLogout} style={logoutButtonStyle}>
+          Logout
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ================= styles ================= */
+
+const navBarStyle = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  width: "100%",
+  height: "60px",
+  backgroundColor: "#333",
+  color: "#fff",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  boxShadow: "0px 4px 6px rgba(0, 0, 0, 0.1)",
+  zIndex: 1000,
+};
+
+const menuStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: "20px",
+  paddingLeft: "15px",
+};
+
+const menuItemStyle = {
+  color: "#fff",
+  textDecoration: "none",
+  fontSize: "16px",
+  fontWeight: "bold",
+  cursor: "pointer",
+};
+
+const userInfoStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: "15px",
+  paddingRight: "15px",
+};
+
+const userNameStyle = {
+  fontSize: "16px",
+  fontWeight: "bold",
+};
+
+const logoutButtonStyle = {
+  backgroundColor: "red",
+  color: "white",
+  border: "none",
+  padding: "8px 12px",
+  fontSize: "14px",
+  fontWeight: "bold",
+  cursor: "pointer",
+  borderRadius: "5px",
+};
+```
+
+---
+
+## ✅ `index.js`
+
+`src/features/shared/ui/TopHeaderLine/index.js`
+
+```js
+export { default } from "./TopHeaderLine";
+```
+
+---
+
+## ✅ Як імпортувати тепер
+
+```js
+import TopHeaderLine from "@/features/shared/ui/TopHeaderLine";
+```
+
+---
+
+## 🧠 Рекомендація на майбутнє (дуже важливо)
+
+Ти зараз робиш **правильний крок** — виносиш:
+
+* `shared/ui` → header, search, buttons
+* `scheme-editor/ui` → sidebar, canvas, modals
+
+👉 **наступний логічний крок**:
+
+* перевести `TopHeaderLine` з inline-стилів на **MUI AppBar + Toolbar**
+* або на `styled()` / `sx` (краще для темізації)
+
+Якщо хочеш — наступним повідомленням я:
+
+* або **перепишу TopHeaderLine на MUI AppBar**
+* або **покажу, як підв’язати role-based меню (editor / viewer)**

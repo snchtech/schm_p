@@ -1,0 +1,220 @@
+Ок, працюю **тільки по скрінах 1–5**. Нижче я **розпізнав `NewSchemeModal.js`** і **переніс у нову структуру** (App Router / `src/features/...`). Також прибрав залежність від `next/router` всередині модалки — **`albumId` передаємо пропсом**, бо модалка використовується на сторінці альбому.
+
+---
+
+## 1) Новий файл
+
+### ✅ `src/features/albums/ui/modals/NewSchemeModal.js`
+
+```js
+'use client'
+
+import { useEffect, useState } from 'react'
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  MenuItem,
+} from '@mui/material'
+import { Formik, Form, Field } from 'formik'
+import * as Yup from 'yup'
+
+import { fetchAlbums, createScheme } from '@/utils/api'
+import { useAuth } from '@/context/AuthContext'
+import { useRouter } from 'next/navigation'
+
+export default function NewSchemeModal({
+  open,
+  onClose,
+  onSchemeCreated,
+  albumId, // ✅ тепер приходить з батьківського компонента
+}) {
+  const { user } = useAuth()
+  const [albums, setAlbums] = useState([])
+  const router = useRouter()
+
+  useEffect(() => {
+    async function loadData() {
+      setAlbums(await fetchAlbums())
+      // зі скріну видно, що fetchDepartments/fetchUnits були закоментовані — лишаємо так
+    }
+    loadData()
+  }, [])
+
+  const validationSchema = Yup.object().shape({
+    album_id: Yup.number().required('Оберіть альбом'),
+    name: Yup.string().required('Введіть назву'),
+    pagenumber: Yup.string().required('Введіть номер аркушу'),
+    system: Yup.string().required('Введіть систему'),
+    format: Yup.string().required('Оберіть формат'),
+  })
+
+  const handleSubmit = async (values, { setSubmitting, resetForm }) => {
+    try {
+      const response = await createScheme({
+        ...values,
+        editor_id: user?.tab_no, // як на скріні
+      })
+
+      onClose?.()
+      onSchemeCreated?.()
+      resetForm()
+
+      router.push(`/scheme/${response.scheme_id}`) // як на скріні
+    } catch (error) {
+      console.error('Error creating scheme:', error)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onClose={onClose}>
+      <DialogTitle>Створення нової схеми</DialogTitle>
+
+      <Formik
+        initialValues={{
+          name: '',
+          album_id: albumId || '', // ✅ раніше було router.query.albumId
+          description: '',
+          format: 'A3',
+          pagenumber: '',
+          system: '',
+        }}
+        validationSchema={validationSchema}
+        onSubmit={handleSubmit}
+      >
+        {({ isSubmitting, errors, touched }) => (
+          <Form>
+            <DialogContent>
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Назва"
+                name="name"
+                fullWidth
+                error={touched.name && !!errors.name}
+                helperText={touched.name && errors.name}
+              />
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                select
+                label="Виберіть альбом"
+                name="album_id"
+                fullWidth
+                error={touched.album_id && !!errors.album_id}
+                helperText={touched.album_id && errors.album_id}
+              >
+                {albums.map((album) => (
+                  <MenuItem
+                    key={`album-${album.ALBUM_ID}`}
+                    value={album.ALBUM_ID}
+                  >
+                    {album.NAME}
+                  </MenuItem>
+                ))}
+              </Field>
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Опис"
+                name="description"
+                fullWidth
+                multiline
+                rows={3}
+              />
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                select
+                label="Формат"
+                name="format"
+                fullWidth
+                error={touched.format && !!errors.format}
+                helperText={touched.format && errors.format}
+              >
+                {['A4', 'A3', 'A2', 'A1', 'A0'].map((format) => (
+                  <MenuItem key={`format-${format}`} value={format}>
+                    {format}
+                  </MenuItem>
+                ))}
+              </Field>
+
+              <Field
+                sx={{ mb: 2 }}
+                as={TextField}
+                label="Номер аркушу"
+                name="pagenumber"
+                fullWidth
+                error={touched.pagenumber && !!errors.pagenumber}
+                helperText={touched.pagenumber && errors.pagenumber}
+              />
+
+              <Field
+                as={TextField}
+                label="Система"
+                name="system"
+                fullWidth
+                error={touched.system && !!errors.system}
+                helperText={touched.system && errors.system}
+              />
+            </DialogContent>
+
+            <DialogActions>
+              <Button onClick={onClose} color="secondary">
+                Скасувати
+              </Button>
+              <Button
+                type="submit"
+                color="primary"
+                variant="contained"
+                disabled={isSubmitting}
+              >
+                Створити
+              </Button>
+            </DialogActions>
+          </Form>
+        )}
+      </Formik>
+    </Dialog>
+  )
+}
+```
+
+---
+
+## 2) Як викликати модалку зі сторінки альбому (приклад заміни старого `router.query.albumId`)
+
+Там, де ти раніше робив:
+
+```jsx
+<NewSchemeModal
+  open={isNewSchemeModalOpen}
+  onClose={handleCloseNewSchemeModal}
+  onSchemeCreated={() => {}}
+/>
+```
+
+✅ тепер передай `albumId`:
+
+```jsx
+<NewSchemeModal
+  open={isNewSchemeModalOpen}
+  onClose={handleCloseNewSchemeModal}
+  onSchemeCreated={() => {}}
+  albumId={albumId}
+/>
+```
+
+(бо `albumId` у тебе вже є на сторінці `/albums/[albumId]`)
+
+---
+
+Якщо скинеш **наступний файл** (назва + старий шлях + скріни 1,2,3...), я так само **розпізнаю код і розкладу** по новій структурі.

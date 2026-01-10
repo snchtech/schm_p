@@ -1,0 +1,80 @@
+Ок, це **ScaleControl.js** зі старого:
+`app/components/Scheme/TopToolbar/ScaleControl.js`
+
+Переносимо в нову структуру:
+
+✅ `src/features/scheme-editor/ui/top-bar/controls/ScaleControl.js`
+
+---
+
+## 1) Новий файл: `ScaleControl.js`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, IconButton, Tooltip, Typography } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import RemoveIcon from "@mui/icons-material/Remove";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+const ScaleControl = ({ onZoomIn, onZoomOut, onDelete }) => {
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+      <Typography variant="subtitle1" sx={{ mr: 1, color: "#000000" }}>
+        Масштаб:
+      </Typography>
+
+      <Tooltip title="Збільшити">
+        <IconButton color="primary" onClick={onZoomIn}>
+          <AddIcon />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip title="Зменшити">
+        <IconButton color="primary" onClick={onZoomOut}>
+          <RemoveIcon />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip title="Видалити елемент">
+        <IconButton color="error" onClick={onDelete}>
+          <DeleteIcon />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+};
+
+export default ScaleControl;
+```
+
+---
+
+## 2) Підключення в `EditorTopBar.js`
+
+У нас вже так:
+
+```js
+import ScaleControl from "./controls/ScaleControl";
+```
+
+---
+
+## 3) Статус: top-bar готовий повністю ✅
+
+Тепер весь набір контролів уже перенесений і відповідає `EditorTopBar`:
+
+* ✅ ScaleControl
+* ✅ BindingsControl
+* ✅ CheckSchemeControl
+* ✅ RefreshControl
+* ✅ EditorTopBar
+
+---
+
+## 4) Наступний крок (логічний)
+
+Тепер найважливіше — **`EditorCanvas.js`** (бо туди треба зібрати все, що ми перенесли в `ui/canvas`: `CanvasHeader`, `NotesBlock`, `SchemeTable`, плюс Stage/Layers/Symbols/Connections/Grid/Guides).
+
+Кидай скрінами **старий CanvasArea/EditorCanvas** (будь-який основний файл, де збирається канвас) — і я зроблю фінальний “склей” під нову архітектуру.

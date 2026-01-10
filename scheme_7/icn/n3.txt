@@ -1,0 +1,170 @@
+Чудово 👍
+Додаємо **anchor-точку для конекторів** **в спільному вузлі J**, акуратно і так, щоб вона:
+
+* не заважала клікам по фігурі
+* могла підсвічуватись / ловити hover
+* віддавала координати для конекторів
+
+Нижче — **оновлений `react-konva` компонент** з anchor.
+
+---
+
+## ✅ CircleLineTwoTriangles + Connector Anchor
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Circle, Line } from "react-konva";
+
+/**
+ * CircleLineTwoTriangles
+ * + Anchor point у вузлі J для конекторів
+ *
+ * Props (додаткові):
+ *  showAnchors      — показувати anchor (default true)
+ *  onAnchorClick    — (info) => void
+ *  onAnchorHover    — (info | null) => void
+ */
+export default function CircleLineTwoTriangles({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 8,
+  lineCap = "round",
+  lineJoin = "round",
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // ===== shared junction (anchor point) =====
+  const JX = 110;
+  const JY = 70;
+  const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* ===== geometry ===== */}
+
+      {/* left circle */}
+      <Circle
+        x={35}
+        y={40}
+        radius={16}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {/* elbow line */}
+      <Line
+        points={[51, 40, 110, 40, JX, JY]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+
+      {/* right triangle (left vertex == J) */}
+      <Line
+        points={[JX, JY, 190, 40, 190, 100]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+
+      {/* bottom triangle (top vertex == J) */}
+      <Line
+        points={[JX, JY, 85, 140, 135, 140]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+
+      {/* ===== anchor for connectors ===== */}
+      {showAnchors && (
+        <Circle
+          x={JX}
+          y={JY}
+          radius={ANCHOR_R}
+          fill="#fff"
+          stroke={stroke}
+          strokeWidth={2}
+          listening
+          onMouseEnter={() => {
+            document.body.style.cursor = "crosshair";
+            onAnchorHover?.({
+              id: "junction",
+              x: JX,
+              y: JY,
+            });
+          }}
+          onMouseLeave={() => {
+            document.body.style.cursor = "default";
+            onAnchorHover?.(null);
+          }}
+          onMouseDown={(e) => e.cancelBubble = true}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            onAnchorClick?.({
+              id: "junction",
+              x: JX,
+              y: JY,
+            });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+## 🔌 Як це використовується в твоєму редакторі
+
+```jsx
+<CircleLineTwoTriangles
+  x={200}
+  y={150}
+  scale={1}
+  onAnchorClick={(anchor) => {
+    // тут старт створення конектора
+    startConnector({
+      elementId: el.id,
+      anchorId: anchor.id,
+      x: anchor.x,
+      y: anchor.y,
+    });
+  }}
+/>
+```
+
+---
+
+## 🧠 Чому це правильно для твого проєкту
+
+* anchor **живе в локальних координатах елемента**
+* масштаб (`scale`) застосовується автоматично
+* `cancelBubble` не дає ламати selection
+* готово для:
+
+  * routing ліній
+  * snap
+  * hover-підсвітки
+
+---
+
+## 🔜 Можемо зробити далі
+
+1. 🔹 кілька anchor-ів (ліва лінія / правий трикутник / нижній)
+2. 🔹 автоматичний `getAnchorPoints()` для всіх символів
+3. 🔹 магнітну підсвітку при наведенні конектора
+4. 🔹 типи anchor-ів (`in / out / bidirectional`)
+
+Скажи, який пункт беремо наступним — ти зараз будуєш **дуже правильну архітектуру редактора** 💪

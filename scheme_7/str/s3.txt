@@ -1,0 +1,308 @@
+Ок, це динамічна сторінка **`pages/albums/[albumId].js`** (Pages Router). В App Router це буде:
+
+* **`src/app/albums/[albumId]/page.js`** (серверний файл-сторінка)
+* а всю логіку/хуки — в **клієнтський** компонент у `features`
+
+Нижче: 1) зібраний код, 2) нові файли, 3) важливі правки роутера/параметрів.
+
+---
+
+## 1) Відновлений код зі скрінів (оригінал)
+
+> **OLD:** `pages/albums/[albumId].js`
+
+```jsx
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/router'
+import { Box, Typography, IconButton, Paper, Tab, Tabs, Button } from '@mui/material'
+import { ArrowBack, Description, PictureAsPdf, Print, Add, Layers } from '@mui/icons-material'
+import NavigationTree from '@/app/components/shared/NavigationTree'
+import AlbumEditForm from '@/app/components/album/AlbumEditForm'
+import SchemeReport from '@/app/components/album/SchemeReport'
+import SearchComponent from '@/app/components/shared/SearchBar'
+import NewSchemeModal from '@/app/components/album/NewSchemeModal'
+import { fetchAlbumById } from '@/utils/api'
+
+const AlbumPage = () => {
+  const router = useRouter()
+  const { albumId, mode } = router.query
+
+  const [album, setAlbum] = useState(null)
+  const [activeTab, setActiveTab] = useState(0)
+  const [isNewSchemeModalOpen, setIsNewSchemeModalOpen] = useState(false)
+
+  useEffect(() => {
+    if (albumId) {
+      const loadAlbum = async () => {
+        try {
+          const data = await fetchAlbumById(albumId)
+          setAlbum(data)
+        } catch (error) {
+          console.error('Помилка завантаження альбому:', error)
+        }
+      }
+
+      loadAlbum()
+    }
+  }, [albumId])
+
+  const handleOpenNewSchemeModal = () => {
+    setIsNewSchemeModalOpen(true)
+  }
+
+  const handleCloseNewSchemeModal = () => {
+    setIsNewSchemeModalOpen(false)
+  }
+
+  if (!album) {
+    return <Typography variant="h6">Завантаження...</Typography>
+  }
+
+  return (
+    <Box display="flex" height="100vh">
+      {/* Ліва панель */}
+      <Box width="300px" p={2} borderRight="1px solid #ddd">
+        <Tabs
+          value={activeTab}
+          onChange={(e, newValue) => setActiveTab(newValue)}
+          variant="fullWidth"
+        >
+          <Tab label="Навігація" />
+          <Tab label="Редагування альбому" />
+        </Tabs>
+
+        <Box hidden={activeTab !== 0}>
+          <NavigationTree albumId={albumId} />
+        </Box>
+        <Box hidden={activeTab !== 1}>
+          <AlbumEditForm albumId={albumId} />
+        </Box>
+      </Box>
+
+      {/* Основний контент */}
+      <Box flexGrow={1} p={3}>
+        {/* Верхня панель */}
+        <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
+          {/* Блок пошуку */}
+          <SearchComponent />
+
+          {/* Кнопки */}
+          <Box display="flex" alignItems="center" gap={1}>
+            <IconButton onClick={() => router.push('/albums')} title="До каталогу альбомів">
+              <ArrowBack />
+            </IconButton>
+
+            <IconButton title="Версії альбому">
+              <Layers />
+            </IconButton>
+
+            <IconButton title="Документи альбому">
+              <Description />
+            </IconButton>
+
+            <IconButton title="Експорт альбому">
+              <PictureAsPdf />
+            </IconButton>
+
+            <IconButton title="Друк альбому">
+              <Print />
+            </IconButton>
+
+            <Button
+              variant="contained"
+              startIcon={<Add />}
+              title="Новий аркуш альбому схем"
+              onClick={handleOpenNewSchemeModal}
+            >
+              Новий аркуш
+            </Button>
+          </Box>
+        </Box>
+
+        {/* Заголовок */}
+        <Paper sx={{ p: 2, mb: 2, textAlign: 'center' }}>
+          <Typography variant="h5">Список схем альбому {album.NAME}</Typography>
+        </Paper>
+
+        {/* Блок звіту */}
+        <SchemeReport albumId={albumId} userRole={album.userRole} mode={mode} />
+
+        {/* Модальне вікно */}
+        <NewSchemeModal
+          open={isNewSchemeModalOpen}
+          onClose={handleCloseNewSchemeModal}
+          onSchemeCreated={() => {}}
+        />
+      </Box>
+    </Box>
+  )
+}
+
+export default AlbumPage
+```
+
+---
+
+## 2) Нова структура (App Router)
+
+### ✅ NEW: UI компонент (клієнтський)
+
+**`src/features/albums/ui/AlbumPage.js`**
+
+```jsx
+'use client'
+
+import { useEffect, useMemo, useState } from 'react'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { Box, Typography, IconButton, Paper, Tab, Tabs, Button } from '@mui/material'
+import { ArrowBack, Description, PictureAsPdf, Print, Add, Layers } from '@mui/icons-material'
+
+import NavigationTree from '@/app/components/shared/NavigationTree'
+import AlbumEditForm from '@/app/components/album/AlbumEditForm'
+import SchemeReport from '@/app/components/album/SchemeReport'
+import SearchComponent from '@/app/components/shared/SearchBar'
+import NewSchemeModal from '@/app/components/album/NewSchemeModal'
+
+import { fetchAlbumById } from '@/utils/api'
+
+export default function AlbumPage() {
+  const router = useRouter()
+  const params = useParams()
+  const searchParams = useSearchParams()
+
+  const albumId = params?.albumId
+  const mode = useMemo(() => searchParams.get('mode'), [searchParams])
+
+  const [album, setAlbum] = useState(null)
+  const [activeTab, setActiveTab] = useState(0)
+  const [isNewSchemeModalOpen, setIsNewSchemeModalOpen] = useState(false)
+
+  useEffect(() => {
+    if (!albumId) return
+
+    const loadAlbum = async () => {
+      try {
+        const data = await fetchAlbumById(albumId)
+        setAlbum(data)
+      } catch (error) {
+        console.error('Помилка завантаження альбому:', error)
+      }
+    }
+
+    loadAlbum()
+  }, [albumId])
+
+  const handleOpenNewSchemeModal = () => setIsNewSchemeModalOpen(true)
+  const handleCloseNewSchemeModal = () => setIsNewSchemeModalOpen(false)
+
+  if (!album) {
+    return <Typography variant="h6">Завантаження...</Typography>
+  }
+
+  return (
+    <Box display="flex" height="100vh">
+      {/* Ліва панель */}
+      <Box width="300px" p={2} borderRight="1px solid #ddd">
+        <Tabs
+          value={activeTab}
+          onChange={(e, newValue) => setActiveTab(newValue)}
+          variant="fullWidth"
+        >
+          <Tab label="Навігація" />
+          <Tab label="Редагування альбому" />
+        </Tabs>
+
+        <Box hidden={activeTab !== 0}>
+          <NavigationTree albumId={albumId} />
+        </Box>
+
+        <Box hidden={activeTab !== 1}>
+          <AlbumEditForm albumId={albumId} />
+        </Box>
+      </Box>
+
+      {/* Основний контент */}
+      <Box flexGrow={1} p={3}>
+        {/* Верхня панель */}
+        <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
+          <SearchComponent />
+
+          <Box display="flex" alignItems="center" gap={1}>
+            <IconButton onClick={() => router.push('/albums')} title="До каталогу альбомів">
+              <ArrowBack />
+            </IconButton>
+
+            <IconButton title="Версії альбому">
+              <Layers />
+            </IconButton>
+
+            <IconButton title="Документи альбому">
+              <Description />
+            </IconButton>
+
+            <IconButton title="Експорт альбому">
+              <PictureAsPdf />
+            </IconButton>
+
+            <IconButton title="Друк альбому">
+              <Print />
+            </IconButton>
+
+            <Button
+              variant="contained"
+              startIcon={<Add />}
+              title="Новий аркуш альбому схем"
+              onClick={handleOpenNewSchemeModal}
+            >
+              Новий аркуш
+            </Button>
+          </Box>
+        </Box>
+
+        <Paper sx={{ p: 2, mb: 2, textAlign: 'center' }}>
+          <Typography variant="h5">Список схем альбому {album.NAME}</Typography>
+        </Paper>
+
+        <SchemeReport albumId={albumId} userRole={album.userRole} mode={mode} />
+
+        <NewSchemeModal
+          open={isNewSchemeModalOpen}
+          onClose={handleCloseNewSchemeModal}
+          onSchemeCreated={() => {
+            // якщо захочеш — тут можна тригернути рефреш списку схем
+          }}
+        />
+      </Box>
+    </Box>
+  )
+}
+```
+
+### ✅ NEW: сторінка App Router
+
+**`src/app/albums/[albumId]/page.js`**
+
+```jsx
+import AlbumPage from '@/features/albums/ui/AlbumPage'
+
+export default function Page() {
+  return <AlbumPage />
+}
+```
+
+---
+
+## 3) Критичні правки при міграції
+
+* `next/router` ➜ в App Router замінюємо на:
+
+  * `useParams()` для `albumId`
+  * `useSearchParams()` для `mode`
+  * `useRouter()` (з `next/navigation`) для `push()`
+* Додаємо `'use client'` у компонент `AlbumPage`, бо хуки.
+
+---
+
+Якщо хочеш — наступним кроком можемо винести ліву панель (Tabs+NavigationTree+AlbumEditForm) в окремий компонент `features/albums/ui/AlbumSidePanel.js`, щоб сторінка була чистіша.
+
+Кидай наступний файл/скріни 👇

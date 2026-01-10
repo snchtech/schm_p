@@ -1,0 +1,360 @@
+Супер — твоя поточна архітектура ( `DiagramEditorPage → EditorCanvas(Stage+Layer)` + `useZoomPan(stageRef, layerRef)` ) ідеально підходить, щоб “формат аркуша” зробити **першокласною сутністю** і **експортувати на A3 300 DPI незалежно від зуму**.
+
+Нижче даю **конкретний план + код**, який ти можеш вставити у проєкт з мінімальними правками.
+
+---
+
+# 1) Вводимо поняття “аркуш” (page) як конфіг
+
+Створи файл:
+
+### `features/scheme-editor/model/page/pageFormat.js`
+
+```js
+// features/scheme-editor/model/page/pageFormat.js
+const MM_PER_INCH = 25.4;
+
+export const PAPER_MM = {
+  A3: { w: 297, h: 420 },
+  A4: { w: 210, h: 297 },
+};
+
+export function getPaperMm(paper = "A3", orientation = "landscape") {
+  const p = PAPER_MM[paper] || PAPER_MM.A3;
+  return orientation === "landscape"
+    ? { w: p.h, h: p.w }
+    : { w: p.w, h: p.h };
+}
+
+export function mmToPx(mm, dpi = 96) {
+  return (mm / MM_PER_INCH) * dpi;
+}
+
+export function getPaperPx({ paper = "A3", orientation = "landscape", dpi = 96 }) {
+  const mm = getPaperMm(paper, orientation);
+  return {
+    w: Math.round(mmToPx(mm.w, dpi)),
+    h: Math.round(mmToPx(mm.h, dpi)),
+  };
+}
+```
+
+---
+
+# 2) Малюємо аркуш у Konva як “фон + рамка + поля”
+
+Створи компонент:
+
+### `features/scheme-editor/ui/canvas/PageLayer.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Rect, Line, Group } from "react-konva";
+
+export default function PageLayer({
+  pageRect,         // {x,y,width,height}
+  marginsPx,        // {top,right,bottom,left} у px
+  showOuterShade = true,
+}) {
+  const { x, y, width, height } = pageRect;
+
+  const inner = {
+    x: x + marginsPx.left,
+    y: y + marginsPx.top,
+    width: width - marginsPx.left - marginsPx.right,
+    height: height - marginsPx.top - marginsPx.bottom,
+  };
+
+  return (
+    <Group listening={false}>
+      {/* затемнення “поза аркушем” (необов’язково) */}
+      {showOuterShade && (
+        <>
+          {/* простий прийом: великий напівпрозорий Rect під аркушем */}
+          <Rect x={x - 4000} y={y - 4000} width={8000} height={8000} fill="rgba(0,0,0,0.06)" />
+          <Rect x={x} y={y} width={width} height={height} fill="white" />
+        </>
+      )}
+
+      {/* аркуш */}
+      <Rect x={x} y={y} width={width} height={height} fill="white" stroke="black" strokeWidth={2} />
+
+      {/* safe area / поля пунктиром */}
+      <Line
+        points={[
+          inner.x, inner.y,
+          inner.x + inner.width, inner.y,
+          inner.x + inner.width, inner.y + inner.height,
+          inner.x, inner.y + inner.height,
+          inner.x, inner.y
+        ]}
+        stroke="rgba(0,0,0,0.35)"
+        dash={[10, 6]}
+        strokeWidth={1}
+        closed={false}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# 3) Додаємо pageConfig у `DiagramEditorPage` і передаємо в Canvas
+
+У `DiagramEditorPage.jsx`:
+
+```jsx
+import React, { useMemo, useState } from "react";
+import { getPaperPx, mmToPx } from "../../model/page/pageFormat";
+
+// ...
+
+export default function DiagramEditorPage() {
+  const S = useDiagramState();
+
+  const [pageConfig, setPageConfig] = useState({
+    paper: "A3",
+    orientation: "landscape",
+    screenDpi: 96, // відображення в редакторі
+    marginsMm: { top: 10, right: 10, bottom: 10, left: 10 },
+  });
+
+  // ...
+
+  return (
+    <>
+      <EditorTopBar
+        // ...
+        pageConfig={pageConfig}
+        setPageConfig={setPageConfig}
+      />
+
+      <EditorCanvas
+        stageRef={stageRef}
+        layerRef={layerRef}
+        S={S}
+        pageConfig={pageConfig}
+        selectedKonvaNode={selectedKonvaNode}
+        registerNodeRef={registerNodeRef}
+        onElementContextMenu={handleElementContextMenu}
+      />
+
+      {/* ... */}
+    </>
+  );
+}
+```
+
+---
+
+# 4) Реально “обмежуємо малювання форматом” через clip
+
+Онови `EditorCanvas.jsx`: додаємо `PageLayer`, рахуємо `pageRect`, і **контент (connections/symbols)** кладемо в `Group` з `clipX/clipY/clipWidth/clipHeight`.
+
+### `features/scheme-editor/ui/canvas/EditorCanvas.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Stage, Layer, Group } from "react-konva";
+
+import { getPaperPx, mmToPx } from "../../model/page/pageFormat";
+import PageLayer from "./PageLayer";
+
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import SelectionTransformer from "./SelectionTransformer";
+
+export default function EditorCanvas({
+  stageRef,
+  layerRef,
+  S,
+  pageConfig,
+  selectedKonvaNode,
+  registerNodeRef,
+  onElementContextMenu,
+}) {
+  const stageW = 1000;
+  const stageH = 600;
+
+  // 1) “екранний” розмір аркуша (не для друку, а для роботи)
+  const paperPx = useMemo(
+    () => getPaperPx({ paper: pageConfig.paper, orientation: pageConfig.orientation, dpi: pageConfig.screenDpi }),
+    [pageConfig.paper, pageConfig.orientation, pageConfig.screenDpi]
+  );
+
+  // 2) позиціонуємо аркуш по центру viewport
+  const pageRect = useMemo(() => {
+    const x = Math.round((stageW - paperPx.w) / 2);
+    const y = Math.round((stageH - paperPx.h) / 2);
+    return { x, y, width: paperPx.w, height: paperPx.h };
+  }, [paperPx.w, paperPx.h]);
+
+  // 3) margins у px (для пунктиру)
+  const marginsPx = useMemo(() => {
+    const dpi = pageConfig.screenDpi;
+    const m = pageConfig.marginsMm;
+    return {
+      top: Math.round(mmToPx(m.top, dpi)),
+      right: Math.round(mmToPx(m.right, dpi)),
+      bottom: Math.round(mmToPx(m.bottom, dpi)),
+      left: Math.round(mmToPx(m.left, dpi)),
+    };
+  }, [pageConfig.marginsMm, pageConfig.screenDpi]);
+
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage ref={stageRef} width={stageW} height={stageH} style={{ border: "1px solid #ccc" }}>
+        {/* ВАЖЛИВО: залишаємо один Layer ref={layerRef}, бо useZoomPan ним керує */}
+        <Layer ref={layerRef}>
+          {/* Аркуш (фон + рамка) */}
+          <PageLayer pageRect={pageRect} marginsPx={marginsPx} />
+
+          {/* Контент, який ОБРІЗАЄТЬСЯ межами аркуша */}
+          <Group
+            clipX={pageRect.x}
+            clipY={pageRect.y}
+            clipWidth={pageRect.width}
+            clipHeight={pageRect.height}
+          >
+            <DiagramConnections
+              connections={S.connections}
+              hoveredConnectionId={S.hoveredConnectionId}
+              hoveredLineAnchorId={S.hoveredLineAnchorId}
+              isAddingConnector={S.isAddingConnector}
+              setHoveredConnectionId={S.setHoveredConnectionId}
+              setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+              handleLineClick={S.handleLineClick}
+              handleAnchorClick={S.handleAnchorClick}
+              updateConnectionOffset={S.updateConnectionOffset}
+            />
+
+            <DiagramSymbols
+              symbols={S.symbols}
+              isAddingConnector={S.isAddingConnector}
+              hoveredElement={S.hoveredElement}
+              hoveredAnchor={S.hoveredAnchor}
+              getAnchorPoints={S.getAnchorPoints}
+              setHoveredElement={S.setHoveredElement}
+              setHoveredAnchor={S.setHoveredAnchor}
+              handleDragMove={S.handleDragMove}
+              handleAnchorClick={S.handleAnchorClick}
+              onElementContextMenu={onElementContextMenu}
+              onMouseDown={S.selectHightlightEl}
+              isSelected={S.selected}
+              registerNodeRef={registerNodeRef}
+            />
+          </Group>
+
+          {/* Transformer можна лишати поза clip, щоб ручки не “різались” */}
+          <SelectionTransformer selectedNode={selectedKonvaNode} enabled={!!selectedKonvaNode} />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+✅ Після цього користувач бачить чіткий аркуш A3/A4.
+✅ Все, що малюється, **візуально обмежене рамкою** (clip).
+
+---
+
+# 5) Головне: експорт/друк A3 300 DPI НЕ залежить від zoom
+
+Тут є ключова штука: `useZoomPan` змінює transform (scale/position) stage або layer. Якщо зробити `stage.toDataURL()` “як є” — отримаєш те, що бачиш у viewport (тобто зум).
+
+Нам треба: **вивантажити саме прямокутник pageRect** у високій якості **і так, ніби scale=1**.
+
+Найнадійніший мінімальний спосіб у твоєму випадку:
+
+1. тимчасово скинути transform (scale/pos) на `layerRef` (або на stage — залежить як реалізований `useZoomPan`)
+2. зробити `toDataURL({ x, y, width, height, pixelRatio })`
+3. повернути transform назад
+
+Створи утиліту:
+
+### `features/scheme-editor/model/export/exportPagePng.js`
+
+```js
+// features/scheme-editor/model/export/exportPagePng.js
+import { getPaperPx } from "../page/pageFormat";
+
+export function exportPagePng({
+  stageRef,
+  layerRef,
+  pageRect,          // {x,y,width,height} в “document coords”
+  pageConfig,        // {paper, orientation}
+  dpi = 300,
+}) {
+  const stage = stageRef?.current;
+  const layer = layerRef?.current;
+  if (!stage || !layer) return null;
+
+  // зберігаємо поточний transform (його міняє zoom/pan)
+  const prevScale = layer.scale();
+  const prevPos = layer.position();
+
+  try {
+    // скидаємо zoom/pan
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+
+    // Рахуємо pixelRatio так, щоб отримати 300dpi при відображенні 96dpi
+    // Якщо твій “document space” = px@screenDpi, то:
+    const screenDpi = pageConfig.screenDpi || 96;
+    const pixelRatio = dpi / screenDpi;
+
+    const dataUrl = stage.toDataURL({
+      x: pageRect.x,
+      y: pageRect.y,
+      width: pageRect.width,
+      height: pageRect.height,
+      pixelRatio, // робить експорт різкішим
+    });
+
+    return dataUrl;
+  } finally {
+    // повертаємо transform
+    layer.scale(prevScale);
+    layer.position(prevPos);
+    layer.batchDraw();
+  }
+}
+```
+
+> Так, це “тимчасовий reset” — але він дуже практичний і працює стабільно, якщо zoom/pan сидить саме на `layerRef` (як у тебе).
+
+---
+
+# 6) Додаємо кнопку “Експорт A3 (300 DPI)” у TopBar
+
+У `EditorTopBar.jsx` ти можеш швидко додати кнопку, а handler прокинути з `DiagramEditorPage`.
+
+Найпростіше: у `DiagramEditorPage` зробити `handleExport` і передати вниз.
+
+Тобі треба, щоб `EditorCanvas` повертав `pageRect` назовні або ти його рахував в одному місці.
+**Практично:** рахуй `pageRect` в `EditorCanvas` як зараз, але продублюй у `DiagramEditorPage` (або винеси в helper `getPageRect(stageW, stageH, pageConfig)`), щоб export знав точні координати.
+
+Якщо хочеш — я можу одразу написати акуратний варіант, де `pageRect` є єдиним джерелом правди (через `useMemo` у `DiagramEditorPage` і передається в `EditorCanvas`).
+
+---
+
+# 7) Що ти отримаєш після цього
+
+* Вибрав A3/A4 → **рамка аркуша змінюється**
+* Малювання/зв’язки/елементи **“живуть” в межах формату** (через clip)
+* Zoom для роботи лишається як є
+* Експорт “A3 300 DPI” — **чіткий**, читабельний, придатний для друку
+
+---
+
+## Щоб я дав тобі 100% точний export без “сюрпризів”
+
+Скинь (коротко) код `useZoomPan` (саме де ти ставиш scale/position: на `stageRef.current` чи на `layerRef.current`).
+І я одразу піджену `exportPagePng` під твою реальну трансформацію (щоб не було ситуації “скинув не той вузол”).

@@ -1,0 +1,151 @@
+Чітко 👍
+Додаємо **anchor-точку саме зверху лінії** — логічно **по центру “ковпачка”**, бо це:
+
+* геометрично зрозуміло
+* стабільно при масштабі
+* інтуїтивно для користувача як “вихід угору”
+
+Нижче — **оновлений компонент** з **top-anchor** (і готовий хук для конекторів).
+
+---
+
+## ✅ TwoTrianglesZigzag + TOP connector anchor
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Path, Rect, Circle } from "react-konva";
+
+/**
+ * TwoTrianglesZigzag (react-konva)
+ * + Anchor зверху лінії (по центру ковпачка)
+ *
+ * Anchor id: "top"
+ */
+export default function TwoTrianglesZigzag({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 10,
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // ===== geometry constants =====
+  const CENTER_X = 100;
+  const CENTER_Y = 75;
+
+  // top cap
+  const CAP_X = 90;
+  const CAP_Y = 0;
+  const CAP_W = 20;
+  const CAP_H = 14;
+
+  // anchor (top of zigzag)
+  const TOP_ANCHOR_X = CAP_X + CAP_W / 2; // 100
+  const TOP_ANCHOR_Y = CAP_Y;             // 0
+  const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Left triangle */}
+      <Line
+        points={[30, 40, 30, 110, CENTER_X, CENTER_Y]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Right triangle */}
+      <Line
+        points={[170, 40, 170, 110, CENTER_X, CENTER_Y]}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      {/* Zigzag line */}
+      <Path
+        data="M100 75 L100 60 L90 52 L110 44 L90 36 L110 28 L100 20 L100 12"
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+        fillEnabled={false}
+      />
+
+      {/* Top cap */}
+      <Rect x={CAP_X} y={CAP_Y} width={CAP_W} height={CAP_H} fill={stroke} />
+
+      {/* ===== TOP anchor for connectors ===== */}
+      {showAnchors && (
+        <Circle
+          x={TOP_ANCHOR_X}
+          y={TOP_ANCHOR_Y}
+          radius={ANCHOR_R}
+          fill="#fff"
+          stroke={stroke}
+          strokeWidth={2}
+          listening
+          onMouseEnter={() => {
+            document.body.style.cursor = "crosshair";
+            onAnchorHover?.({
+              id: "top",
+              x: TOP_ANCHOR_X,
+              y: TOP_ANCHOR_Y,
+            });
+          }}
+          onMouseLeave={() => {
+            document.body.style.cursor = "default";
+            onAnchorHover?.(null);
+          }}
+          onMouseDown={(e) => (e.cancelBubble = true)}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            onAnchorClick?.({
+              id: "top",
+              x: TOP_ANCHOR_X,
+              y: TOP_ANCHOR_Y,
+            });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+## 🧠 Як це інтегрується в твою систему конекторів
+
+```js
+onAnchorClick={({ id, x, y }) => {
+  startConnector({
+    elementId: el.id,
+    anchorId: id, // "top"
+    x,
+    y,
+  });
+}}
+```
+
+---
+
+## 🔜 Наступний правильний крок
+
+Ти вже майже на фініші з архітектурою 👇
+Рекомендую далі:
+
+1. 🔹 стандартизувати `getAnchorPoints(el)` для **всіх символів**
+2. 🔹 типи anchor-ів (`in | out | both`)
+3. 🔹 автоматичне підсвічування “дозволених” anchor-ів при перетягуванні лінії
+
+Якщо хочеш — наступним повідомленням зробимо **єдиний AnchorLayer** для всіх елементів (як у draw.io / Visio).

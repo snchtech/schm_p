@@ -1,0 +1,181 @@
+Ок, це **`pages/api/rest/refreshtokens.js`** (оновлення **REMOTE** access/refresh + генерація `etlsUser`).
+
+### ✅ Куди переносимо
+
+Ти вже маєш у новій структурі `/api/rest/*`, тому:
+
+✅ **NEW:** `src/app/api/rest/refreshtokens/route.js`
+
+(і важливо: цей endpoint повертає **newAccessToken/newRefreshToken/newEtlsUser** і ставить cookies)
+
+---
+
+## 1) Відновлений код зі скрінів (як було)
+
+```js
+import { NextResponse } from 'next/server'
+import { SignJWT } from 'jose'
+import { parse } from 'cookie'
+export const runtime = 'edge'
+
+const REMOTE_API = process.env.MAIN_API_URL
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+const EXPIRES_IN_ACCESS_ETLS = parseInt(process.env.ETLS_ACCESS_EXPIRE_TIME)
+const EXPIRES_IN_REFRESH_ETLS = parseInt(process.env.ETLS_REFRESH_EXPIRE_TIME)
+
+export default async function refreshRestToken(req, res, next) {
+  try {
+    // Отримуємо cookies
+    const cookieStore = req.cookies
+    const refreshToken = cookieStore.get('refreshToken')?.value
+
+    // якщо немає refresh token
+    if (!refreshToken) {
+      console.warn('No refresh token available')
+      return null
+    }
+
+    // Запит на оновлення токенів у REMOTE_API
+    const refreshResponse = await fetch(`${REMOTE_API}/api/auth/refresh`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `refreshToken=${refreshToken}`,
+      },
+    })
+
+    if (!refreshResponse.ok) {
+      console.error('Failed to refresh token')
+      return null
+    }
+
+    // Отримуємо нові токени та userData з API
+    const refreshedData = await refreshResponse.json()
+    const newAccessToken = refreshedData.accessToken
+    const newRefreshToken = refreshedData.refreshToken
+    const userData = refreshedData.user
+
+    // Генеруємо `userDataEtls` через `jose`
+    const newEtlsUser = await new SignJWT(userData)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    // Формуємо відповідь із оновленими токенами у `Set-Cookie`
+    const response = NextResponse.json({
+      newAccessToken,
+      newRefreshToken,
+      newEtlsUser,
+    })
+
+    response.headers.set(
+      'Set-Cookie',
+      [
+        `accessToken=${newAccessToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshToken=${newRefreshToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `etlsUser=${newEtlsUser}; HttpOnly; Path=/; Max-Age=43200`,
+      ].join(', ')
+    )
+
+    return response
+  } catch (error) {
+    console.error('Error refreshing tokens:', error)
+    return null
+  }
+}
+```
+
+> `parse` з `cookie` тут не використовується — у новій версії викидаємо.
+
+---
+
+## 2) Нова версія під App Router
+
+✅ **NEW:** `src/app/api/rest/refreshtokens/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
+import { SignJWT } from 'jose'
+
+export const runtime = 'edge'
+
+const REMOTE_API = process.env.MAIN_API_URL
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const EXPIRES_IN_REFRESH_ETLS = Number(process.env.ETLS_REFRESH_EXPIRE_TIME || 0)
+
+const COOKIE_MAX_AGE = 43200 // 12 год
+
+export async function POST() {
+  try {
+    const cookieStore = cookies()
+    const refreshToken = cookieStore.get('refreshToken')?.value
+
+    if (!refreshToken) {
+      return NextResponse.json({ error: 'No refresh token available' }, { status: 401 })
+    }
+
+    // REMOTE refresh
+    const refreshResponse = await fetch(`${REMOTE_API}/api/auth/refresh`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `refreshToken=${refreshToken}`,
+      },
+    })
+
+    if (!refreshResponse.ok) {
+      return NextResponse.json({ error: 'Failed to refresh token' }, { status: 401 })
+    }
+
+    const refreshedData = await refreshResponse.json()
+    const newAccessToken = refreshedData.accessToken
+    const newRefreshToken = refreshedData.refreshToken
+    const userData = refreshedData.user
+
+    const newEtlsUser = await new SignJWT(userData)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const res = NextResponse.json({
+      newAccessToken,
+      newRefreshToken,
+      newEtlsUser,
+    })
+
+    const common = {
+      httpOnly: true,
+      path: '/',
+      maxAge: COOKIE_MAX_AGE,
+      sameSite: 'lax',
+      // secure: true, // в проді
+    }
+
+    res.cookies.set('accessToken', newAccessToken, common)
+    res.cookies.set('refreshToken', newRefreshToken, common)
+    res.cookies.set('etlsUser', newEtlsUser, common)
+
+    return res
+  } catch (error) {
+    console.error('Error refreshing tokens:', error)
+    return NextResponse.json({ error: 'Request failed' }, { status: 500 })
+  }
+}
+```
+
+### Чому `POST`, а не `GET`?
+
+У старій структурі ти викликав це з серверної логіки і воно **змінює cookies**, тому **POST логічніше**. Якщо у тебе вже є виклики саме GET — скажеш, і я дам GET-варіант (це одна стрічка зміни `export async function GET()`).
+
+---
+
+## 3) Підсумок
+
+* **OLD:** `pages/api/rest/refreshtokens.js`
+* **NEW:** `src/app/api/rest/refreshtokens/route.js`
+
+Кидай наступний файл — ідеально: **`pages/api/rest/refreshresttokens.js`** (бо твій `/api/auth/refreshtoken` саме його викликає).

@@ -1,0 +1,219 @@
+Нижче — **розпізнаний код `AlbumsReport.js` зі скрінів** і **куди його покласти в новій структурі** (без “вигадування” зайвого — лише те, що видно на зображеннях, + мінімальні технічні правки, щоб файл реально збирався).
+
+---
+
+## 1) Новий шлях у структурі
+
+**Було:**
+
+* `app/components/albums/AlbumsReport.js`
+
+**Стає (пропозиція під твою структуру features):**
+
+* `src/features/albums/ui/AlbumsReport.js`
+
+> Якщо ти хочеш тримати все тільки в `scheme-editor`, тоді можна:
+> `src/features/scheme-editor/ui/albums/AlbumsReport.js`
+> але логічніше винести “albums” окремою фічею.
+
+---
+
+## 2) Розпізнаний код (готовий файл)
+
+```jsx
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/router'
+
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TablePagination,
+} from '@mui/material'
+
+import { Visibility, Edit, Delete } from '@mui/icons-material'
+
+import { RoleProtectedComponent } from '@/app/components/HOC/roleProtected'
+import { archiveAlbum } from '@/utils/api'
+
+export default function AlbumsReport({ albums, statuses, mode }) {
+  const router = useRouter()
+  const [selectedAlbum, setSelectedAlbum] = useState(null)
+  const [isArchiveModalOpen, setIsArchiveModalOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const rowsPerPage = 15
+
+  // Перехід на сторінку альбому в режимах viewer/editor
+  const handleViewClick = (albumId) => {
+    router.push(`/albums/${albumId}?mode=viewer`)
+  }
+
+  const handleEditClick = (albumId) => {
+    router.push(`/albums/${albumId}?mode=editor`)
+  }
+
+  // Відкриває модальне вікно підтвердження архівації
+  const handleArchiveClick = (album) => {
+    setSelectedAlbum(album)
+    setIsArchiveModalOpen(true)
+  }
+
+  // Запит до API для оновлення статусу альбому на "Архів"
+  const confirmArchiveAlbum = async () => {
+    if (!selectedAlbum) return
+
+    try {
+      await archiveAlbum(selectedAlbum.ALBUM_ID) // Запит до API
+      setIsArchiveModalOpen(false)
+      router.reload() // Оновлення сторінки після архівації
+    } catch (error) {
+      console.error('Error archiving album:', error)
+    }
+  }
+
+  // Обробка зміни сторінки
+  const handleChangePage = (event, newPage) => {
+    setPage(newPage)
+  }
+
+  // Відображати тільки альбоми для поточної сторінки
+  const paginatedAlbums = (albums || []).slice(
+    page * rowsPerPage,
+    (page + 1) * rowsPerPage,
+  )
+
+  return (
+    <>
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Перегляд</TableCell>
+              <TableCell>ID</TableCell>
+              <TableCell>Відділ</TableCell>
+              <TableCell>Unit</TableCell>
+              <TableCell>Назва</TableCell>
+              <TableCell>Опис</TableCell>
+              <TableCell>Дата створення/оновлення</TableCell>
+
+              <RoleProtectedComponent roles={['Editor']}>
+                <TableCell>Дії</TableCell>
+              </RoleProtectedComponent>
+            </TableRow>
+          </TableHead>
+
+          <TableBody>
+            {paginatedAlbums.map((album) => (
+              <TableRow key={`album-${album.ALBUM_ID}`}>
+                {/* Перегляд альбому */}
+                <TableCell>
+                  <IconButton
+                    color="primary"
+                    onClick={() => handleViewClick(album.ALBUM_ID)}
+                  >
+                    <Visibility />
+                  </IconButton>
+                </TableCell>
+
+                <TableCell>{album.ALBUM_ID}</TableCell>
+                <TableCell>{album.DEPART_SHORT_NAME}</TableCell>
+                <TableCell>{album.UNIT_NAME}</TableCell>
+                <TableCell>{album.NAME}</TableCell>
+                <TableCell>{album.ALBUM_DESCRIPTION}</TableCell>
+                <TableCell>{album.ALBUM_UPDATED_AT}</TableCell>
+
+                {/* Дії для ролі editor */}
+                <RoleProtectedComponent roles={['Editor']}>
+                  <TableCell>
+                    <IconButton
+                      color="warning"
+                      onClick={() => handleEditClick(album.ALBUM_ID)}
+                    >
+                      <Edit />
+                    </IconButton>
+
+                    <IconButton
+                      color="error"
+                      onClick={() => handleArchiveClick(album)}
+                    >
+                      <Delete />
+                    </IconButton>
+                  </TableCell>
+                </RoleProtectedComponent>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      {/* Пагінація (відображається тільки якщо більше 15 альбомів) */}
+      {albums?.length > rowsPerPage && (
+        <TablePagination
+          component="div"
+          count={albums.length}
+          page={page}
+          rowsPerPage={rowsPerPage}
+          rowsPerPageOptions={[rowsPerPage]}
+          onPageChange={handleChangePage}
+        />
+      )}
+
+      {/* Модальне вікно архівації */}
+      <Dialog open={isArchiveModalOpen} onClose={() => setIsArchiveModalOpen(false)}>
+        <DialogTitle>Архівація альбому</DialogTitle>
+        <DialogContent>
+          Ви точно бажаєте перемістити альбом <b>{selectedAlbum?.NAME}</b> в архів?
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setIsArchiveModalOpen(false)} color="secondary">
+            Відмінити
+          </Button>
+          <Button onClick={confirmArchiveAlbum} color="primary" variant="contained">
+            Так
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  )
+}
+```
+
+### Мінімальні правки (щоб не ламалось)
+
+* Додав **`'use client'`**, бо є хуки + `next/router`.
+* Додав імпорти **`useState`** і **`useRouter`**, бо на скрінах верх файлу був обрізаний, а без них не збереться.
+* В таблиці на скрінах було `albums.map(...)` навіть при наявності `paginatedAlbums` — я зробив **мапу по `paginatedAlbums`**, щоб пагінація реально працювала.
+* У діалозі на скрінах було `selectedAlbum?.name`, але у даних зверху ти використовуєш `album.NAME`, тому я поставив **`selectedAlbum?.NAME`**.
+
+---
+
+## 3) Що треба перевірити у тебе в проекті після переносу
+
+1. Чи існує шлях імпорту:
+
+* `@/app/components/HOC/roleProtected`
+* `@/utils/api`
+
+Якщо ти теж переносиш HOC/утиліти у `shared/` або `features/`, тоді я підкажу точні нові імпорти під твої реальні шляхи.
+
+---
+
+Якщо наступним кроком ти хочеш — я так само “1-в-1 зі скрінів” перенесу:
+
+* `NewSchemeModal.js`
+* `SchemeReport.js`
+* `AlbumsFilter.js`
+
+…у відповідні папки `src/features/...` (і одразу підправлю імпорти під нові місця).

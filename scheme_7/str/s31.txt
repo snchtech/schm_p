@@ -1,0 +1,151 @@
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Group, Rect, Line, Shape, Circle } from "react-konva";
+
+/**
+ * MonitorCrossIcon (react-konva)
+ * - Малює еквівалент твого SVG через Rect/Line/Shape
+ * - Додає точку прив’язки (anchor) на верхньому прямокутнику (по центру)
+ *
+ * Props:
+ *  x, y            — позиція групи
+ *  scale           — масштаб іконки (default 1)
+ *  stroke          — колір ліній
+ *  strokeWidth     — товщина ліній
+ *  onAnchorClick   — (info) => void, info = { anchorId, x, y }
+ *  showAnchors     — показувати anchor (default true)
+ */
+export default function MonitorCrossIcon({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 2.5,
+  showAnchors = true,
+  onAnchorClick,
+}) {
+  // Оригінальний viewBox: 0 0 65 62
+  const vb = useMemo(() => ({ w: 65, h: 62 }), []);
+
+  // Геометрія верхнього прямокутника (як у svg)
+  const topRect = useMemo(
+    () => ({ x: 10, y: 2, w: 48, h: 18 }),
+    [],
+  );
+
+  // Точка прив’язки: по центру верхнього прямокутника (можеш змінити на top-center edge, якщо треба)
+  // center:
+  const anchor = useMemo(
+    () => ({
+      id: "anchor-top-rect-center",
+      x: topRect.x + topRect.w / 2,
+      y: topRect.y + topRect.h / 2,
+    }),
+    [topRect],
+  );
+
+  // Візуальний розмір точки — в “координатах viewBox”, щоб нормально масштабувалось через Group scale
+  const anchorRadius = 3.2;
+
+  const handleAnchorClick = (e) => {
+    e.cancelBubble = true;
+    onAnchorClick?.({
+      anchorId: anchor.id,
+      // Віддаємо координати в локальній системі координат іконки (до scale та x/y групи)
+      x: anchor.x,
+      y: anchor.y,
+    });
+  };
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* monitor outline */}
+      <Rect
+        x={topRect.x}
+        y={topRect.y}
+        width={topRect.w}
+        height={topRect.h}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {/* monitor top bar fill */}
+      <Rect
+        x={topRect.x}
+        y={topRect.y}
+        width={topRect.w}
+        height={8}
+        fill={stroke}
+        strokeEnabled={false}
+      />
+
+      {/* stand */}
+      <Line
+        points={[34, 20, 34, 45]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="square"
+      />
+
+      {/* triangles */}
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(2, 32);
+          ctx.lineTo(2, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(62, 32);
+          ctx.lineTo(62, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+
+      {/* diagonals */}
+      <Line points={[2, 58, 62, 32]} stroke={stroke} strokeWidth={strokeWidth} />
+      <Line points={[62, 58, 2, 32]} stroke={stroke} strokeWidth={strokeWidth} />
+
+      {/* anchor */}
+      {showAnchors && (
+        <Circle
+          x={anchor.x}
+          y={anchor.y}
+          radius={anchorRadius}
+          fill="white"
+          stroke={stroke}
+          strokeWidth={Math.max(1, strokeWidth * 0.6)}
+          onMouseDown={(e) => e.cancelBubble = true}
+          onClick={handleAnchorClick}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо ти під “точкою прив’язки” мав на увазі **не центр**, а **точно верхній край по центру** (top-center edge), просто заміни `y` тут:
+
+```js
+y: topRect.y  // замість topRect.y + topRect.h / 2
+```
+
+Хочеш, щоб ця точка одразу працювала як anchor для конектора (hover, snap, курсор, тощо) — скажи, під твою поточну архітектуру (getAnchorPoints / hoveredAnchor / handleAnchorClick) підключу правильно.

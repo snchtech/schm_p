@@ -1,0 +1,91 @@
+Так, це **API route** зі старого Pages Router:
+**OLD:** `pages/api/auth/get-user.js`
+
+У новій структурі (App Router) це має стати **Route Handler**:
+
+✅ **NEW:** `src/app/api/auth/get-user/route.js`
+
+Також тут є важлива правка: у Route Handler **нема `req.cookies.get()`** як у middleware/edge. Там cookies читаються через `cookies()` з `next/headers` (або через `req.headers.get('cookie')` і `cookie.parse`, але це зайве).
+
+Нижче даю 1) відновлений код з твого скріну, 2) правильну версію під App Router.
+
+---
+
+## 1) Відновлений код зі скріну (як було)
+
+```js
+import { NextResponse } from 'next/server'
+//import { cookies } from 'next/headers'
+import { jwtVerify } from 'jose'
+export const runtime = 'edge'
+import { parse } from 'cookie'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+
+export default async function getUser(req) {
+  try {
+    // const cookieStore = cookies
+    // const etlsUser = cookieStore.get('etlsUser')?.value
+
+    //console.log(cookieStore, 'cookie on api next')
+    const etlsUser = req.cookies.get('etlsUser')?.value
+
+    if (!etlsUser) {
+      return NextResponse.json({ error: 'No user data available' }, { status: 401 })
+    }
+
+    // Верифікація `userDataEtls` через `jose`
+    const { payload } = await jwtVerify(etlsUser, ETLS_ACCESS)
+
+    return NextResponse.json({ userData: payload })
+  } catch (error) {
+    console.error('Error verifying etlsUser:', error)
+    return NextResponse.json({ error: 'Invalid user data' }, { status: 401 })
+  }
+}
+```
+
+---
+
+## 2) Нова структура + правильний Route Handler
+
+### ✅ NEW FILE: `src/app/api/auth/get-user/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
+import { jwtVerify } from 'jose'
+
+export const runtime = 'edge'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+
+export async function GET() {
+  try {
+    const cookieStore = cookies()
+    const etlsUser = cookieStore.get('etlsUser')?.value
+
+    if (!etlsUser) {
+      return NextResponse.json({ error: 'No user data available' }, { status: 401 })
+    }
+
+    const { payload } = await jwtVerify(etlsUser, ETLS_ACCESS)
+
+    return NextResponse.json({ userData: payload })
+  } catch (error) {
+    console.error('Error verifying etlsUser:', error)
+    return NextResponse.json({ error: 'Invalid user data' }, { status: 401 })
+  }
+}
+```
+
+---
+
+## 3) Що можна прибрати / уточнення
+
+* `import { parse } from 'cookie'` — **не потрібно**, якщо читаємо cookie через `cookies()`.
+* В App Router **немає `export default function`** для API — тільки `export async function GET/POST/...`.
+
+---
+
+Кидай наступний API файл/скрін ✅

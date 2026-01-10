@@ -1,0 +1,172 @@
+Ок, працюю **лише** з тим, що видно на скрінах.
+
+Нижче я **розпізнав код** `AlbumsFilter.js` і **розклав** його під нову структуру (аналогічну до `features/scheme-editor`, але для фічі альбомів).
+
+---
+
+## 1) Розпізнаний код із знімків (повний файл)
+
+### ✅ Нова локація
+
+`src/features/albums/ui/filters/AlbumsFilter.js`
+
+```js
+import { useEffect, useState } from "react";
+import { Paper, Box, TextField, MenuItem } from "@mui/material";
+import { fetchAlbumFilterOptions } from "@/utils/api";
+
+export default function AlbumsFilters({ onFilterChange }) {
+  const [departments, setDepartments] = useState([]);
+  const [units, setUnits] = useState([]);
+  const [statuses, setStatuses] = useState([]);
+
+  const [selectedDepartment, setSelectedDepartment] = useState("");
+  const [selectedUnit, setSelectedUnit] = useState("");
+  const [selectedStatus, setSelectedStatus] = useState(""); // Виправлено
+
+  useEffect(() => {
+    async function loadFilterData() {
+      const data = await fetchAlbumFilterOptions();
+      setDepartments(data.departments);
+      setUnits(data.units);
+      setStatuses(data.statuses);
+    }
+    loadFilterData();
+  }, []);
+
+  useEffect(() => {
+    onFilterChange({
+      department: selectedDepartment,
+      unit: selectedUnit,
+      status: selectedStatus,
+    });
+  }, [selectedDepartment, selectedUnit, selectedStatus]);
+
+  return (
+    <Paper sx={{ p: 2, mb: 2 }}>
+      <Box display="flex" gap={2}>
+        {/* Фільтр по відділу */}
+        <TextField
+          select
+          label="Відділ"
+          fullWidth
+          value={selectedDepartment}
+          onChange={(e) => setSelectedDepartment(e.target.value)}
+        >
+          <MenuItem value="">Всі</MenuItem>
+          {departments.map((dep) => (
+            <MenuItem key={dep.id} value={dep.id}>
+              {dep.name}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {/* Фільтр по підрозділу */}
+        <TextField
+          select
+          label="Підрозділ"
+          fullWidth
+          value={selectedUnit}
+          onChange={(e) => setSelectedUnit(e.target.value)}
+        >
+          <MenuItem value="">Всі</MenuItem>
+          {units.map((unit) => (
+            <MenuItem key={unit.id} value={unit.id}>
+              {unit.name}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {/* Фільтр по статусу */}
+        <TextField
+          select
+          label="Статус"
+          fullWidth
+          value={selectedStatus}
+          onChange={(e) => setSelectedStatus(e.target.value)}
+        >
+          <MenuItem value="">Всі</MenuItem>
+          {statuses.map((status) => (
+            <MenuItem key={status.id} value={status.id}>
+              {status.name}
+            </MenuItem>
+          ))}
+        </TextField>
+      </Box>
+    </Paper>
+  );
+}
+```
+
+> Примітка: на скріні видно `fetchAlbumFilterOptions` імпорт із `@/utils/api`, але не видно `useState/useEffect/Paper/Box/TextField/MenuItem` — я їх додав як **обов’язкові** для того JSX, який є на зображенні.
+
+---
+
+## 2) Як “розподілити” у новій структурі проєкту
+
+Твоя нова структура описана для `scheme-editor`, але цей компонент логічно належить до **альбомів**. Тому робимо окрему фічу `albums` (точно таким самим підходом, як `scheme-editor`).
+
+### ✅ Рекомендована структура для цього компонента
+
+```
+src
+--features
+----albums
+------ui
+--------filters
+----------AlbumsFilter.js
+--------index.js
+------model
+--------api
+----------fetchAlbumFilterOptions.js   (опційно, якщо хочеш забрати з "@/utils/api")
+```
+
+### Варіант А (мінімальні зміни) — лишаємо як є
+
+Компонент залишається з:
+
+```js
+import { fetchAlbumFilterOptions } from "@/utils/api";
+```
+
+і просто переносимо `AlbumsFilter.js` у:
+`src/features/albums/ui/filters/AlbumsFilter.js`
+
+### Варіант Б (правильніше по “feature-based”) — винести API у фічу
+
+1. Створюєш файл:
+   `src/features/albums/model/api/fetchAlbumFilterOptions.js`
+
+```js
+import { fetchAlbumFilterOptions as fetchAlbumFilterOptionsFromUtils } from "@/utils/api";
+
+export async function fetchAlbumFilterOptions() {
+  return fetchAlbumFilterOptionsFromUtils();
+}
+```
+
+2. І тоді в компоненті міняєш імпорт на:
+
+```js
+import { fetchAlbumFilterOptions } from "@/features/albums/model/api/fetchAlbumFilterOptions";
+```
+
+---
+
+## 3) Зручний ре-експорт (щоб імпорти були короткі)
+
+### `src/features/albums/ui/index.js`
+
+```js
+export { default as AlbumsFilter } from "./filters/AlbumsFilter";
+```
+
+Тоді можна імпортувати так:
+
+```js
+import { AlbumsFilter } from "@/features/albums/ui";
+```
+
+---
+
+Якщо далі ти скинеш наступний файл у форматі “назва+старий шлях + скріни 1,2,3…”, я так само: **розпізнаю код** і **розкладу по новій структурі**.

@@ -1,0 +1,239 @@
+Ок, це **`pages/api/auth/refreshtoken.js`**. Переносимо в App Router як:
+
+✅ **NEW:** `src/app/api/auth/refreshtoken/route.js`
+
+Тут одразу 2 важливі правки під App Router:
+
+1. `req.cookies.get(...)` в route handler **не завжди працює як ти очікуєш** — стабільно читаємо через `cookies()` з `next/headers`, або беремо `req.headers.get('cookie')` і парсимо.
+2. `Set-Cookie` через `.join(', ')` — **неправильно**. Ставимо через `response.cookies.set()`.
+
+І ще: у твоєму коді є `logoutUser(req)` з `utils/auth` — у App Router краще робити локальну “logout-відповідь” прямо тут (очистити cookies + 401), щоб не тягнути залежність від старого utils.
+
+---
+
+## 1) Відновлений код зі скрінів (як було)
+
+> **OLD:** `pages/api/auth/refreshtoken.js`
+
+```js
+export const runtime = 'edge'
+import { NextResponse } from 'next/server'
+import { jwtVerify, SignJWT } from 'jose'
+import { logoutUser } from '../../../../utils/auth'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+const EXPIRES_IN_ACCESS_ETLS = parseInt(process.env.ETLS_ACCESS_EXPIRE_TIME)
+const EXPIRES_IN_REFRESH_ETLS = parseInt(process.env.ETLS_REFRESH_EXPIRE_TIME)
+
+export default async function POST(req, res, next) {
+  try {
+    // Отримуємо cookies
+    const cookieStore = req.cookies
+    const refreshTokenEtls = cookieStore.get('refreshTokenEtls')?.value
+
+    // якщо refresh token відсутній
+    if (!refreshTokenEtls) {
+      //return NextResponse.json({ error: 'No refresh token provided' }, { status: 401 })
+      return logoutUser(req)
+    }
+
+    // Оновлюємо токени на API
+    const refreshedAPITokens = await fetch(`${req.nextUrl.origin}/api/rest/refreshresttokens`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: req.headers.get('cookie') || '',
+      },
+    })
+
+    // **Додаємо логування типу контенту**
+    const contentType = refreshedAPITokens.headers.get('content-type') || 'unknown'
+    console.log(`🔴 Refresh token response content-type: ${contentType}`)
+
+    if (!refreshedAPITokens.ok) {
+      console.error('🔴 Refresh token request failed with status:', refreshedAPITokens.status)
+      return logoutUser(req)
+    }
+
+    // **Перевіряємо, чи відповідає сервер у JSON-форматі**
+    if (!contentType.includes('application/json')) {
+      console.error(
+        '🔴 Server did not return JSON, possible error page:',
+        await refreshedAPITokens.text()
+      )
+      return logoutUser(req)
+    }
+
+    const refreshTokenData = await refreshedAPITokens.json()
+    const newAccessToken = refreshTokenData.newAccessToken
+    const newRefreshToken = refreshTokenData.newRefreshToken
+    const newEtlsUser = refreshTokenData.newEtlsUser
+
+    // Перевіряємо refreshTokenEtls
+    const { payload } = await jwtVerify(refreshTokenEtls, ETLS_REFRESH)
+
+    // Генеруємо нові токени
+    const newAccessTokenEtls = await new SignJWT({ username: payload.username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const newRefreshTokenEtls = await new SignJWT({ username: payload.username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    // Формуємо відповідь з новими токенами + cookies
+    const response = NextResponse.json({
+      message: 'Tokens refreshed',
+      newAccessTokenEtls: newAccessTokenEtls,
+      newRefreshTokenEtls: newRefreshTokenEtls,
+      newAccessToken: newAccessToken,
+      newRefreshToken: newRefreshToken,
+      newEtlsUser: newEtlsUser,
+    })
+
+    response.headers.set(
+      'Set-Cookie',
+      [
+        `accessTokenEtls=${newAccessTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshTokenEtls=${newRefreshTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `accessToken=${newAccessToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshToken=${newRefreshToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `etlsUser=${newEtlsUser}; HttpOnly; Path=/; Max-Age=43200`,
+      ].join(', ')
+    )
+
+    return response
+  } catch (error) {
+    console.error('Failed to refresh tokens:', error)
+    return NextResponse.json({ error: 'Invalid refresh token' }, { status: 401 })
+  }
+}
+```
+
+---
+
+## 2) Нова версія під App Router
+
+✅ **NEW:** `src/app/api/auth/refreshtoken/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
+import { jwtVerify, SignJWT } from 'jose'
+
+export const runtime = 'edge'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+
+const EXPIRES_IN_ACCESS_ETLS = Number(process.env.ETLS_ACCESS_EXPIRE_TIME || 0)
+const EXPIRES_IN_REFRESH_ETLS = Number(process.env.ETLS_REFRESH_EXPIRE_TIME || 0)
+
+const COOKIE_MAX_AGE = 43200 // 12 год
+
+function logoutResponse() {
+  const res = NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const opts = { path: '/', maxAge: 0 }
+  res.cookies.set('accessToken', '', opts)
+  res.cookies.set('refreshToken', '', opts)
+  res.cookies.set('accessTokenEtls', '', opts)
+  res.cookies.set('refreshTokenEtls', '', opts)
+  res.cookies.set('etlsUser', '', opts)
+
+  return res
+}
+
+export async function POST(req) {
+  try {
+    const cookieStore = cookies()
+    const refreshTokenEtls = cookieStore.get('refreshTokenEtls')?.value
+
+    if (!refreshTokenEtls) {
+      return logoutResponse()
+    }
+
+    // Тягнемо refresh із твого внутрішнього API (proxy), передаючи cookies користувача
+    const origin = new URL(req.url).origin
+
+    const refreshedAPITokens = await fetch(`${origin}/api/rest/refreshresttokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: req.headers.get('cookie') || '',
+      },
+    })
+
+    const contentType = refreshedAPITokens.headers.get('content-type') || 'unknown'
+    console.log(`🔴 Refresh token response content-type: ${contentType}`)
+
+    if (!refreshedAPITokens.ok) {
+      console.error('🔴 Refresh token request failed with status:', refreshedAPITokens.status)
+      return logoutResponse()
+    }
+
+    if (!contentType.includes('application/json')) {
+      console.error('🔴 Server did not return JSON, possible error page:', await refreshedAPITokens.text())
+      return logoutResponse()
+    }
+
+    const refreshTokenData = await refreshedAPITokens.json()
+    const newAccessToken = refreshTokenData.newAccessToken
+    const newRefreshToken = refreshTokenData.newRefreshToken
+    const newEtlsUser = refreshTokenData.newEtlsUser
+
+    // Перевірка refreshTokenEtls (внутрішнього)
+    const { payload } = await jwtVerify(refreshTokenEtls, ETLS_REFRESH)
+
+    const newAccessTokenEtls = await new SignJWT({ username: payload.username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const newRefreshTokenEtls = await new SignJWT({ username: payload.username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    const response = NextResponse.json({ message: 'Tokens refreshed' })
+
+    const common = {
+      httpOnly: true,
+      path: '/',
+      maxAge: COOKIE_MAX_AGE,
+      sameSite: 'lax',
+      // secure: true, // в проді
+    }
+
+    response.cookies.set('accessTokenEtls', newAccessTokenEtls, common)
+    response.cookies.set('refreshTokenEtls', newRefreshTokenEtls, common)
+    response.cookies.set('accessToken', newAccessToken, common)
+    response.cookies.set('refreshToken', newRefreshToken, common)
+    response.cookies.set('etlsUser', newEtlsUser, common)
+
+    return response
+  } catch (error) {
+    console.error('Failed to refresh tokens:', error)
+    return logoutResponse()
+  }
+}
+```
+
+---
+
+## 3) Що тепер робити зі старим `logoutUser`
+
+* Якщо цей `logoutUser` використовується ще десь (middleware або інші API) — тоді ми або:
+
+  * переносимо його в `src/shared/auth/logoutResponse.js`, або
+  * робимо окремий route `/api/auth/logout` і всюди редіректимо туди.
+
+Але для цього файлу вже достатньо локальної `logoutResponse()`.
+
+---
+
+Кидай наступний файл зі старої auth-гілки (`utils/auth`, `refreshresttokens`, `customfetch`, middleware.js) — і ми доведемо весь auth-контур до однієї чистої схеми без дублювання коду.

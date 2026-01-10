@@ -1,0 +1,180 @@
+Ок — ці два файли теж треба **перенести з `app/components/...` у `src/features/...`** і **виправити JSX**, бо зараз там рядок тексту без обгортки (це помилка).
+
+Нижче даю **готові робочі файли** під “нову структуру” (аналогічно до `SchemeInfoCard`), + короткі імпорти через `index.js`.
+
+---
+
+## ✅ 1) `SchemeSelector`
+
+### Шлях
+
+`src/features/scheme-editor/ui/sidebar/SchemeSelector/SchemeSelector.js`
+
+```jsx
+"use client";
+
+import React, { useMemo, useState } from "react";
+import { Box, TextField, Typography, List, ListItemButton, ListItemText } from "@mui/material";
+
+/**
+ * SchemeSelector
+ * Призначення: вибір схеми/аркуша (пізніше підключиш API).
+ *
+ * props:
+ *  schemes: [{ id, name, sheetNumber }]  // масив для списку
+ *  selectedId: string|number
+ *  onSelect: (scheme) => void
+ */
+export default function SchemeSelector({
+  schemes = [],
+  selectedId = "",
+  onSelect,
+}) {
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return schemes;
+
+    return schemes.filter((s) => {
+      const name = String(s.name ?? "").toLowerCase();
+      const id = String(s.id ?? "").toLowerCase();
+      const sheet = String(s.sheetNumber ?? "").toLowerCase();
+      return name.includes(q) || id.includes(q) || sheet.includes(q);
+    });
+  }, [schemes, query]);
+
+  return (
+    <Box sx={{ p: 1 }}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+        Вибір схеми
+      </Typography>
+
+      <TextField
+        fullWidth
+        size="small"
+        label="Пошук (назва / id / № аркуша)"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        sx={{ mb: 1.5 }}
+      />
+
+      <List dense sx={{ p: 0 }}>
+        {filtered.map((s) => {
+          const primary = s.name ?? `Схема #${s.id}`;
+          const secondary = [
+            s.sheetNumber ? `Аркуш: ${s.sheetNumber}` : null,
+            s.id ? `ID: ${s.id}` : null,
+          ]
+            .filter(Boolean)
+            .join(" • ");
+
+          return (
+            <ListItemButton
+              key={s.id}
+              selected={String(selectedId) === String(s.id)}
+              onClick={() => onSelect?.(s)}
+              sx={{ borderRadius: 1 }}
+            >
+              <ListItemText primary={primary} secondary={secondary} />
+            </ListItemButton>
+          );
+        })}
+
+        {!filtered.length && (
+          <Typography variant="body2" sx={{ opacity: 0.7, mt: 1 }}>
+            Нічого не знайдено
+          </Typography>
+        )}
+      </List>
+    </Box>
+  );
+}
+```
+
+### Індекс
+
+`src/features/scheme-editor/ui/sidebar/SchemeSelector/index.js`
+
+```js
+export { default } from "./SchemeSelector";
+```
+
+---
+
+## ✅ 2) `StandardElements`
+
+### Шлях
+
+`src/features/scheme-editor/ui/sidebar/StandardElements/StandardElements.js`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, Typography, Stack, IconButton, Tooltip } from "@mui/material";
+import CropSquareIcon from "@mui/icons-material/CropSquare";
+import CircleOutlinedIcon from "@mui/icons-material/CircleOutlined";
+
+/**
+ * StandardElements
+ * Призначення: набір стандартних елементів (rect/circle).
+ *
+ * props:
+ *  onAddElement: (payload) => void
+ *    payload example:
+ *      { type: "rect" } або { type: "circle" }
+ */
+export default function StandardElements({ onAddElement }) {
+  return (
+    <Box sx={{ p: 1 }}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+        Стандартні елементи
+      </Typography>
+
+      <Stack direction="row" spacing={1} flexWrap="wrap">
+        <Tooltip title="Прямокутник">
+          <IconButton
+            size="small"
+            onClick={() => onAddElement?.({ type: "rect" })}
+            sx={{ border: "1px solid #ccc", borderRadius: 1 }}
+          >
+            <CropSquareIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+
+        <Tooltip title="Коло">
+          <IconButton
+            size="small"
+            onClick={() => onAddElement?.({ type: "circle" })}
+            sx={{ border: "1px solid #ccc", borderRadius: 1 }}
+          >
+            <CircleOutlinedIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
+    </Box>
+  );
+}
+```
+
+### Індекс
+
+`src/features/scheme-editor/ui/sidebar/StandardElements/index.js`
+
+```js
+export { default } from "./StandardElements";
+```
+
+---
+
+## Як тепер імпортувати в `LeftSidebar`
+
+```js
+import SchemeSelector from "@/features/scheme-editor/ui/sidebar/SchemeSelector";
+import StandardElements from "@/features/scheme-editor/ui/sidebar/StandardElements";
+```
+
+---
+
+Якщо ти покажеш **твій актуальний `LeftSidebar.js` у новій структурі**, я одразу вставлю туди ці блоки (і підв’яжу `onAddElement` до твого `useDiagramState/useDiagramStore`, щоб при кліку реально додавався елемент на canvas).

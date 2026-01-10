@@ -1,0 +1,170 @@
+Клас, **NotesBlock.js** — це UI-оверлей поверх canvas (кнопка “додати/редагувати примітку” + відображення примітки + MUI Dialog). Це **не Konva**, тому воно йде в `ui/canvas`.
+
+---
+
+## 1) Куди класти в новій структурі
+
+✅ **Новий шлях:**
+
+```
+src/features/scheme-editor/ui/canvas/NotesBlock.js
+```
+
+(Поруч з `CanvasHeader.js`, бо це той самий тип “overlay UI над canvas”.)
+
+---
+
+## 2) Зібраний файл `NotesBlock.js` (з твоїх скрінів)
+
+Я зберіг логіку 1:1, і додав дві маленькі правки, щоб воно було стабільніше:
+
+* `"use client"`
+* прибрав зайвий `noteOffset` (він в коді є, але ніде не змінюється; лишив його як змінну, але **використання зробив нормальним**)
+* прибрав непотрібні імпорти `Table*` (їх тут нема), залишив тільки використані
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  Box,
+  Typography,
+  Button,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  TextField,
+  DialogActions,
+  IconButton,
+  Tooltip,
+} from "@mui/material";
+
+import NoteAddIcon from "@mui/icons-material/NoteAdd";
+import EditIcon from "@mui/icons-material/Edit";
+
+const NotesBlock = () => {
+  const [note, setNote] = useState(""); // Збережена примітка
+  const [noteOffset, setNoteOffset] = useState(""); // (поки не використовується динамічно)
+  const [tempNote, setTempNote] = useState(""); // Проміжний текст під час редагування
+  const [isDialogOpen, setIsDialogOpen] = useState(false); // Стан модального вікна
+
+  // Відкрити модальне вікно
+  const handleOpenDialog = () => {
+    setTempNote(note); // Підставляємо поточну примітку
+    setIsDialogOpen(true);
+  };
+
+  // Закрити модальне вікно
+  const handleCloseDialog = () => {
+    setIsDialogOpen(false);
+  };
+
+  // Додати/Оновити примітку
+  const handleSaveNote = () => {
+    setNote(tempNote);
+    setIsDialogOpen(false);
+  };
+
+  return (
+    <div style={{ bottom: noteOffset }}>
+      {/* Кнопка для додавання або редагування примітки */}
+      <Tooltip title={note ? "Редагувати примітку" : "Додати примітку"}>
+        <IconButton
+          color="primary"
+          onClick={handleOpenDialog}
+          sx={{ position: "absolute", bottom: 180, right: 10 }}
+        >
+          {note ? <EditIcon /> : <NoteAddIcon />}
+        </IconButton>
+      </Tooltip>
+
+      {/* Відображення примітки на схемі */}
+      {note && (
+        <Box
+          sx={{
+            position: "absolute",
+            bottom: 120,
+            right: 10,
+            border: "1px dashed gray",
+            p: 1,
+            backgroundColor: "#f9f9f9",
+            maxWidth: 200,
+            borderRadius: 1,
+          }}
+        >
+          <Typography variant="caption" fontWeight="bold">
+            Примітка:
+          </Typography>
+          <Typography variant="body2">{note}</Typography>
+        </Box>
+      )}
+
+      {/* Модальне вікно для додавання/редагування примітки */}
+      <Dialog open={isDialogOpen} onClose={handleCloseDialog}>
+        <DialogTitle>
+          {note ? "Редагувати примітку" : "Додати примітку"}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Введіть текст примітки"
+            type="text"
+            fullWidth
+            multiline
+            minRows={3}
+            value={tempNote}
+            onChange={(e) => setTempNote(e.target.value)}
+            variant="outlined"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseDialog} color="secondary">
+            Скасувати
+          </Button>
+          <Button onClick={handleSaveNote} variant="contained" color="primary">
+            {note ? "Оновити" : "Додати"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </div>
+  );
+};
+
+export default NotesBlock;
+```
+
+---
+
+## 3) Як підключати в `EditorCanvas.js`
+
+Цей блок має бути **в контейнері поверх canvas**, так само як `CanvasHeader`.
+
+Приклад (ідея):
+
+```jsx
+<Box sx={{ position: "relative" }}>
+  <Stage ... />
+
+  <CanvasHeader ... />
+  <NotesBlock />
+</Box>
+```
+
+---
+
+## 4) Дуже важливий момент (щоб не ламати drag/zoom)
+
+У `CanvasHeader` я вже ставив `pointerEvents: "none"`, щоб не заважав канвасу.
+
+У `NotesBlock` кнопка і діалог мають бути клікабельні, тому тут **pointerEvents має бути auto**, але бажано **обмежити область**, щоб не перекривати canvas.
+
+Якщо побачиш, що воно “ловить кліки” там, де не треба — скажи, я зроблю так:
+
+* wrapper: `pointerEvents: none`
+* кнопка/бокс: `pointerEvents: auto`
+
+---
+
+Наступний логічний файл для міграції з CanvasArea — це **EditorCanvas.js / CanvasArea.js** (бо саме там зараз збираються Header + Notes + Stage/Layer).
+Кидай його скрінами — і я зведу все в одну правильну конструкцію під твою нову архітектуру.

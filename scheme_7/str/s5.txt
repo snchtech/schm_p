@@ -1,0 +1,180 @@
+Ок, це **`pages/api/auth/login.js`**. У App Router переносимо в:
+
+✅ **NEW:** `src/app/api/auth/login/route.js`
+
+Тут важливо: у Route Handler **нема `export default`**, і **cookie краще ставити через `response.cookies.set()`**, а не вручну через `Set-Cookie` + `.join('; ')` (це ще й некоректно для кількох cookies — їх треба сетити окремими заголовками або через API cookies).
+
+Нижче: 1) зібраний код “як є”, 2) правильна версія під App Router.
+
+---
+
+## 1) Відновлений код зі скрінів (як було)
+
+> **OLD:** `pages/api/auth/login.js`
+
+```js
+import { SignJWT } from 'jose'
+import { NextResponse } from 'next/server'
+
+const MAIN_API_URL = process.env.MAIN_API_URL
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+const EXPIRES_IN_ACCESS_ETLS = parseInt(process.env.ETLS_ACCESS_EXPIRE_TIME)
+const EXPIRES_IN_REFRESH_ETLS = parseInt(process.env.ETLS_REFRESH_EXPIRE_TIME)
+
+export const config = {
+  runtime: 'edge',
+}
+
+export default async function loginRequest(req, res) {
+  try {
+    //const { username, password } = req.body
+    const { username, password } = await req.json()
+
+    // Запит до API
+    const apiResponse = await fetch(`${MAIN_API_URL}/api/auth/login`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+
+    if (!apiResponse.ok) {
+      return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
+    }
+
+    // отримуємо відповідь
+    const { accessToken, refreshToken, user } = await apiResponse.json()
+
+    // Генеруємо JWT токени
+    // Генеруємо `userDataEtls`
+    const userDataEtls = await new SignJWT(user)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    // Генерація внутрішніх токенів
+    const accessTokenEtls = await new SignJWT({ username: username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const refreshTokenEtls = await new SignJWT({ username: username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    // формуємо response з cookies
+    const response = NextResponse.json({ message: 'Login successful', user })
+
+    response.headers.set(
+      'Set-Cookie',
+      [
+        `accessToken=${accessToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshToken=${refreshToken}; HttpOnly; Path=/; Max-Age=43200`,
+        `accessTokenEtls=${accessTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `refreshTokenEtls=${refreshTokenEtls}; HttpOnly; Path=/; Max-Age=43200`,
+        `etlsUser=${userDataEtls}; HttpOnly; Path=/; Max-Age=43200`,
+      ].join('; ')
+    )
+
+    return response
+  } catch (error) {
+    console.error('failed to refresh tokens:', error)
+    return NextResponse.json({ error: 'Invalid refresh token' }, { status: 401 })
+  }
+}
+```
+
+---
+
+## 2) Нова версія для App Router (Route Handler)
+
+✅ **NEW:** `src/app/api/auth/login/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { SignJWT } from 'jose'
+
+export const runtime = 'edge'
+
+const MAIN_API_URL = process.env.MAIN_API_URL
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+
+const EXPIRES_IN_ACCESS_ETLS = Number(process.env.ETLS_ACCESS_EXPIRE_TIME || 0)
+const EXPIRES_IN_REFRESH_ETLS = Number(process.env.ETLS_REFRESH_EXPIRE_TIME || 0)
+
+// якщо хочеш окремий TTL на зовнішні токени — винеси в env
+const COOKIE_MAX_AGE = 43200 // 12 год
+
+export async function POST(req) {
+  try {
+    const { username, password } = await req.json()
+
+    const apiResponse = await fetch(`${MAIN_API_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+
+    if (!apiResponse.ok) {
+      return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
+    }
+
+    const { accessToken, refreshToken, user } = await apiResponse.json()
+
+    // userDataEtls (пакуємо user)
+    const userDataEtls = await new SignJWT(user)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_ACCESS)
+
+    // внутрішні токени (пакуємо мінімум)
+    const accessTokenEtls = await new SignJWT({ username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_ACCESS_ETLS)
+      .sign(ETLS_ACCESS)
+
+    const refreshTokenEtls = await new SignJWT({ username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+      .sign(ETLS_REFRESH)
+
+    const response = NextResponse.json({ message: 'Login successful', user })
+
+    // Важливо: кожну cookie ставимо окремо
+    const common = {
+      httpOnly: true,
+      path: '/',
+      maxAge: COOKIE_MAX_AGE,
+      sameSite: 'lax',
+      // secure: true, // увімкнути в проді (https)
+    }
+
+    response.cookies.set('accessToken', accessToken, common)
+    response.cookies.set('refreshToken', refreshToken, common)
+    response.cookies.set('accessTokenEtls', accessTokenEtls, common)
+    response.cookies.set('refreshTokenEtls', refreshTokenEtls, common)
+    response.cookies.set('etlsUser', userDataEtls, common)
+
+    return response
+  } catch (error) {
+    console.error('Login error:', error)
+    return NextResponse.json({ error: 'Login failed' }, { status: 500 })
+  }
+}
+```
+
+---
+
+## 3) Ключові зміни/зауваження
+
+* `export const config = { runtime: 'edge' }` ➜ в App Router це **`export const runtime = 'edge'`**
+* `Set-Cookie` через `.join('; ')` — **неправильно** для кількох cookies (мають бути окремі заголовки). Тому використовуємо `response.cookies.set`.
+* Я прибрав `credentials: 'include'` на серверному fetch — для бекенду це не дає користі, бо ми не прокидуємо cookies браузера на зовнішній API в цьому місці.
+
+---
+
+Кидай наступний API файл (refresh/logout/middleware або що там далі) — перенесемо так само.

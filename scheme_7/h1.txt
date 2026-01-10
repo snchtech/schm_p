@@ -1,0 +1,296 @@
+Зрозумів. У тебе зараз “скелет” **EditorCanvas.js + useDiagramState.js + DiagramSymbols.js**, і ти, ймовірно, робиш zoom/pan через трансформацію **контейнера схеми** (Layer або Group). Infinite grid по viewport “не чіпляється”, коли:
+
+* грід малюється як “скінченний прямокутник”, або
+* viewportRect рахується не з того контейнера, що зумиться, або
+* viewportRect не оновлюється при wheel/pan, або
+* грід стоїть не в тому місці дерева Konva.
+
+Нижче даю **робочий спосіб**, який гарантовано заводиться з твоєю трійкою файлів.
+
+---
+
+## Принцип, який має бути в редакторі
+
+1. Є **один контейнер світу** `world` (краще `Group`) — саме його ми **scale/position** при zoom/pan.
+2. Infinite grid малюється **в координатах world**, але тільки на прямокутнику **видимої області світу** (`viewportRectWorld`).
+3. `viewportRectWorld` оновлюється **тільки на zoom/pan/resize** (НЕ на drag елементів).
+
+---
+
+# 1) Додай утиліту для viewportRect у world-координатах
+
+`shared/konva/grid/getWorldViewportRect.js`
+
+```js
+export function getWorldViewportRect(stage, world) {
+  const scale = world.scaleX() || 1;
+  const pos = world.position(); // world.x/world.y відносно stage
+
+  const w = stage.width();
+  const h = stage.height();
+
+  const x1 = (0 - pos.x) / scale;
+  const y1 = (0 - pos.y) / scale;
+
+  const x2 = (w - pos.x) / scale;
+  const y2 = (h - pos.y) / scale;
+
+  return { x1, y1, x2, y2, scale };
+}
+```
+
+---
+
+# 2) Зроби Grid як один Shape, який малює тільки viewport+padding
+
+`features/ui/canvas/GridLayer.js` (або де ти тримаєш GridLayer)
+
+```js
+"use client";
+import React from "react";
+import { Shape } from "react-konva";
+
+const roundDown = (v, step) => Math.floor(v / step) * step;
+const roundUp = (v, step) => Math.ceil(v / step) * step;
+
+export default function GridLayer({
+  visible,
+  viewportRect,        // {x1,y1,x2,y2,scale}
+  gridSize = 40,
+  subDiv = 4,
+  padding = 600,       // запас у world units
+}) {
+  if (!visible || !viewportRect) return null;
+
+  const minor = gridSize / subDiv;
+  const { x1, y1, x2, y2 } = viewportRect;
+
+  const startX = roundDown(x1 - padding, minor);
+  const endX = roundUp(x2 + padding, minor);
+  const startY = roundDown(y1 - padding, minor);
+  const endY = roundUp(y2 + padding, minor);
+
+  return (
+    <Shape
+      listening={false}
+      perfectDrawEnabled={false}
+      sceneFunc={(ctx, shape) => {
+        // minor
+        ctx.beginPath();
+        for (let x = startX; x <= endX; x += minor) {
+          ctx.moveTo(x, startY);
+          ctx.lineTo(x, endY);
+        }
+        for (let y = startY; y <= endY; y += minor) {
+          ctx.moveTo(startX, y);
+          ctx.lineTo(endX, y);
+        }
+        ctx.strokeStyle = "#e9e9e9";
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+
+        // major
+        ctx.beginPath();
+        const mx0 = roundDown(startX, gridSize);
+        const my0 = roundDown(startY, gridSize);
+
+        for (let x = mx0; x <= endX; x += gridSize) {
+          ctx.moveTo(x, startY);
+          ctx.lineTo(x, endY);
+        }
+        for (let y = my0; y <= endY; y += gridSize) {
+          ctx.moveTo(startX, y);
+          ctx.lineTo(endX, y);
+        }
+        ctx.strokeStyle = "#cfcfcf";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStrokeShape(shape);
+      }}
+    />
+  );
+}
+```
+
+✅ Це усуває “порожні смуги” при zoom-out, бо грід завжди покриває видиму область + запас.
+
+---
+
+# 3) useDiagramState.js: тримай viewportRect і метод його оновлення
+
+Тобі потрібні `stageRef` і `worldRef`, та функція `updateViewportRect`.
+
+`features/diagram/model/useDiagramState.js` (або де у тебе useDiagramState)
+
+```js
+"use client";
+import { useCallback, useRef, useState } from "react";
+import { getWorldViewportRect } from "@/shared/konva/grid/getWorldViewportRect";
+
+export function useDiagramState() {
+  const stageRef = useRef(null);
+  const worldRef = useRef(null);
+
+  const [gridVisible, setGridVisible] = useState(true);
+  const [viewportRect, setViewportRect] = useState(null);
+
+  const updateViewportRect = useCallback(() => {
+    const stage = stageRef.current;
+    const world = worldRef.current;
+    if (!stage || !world) return;
+    setViewportRect(getWorldViewportRect(stage, world));
+  }, []);
+
+  return {
+    stageRef,
+    worldRef,
+    gridVisible,
+    setGridVisible,
+    viewportRect,
+    updateViewportRect,
+    // + решта твого state (symbols, selection, connections...)
+  };
+}
+```
+
+---
+
+# 4) EditorCanvas.js: створи world Group і оновлюй viewportRect на zoom/pan
+
+Тут ключове: **zoom/pan застосовуй саме до `worldRef.current`** (Group), і після кожної зміни викликай `updateViewportRect()`.
+
+Приклад каркасу (підлаштуй під свій код):
+
+```js
+"use client";
+import React, { useEffect, useRef, useState } from "react";
+import { Stage, Layer, Group } from "react-konva";
+import GridLayer from "@/features/ui/canvas/GridLayer";
+import { useDiagramState } from "@/features/diagram/model/useDiagramState";
+import DiagramSymbols from "./DiagramSymbols";
+
+export default function EditorCanvas() {
+  const [size, setSize] = useState({ w: 1200, h: 700 });
+
+  const {
+    stageRef,
+    worldRef,
+    gridVisible,
+    viewportRect,
+    updateViewportRect,
+    // symbols, handlers...
+  } = useDiagramState();
+
+  // resize (важливо для viewportRect)
+  useEffect(() => {
+    const onResize = () => {
+      const el = document.getElementById("canvasWrap");
+      if (!el) return;
+      setSize({ w: el.clientWidth, h: el.clientHeight });
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // після першого рендера - порахувати viewportRect
+  useEffect(() => {
+    // невеличка страховка, щоб refs вже були
+    requestAnimationFrame(() => updateViewportRect());
+  }, [size.w, size.h, updateViewportRect]);
+
+  const onWheel = (e) => {
+    e.evt.preventDefault();
+
+    const stage = stageRef.current;
+    const world = worldRef.current;
+    if (!stage || !world) return;
+
+    const oldScale = world.scaleX() || 1;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const zoomStep = 1.15;
+    const direction = e.evt.deltaY > 0 ? 1 : -1;
+    const scaleBy = direction > 0 ? 1 / zoomStep : zoomStep;
+    const newScale = Math.max(0.2, Math.min(6, oldScale * scaleBy));
+
+    // координата курсора у world coords
+    const mousePointTo = {
+      x: (pointer.x - world.x()) / oldScale,
+      y: (pointer.y - world.y()) / oldScale,
+    };
+
+    world.scale({ x: newScale, y: newScale });
+
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+    world.position(newPos);
+
+    world.getLayer().batchDraw();
+    updateViewportRect(); // <-- КЛЮЧ
+  };
+
+  return (
+    <div id="canvasWrap" style={{ width: "100%", height: "100%" }}>
+      <Stage
+        ref={stageRef}
+        width={size.w}
+        height={size.h}
+        onWheel={onWheel}
+        style={{ background: "#fafafa" }}
+      >
+        <Layer>
+          {/* WORLD container: саме його зумимо/панимо */}
+          <Group ref={worldRef}>
+            {/* Infinite grid in world coords */}
+            <GridLayer
+              visible={gridVisible}
+              viewportRect={viewportRect}
+              gridSize={40}
+              subDiv={4}
+              padding={600}
+            />
+
+            {/* Твої елементи */}
+            <DiagramSymbols /* symbols, handlers... */ />
+          </Group>
+        </Layer>
+      </Stage>
+    </div>
+  );
+}
+```
+
+### Важливо
+
+* GridLayer тепер **всередині world Group**, і малюється на `viewportRect`.
+* `updateViewportRect()` викликається **після кожного zoom/pan/resize**, і не викликається при drag елементів.
+
+---
+
+# 5) Чому в тебе “не виходило”
+
+99% причин одна з цих:
+
+* ти рахував viewportRect від `layerRef`, а zoom робив на `groupRef` (або навпаки)
+* грід стояв не в `world`, а поруч (інший layer), і координати не збігалися
+* viewportRect не оновлювався після zoom/pan
+* грід був “скінченним” (width/height константні), тому з’являлись смуги
+
+---
+
+## Швидка перевірка, що все підключено правильно
+
+Після zoom колесом:
+
+* `worldRef.current.scaleX()` має змінюватись
+* `viewportRect` має змінюватись (x1/x2/y1/y2)
+* грід має завжди “заповнювати” екран без смуг
+
+---
+
+Якщо хочеш, я можу під твою конкретну трійку файлів зробити “патч-версію” прямо по назвах змінних: покажи (копіпастою) **твій onWheel/zoom-pan** (або useZoomPan), і як ти зараз рендериш `Stage/Layer/DiagramSymbols`. Я тоді підставлю `worldRef` саме туди, де треба, без перебудови всього.

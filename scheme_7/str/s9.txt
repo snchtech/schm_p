@@ -1,0 +1,140 @@
+Ок, це **logout REST**:
+**OLD:** `pages/api/auth/logoutrest.js`
+
+### ✅ Куди переносимо
+
+✅ **NEW:** `src/app/api/auth/logout/route.js`
+(логічніше назвати просто `logout`, а не `logoutrest`, бо це вже route handler)
+
+І знову: `Set-Cookie` через `.join(', ')` — не робимо. Очищаємо cookies через `response.cookies.set(..., {maxAge: 0})`.
+
+---
+
+## 1) Відновлений код зі скрінів (як було)
+
+```js
+import { NextResponse } from 'next/server'
+export const runtime = 'edge'
+const REMOTE_API = process.env.MAIN_API_URL
+
+export default async function logoutRequest(req, res) {
+  const cookieStore = req.cookies
+  const refreshToken = cookieStore.get('refreshToken')?.value
+  try {
+    // Виконуємо запит на REMOTE_API/api/auth/logout
+    const logoutOnAPIServer = await fetch(`${REMOTE_API}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `refreshToken=${refreshToken}`,
+      },
+    })
+
+    if (!logoutOnAPIServer.ok) {
+      console.error('Failed to logout on remote API, proceeding with local logout.')
+    }
+
+    // Формуємо відповідь
+    const responseData = NextResponse.json(await logoutOnAPIServer.json())
+
+    responseData.headers.set(
+      'Set-Cookie',
+      [
+        'accessTokenEtls=; HttpOnly; Path=/; Max-Age=0',
+        'refreshTokenEtls=; HttpOnly; Path=/; Max-Age=0',
+        'userDataEtls=; HttpOnly; Path=/; Max-Age=0',
+        'etlsUser=; HttpOnly; Path=/; Max-Age=0',
+        'accessToken=; HttpOnly; Path=/; Max-Age=0',
+        'refreshToken=; HttpOnly; Path=/; Max-Age=0',
+      ].join(', ')
+    )
+
+    console.log('LOGOUT REST FINISH')
+
+    return responseData
+  } catch (error) {
+    // Повертаємо помилку
+    console.error('Logout on API server error:', error)
+  }
+}
+```
+
+---
+
+## 2) Нова версія під App Router
+
+✅ **NEW:** `src/app/api/auth/logout/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
+
+export const runtime = 'edge'
+
+const REMOTE_API = process.env.MAIN_API_URL
+
+function clearAuthCookies(res) {
+  const opts = { path: '/', maxAge: 0 }
+
+  res.cookies.set('accessTokenEtls', '', opts)
+  res.cookies.set('refreshTokenEtls', '', opts)
+  res.cookies.set('userDataEtls', '', opts) // у тебе зустрічається в logout
+  res.cookies.set('etlsUser', '', opts)
+
+  res.cookies.set('accessToken', '', opts)
+  res.cookies.set('refreshToken', '', opts)
+
+  res.cookies.set('refreshingToken', '', opts)
+
+  return res
+}
+
+export async function POST() {
+  const cookieStore = cookies()
+  const refreshToken = cookieStore.get('refreshToken')?.value
+
+  try {
+    // logout на REMOTE API (якщо refreshToken є)
+    if (refreshToken) {
+      const remoteRes = await fetch(`${REMOTE_API}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `refreshToken=${refreshToken}`,
+        },
+      })
+
+      if (!remoteRes.ok) {
+        console.error('Failed to logout on remote API, proceeding with local logout.')
+      }
+    }
+
+    const res = NextResponse.json({ message: 'Logged out' })
+    clearAuthCookies(res)
+    console.log('LOGOUT REST FINISH')
+    return res
+  } catch (error) {
+    console.error('Logout on API server error:', error)
+    const res = NextResponse.json({ message: 'Logged out' })
+    clearAuthCookies(res)
+    return res
+  }
+}
+```
+
+---
+
+## 3) Нюанс: `userDataEtls` vs `etlsUser`
+
+У тебе в logout чистяться **обидва** (`userDataEtls` і `etlsUser`).
+А в інших файлах ти зазвичай використовуєш `etlsUser`. Я залишив очищення обох, щоб не було “висячих” cookie після рефактору.
+
+---
+
+### Підсумок
+
+* **OLD:** `pages/api/auth/logoutrest.js`
+* **NEW:** `src/app/api/auth/logout/route.js`
+
+Кидай наступний файл — і бажано тепер або `api/rest/refreshresttokens`, або `utils/auth` (logoutUser), щоб остаточно прибрати залежності на старі утиліти.

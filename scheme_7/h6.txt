@@ -1,0 +1,213 @@
+Нижче — **з чого реально почати** саме у твоєму `useDiagramState`, щоб логічні слої запрацювали “по-людськи”, і щоб далі було легко під’єднати БД/довідник.
+
+Я дам **готові вставки коду** (це вже не “теорія”), але мінімально інвазивно: ти додаєш 3 речі:
+
+1. `layersConfig` (поки локально, потім з БД),
+2. `layersState` у `useDiagramState`,
+3. утиліту `createSymbol(...)`, щоб **при створенні** автоматично ставився `layerId` з registry.
+
+---
+
+# 1) Додай конфіг слоїв + дефолт
+
+Створи файл (в твоєму каталозі поруч із `useDiagramState.js` або в `state/`):
+
+**`layersConfig.js`**
+
+```js
+export const LAYERS_CONFIG = [
+  { id: "main", title: "Елементи", order: 10, defaultVisible: true },
+  { id: "labels", title: "Підписи", order: 20, defaultVisible: true },
+  { id: "places", title: "Місця", order: 30, defaultVisible: true },
+  { id: "aux", title: "Допоміжне", order: 90, defaultVisible: false },
+];
+
+export const DEFAULT_LAYER_ID = "main";
+```
+
+---
+
+# 2) Додай metadata у registry (defaultLayerId)
+
+Там де в тебе `ELEMENT_COMPONENTS` / registry — додай `defaultLayerId`.
+
+Наприклад:
+
+```js
+export const ELEMENT_REGISTRY = {
+  rect:   { Component: RectElement, defaultLayerId: "main" },
+  circle: { Component: CircleElement, defaultLayerId: "main" },
+  text:   { Component: TextElement, defaultLayerId: "labels" },
+};
+```
+
+> Якщо поки registry — просто мапа компонентів, можна зробити другий об’єкт `ELEMENT_META` з `defaultLayerId`. Але краще одразу перейти на “registry = {Component, meta}”.
+
+---
+
+# 3) Впровадь слої у `useDiagramState` (мінімальний патч)
+
+### ✅ 3.1. Імпорти + ініціалізація layersState
+
+У тебе зараз навіть `useEffect` не імпортований — додай його теж.
+
+На початку файла:
+
+```js
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { LAYERS_CONFIG, DEFAULT_LAYER_ID } from "./layersConfig";
+import { ELEMENT_REGISTRY } from "./elementRegistry"; // як у тебе називається
+```
+
+Далі у `useDiagramState` додай state:
+
+```js
+const [layersState, setLayersState] = useState(() =>
+  Object.fromEntries(
+    LAYERS_CONFIG.map((l) => [l.id, { visible: l.defaultVisible }])
+  )
+);
+```
+
+### ✅ 3.2. Стандартизуй створення символа (щоб layerId ставився автоматом)
+
+Додай helper:
+
+```js
+const createSymbol = useCallback((type, payload) => {
+  const meta = ELEMENT_REGISTRY?.[type];
+  const layerId =
+    payload?.layerId ??
+    meta?.defaultLayerId ??
+    DEFAULT_LAYER_ID;
+
+  return {
+    id: uuidv4(),
+    type,
+    layerId,
+    ...payload,
+  };
+}, []);
+```
+
+І тепер твою початкову ініціалізацію `symbols` перепиши на:
+
+```js
+const [symbols, setSymbols] = useState(() => ([
+  createSymbol("rect", {
+    x: 100, y: 100, width: 80, height: 50,
+    fill: "gray", stroke: "black", strokeWidth: 2
+  }),
+  createSymbol("circle", {
+    x: 300, y: 200, width: 60, height: 60, radius: 30,
+    fill: "gray", stroke: "black", strokeWidth: 2
+  }),
+  createSymbol("rect", {
+    x: 450, y: 200, width: 80, height: 50,
+    fill: "gray", stroke: "black", strokeWidth: 2
+  }),
+]));
+```
+
+> Чому так важливо: коли ти додаси “підписи”, “місця”, “службові” типи — вони автоматично ляжуть у правильний слой.
+
+### ✅ 3.3. Додай дії керування слоями (toggle / setPreset)
+
+Поки найпростіше:
+
+```js
+const toggleLayerVisibility = useCallback((layerId) => {
+  setLayersState((prev) => ({
+    ...prev,
+    [layerId]: { ...prev[layerId], visible: !prev[layerId]?.visible },
+  }));
+}, []);
+
+const setAllLayersVisible = useCallback((visible) => {
+  setLayersState((prev) => {
+    const next = { ...prev };
+    Object.keys(next).forEach((id) => {
+      next[id] = { ...next[id], visible };
+    });
+    return next;
+  });
+}, []);
+```
+
+### ✅ 3.4. Дай “видимі symbols” окремо (для DiagramSymbols)
+
+Це потрібно, щоб не ганяти фільтр у UI кожен раз:
+
+```js
+const visibleSymbols = useMemo(() => {
+  return symbols.filter((s) => {
+    const lid = s.layerId ?? DEFAULT_LAYER_ID;
+    return layersState?.[lid]?.visible !== false;
+  });
+}, [symbols, layersState]);
+```
+
+---
+
+# 4) Підключення в UI (де саме використовувати)
+
+Ти робиш так:
+
+* У Canvas/Editor передаєш **visibleSymbols** у `DiagramSymbols`
+* А `symbols` лишаєш як “повні дані” для логіки (зв’язки, пошук, тощо)
+
+Тобто:
+
+* для рендера: `visibleSymbols`
+* для обчислень/збереження: `symbols`
+
+⚠️ Але в тебе важливий момент: `resolveAttachmentPoint(..., symbols, connections)` — якщо символ схований, він все одно існує. Це нормально: зв’язки можуть “триматись” на ньому, просто користувач не бачить символ. (Пізніше ти вирішиш, чи ховати ще й конектори, які до нього прив’язані — це вже політика слоїв.)
+
+---
+
+# 5) Що повернути з useDiagramState
+
+Додай у return:
+
+* `layersState`
+* `layersConfig` (щоб UI-панель могла намалювати список)
+* `toggleLayerVisibility`, `setAllLayersVisible`
+* `visibleSymbols`
+
+Наприклад:
+
+```js
+return {
+  // data
+  symbols,
+  visibleSymbols,
+  connections,
+
+  // layers
+  layersState,
+  layersConfig: LAYERS_CONFIG,
+  toggleLayerVisibility,
+  setAllLayersVisible,
+
+  // решта як у тебе...
+};
+```
+
+---
+
+## Важливе уточнення по твоєму коду типів
+
+У тебе `type: 'rect' / 'circle'`, але `getAnchorPoints` перевіряє `type === "RECTANGLE"` і `type === "CIRCLE"`. Це зараз виглядає як баг/залишок зі старої версії — через це анкори можуть повертати `[]`.
+Мінімальна рекомендація: привести до єдиного стандарту (`rect/circle`) і в `getAnchorPoints` перевіряти їх.
+
+---
+
+## Далі (після цього кроку)
+
+Коли це заведеться:
+
+1. зробимо просту MUI панель з чекбоксами на базі `layersConfig + layersState`
+2. додамо політику: “ховати конектори слою X” або “ховати конектори, якщо хоча б один кінець на схованому слої”
+3. підготуємо формат для БД: `LAYERS_CONFIG` просто стане результатом `fetchLayers()`.
+
+Якщо хочеш — наступним повідомленням я дам **готовий мінімальний компонент панелі слоїв на MUI** (без зайвої стилізації), який одразу підключиш до цього `useDiagramState`.

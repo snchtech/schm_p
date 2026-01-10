@@ -1,0 +1,106 @@
+Ок, беру **тільки цей скрін**.
+
+---
+
+## 1️⃣ Розпізнаний код файлу (зі скріну)
+
+**`witRoleAccess.js`** (є друкарська помилка в назві — має бути `withRoleAccess.js`, але я спочатку відтворюю як є):
+
+```js
+import { useAuth } from '@/context/AuthContext'
+
+export function withRoleAccess(WrappedComponent, allowedRoles = []) {
+  return function RoleProtectedComponent(props) {
+    const { user } = useAuth()
+
+    if (!user || !user.roles) {
+      return <p>Access Denied</p>
+    }
+
+    const hasAccess = user.roles.some((role) => allowedRoles.includes(role))
+
+    if (!hasAccess) {
+      return <p>Access Denied</p>
+    }
+
+    return <WrappedComponent {...props} />
+  }
+}
+```
+
+---
+
+## 2️⃣ Куди класти в новій структурі
+
+Це **HOC-guard** (UI-рівень), який залежить від `AuthContext`, тому логічно класти в **shared/ui** поруч із `RoleProtectedComponent`.
+
+✅ Пропоноване місце:
+
+```
+src/shared/ui/withRoleAccess.js
+```
+
+(або `src/shared/ui/guards/withRoleAccess.js`, якщо хочеш папку guards)
+
+---
+
+## 3️⃣ Файл у новій структурі (готовий)
+
+### `src/shared/ui/withRoleAccess.js`
+
+```js
+'use client'
+
+import { useAuth } from '@/context/AuthContext'
+
+export function withRoleAccess(WrappedComponent, allowedRoles = []) {
+  return function RoleProtectedComponent(props) {
+    const { user } = useAuth()
+
+    if (!user || !user.roles) {
+      return <p>Access Denied</p>
+    }
+
+    const hasAccess = user.roles.some((role) => allowedRoles.includes(role))
+
+    if (!hasAccess) {
+      return <p>Access Denied</p>
+    }
+
+    return <WrappedComponent {...props} />
+  }
+}
+```
+
+> Додав `'use client'`, бо HOC використовує `useAuth()`.
+
+---
+
+## 4️⃣ Як міняється імпорт
+
+### Було:
+
+```js
+import { withRoleAccess } from '@/app/components/HOC/witRoleAccess'
+```
+
+### Стало:
+
+```js
+import { withRoleAccess } from '@/shared/ui/withRoleAccess'
+```
+
+---
+
+## 5️⃣ Невелика ремарка про назву файлу
+
+У тебе зараз **`witRoleAccess.js`** (без `h`).
+Щоб не плодити плутанину, у новій структурі краще одразу назвати нормально:
+
+✅ `withRoleAccess.js`
+
+Логіка/код при цьому не змінюються.
+
+---
+
+Скидай наступний файл (назва + старий шлях + скріни), і так само розкладу.

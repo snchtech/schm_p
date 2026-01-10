@@ -1,0 +1,147 @@
+Ок, це вже **`logServerAction.js` (старий шлях `utils/logServerAction.js`)** — **серверна утиліта для логування** (winston + jwtVerify, дістає username з ETLS токена).
+
+---
+
+## 1) Куди класти в новій структурі
+
+Це 100% **shared**, бо логування використовуватимуть різні фічі.
+
+✅ Новий шлях:
+
+```
+src/shared/server/log/logServerAction.js
+```
+
+(можна коротше `src/shared/server/log.js`, але краще папкою, бо потім додаси інші лог-хелпери.)
+
+---
+
+## 2) Зібраний файл зі скрінів (як є)
+
+### ✅ `src/shared/server/log/logServerAction.js`
+
+```js
+"use server"; // Використовуємо server-side функцію
+
+export const config = {
+  runtime: "nodejs",
+};
+
+import fs from "fs";
+import path from "path";
+import { jwtVerify } from "jose";
+import DailyRotateFile from "winston-daily-rotate-file";
+import { createLogger, format, transports } from "winston";
+
+// Формат часу 12.03.2025 12:10:14
+const timeFormat = () => {
+  const now = new Date();
+  return now.toLocaleString("uk-UA", { timeZone: "Europe/Kiev" }).replace(",", "");
+};
+
+// Отримання логіну з JWT (з cookies)
+async function getUserLoginFromToken(token) {
+  try {
+    if (!token) return "UnknownUser"; // Якщо токена нема
+
+    const secretKey = new TextEncoder().encode(process.env.ETLS_ACCESS);
+    const { payload } = await jwtVerify(token, secretKey);
+
+    return payload.username || "UnknownUser"; // 🔹 Повертаємо `username`
+  } catch (error) {
+    return "UnknownUser"; // Якщо помилка
+  }
+}
+
+// Основний логер (звичайні логи)
+const infoLogger = createLogger({
+  level: "info",
+  format: format.combine(
+    format.timestamp({ format: "DD.MM.YYYY HH:mm:ss" }), // Формат часу
+    format.printf(
+      ({ timestamp, level, message }) =>
+        `[${timestamp}] ${level.toUpperCase()}: ${message}`,
+    ),
+  ),
+  transports: [
+    new transports.Console(),
+    // new DailyRotateFile({
+    //   filename: 'logs/app-%DATE%.log',
+    //   datePattern: 'YYYY-MM-DD',
+    //   maxSize: '5m',
+    //   maxFiles: '14d',
+    // }),
+  ],
+});
+
+// Логер для помилок
+const errorLogger = createLogger({
+  level: "error",
+  format: format.combine(
+    format.timestamp({ format: "DD.MM.YYYY HH:mm:ss" }),
+    format.printf(
+      ({ timestamp, level, message }) =>
+        `[${timestamp}] ${level.toUpperCase()}: ${message}`,
+    ),
+  ),
+  transports: [
+    new transports.Console(),
+    // new DailyRotateFile({
+    //   filename: 'logs/errors-%DATE%.log',
+    //   datePattern: 'YYYY-MM-DD',
+    //   maxSize: '5m',
+    //   maxFiles: '14d',
+    // }),
+  ],
+});
+
+// Функція для запису логів у відповідний файл
+export async function logToFile(level, message, token) {
+  try {
+    const login = await getUserLoginFromToken(token); // ♦ Отримуємо логін користувача
+
+    const logMessage = `[${timeFormat()}] ${level.toUpperCase()} [${login}]: ${message}`;
+
+    if (level === "error") {
+      errorLogger.error(logMessage);
+    } else {
+      infoLogger.info(logMessage);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error writing log:", error);
+    return { success: false, error: "Failed to write log" };
+  }
+}
+```
+
+---
+
+## 3) Що тут “зайве/підозріле”, але я НЕ змінюю без твоєї команди
+
+1. **`fs`, `path`, `DailyRotateFile` імпортовані, але не використовуються** (бо rotate закоментований).
+2. `toLocaleString(...).replace(",", "")` — ок, але формат може “плисти” між середовищами.
+3. `process.env.ETLS_ACCESS` — важливо, щоб був доступний у server runtime.
+
+Якщо хочеш — потім зробимо чисту версію (без мертвих імпортів, з rotate і створенням папки `logs/`).
+
+---
+
+## 4) Як міняється імпорт
+
+Було:
+
+```js
+import { logToFile } from "@/utils/logServerAction";
+```
+
+Стає:
+
+```js
+import { logToFile } from "@/shared/server/log/logServerAction";
+```
+
+---
+
+Кидай наступний файл. Якщо в тебе є файл, який викликає `logToFile(...)` (наприклад API route `/api/rest/...`) — скинь його, і я одразу покажу як правильно “вмонтувати” логування в нову структуру.

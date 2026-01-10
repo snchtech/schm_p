@@ -1,0 +1,89 @@
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Circle } from "react-konva";
+
+/**
+ * CrossJunction (react-konva)
+ * - 2 лінії, що перетинаються
+ * - чорна точка у місці перетину
+ * + anchor-точка для конекторів у центрі (100,50)
+ *
+ * Props:
+ *  x, y, scale
+ *  stroke, strokeWidth
+ *  dotRadius (default 8)
+ *  showAnchors (default true)
+ *  onAnchorClick, onAnchorHover
+ */
+export default function CrossJunction({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 6,
+  dotRadius = 8,
+
+  showAnchors = true,
+  onAnchorClick,
+  onAnchorHover,
+}) {
+  // viewBox 0 0 200 100
+  const JX = 100;
+  const JY = 50;
+
+  const anchorR = Math.max(4, strokeWidth * 0.75);
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* Horizontal line */}
+      <Line
+        points={[10, 50, 190, 50]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+      />
+
+      {/* Diagonal line */}
+      <Line
+        points={[60, 80, 140, 20]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+      />
+
+      {/* Junction dot */}
+      <Circle x={JX} y={JY} radius={dotRadius} fill={stroke} />
+
+      {/* Anchor for connectors (center) */}
+      {showAnchors && (
+        <Circle
+          x={JX}
+          y={JY}
+          radius={anchorR}
+          fill="#fff"
+          stroke={stroke}
+          strokeWidth={2}
+          listening
+          onMouseEnter={() => {
+            document.body.style.cursor = "crosshair";
+            onAnchorHover?.({ id: "junction", x: JX, y: JY });
+          }}
+          onMouseLeave={() => {
+            document.body.style.cursor = "default";
+            onAnchorHover?.(null);
+          }}
+          onMouseDown={(e) => (e.cancelBubble = true)}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            onAnchorClick?.({ id: "junction", x: JX, y: JY });
+          }}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+Якщо хочеш, зроблю anchor **невидимим** (opacity=0), але з великим `hitStrokeWidth`, щоб було легко попадати курсором.

@@ -1,0 +1,102 @@
+Ок, це **TopToolbar.js** зі старого `app/components/Scheme/TopToolbar.js`.
+Переносимо його в нову структуру в блок **top-bar** (у тебе він вже є).
+
+## 1) Куди покласти в новій структурі
+
+Я рекомендую **замість TopToolbar зробити/оновити `EditorTopBar.js`**, щоб назви в проекті були єдині.
+
+✅ **Новий шлях:**
+`src/features/scheme-editor/ui/top-bar/EditorTopBar.js`
+
+---
+
+## 2) Готовий код `EditorTopBar.js`
+
+```jsx
+"use client";
+
+import React from "react";
+import { AppBar, Toolbar, Divider } from "@mui/material";
+
+import ScaleControl from "./controls/ScaleControl";
+import BindingsControl from "./controls/BindingsControl";
+import CheckSchemeControl from "./controls/CheckSchemeControl";
+import RefreshControl from "./controls/RefreshControl";
+
+const EditorTopBar = ({ onZoomIn, onZoomOut, onDelete, onRefresh }) => {
+  return (
+    <AppBar position="static" sx={{ backgroundColor: "#ffffff", boxShadow: 1 }}>
+      <Toolbar
+        sx={{
+          display: "flex",
+          justifyContent: "flex-start",
+          alignItems: "center",
+          gap: 2,
+        }}
+      >
+        {/* Масштабування */}
+        <ScaleControl
+          onZoomIn={onZoomIn}
+          onZoomOut={onZoomOut}
+          onDelete={onDelete}
+        />
+
+        <Divider orientation="vertical" flexItem />
+
+        {/* Прив’язки */}
+        <BindingsControl />
+
+        <Divider orientation="vertical" flexItem />
+
+        {/* Перевірка схеми */}
+        <CheckSchemeControl />
+
+        <Divider orientation="vertical" flexItem />
+
+        {/* Оновити */}
+        <RefreshControl onRefresh={onRefresh} />
+      </Toolbar>
+    </AppBar>
+  );
+};
+
+export default EditorTopBar;
+```
+
+---
+
+## 3) Що ще треба по структурі поруч (поки як “заглушки шляхів”)
+
+Ці компоненти в старому файлі були в `./TopToolbar/...`, тому в новій структурі я пропоную так:
+
+```
+src/features/scheme-editor/ui/top-bar/
+  EditorTopBar.js
+  controls/
+    ScaleControl.js
+    BindingsControl.js
+    CheckSchemeControl.js
+    RefreshControl.js
+```
+
+Ти можеш зараз **скинути наступним** будь-який з цих файлів (наприклад `ScaleControl.js`) — і я перенесу його так само.
+
+---
+
+## 4) Оновлення імпортів там, де використовується top bar
+
+Якщо десь було:
+
+```js
+import TopToolbar from "app/components/Scheme/TopToolbar";
+```
+
+Стане:
+
+```js
+import EditorTopBar from "@/features/scheme-editor/ui/top-bar/EditorTopBar";
+```
+
+---
+
+Надсилай наступний файл з підпапки **TopToolbar** (ScaleControl / BindingsControl / CheckSchemeControl / RefreshControl) — і рухаємось далі.

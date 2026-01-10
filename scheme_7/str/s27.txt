@@ -1,0 +1,119 @@
+Ок, це **BindingsControl.js** зі старого:
+`app/components/Scheme/TopToolbar/BindingsControl.js`
+
+Це **UI-контрол для верхньої панелі**, тому переносимо його в:
+
+✅ `src/features/scheme-editor/ui/top-bar/controls/BindingsControl.js`
+
+(саме так я підключав його в нашому `EditorTopBar.js`.)
+
+---
+
+## 1) Новий файл: `BindingsControl.js`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  Box,
+  IconButton,
+  Tooltip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  Typography,
+} from "@mui/material";
+
+import LinkIcon from "@mui/icons-material/Link";
+import DeviceHubIcon from "@mui/icons-material/DeviceHub";
+import MapIcon from "@mui/icons-material/Map";
+
+const BindingsControl = () => {
+  const [openDialog, setOpenDialog] = useState(null);
+
+  const handleOpenDialog = (type) => setOpenDialog(type);
+  const handleCloseDialog = () => setOpenDialog(null);
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+      <Typography variant="subtitle1" sx={{ mr: 1, color: "#000000" }}>
+        Прив&apos;язки:
+      </Typography>
+
+      <Tooltip title="Додати ЗВТ">
+        <IconButton onClick={() => handleOpenDialog("zvt")}>
+          <DeviceHubIcon />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip title="Додати зв'язок між аркушами">
+        <IconButton onClick={() => handleOpenDialog("link")}>
+          <LinkIcon />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip title="Додати просторову схему">
+        <IconButton onClick={() => handleOpenDialog("spatial")}>
+          <MapIcon />
+        </IconButton>
+      </Tooltip>
+
+      {/* Модальні вікна */}
+      <Dialog open={openDialog === "zvt"} onClose={handleCloseDialog}>
+        <DialogTitle>Додати ЗВТ</DialogTitle>
+        <DialogContent>Елементи форми для додавання ЗВТ</DialogContent>
+      </Dialog>
+
+      <Dialog open={openDialog === "link"} onClose={handleCloseDialog}>
+        <DialogTitle>Додати звязок між аркушами</DialogTitle>
+        <DialogContent>Елементи форми для додавання звязку</DialogContent>
+      </Dialog>
+
+      <Dialog open={openDialog === "spatial"} onClose={handleCloseDialog}>
+        <DialogTitle>Додати просторову схему</DialogTitle>
+        <DialogContent>
+          Елементи форми для додавання просторової схеми
+        </DialogContent>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default BindingsControl;
+```
+
+---
+
+## 2) Як тепер імпортується в `EditorTopBar.js`
+
+(У нас вже так і було)
+
+```js
+import BindingsControl from "./controls/BindingsControl";
+```
+
+---
+
+## 3) Примітка на майбутнє (важлива для архітектури)
+
+Зараз цей компонент має “заглушки” в `<DialogContent>...`. Коли ти будеш робити реальну логіку:
+
+* створення ZVT
+* зв’язок між аркушами (перехід/TransitionArrow)
+* просторову схему
+
+краще винести кожну форму в окремий компонент типу:
+
+```
+ui/top-bar/bindings/
+  ZvtDialog.js
+  SheetLinkDialog.js
+  SpatialSchemeDialog.js
+```
+
+і тут просто відкривати їх.
+
+---
+
+Кидай наступний файл з `TopToolbar/` — наприклад **ScaleControl.js**, **CheckSchemeControl.js** або **RefreshControl.js**.

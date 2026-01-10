@@ -1,0 +1,111 @@
+Ок, працюю **саме з CanvasArea.js** (старий шлях: `app/components/Scheme/CanvasArea.js`) і розкладаю його під твою нову структуру. Нижче — **1) розпізнаний код файлу**, **2) куди його покласти**, **3) як змінити імпорти**.
+
+---
+
+## 1) Куди переносимо CanvasArea.js у новій структурі
+
+**Було:**
+
+* `app/components/Scheme/CanvasArea.js`
+
+**Стає (логічно під твою структуру):**
+
+* `src/features/scheme-editor/ui/page/CanvasArea.js`
+
+> CanvasArea — це “page-level” контейнер (хедер + canvas + таблиця + нотатки + модалка), тому найкраще місце — `ui/page`.
+
+---
+
+## 2) Оновлений код `src/features/scheme-editor/ui/page/CanvasArea.js`
+
+```jsx
+import React, { useState } from "react";
+
+import KonvaStage from "../canvas-area/KonvaStage";
+import CanvasHeader from "../canvas-area/CanvasHeader";
+import SchemeTable from "../canvas-area/SchemeTable";
+import NotesBlock from "../canvas-area/NotesBlock";
+import AddTableModal from "../canvas-area/modals/AddTableModal";
+
+const CanvasArea = () => {
+  const [elements, setElements] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [note, setNote] = useState("");
+  const [isTableModalOpen, setTableModalOpen] = useState(false);
+  const [noteOffset, setNoteOffset] = useState(0);
+
+  const handleAddRow = (row) => {
+    setRows([...rows, row]);
+  };
+
+  return (
+    <div
+      style={{
+        position: "relative",
+        width: "1123px",
+        height: "794px",
+        margin: "auto",
+        border: "1px solid black",
+      }}
+    >
+      <CanvasHeader
+        albumCode="3.ТГ.000-СШ"
+        point="55"
+        system="Q1"
+        schemeName="Схема розміщення системи Q1"
+        sheetNumber="3"
+      />
+
+      <KonvaStage width={1123} height={794} elements={elements} />
+
+      <SchemeTable
+        rows={rows}
+        onAddRow={() => setTableModalOpen(true)}
+        onNotePositionUpdate={(count) => setNoteOffset(count * 30)}
+      />
+
+      <NotesBlock note={note} noteOffset={noteOffset} />
+
+      <AddTableModal
+        open={isTableModalOpen}
+        onClose={() => setTableModalOpen(false)}
+        onAddRow={handleAddRow}
+      />
+    </div>
+  );
+};
+
+export default CanvasArea;
+```
+
+---
+
+## 3) Куди подіти залежності (бо в старому файлі вони були в `./CanvasArea/*` і `./Modals/*`)
+
+У тебе в структурі **нема** готової папки під ці “старі” компоненти, тому створюємо мінімально логічну під `features/scheme-editor/ui/` (це нормально — ти сам писав “можуть бути і інші”).
+
+**Пропонована мапа:**
+
+* Було: `./CanvasArea/KonvaStage`
+  ➜ Стає: `src/features/scheme-editor/ui/canvas-area/KonvaStage.js`
+
+* Було: `./CanvasArea/CanvasHeader`
+  ➜ Стає: `src/features/scheme-editor/ui/canvas-area/CanvasHeader.js`
+
+* Було: `./CanvasArea/SchemeTable`
+  ➜ Стає: `src/features/scheme-editor/ui/canvas-area/SchemeTable.js`
+
+* Було: `./CanvasArea/NotesBlock`
+  ➜ Стає: `src/features/scheme-editor/ui/canvas-area/NotesBlock.js`
+
+* Було: `./Modals/AddTableModal`
+  ➜ Стає: `src/features/scheme-editor/ui/canvas-area/modals/AddTableModal.js`
+
+Тому в `CanvasArea.js` я вже підставив імпорти під цю нову мапу:
+
+* `../canvas-area/...`
+* `../canvas-area/modals/...`
+
+---
+
+Якщо ти зараз скинеш **скріни одного з залежних файлів** (наприклад `KonvaStage.js`), я так само: **розпізнаю код зі скрінів** і розкладу його у ці нові шляхи з правильними імпортами.
