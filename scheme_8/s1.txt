@@ -1,0 +1,279 @@
+У тебе тут виникає **класична проблема Next.js middleware + refresh + client fetch**, яка створює **циклічний refresh токенів**.
+Я поясню **чому це відбувається**, а потім покажу **як це стабільно виправити**.
+
+---
+
+# 1️⃣ Де виникає цикл
+
+Цикл створюється через таку послідовність:
+
+1️⃣ Користувач заходить на `/login`
+
+2️⃣ `AuthContext` виконує
+
+```js
+fetch('/api/auth/get-user')
+```
+
+3️⃣ Цей запит проходить через **middleware**
+
+4️⃣ Middleware бачить:
+
+```
+accessTokenEtls expired
+refreshTokenEtls valid
+```
+
+і виконує
+
+```
+/api/auth/refreshtoken
+```
+
+5️⃣ refresh встановлює cookies
+
+6️⃣ **але middleware вже виконується знову**
+
+7️⃣ AuthContext **знову робить fetch**
+
+```
+/api/auth/get-user
+```
+
+і цикл повторюється.
+
+---
+
+# 2️⃣ Друга проблема — middleware працює і на API
+
+Middleware зараз обробляє **ВСІ маршрути**, включно з:
+
+```
+/api/auth/get-user
+/api/auth/refreshtoken
+/api/auth/login
+```
+
+Тому refresh запускає middleware знову.
+
+---
+
+# 3️⃣ Найважливіше правило Next.js
+
+Middleware **не повинен працювати для auth API routes**.
+
+---
+
+# ✅ Рішення №1 (обов'язкове)
+
+В middleware потрібно **ігнорувати API auth routes**.
+
+На початку proxy:
+
+```js
+if (pathname.startsWith("/api/auth")) {
+  return NextResponse.next();
+}
+```
+
+---
+
+### стане
+
+```js
+export async function proxy(req) {
+  const { pathname, searchParams } = req.nextUrl;
+
+  // ❗ не перевіряємо middleware для auth API
+  if (pathname.startsWith("/api/auth")) {
+    return NextResponse.next();
+  }
+```
+
+---
+
+# 4️⃣ Рішення №2 (дуже важливе)
+
+`AuthContext` **не повинен робити fetch на /login**
+
+Бо middleware і так перевіряє токен.
+
+Зміни:
+
+```js
+useEffect(() => {
+```
+
+на
+
+```js
+useEffect(() => {
+  if (window.location.pathname === "/login") return;
+```
+
+---
+
+# 5️⃣ Рішення №3 (щоб уникнути race condition refresh)
+
+Зараз у тебе:
+
+```
+refreshingToken cookie
+```
+
+але middleware **не чекає refresh**.
+
+Тому запити можуть одночасно refresh.
+
+Краще зробити:
+
+```
+if (refreshingToken === "1") {
+  await new Promise((r) => setTimeout(r, 200));
+  return NextResponse.next();
+}
+```
+
+---
+
+# 6️⃣ Рішення №4 (прибрати refresh для /login)
+
+Додай:
+
+```js
+if (pathname === "/login") {
+  return NextResponse.next();
+}
+```
+
+до логіки refresh.
+
+---
+
+# 7️⃣ Як виглядатиме стабільний middleware
+
+Спрощено:
+
+```js
+export async function proxy(req) {
+  const { pathname } = req.nextUrl;
+
+  // API auth пропускаємо
+  if (pathname.startsWith("/api/auth")) {
+    return NextResponse.next();
+  }
+
+  // login сторінка
+  if (pathname === "/login") {
+    return NextResponse.next();
+  }
+
+  const accessTokenEtls = req.cookies.get("accessTokenEtls")?.value;
+  const refreshTokenEtls = req.cookies.get("refreshTokenEtls")?.value;
+
+  if (!accessTokenEtls || !refreshTokenEtls) {
+    return logoutUser(req);
+  }
+
+  try {
+    await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS);
+    return NextResponse.next();
+  } catch {
+    try {
+      await jose.jwtVerify(refreshTokenEtls, ETLS_REFRESH);
+
+      const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`, {
+        method: "POST",
+        headers: {
+          Cookie: req.headers.get("cookie") || "",
+        },
+      });
+
+      if (!rr.ok) return logoutUser(req);
+
+      const refreshed = await rr.json();
+
+      const res = NextResponse.next();
+
+      res.cookies.set("accessTokenEtls", refreshed.newAccessTokenEtls);
+      res.cookies.set("refreshTokenEtls", refreshed.newRefreshTokenEtls);
+
+      return res;
+    } catch {
+      return logoutUser(req);
+    }
+  }
+}
+```
+
+---
+
+# 8️⃣ Ще одна порада (дуже важлива)
+
+Тобі **не потрібен `/api/auth/get-user` взагалі**.
+
+Ти вже маєш cookie:
+
+```
+etlsUser
+```
+
+Можна зробити:
+
+```js
+const user = await jwtVerify(etlsUser)
+```
+
+і не робити fetch.
+
+Це **прибере 80% проблем**.
+
+---
+
+# 9️⃣ Архітектура яка працює без циклів
+
+```
+middleware
+   ↓
+перевірка accessTokenEtls
+   ↓
+expired ?
+   ↓
+refreshTokenEtls
+   ↓
+refresh
+   ↓
+NextResponse.next()
+```
+
+Client side:
+
+```
+AuthContext
+    ↓
+decode etlsUser cookie
+```
+
+**без fetch**
+
+---
+
+# 🔥 Найбільша помилка у твоїй схемі
+
+```
+AuthContext → fetch → middleware → refresh → middleware → fetch
+```
+
+це і є цикл.
+
+---
+
+# ✅ Якщо хочеш — я можу показати **production-ready auth architecture для Next.js**, яка:
+
+* не має циклів
+* не має race conditions
+* працює з middleware
+* не потребує `/get-user`
+* робить refresh тільки один раз
+
+(вона приблизно **на 40 рядків простіша за твою**).

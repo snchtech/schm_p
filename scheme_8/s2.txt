@@ -1,0 +1,760 @@
+Так. Нижче дам тобі **нормальну робочу схему auth для Next.js**, яка прибирає зациклення, розділяє відповідальність і робить refresh передбачуваним.
+
+Я покажу варіант для твоєї поточної логіки:
+
+* є зовнішні `accessToken` / `refreshToken`
+* є внутрішні `accessTokenEtls` / `refreshTokenEtls`
+* є `etlsUser` у cookie
+* middleware захищає сторінки
+* клієнтський `AuthContext` не запускає refresh-цикли
+
+---
+
+# Що саме треба змінити
+
+Твоя стабільна схема має бути така:
+
+1. **middleware захищає тільки сторінки**
+2. **middleware не чіпає auth API**
+3. **AuthContext не ходить на `/api/auth/get-user` при кожному рендері**
+4. **user беремо або з server component, або з окремого легкого endpoint без refresh-логіки**
+5. **refresh робиться тільки в middleware для page requests** або в `customfetch` для API-запитів
+6. **logout не повинен сам провокувати новий цикл middleware**
+
+---
+
+# Головна причина циклу у тебе
+
+Ось цей фрагмент:
+
+```js
+useEffect(() => {
+  const fetchUserData = async () => {
+    const res = await fetch('/api/auth/get-user', {
+      method: 'GET',
+      credentials: 'include',
+    })
+    ...
+  }
+
+  fetchUserData()
+}, [])
+```
+
+На `/login` або після back navigation цей fetch знову йде через middleware.
+Middleware бачить прострочений `accessTokenEtls`, намагається refresh, далі знову новий запит, і починається коло.
+
+---
+
+# Production-ready підхід
+
+## 1. Middleware має працювати тільки для сторінок
+
+У тебе зараз `proxy`, але логіка важлива однакова.
+Треба:
+
+* пропустити `/api/auth/*`
+* пропустити `/api/rest/*` якщо там своя логіка refresh у fetch-wrapper
+* пропустити `_next`, favicon, статичні файли
+* окремо обробити `/login`
+
+---
+
+## 2. Middleware не має refresh-ити на `/login`
+
+На сторінці логіну логіка проста:
+
+* якщо валідний `accessTokenEtls` → редірект на `/`
+* якщо невалідний → просто пускаємо на `/login`
+* **не робимо refresh на `/login`**
+
+Бо інакше back-button часто запускає нескінченні сценарії.
+
+---
+
+## 3. AuthContext не повинен викликати захищений endpoint при старті
+
+Найкраще рішення:
+не робити `fetch('/api/auth/get-user')` у `useEffect`, а передавати user у provider із сервера.
+
+Але навіть якщо залишаєш client-only варіант, то:
+
+* не викликати його на `/login`
+* не використовувати endpoint, який провокує refresh
+* повертати user тільки з `etlsUser`
+
+---
+
+# Рекомендована структура
+
+---
+
+## A. `middleware.js`
+
+```js
+import { NextResponse } from 'next/server'
+import * as jose from 'jose'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+const ETLS_REFRESH = new TextEncoder().encode(process.env.ETLS_REFRESH)
+
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  path: '/',
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+}
+
+async function clearAuthAndRedirect(req) {
+  const res = NextResponse.redirect(new URL('/login', req.url))
+
+  res.cookies.set('accessTokenEtls', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('refreshTokenEtls', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('accessToken', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('refreshToken', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('etlsUser', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+
+  return res
+}
+
+async function tryRefresh(req) {
+  const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: req.headers.get('cookie') || '',
+    },
+    credentials: 'include',
+    cache: 'no-store',
+  })
+
+  if (!rr.ok) return null
+
+  return rr.json()
+}
+
+export async function middleware(req) {
+  const { pathname, searchParams } = req.nextUrl
+
+  // 1. Ігноруємо системні та статичні маршрути
+  if (
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/favicon.ico') ||
+    pathname.startsWith('/assets') ||
+    pathname.match(/\.(.*)$/)
+  ) {
+    return NextResponse.next()
+  }
+
+  // 2. Ігноруємо auth/api маршрути
+  if (pathname.startsWith('/api/auth')) {
+    return NextResponse.next()
+  }
+
+  // За бажанням: якщо /api/rest/* має власний wrapper refresh
+  if (pathname.startsWith('/api/rest')) {
+    return NextResponse.next()
+  }
+
+  const accessTokenEtls = req.cookies.get('accessTokenEtls')?.value
+  const refreshTokenEtls = req.cookies.get('refreshTokenEtls')?.value
+
+  // 3. loginByToken сценарій
+  const accessTokenFromHeader =
+    req.headers.get('Authorization')?.replace('Bearer ', '') || searchParams.get('t')
+
+  if (accessTokenFromHeader) {
+    const loginResponse = await fetch(`${req.nextUrl.origin}/api/auth/loginByToken`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accessToken: accessTokenFromHeader,
+        redirectTo: pathname,
+      }),
+      credentials: 'include',
+      cache: 'no-store',
+    })
+
+    if (!loginResponse.ok) {
+      return NextResponse.redirect(new URL('/login', req.url))
+    }
+
+    const data = await loginResponse.json()
+    const res = NextResponse.redirect(new URL(pathname, req.url))
+
+    res.cookies.set('accessToken', data.newAccessToken, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('refreshToken', data.refreshToken, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('accessTokenEtls', data.accessTokenEtls, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('refreshTokenEtls', data.refreshTokenEtls, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('etlsUser', data.etlsUser, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+
+    return res
+  }
+
+  // 4. Логіка для /login
+  if (pathname === '/login') {
+    if (!accessTokenEtls) {
+      return NextResponse.next()
+    }
+
+    try {
+      await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS)
+      return NextResponse.redirect(new URL('/', req.url))
+    } catch {
+      // На /login НЕ refresh-имо
+      return NextResponse.next()
+    }
+  }
+
+  // 5. Захист усіх інших сторінок
+  if (!accessTokenEtls || !refreshTokenEtls) {
+    return clearAuthAndRedirect(req)
+  }
+
+  try {
+    await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS)
+    return NextResponse.next()
+  } catch {
+    try {
+      await jose.jwtVerify(refreshTokenEtls, ETLS_REFRESH)
+    } catch {
+      return clearAuthAndRedirect(req)
+    }
+
+    const refreshed = await tryRefresh(req)
+
+    if (!refreshed) {
+      return clearAuthAndRedirect(req)
+    }
+
+    const res = NextResponse.next()
+
+    res.cookies.set('accessTokenEtls', refreshed.newAccessTokenEtls, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('refreshTokenEtls', refreshed.newRefreshTokenEtls, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('accessToken', refreshed.newAccessToken, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('refreshToken', refreshed.newRefreshToken, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+    res.cookies.set('etlsUser', refreshed.newEtlsUser, {
+      ...COOKIE_OPTIONS,
+      maxAge: 43200,
+    })
+
+    return res
+  }
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+}
+```
+
+---
+
+# Чому це вже стабільніше
+
+Тут є три ключові речі:
+
+### 1. `/api/auth/*` не проходить через middleware
+
+Отже:
+
+* `/api/auth/login`
+* `/api/auth/refreshtoken`
+* `/api/auth/get-user`
+  не запускають повторний refresh-цикл
+
+### 2. `/login` не refresh-ить токени
+
+Це прибирає проблему:
+
+* зайшов на логін
+* натиснув back
+* middleware знову пробує refresh
+* редіректить
+* знову refresh
+* і так по колу
+
+### 3. Для сторінок refresh відбувається лише один раз на request
+
+Це нормальна поведінка.
+
+---
+
+# B. `AuthContext` — правильніший варіант
+
+Твій поточний `AuthContext` провокує зайві запити.
+Краще зробити так, щоб він просто отримував `initialUser`.
+
+---
+
+## Варіант 1 — найкращий: user передає server layout
+
+### `context/AuthContext.jsx`
+
+```js
+'use client'
+
+import { createContext, useContext, useMemo, useState } from 'react'
+
+const AuthContext = createContext(null)
+
+export function AuthProvider({ children, initialUser = null }) {
+  const [user, setUser] = useState(initialUser)
+
+  const value = useMemo(() => ({ user, setUser }), [user])
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+  if (!context) {
+    throw new Error('useAuth must be used within AuthProvider')
+  }
+  return context
+}
+```
+
+---
+
+## У layout передаємо user із cookie
+
+Якщо ти на app router, це ідеальний варіант.
+
+### `app/layout.jsx`
+
+```js
+import { cookies } from 'next/headers'
+import { jwtVerify } from 'jose'
+import { AuthProvider } from '@/context/AuthContext'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+
+async function getInitialUser() {
+  const cookieStore = cookies()
+  const etlsUser = cookieStore.get('etlsUser')?.value
+
+  if (!etlsUser) return null
+
+  try {
+    const { payload } = await jwtVerify(etlsUser, ETLS_ACCESS)
+    return payload
+  } catch {
+    return null
+  }
+}
+
+export default async function RootLayout({ children }) {
+  const initialUser = await getInitialUser()
+
+  return (
+    <html lang="uk">
+      <body>
+        <AuthProvider initialUser={initialUser}>
+          {children}
+        </AuthProvider>
+      </body>
+    </html>
+  )
+}
+```
+
+---
+
+# Важлива деталь по `etlsUser`
+
+У тебе в `login` є таке:
+
+```js
+const userDataEtls = await new SignJWT(user)
+  .setProtectedHeader({ alg: 'HS256' })
+  .setExpirationTime(Math.floor(Date.now() / 1000) + EXPIRES_IN_REFRESH_ETLS)
+  .sign(ETLS_ACCESS)
+```
+
+Тобто `etlsUser` підписаний `ETLS_ACCESS`, а не `ETLS_REFRESH`.
+Це ок, головне бути послідовним і перевіряти його тим самим секретом.
+
+---
+
+# C. Якщо все ж хочеш залишити `/api/auth/get-user`
+
+Тоді зроби його **тупим**, без refresh, без складної логіки.
+
+### `app/api/auth/get-user/route.js`
+
+```js
+import { NextResponse } from 'next/server'
+import { jwtVerify } from 'jose'
+
+const ETLS_ACCESS = new TextEncoder().encode(process.env.ETLS_ACCESS)
+
+export async function GET(req) {
+  const etlsUser = req.cookies.get('etlsUser')?.value
+
+  if (!etlsUser) {
+    return NextResponse.json({ userData: null }, { status: 200 })
+  }
+
+  try {
+    const { payload } = await jwtVerify(etlsUser, ETLS_ACCESS)
+    return NextResponse.json({ userData: payload }, { status: 200 })
+  } catch {
+    return NextResponse.json({ userData: null }, { status: 200 })
+  }
+}
+```
+
+І головне — цей route вже не повинен запускати middleware, бо ми додали:
+
+```js
+if (pathname.startsWith('/api/auth')) {
+  return NextResponse.next()
+}
+```
+
+---
+
+# D. Якщо залишаєш клієнтський fetch у `AuthContext`
+
+Тоді хоча б так:
+
+```js
+'use client'
+
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { usePathname } from 'next/navigation'
+
+const AuthContext = createContext(null)
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null)
+  const pathname = usePathname()
+
+  useEffect(() => {
+    if (pathname === '/login') return
+
+    let ignore = false
+
+    const fetchUserData = async () => {
+      try {
+        const res = await fetch('/api/auth/get-user', {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+        })
+
+        if (!res.ok) return
+
+        const { userData } = await res.json()
+
+        if (!ignore) {
+          setUser(userData || null)
+        }
+      } catch (error) {
+        console.error('Error fetching user data:', error)
+      }
+    }
+
+    fetchUserData()
+
+    return () => {
+      ignore = true
+    }
+  }, [pathname])
+
+  const value = useMemo(() => ({ user, setUser }), [user])
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export const useAuth = () => {
+  const context = useContext(AuthContext)
+  if (!context) throw new Error('useAuth must be used within AuthProvider')
+  return context
+}
+```
+
+Але все одно кращий варіант — **без fetch**, через `initialUser`.
+
+---
+
+# E. `withRoleAccess` краще трохи покращити
+
+У тебе зараз:
+
+```js
+if (!user || !user.roles) {
+  return <p>Access Denied</p>
+}
+```
+
+Проблема в тому, що при першому рендері `user` може бути `null`, хоча ще просто не завершилась ініціалізація.
+
+Краще мати `isLoading`.
+
+---
+
+## Оновлений `AuthContext`
+
+```js
+'use client'
+
+import { createContext, useContext, useMemo, useState } from 'react'
+
+const AuthContext = createContext(null)
+
+export function AuthProvider({ children, initialUser = null }) {
+  const [user, setUser] = useState(initialUser)
+  const [isLoading] = useState(false)
+
+  const value = useMemo(() => ({ user, setUser, isLoading }), [user, isLoading])
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+  if (!context) throw new Error('useAuth must be used within AuthProvider')
+  return context
+}
+```
+
+---
+
+## Оновлений `withRoleAccess`
+
+```js
+'use client'
+
+import { useAuth } from '@/context/AuthContext'
+
+export function withRoleAccess(WrappedComponent, allowedRoles = []) {
+  return function RoleProtectedComponent(props) {
+    const { user, isLoading } = useAuth()
+
+    if (isLoading) {
+      return <p>Loading...</p>
+    }
+
+    if (!user || !Array.isArray(user.roles)) {
+      return <p>Access Denied</p>
+    }
+
+    const hasAccess = user.roles.some((role) => allowedRoles.includes(role))
+
+    if (!hasAccess) {
+      return <p>Access Denied</p>
+    }
+
+    return <WrappedComponent {...props} />
+  }
+}
+```
+
+---
+
+# F. `logoutUser` теж краще спростити
+
+У тебе там є окремий fetch на `/api/rest/logoutrest`. Це ок, але очищення cookie краще робити через `response.cookies.set`, а не через ручний `"Set-Cookie"` рядок.
+
+---
+
+## Безпечніший `logoutUser`
+
+```js
+import { NextResponse } from 'next/server'
+
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  path: '/',
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+}
+
+function clearCookies(res) {
+  res.cookies.set('accessTokenEtls', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('refreshTokenEtls', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('accessToken', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('refreshToken', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('etlsUser', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  res.cookies.set('userDataEtls', '', { ...COOKIE_OPTIONS, maxAge: 0 })
+  return res
+}
+
+export async function logoutUser(req) {
+  const { pathname } = req.nextUrl
+
+  if (pathname !== '/login') {
+    try {
+      await fetch(`${req.nextUrl.origin}/api/rest/logoutrest`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: req.headers.get('cookie') || '',
+        },
+      })
+    } catch (error) {
+      console.error('Logout error:', error)
+    }
+  }
+
+  if (pathname === '/login') {
+    return clearCookies(NextResponse.next())
+  }
+
+  return clearCookies(NextResponse.redirect(new URL('/login', req.url)))
+}
+```
+
+---
+
+# G. Дуже важливий нюанс по refresh race condition
+
+Оцей підхід:
+
+```js
+const refreshingToken = req.cookies.get("refreshingToken")?.value;
+```
+
+майже ніколи не дає надійної синхронізації між паралельними requests.
+Чому:
+
+* кілька запитів приходять одночасно
+* всі бачать старий стан cookie
+* всі одночасно вирішують refresh-ити
+
+Тобто cookie-прапорець тут не є справжнім lock-механізмом.
+
+## Що краще:
+
+або
+
+* просто дозволити 1–2 паралельні refresh запити, якщо бекенд це терпить
+  або
+* робити dedupe refresh вже у fetch-wrapper на сервері
+  або
+* зменшити кількість місць, де refresh взагалі може статись
+
+У твоєму випадку найкраще:
+
+* refresh у middleware тільки для page requests
+* refresh у `customfetch` тільки для REST/API calls
+* `AuthContext` взагалі не запускає auth fetch loop
+
+Цього вже достатньо.
+
+---
+
+# H. Як має виглядати загальна схема
+
+## Login
+
+`/api/auth/login`
+
+* отримує зовнішні токени
+* генерує внутрішні токени
+* ставить:
+
+  * `accessToken`
+  * `refreshToken`
+  * `accessTokenEtls`
+  * `refreshTokenEtls`
+  * `etlsUser`
+
+## Middleware
+
+* перевіряє тільки page requests
+* `/login` не refresh-ить
+* `/api/auth/*` не чіпає
+* якщо access expired, але refresh valid → один refresh
+* якщо refresh invalid → logout
+
+## AuthContext
+
+* отримує `initialUser` із server layout
+* не викликає auth endpoint на кожній навігації
+
+## API wrapper (`customfetch`)
+
+* якщо зовнішній access token протух під час API-запиту, оновлює його через `/api/auth/refreshtoken`
+* це окрема логіка від middleware
+
+---
+
+# Мінімум змін, які вже вирішать твою проблему
+
+Якщо не хочеш зараз повністю перебудовувати архітектуру, зроби хоча б ці 3 речі:
+
+### 1. У middleware додай
+
+```js
+if (pathname.startsWith('/api/auth')) {
+  return NextResponse.next()
+}
+```
+
+### 2. На `/login` не роби refresh
+
+Тільки:
+
+* валідний access → редірект на `/`
+* невалідний → `NextResponse.next()`
+
+### 3. У `AuthContext` не викликай `/api/auth/get-user` на `/login`
+
+```js
+if (window.location.pathname === '/login') return
+```
+
+Цього вже часто достатньо, щоб цикл зник.
+
+---
+
+# Що я б радив тобі зробити прямо зараз
+
+Оптимальний план:
+
+1. Переписати middleware за шаблоном вище
+2. Прибрати fetch із `AuthContext` і передавати `initialUser` з layout
+3. Залишити refresh тільки в middleware для сторінок і в `customfetch` для API
+
+---
+
+Я можу одразу зібрати тобі **готовий комплект файлів** під твою структуру проєкту:
+
+* `middleware.js`
+* `app/layout.jsx`
+* `context/AuthContext.jsx`
+* `app/api/auth/get-user/route.js` або варіант без нього
+* оновлений `logoutUser`
+* `withRoleAccess`
+
+вже в узгодженому вигляді, щоб ти просто вставив у проєкт.

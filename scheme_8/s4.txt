@@ -1,0 +1,335 @@
+Покажу. Це справді **важлива оптимізація**, яка сильно впливає на систему коли користувачів стає **500-1000+**.
+
+Зараз у тебе архітектура виглядає так:
+
+```
+Browser
+   ↓
+Next.js (middleware)
+   ↓
+Next.js API route
+   ↓
+Express API
+   ↓
+Database
+```
+
+Тобто **кожен запит проходить 2 HTTP сервери**.
+
+---
+
+# 1️⃣ Проблема подвійного HTTP
+
+Приклад одного запиту:
+
+```
+Browser → Next.js → Express → DB
+```
+
+Це означає:
+
+```
+1 HTTP request
++ 1 HTTP request
+= 2 HTTP requests
+```
+
+Якщо:
+
+```
+500 users
+× 10 requests/sec
+```
+
+то виходить:
+
+```
+5000 req/sec → Next.js
+5000 req/sec → Express
+```
+
+Фактично система обробляє **10000 HTTP запитів**.
+
+---
+
+# 2️⃣ Що роблять production системи
+
+Вони прибирають один HTTP шар.
+
+Тобто:
+
+```
+Browser → Express API
+Browser → Next.js
+```
+
+Next.js залишається тільки для:
+
+```
+SSR
+middleware
+auth
+UI
+```
+
+---
+
+# 3️⃣ Як виглядає оптимальна схема
+
+```
+Browser
+   ↓
+Next.js (pages, middleware)
+   ↓
+Browser fetch
+   ↓
+Express API
+   ↓
+Database
+```
+
+Next.js **не проксує всі API запити**.
+
+---
+
+# 4️⃣ Як тоді працює авторизація
+
+Дуже просто — через **cookies**.
+
+Браузер автоматично передає cookies і в Next.js і в Express.
+
+```
+Cookie: accessToken
+Cookie: refreshToken
+```
+
+---
+
+# 5️⃣ Як виглядає запит з клієнта
+
+Зараз у тебе:
+
+```js
+fetch("/api/rest/getAlbums")
+```
+
+(Next.js API route)
+
+Краще:
+
+```js
+fetch("https://api.myserver.com/getAlbums", {
+  credentials: "include"
+})
+```
+
+---
+
+# 6️⃣ Тоді потік виглядає так
+
+```
+Browser
+   ↓
+fetch → Express API
+   ↓
+Database
+```
+
+Next.js тут **не бере участі**.
+
+---
+
+# 7️⃣ Middleware все ще працює
+
+Middleware працює тільки на:
+
+```
+page requests
+navigation
+SSR
+```
+
+Тобто:
+
+```
+GET /albums
+GET /editor
+GET /dashboard
+```
+
+але **не API**.
+
+---
+
+# 8️⃣ Refresh токена
+
+Refresh робиться так:
+
+```
+Browser
+   ↓
+Express /auth/refreshtoken
+```
+
+або через fetch wrapper.
+
+---
+
+# 9️⃣ У чому виграш
+
+Було:
+
+```
+Browser → Next → Express
+```
+
+Стало:
+
+```
+Browser → Express
+```
+
+Тобто:
+
+| Параметр    | Було   | Стало |
+| ----------- | ------ | ----- |
+| HTTP hops   | 2      | 1     |
+| Latency     | більша | менша |
+| CPU         | більше | менше |
+| Scalability | нижча  | вища  |
+
+---
+
+# 🔟 На великих системах це критично
+
+Приклад з production:
+
+| Users | Архітектура             |
+| ----- | ----------------------- |
+| 100   | будь-яка                |
+| 500   | краще без proxy         |
+| 1000  | proxy стає bottleneck   |
+| 5000  | proxy не використовують |
+
+---
+
+# 11️⃣ Чому тоді Next.js API взагалі існує
+
+Він потрібен для:
+
+```
+auth
+SSR data
+webhooks
+server actions
+```
+
+але **не для proxy всього backend API**.
+
+---
+
+# 12️⃣ Як виглядає production архітектура
+
+```
+                 ┌──────────────┐
+                 │    Browser    │
+                 └──────┬───────┘
+                        │
+             ┌──────────┴──────────┐
+             │                     │
+        Next.js              Express API
+       (UI + SSR)            (business logic)
+             │                     │
+             └──────────┬──────────┘
+                        │
+                     Database
+```
+
+---
+
+# 13️⃣ Коли Next.js API потрібен
+
+Наприклад:
+
+```
+POST /api/auth/login
+POST /api/auth/refreshtoken
+POST /api/auth/logout
+```
+
+бо там логіка cookies і middleware.
+
+---
+
+# 14️⃣ Для твого проєкту
+
+Я б залишив у Next.js:
+
+```
+/api/auth/login
+/api/auth/loginByToken
+/api/auth/refreshtoken
+/api/auth/logout
+```
+
+А **всі інші API**:
+
+```
+/api/rest/*
+```
+
+відправляв **напряму в Express**.
+
+---
+
+# 15️⃣ Твій поточний customfetch
+
+Зараз у тебе:
+
+```
+Browser → /api/rest/customfetch → Express
+```
+
+Краще:
+
+```
+Browser → Express
+```
+
+---
+
+# 16️⃣ Ще одна величезна перевага
+
+Next.js serverless (Vercel) має **обмеження execution time**.
+
+Express сервер — ні.
+
+---
+
+# 🚀 Підсумок
+
+Проблеми з одночасними користувачами **не буде**, але:
+
+Next.js proxy для всіх API
+→ **подвоює HTTP навантаження**
+
+Краще:
+
+```
+Next.js → UI + auth
+Express → API
+```
+
+---
+
+# 💡 Я бачу ще одну річ у твоєму коді
+
+Твій middleware вже майже готовий до **enterprise архітектури**.
+
+Ти дуже близько до того, щоб зробити систему яка легко витримає **5000+ користувачів**.
+
+Але є **одна маленька помилка у refresh логіці**, яка при великому навантаженні може створити **token storm**.
+
+Це одна з найпоширеніших проблем JWT систем.
+
+Якщо хочеш — покажу як її виправити (це буквально **5 рядків коду**, але різниця велика).

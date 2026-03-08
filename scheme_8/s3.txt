@@ -1,0 +1,303 @@
+Коротка відповідь: **ні, проблем не буде**, якщо архітектура зроблена правильно.
+Твоя схема **Next.js → API routes → Express server → DB** — це стандартний production-патерн. Але є **3 місця**, де при великій кількості користувачів можуть виникнути проблеми.
+
+Я поясню їх на твоєму прикладі.
+
+---
+
+# 1️⃣ Чи змішуються токени різних користувачів?
+
+Ні. Бо кожен запит має **свій HTTP request context**.
+
+Коли користувач робить запит:
+
+```
+Browser
+   ↓
+Next.js API
+   ↓
+Express API
+```
+
+в кожному запиті передаються **його cookies**:
+
+```
+Cookie: accessToken=...
+Cookie: refreshToken=...
+```
+
+Next.js не зберігає ці значення глобально.
+Вони беруться з:
+
+```js
+req.cookies
+```
+
+або
+
+```js
+headers().get("cookie")
+```
+
+Тому одночасні користувачі не перетинаються.
+
+---
+
+# 2️⃣ Найчастіша проблема — refresh race condition
+
+Приклад:
+
+```
+100 users
+accessToken expired
+```
+
+Кожен робить запит.
+
+Тоді:
+
+```
+100 refreshToken requests
+```
+
+на твій endpoint:
+
+```
+/api/auth/refreshtoken
+```
+
+Це нормально, але може створити **burst load**.
+
+---
+
+### Що роблять production системи
+
+Вони роблять **token refresh deduplication**.
+
+Тобто один refresh для одного користувача.
+
+Але навіть без цього більшість систем працює нормально.
+
+---
+
+# 3️⃣ Важлива проблема — connection pool до БД
+
+Ти раніше писав що використовуєш **Oracle + node-oracledb**.
+
+Якщо Express сервер робить:
+
+```
+getConnection()
+```
+
+без пулу, тоді при 200 користувачах буде:
+
+```
+ORA-00018: maximum number of sessions exceeded
+```
+
+Тому **обов'язково використовувати pool**.
+
+Приклад:
+
+```js
+const oracledb = require("oracledb");
+
+const pool = await oracledb.createPool({
+  user: "user",
+  password: "password",
+  connectString: "host/db",
+  poolMin: 10,
+  poolMax: 50,
+  poolIncrement: 5
+});
+```
+
+І в запитах:
+
+```js
+const connection = await pool.getConnection();
+```
+
+---
+
+# 4️⃣ Чи може middleware зламати concurrency
+
+Ні.
+
+Middleware в Next.js працює **stateless**.
+
+Кожен запит:
+
+```
+middleware
+   ↓
+page/api
+```
+
+обробляється незалежно.
+
+Там немає shared state.
+
+---
+
+# 5️⃣ Де може бути проблема у твоїй схемі
+
+Є одна річ у твоєму коді:
+
+```js
+const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`)
+```
+
+Middleware викликає **внутрішній API Next.js**.
+
+Це означає:
+
+```
+middleware
+   ↓
+api route
+   ↓
+middleware
+```
+
+але ти вже це правильно обійшов:
+
+```
+if (pathname.startsWith('/api/auth')) return next()
+```
+
+тому цикл не виникне.
+
+---
+
+# 6️⃣ Чи витримає Next.js багато користувачів
+
+Next.js API routes працюють як звичайний Node server.
+
+Типові цифри:
+
+| Users | Node server   |
+| ----- | ------------- |
+| 100   | легко         |
+| 500   | легко         |
+| 2000  | нормально     |
+| 10000 | треба scaling |
+
+---
+
+# 7️⃣ Де реально виникає bottleneck
+
+Не Next.js.
+
+А:
+
+```
+Express API
+     ↓
+Database
+```
+
+Якщо база повільна — все падає.
+
+---
+
+# 8️⃣ Правильна production схема
+
+```
+Browser
+   ↓
+Next.js (SSR + middleware)
+   ↓
+Next.js API routes (proxy)
+   ↓
+Express API
+   ↓
+Database
+```
+
+Next.js у цій схемі майже **не створює навантаження**.
+
+---
+
+# 9️⃣ Чи треба робити rate limit
+
+Так.
+
+На Express:
+
+```
+express-rate-limit
+```
+
+Приклад:
+
+```js
+const rateLimit = require("express-rate-limit");
+
+app.use(
+  rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 200
+  })
+);
+```
+
+---
+
+# 🔟 Ще одна важлива оптимізація
+
+Краще щоб Next.js **не був proxy для всіх запитів**.
+
+Іноді краще так:
+
+```
+Browser → Express API
+Browser → Next.js
+```
+
+А Next.js тільки:
+
+```
+auth
+SSR
+middleware
+```
+
+Але це залежить від архітектури.
+
+---
+
+# 📊 Висновок
+
+При твоїй схемі **одночасні користувачі не конфліктують**.
+
+Головне:
+
+✅ cookies ізольовані
+✅ middleware stateless
+✅ API routes ізольовані
+
+Слідкувати треба тільки за:
+
+1️⃣ refresh burst
+2️⃣ connection pool DB
+3️⃣ rate limit
+
+---
+
+# 🚀 Я можу ще показати одну дуже корисну річ
+
+У твоїй архітектурі є **одна прихована проблема масштабування**, яка з'являється приблизно після **500-1000 користувачів**.
+
+Вона пов'язана з:
+
+```
+Next.js API → Express API
+```
+
+і **подвоєною кількістю HTTP запитів**.
+
+Її можна виправити однією зміною архітектури.
+
+Якщо хочеш — покажу. Це дуже корисно для production.

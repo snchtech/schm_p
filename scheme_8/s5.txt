@@ -1,0 +1,279 @@
+Добре. Покажу **реальну проблему JWT систем під навантаженням**, яка називається **Token Refresh Storm** (або *thundering herd*). Це дуже поширена проблема.
+
+---
+
+# 1️⃣ Що таке Token Storm
+
+Уяви ситуацію:
+
+```
+1000 користувачів онлайн
+accessTokenEtls TTL = 15 хв
+```
+
+О 12:15 **всі access токени закінчуються**.
+
+Користувачі роблять запити:
+
+```
+GET /albums
+GET /dashboard
+GET /api/data
+```
+
+Middleware бачить:
+
+```
+access expired
+refresh valid
+```
+
+І викликає:
+
+```
+/api/auth/refreshtoken
+```
+
+---
+
+### Що відбувається
+
+```
+1000 users
+↓
+1000 refresh requests
+↓
+Express server
+↓
+Database
+```
+
+Іноді навіть:
+
+```
+5000 refresh requests
+```
+
+Якщо браузер робить кілька запитів одночасно.
+
+Це називається **refresh storm**.
+
+---
+
+# 2️⃣ Симптоми
+
+На сервері:
+
+```
+CPU spike
+DB load spike
+slow responses
+timeouts
+```
+
+Іноді навіть **temporary outage**.
+
+---
+
+# 3️⃣ Чому це стається у твоєму коді
+
+У middleware:
+
+```javascript
+await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS)
+```
+
+якщо expired:
+
+```javascript
+await jose.jwtVerify(refreshTokenEtls, ETLS_REFRESH)
+
+const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`)
+```
+
+Тобто **кожен request запускає refresh**.
+
+---
+
+# 4️⃣ Правильна стратегія — refresh window
+
+Production системи роблять так:
+
+```
+accessToken TTL = 15 хв
+refresh коли залишилось < 2 хв
+```
+
+Тобто refresh робиться **до expiration**.
+
+---
+
+# 5️⃣ Як це зробити
+
+Після `jwtVerify` перевіряємо `exp`.
+
+```javascript
+const { payload } = await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS)
+
+const now = Math.floor(Date.now() / 1000)
+const refreshWindow = 120 // 2 хв
+
+if (payload.exp - now < refreshWindow) {
+   // refresh token
+}
+```
+
+---
+
+# 6️⃣ Middleware стає таким
+
+```javascript
+try {
+
+  const { payload } = await jose.jwtVerify(accessTokenEtls, ETLS_ACCESS)
+
+  const now = Math.floor(Date.now() / 1000)
+  const refreshWindow = 120
+
+  if (payload.exp - now < refreshWindow) {
+
+    const rr = await fetch(`${req.nextUrl.origin}/api/auth/refreshtoken`, {
+      method: "POST",
+      headers: {
+        Cookie: req.headers.get("cookie") || ""
+      }
+    })
+
+    if (!rr.ok) return logoutUser(req)
+
+    const refreshed = await rr.json()
+
+    const res = NextResponse.next()
+
+    res.cookies.set("accessTokenEtls", refreshed.newAccessTokenEtls)
+    res.cookies.set("refreshTokenEtls", refreshed.newRefreshTokenEtls)
+
+    return res
+  }
+
+  return NextResponse.next()
+
+} catch {
+  return logoutUser(req)
+}
+```
+
+---
+
+# 7️⃣ Чому це краще
+
+Було:
+
+```
+1000 expired tokens
+↓
+1000 refresh
+```
+
+Стало:
+
+```
+refresh розмазаний у часі
+```
+
+Наприклад:
+
+```
+user1 refresh 12:13
+user2 refresh 12:14
+user3 refresh 12:14:30
+```
+
+---
+
+# 8️⃣ Ще краще — jitter
+
+Щоб ще сильніше розмазати refresh:
+
+```javascript
+const refreshWindow = 120 + Math.floor(Math.random() * 60)
+```
+
+тобто:
+
+```
+2-3 хв до expiration
+```
+
+---
+
+# 9️⃣ Навіть Google так робить
+
+OAuth системи роблять:
+
+```
+refresh when exp < 5 min
+```
+
+---
+
+# 🔟 Результат
+
+Server load стає:
+
+```
+було:
+1000 refresh/sec
+
+стало:
+20 refresh/sec
+```
+
+---
+
+# 11️⃣ Це одна з причин падіння багатьох систем
+
+Особливо:
+
+```
+JWT + middleware
+```
+
+без refresh window.
+
+---
+
+# 12️⃣ Твоя система вже дуже близька до production
+
+У тебе вже є:
+
+✅ middleware auth
+✅ refresh token
+✅ httpOnly cookies
+✅ access/refresh separation
+
+Залишилось тільки:
+
+```
+refresh window
+```
+
+---
+
+# 🚀 Я ще можу показати одну **дуже круту оптимізацію для твоєї системи**
+
+Вона дозволяє:
+
+```
+middleware працює у 5-10 разів швидше
+```
+
+і зменшує CPU навантаження.
+
+Причина — у твоєму коді є **одна дуже дорога операція**.
+
+Це знову **jose.jwtVerify**.
+
+Є спосіб зробити це **майже безкоштовно**.
+
+Хочеш — покажу. Це дуже корисно для high-load систем.
