@@ -1,0 +1,316 @@
+Дуже правильне питання 👍
+Насправді **CanvasController якраз і робить контекстне меню простішим**, а не складнішим.
+
+Ключова ідея:
+**правий клік теж обробляється централізовано через CanvasController**, але **визначення target (shape / stage)** робиться через `Konva event`.
+
+---
+
+# 1️⃣ Як Konva визначає по чому клікнули
+
+У події є:
+
+```js
+e.target
+```
+
+Це може бути:
+
+```
+Stage
+Layer
+Group
+Rect
+Circle
+```
+
+Тобто:
+
+```js
+if (e.target === stage)
+```
+
+→ клік по пустому canvas
+
+або
+
+```js
+if (e.target.getParent()?.className === "Group")
+```
+
+→ клік по shape
+
+---
+
+# 2️⃣ Як виглядає правильна схема
+
+```text
+CanvasController
+      │
+      ├ mouseDown
+      ├ mouseMove
+      ├ mouseUp
+      └ contextMenu
+```
+
+Stage:
+
+```jsx
+<Stage
+  onMouseDown={controller.mouseDown}
+  onMouseMove={controller.mouseMove}
+  onMouseUp={controller.mouseUp}
+  onContextMenu={controller.contextMenu}
+/>
+```
+
+---
+
+# 3️⃣ Додаємо contextMenu у CanvasController
+
+В `useCanvasController.js`.
+
+```javascript
+const handleContextMenu = (e) => {
+
+  e.evt.preventDefault()
+
+  const stage = e.target.getStage()
+
+  const pointer = stage.getPointerPosition()
+
+  if (!pointer) return
+
+  // якщо клік по пустому canvas
+  if (e.target === stage) {
+
+    openContextMenu({
+      type: "stage",
+      position: pointer
+    })
+
+    return
+  }
+
+  // якщо клік по shape
+  const nodeId = e.target?.attrs?.nodeId
+
+  if (nodeId) {
+
+    openContextMenu({
+      type: "node",
+      id: nodeId,
+      position: pointer
+    })
+
+  }
+
+}
+```
+
+---
+
+# 4️⃣ Як shape передає nodeId
+
+У `DiagramSymbolItem`.
+
+```jsx
+<Group
+  ref={groupRef}
+  x={el.x}
+  y={el.y}
+  draggable
+  nodeId={el.id}
+>
+```
+
+Konva дозволяє додавати кастомні attrs.
+
+Тепер у controller:
+
+```js
+e.target.attrs.nodeId
+```
+
+---
+
+# 5️⃣ Додаємо handler до Stage
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={controller.mouseDown}
+  onMouseMove={controller.mouseMove}
+  onMouseUp={controller.mouseUp}
+  onContextMenu={controller.contextMenu}
+/>
+```
+
+---
+
+# 6️⃣ Context menu state
+
+Його краще тримати або:
+
+* в Zustand
+* або в DiagramEditor
+
+Наприклад:
+
+```javascript
+const [menuState, setMenuState] = useState({
+  open:false,
+  position:null,
+  target:null
+})
+```
+
+---
+
+# 7️⃣ CanvasController може викликати меню
+
+Передаємо callback:
+
+```js
+const controller = useCanvasController({
+  activeTool,
+  editorMode,
+  openContextMenu
+})
+```
+
+---
+
+# 8️⃣ Тоді controller виглядає так
+
+```javascript
+export function useCanvasController({
+  activeTool,
+  editorMode,
+  openContextMenu
+}) {
+
+  const addNode = useGraphStore(s=>s.addNode)
+
+  const handleContextMenu = (e) => {
+
+    e.evt.preventDefault()
+
+    const stage = e.target.getStage()
+
+    const pointer = stage.getPointerPosition()
+
+    if (!pointer) return
+
+    if (e.target === stage) {
+
+      openContextMenu({
+        type:"stage",
+        position:pointer
+      })
+
+      return
+    }
+
+    const nodeId = e.target.attrs.nodeId
+
+    if (nodeId) {
+
+      openContextMenu({
+        type:"node",
+        id:nodeId,
+        position:pointer
+      })
+
+    }
+
+  }
+
+  return {
+    mouseDown:handleMouseDown,
+    mouseMove:handleMouseMove,
+    mouseUp:handleMouseUp,
+    contextMenu:handleContextMenu
+  }
+
+}
+```
+
+---
+
+# 9️⃣ В DiagramEditor
+
+```javascript
+const openContextMenu = ({type,id,position}) => {
+
+  setMenuState({
+    open:true,
+    anchorPosition:{
+      left:position.x,
+      top:position.y
+    },
+    target:{type,id}
+  })
+
+}
+```
+
+---
+
+# 🔟 В результаті
+
+```text
+Right click
+      │
+      ▼
+CanvasController
+      │
+      ▼
+визначає target
+      │
+      ├ stage
+      └ node
+      │
+      ▼
+openContextMenu()
+      │
+      ▼
+GraphContextMenuMui
+```
+
+---
+
+# 11️⃣ Найважливіша перевага
+
+Тепер **контекстне меню працює для всього canvas**:
+
+```
+stage
+node
+connection
+anchor
+selection
+```
+
+і логіка **в одному місці**.
+
+---
+
+# 🚀 Наступний крок (дуже рекомендую)
+
+Я можу показати ще одну дуже важливу річ для редактора схем:
+
+### **Selection Box (lasso selection)**
+
+як у Figma / draw.io:
+
+```
+mousedown
+mousemove
+виділення кількох елементів
+mouseup
+```
+
+Це дуже легко додати тепер, бо у нас вже є **CanvasController**.

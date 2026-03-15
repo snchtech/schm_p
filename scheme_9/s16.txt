@@ -1,0 +1,218 @@
+Ти хочеш змінити UX так:
+
+1. **За замовчуванням** ⭐ **не показуються**.
+2. Є кнопка **"Обрані / Favorites edit mode"**.
+3. Коли її натиснути → **з’являються зірочки**.
+4. Натиснути **Save** → зірочки **зникають**, але вибрані елементи зберігаються.
+
+Це дуже правильний UX (як у Figma/VSCode).
+
+Я покажу **мінімальні зміни у твоєму коді**.
+
+---
+
+# 1. Додати режим редагування Favorites
+
+У `ToolPalette` додай state:
+
+```javascript
+const [editFavorites, setEditFavorites] = useState(false);
+```
+
+---
+
+# 2. Передати режим у `ToolCard`
+
+Було:
+
+```javascript
+function ToolCard({ type, item, active, isFav, onPick, onToggleFav })
+```
+
+Змінюємо:
+
+```javascript
+function ToolCard({ type, item, active, isFav, onPick, onToggleFav, editFavorites })
+```
+
+---
+
+# 3. Показувати ⭐ тільки у режимі редагування
+
+Було:
+
+```javascript
+{/* ⭐ */}
+<Tooltip title={isFav ? "Remove from favorites" : "Add to favorites"} placement="top">
+```
+
+Заміни на:
+
+```javascript
+{editFavorites && (
+  <Tooltip title={isFav ? "Remove from favorites" : "Add to favorites"} placement="top">
+    <IconButton
+      size="small"
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggleFav(type);
+      }}
+      sx={{
+        position: "absolute",
+        top: 2,
+        right: 2,
+        bgcolor: "background.paper",
+        border: "1px solid",
+        borderColor: "divider",
+        "&:hover": { bgcolor: "background.paper" },
+      }}
+    >
+      {isFav ? <StarIcon fontSize="inherit" /> : <StarBorderIcon fontSize="inherit" />}
+    </IconButton>
+  </Tooltip>
+)}
+```
+
+---
+
+# 4. Передати прапорець у всі ToolCard
+
+Знайди:
+
+```javascript
+<ToolCard
+```
+
+і додай:
+
+```javascript
+editFavorites={editFavorites}
+```
+
+Наприклад:
+
+```javascript
+<ToolCard
+  key={type}
+  type={type}
+  item={item}
+  active={activeTool === type}
+  isFav={favSet.has(type)}
+  onPick={pickTool}
+  onToggleFav={toggleFav}
+  editFavorites={editFavorites}
+/>
+```
+
+Зробити це треба у **3 місцях**:
+
+* Favorites
+* Recent
+* All
+
+---
+
+# 5. Додати кнопку Edit / Save
+
+У Header:
+
+Було:
+
+```javascript
+<Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+```
+
+Заміни на:
+
+```javascript
+<Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+```
+
+і додай кнопку:
+
+```javascript
+<Tooltip title={editFavorites ? "Save favorites" : "Edit favorites"}>
+  <IconButton
+    size="small"
+    onClick={() => setEditFavorites((v) => !v)}
+  >
+    {editFavorites ? <StarIcon /> : <StarBorderIcon />}
+  </IconButton>
+</Tooltip>
+```
+
+Повністю header стане:
+
+```javascript
+<Box sx={{ display: "flex", alignItems: "center", px: 1, py: 1 }}>
+  <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 800 }}>
+    Shapes
+  </Typography>
+
+  <Tooltip title={editFavorites ? "Save favorites" : "Edit favorites"}>
+    <IconButton size="small" onClick={() => setEditFavorites((v) => !v)}>
+      {editFavorites ? <StarIcon /> : <StarBorderIcon />}
+    </IconButton>
+  </Tooltip>
+
+  <Tooltip title="Згорнути">
+    <IconButton size="small" onClick={onToggle}>
+      <ChevronLeftIcon />
+    </IconButton>
+  </Tooltip>
+</Box>
+```
+
+---
+
+# 6. UX результат
+
+### Default
+
+```
+Shapes   ☆   <
+```
+
+⭐ **не показуються**
+
+---
+
+### Edit mode
+
+```
+Shapes   ⭐   <
+```
+
+і у кожному елементі:
+
+```
+[ element ] ⭐
+```
+
+---
+
+### Save
+
+натиснув ⭐ → режим вимкнувся
+і ⭐ біля елементів **зникають**
+
+але favorites **залишаються**.
+
+---
+
+# 7. Дуже корисне UX покращення (рекомендую)
+
+Коли `editFavorites = true`, можна підсвітити панель:
+
+```javascript
+bgcolor: editFavorites ? "action.hover" : "transparent"
+```
+
+щоб було видно що **режим редагування активний**.
+
+---
+
+✅ Якщо хочеш, я покажу **ще одну дуже корисну оптимізацію для цього меню**:
+
+можна зробити **drag & drop reorder Favorites**, щоб користувач сам сортував їх порядок (як у Figma toolbar).
+Це додається буквально **20 рядків коду** і значно покращує UX.

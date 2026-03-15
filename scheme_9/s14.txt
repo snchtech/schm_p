@@ -1,0 +1,129 @@
+Є два хороші варіанти. Найпростіший — **додати другу кнопку поруч з Chevron у тому ж Paper**. Тобто одна кнопка відкриває **Tools**, інша — **Sidebar (settings)**.
+
+Покажу найчистіший варіант.
+
+---
+
+# 1. Імпорт іконки Settings
+
+Додай імпорт:
+
+```javascript
+import SettingsIcon from "@mui/icons-material/Settings";
+```
+
+---
+
+# 2. Додай другий state (для sidebar)
+
+У сторінці редактора:
+
+```javascript
+const [toolsOpen, setToolsOpen] = useState(false);
+const [sidebarOpen, setSidebarOpen] = useState(false);
+```
+
+---
+
+# 3. Заміни блок кнопки
+
+Було (у ToolPalette):
+
+```javascript
+<Paper>
+  <IconButton onClick={onToggle}>
+    <ChevronRightIcon />
+  </IconButton>
+</Paper>
+```
+
+Зробимо **дві кнопки**:
+
+```javascript
+<Paper
+  elevation={6}
+  sx={{
+    position: "fixed",
+    top: 16,
+    left: 12,
+    borderRadius: 3,
+    overflow: "hidden",
+    zIndex: 1301,
+    display: "flex"
+  }}
+>
+  <Tooltip title="Відкрити панель інструментів">
+    <IconButton onClick={() => setToolsOpen(true)}>
+      <ChevronRightIcon />
+    </IconButton>
+  </Tooltip>
+
+  <Tooltip title="Відкрити панель схеми">
+    <IconButton onClick={() => setSidebarOpen(true)}>
+      <SettingsIcon />
+    </IconButton>
+  </Tooltip>
+</Paper>
+```
+
+---
+
+# 4. Підключення панелей
+
+```javascript
+<ToolPalette
+  open={toolsOpen}
+  onToggle={() => setToolsOpen(v => !v)}
+/>
+
+<LeftSidebar
+  open={sidebarOpen}
+  onToggle={() => setSidebarOpen(v => !v)}
+/>
+```
+
+---
+
+# 5. Вигляд UI
+
+```
+┌───────────────┐
+│  >  ⚙         │
+└───────────────┘
+
+>  → Tools panel
+⚙ → Sidebar
+```
+
+---
+
+# 6. Краще UX (рекомендую)
+
+Трохи розділити кнопки:
+
+```javascript
+sx={{
+  display: "flex",
+  gap: 0.5,
+  p: 0.5
+}}
+```
+
+---
+
+# 7. Ще кращий варіант (як у Figma)
+
+Замість `Paper` зробити **вертикальний floating toolbar**:
+
+```
+┌───┐
+│ > │  tools
+│ ⚙ │  sidebar
+│ 📑 │ layers
+│ 🔍 │ zoom
+└───┘
+```
+
+Це виглядає **набагато професійніше для редактора схем**.
+
+Якщо хочеш — покажу **маленький компонент FloatingToolbar (~30 рядків)**, який дуже зручно масштабувати під редактор.

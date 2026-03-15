@@ -1,0 +1,305 @@
+Нижче я приведу **повністю готовий компонент `LeftSidebar`**, який працює **так само як твій `ToolPalette`**:
+
+* використовує **MUI Drawer**
+* відкривається **floating кнопкою над canvas**
+* має **header з кнопкою закриття**
+* контент **скролиться**
+* **стан open контролюється ззовні**
+
+Це правильна архітектура для редактора.
+
+---
+
+# 1. Новий компонент `LeftSidebar.js`
+
+```javascript
+"use client";
+
+import React, { useState } from "react";
+import {
+  Box,
+  Drawer,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Typography,
+  IconButton,
+  Tooltip,
+  Paper,
+  Divider
+} from "@mui/material";
+
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ArrowBackIosNewIcon from "@mui/icons-material/ArrowBackIosNew";
+import ArrowForwardIosIcon from "@mui/icons-material/ArrowForwardIos";
+
+import SchemeSelector from "./SchemeSelector";
+import SchemeInfoCard from "./SchemeInfoCard";
+import PersonalElements from "./PersonalElements";
+import StandardElements from "./StandardElements";
+import DepartmentElements from "./DepartmentElements";
+import TextElements from "./TextElements";
+import LayersVisibility from "./LayersVisibility";
+
+const DRAWER_W = 300;
+
+export default function LeftSidebar({ open, onToggle, onLayerChange }) {
+  const [expanded, setExpanded] = useState(["schemeSelector", "infoCard"]);
+
+  const handleExpand = (panel) => (_event, isExpanded) => {
+    setExpanded((prev) =>
+      isExpanded ? [...prev, panel] : prev.filter((p) => p !== panel)
+    );
+  };
+
+  return (
+    <>
+      <Drawer
+        anchor="left"
+        open={open}
+        variant="temporary"
+        hideBackdrop
+        ModalProps={{ keepMounted: true }}
+        PaperProps={{
+          sx: {
+            width: DRAWER_W,
+            height: "100%",
+            borderRight: "1px solid",
+            borderColor: "divider",
+            bgcolor: "#f5f5f5",
+            display: "flex",
+            flexDirection: "column"
+          }
+        }}
+      >
+        {/* Header */}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            px: 1.5,
+            py: 1
+          }}
+        >
+          <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 700 }}>
+            Scheme Panel
+          </Typography>
+
+          <Tooltip title="Закрити">
+            <IconButton size="small" onClick={onToggle}>
+              <ArrowBackIosNewIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Divider />
+
+        {/* Scrollable content */}
+        <Box sx={{ flex: 1, overflowY: "auto", p: 1 }}>
+
+          {/* Вибір схеми */}
+          <Accordion
+            expanded={expanded.includes("schemeSelector")}
+            onChange={handleExpand("schemeSelector")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Вибір схеми</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <SchemeSelector />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Інформаційна картка */}
+          <Accordion
+            expanded={expanded.includes("infoCard")}
+            onChange={handleExpand("infoCard")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Інформаційна картка схеми</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <SchemeInfoCard />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Особисті елементи */}
+          <Accordion
+            expanded={expanded.includes("personalElements")}
+            onChange={handleExpand("personalElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Особисті елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <PersonalElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Стандартні елементи */}
+          <Accordion
+            expanded={expanded.includes("standardElements")}
+            onChange={handleExpand("standardElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Стандартні елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <StandardElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Віддільні елементи */}
+          <Accordion
+            expanded={expanded.includes("departmentElements")}
+            onChange={handleExpand("departmentElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Віддільні елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <DepartmentElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Текстові елементи */}
+          <Accordion
+            expanded={expanded.includes("textElements")}
+            onChange={handleExpand("textElements")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Текстові елементи</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <TextElements />
+            </AccordionDetails>
+          </Accordion>
+
+          {/* Шари */}
+          <Accordion
+            expanded={expanded.includes("layersVisibility")}
+            onChange={handleExpand("layersVisibility")}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography>Шари для відображення</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <LayersVisibility onLayerChange={onLayerChange} />
+            </AccordionDetails>
+          </Accordion>
+
+        </Box>
+      </Drawer>
+
+      {/* Floating open button */}
+      {!open && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: "fixed",
+            top: 80,
+            left: 12,
+            borderRadius: 3,
+            overflow: "hidden",
+            zIndex: 1301
+          }}
+        >
+          <Tooltip title="Відкрити панель схеми">
+            <IconButton onClick={onToggle}>
+              <ArrowForwardIosIcon />
+            </IconButton>
+          </Tooltip>
+        </Paper>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+# 2. Як використовувати в Editor сторінці
+
+Наприклад у `EditorPage.js`.
+
+```javascript
+const [sidebarOpen, setSidebarOpen] = useState(false);
+```
+
+---
+
+### JSX
+
+```javascript
+<LeftSidebar
+  open={sidebarOpen}
+  onToggle={() => setSidebarOpen((v) => !v)}
+  onLayerChange={handleLayerChange}
+/>
+```
+
+---
+
+# 3. Результат UI
+
+### Закрито
+
+```
+◀  button
+
+      CANVAS
+```
+
+---
+
+### Відкрито
+
+```
+┌───────────────┬─────────────────────┐
+│ LeftSidebar   │                     │
+│               │      CANVAS         │
+│               │                     │
+└───────────────┴─────────────────────┘
+```
+
+---
+
+# 4. Дуже важлива деталь (UX)
+
+Оскільки у тебе **вже є ToolPalette**, рекомендую рознести кнопки:
+
+```
+ліва верхня зона
+
+[Tools]      [Layers]
+```
+
+або
+
+```
+ліва сторона
+
+[Tools]
+[Sidebar]
+```
+
+інакше користувач буде плутатись.
+
+---
+
+# 5. Якщо хочеш — я покажу **значно кращий layout для редактора**, який використовують:
+
+* **Figma**
+* **draw.io**
+* **Miro**
+
+де:
+
+```
+LeftTools
+LeftSidebar
+Canvas
+RightInspector
+```
+
+працюють **без Drawer взагалі**, що **сильно спрощує код Konva редактора**.

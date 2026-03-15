@@ -1,0 +1,193 @@
+У тебе вже майже вся архітектура готова 👍
+Потрібно лише **передати вибраний tool з ToolPalette у DiagramEditor і при кліку на Stage створювати новий symbol**.
+
+Це стандартний патерн для графічних редакторів (Figma / Draw.io):
+
+1. користувач **вибирає tool**
+2. клікає на **Stage**
+3. створюється новий **symbol**
+4. symbol додається в `S.symbols`
+
+---
+
+# 1️⃣ Передати activeTool в DiagramEditor
+
+Наприклад у батьківському layout:
+
+```jsx
+const [activeTool, setActiveTool] = useState(null)
+
+<ToolPalette
+  open={paletteOpen}
+  activeTool={activeTool}
+  onSelectTool={setActiveTool}
+/>
+
+<DiagramEditor activeTool={activeTool}/>
+```
+
+---
+
+# 2️⃣ Прийняти activeTool в DiagramEditor
+
+```javascript
+export default function DiagramEditor({ activeTool }) {
+```
+
+---
+
+# 3️⃣ Обробник кліку по Stage
+
+Тут будемо створювати новий елемент.
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry"
+
+const handleStageClick = (e) => {
+
+  if (!activeTool) return
+
+  const stage = e.target.getStage()
+  const pointer = stage.getPointerPosition()
+
+  const tool = ELEMENT_REGISTRY[activeTool]
+
+  const newElement = {
+    id: crypto.randomUUID(),
+    type: activeTool,
+    x: pointer.x,
+    y: pointer.y,
+    ...tool.defaults
+  }
+
+  S.setSymbols(prev => [...prev, newElement])
+}
+```
+
+---
+
+# 4️⃣ Підключити до Stage
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  style={{ border: "1px solid #ccc" }}
+  onMouseDown={handleStageClick}
+>
+```
+
+---
+
+# 5️⃣ Результат
+
+Тепер workflow:
+
+1️⃣ вибрали shape
+
+```
+rectangle
+circle
+text
+```
+
+2️⃣ клік на canvas
+
+3️⃣ створюється symbol
+
+```
+symbols = [
+ {id:1, type:"rect", x:120, y:300}
+]
+```
+
+4️⃣ `DiagramSymbols` автоматично відмалює
+
+```
+<Group>
+   <Rect/>
+</Group>
+```
+
+---
+
+# 6️⃣ Важлива умова
+
+Щоб **клік по existing element не створював новий**, треба перевірити:
+
+```javascript
+if (e.target !== e.target.getStage()) return
+```
+
+Повний код:
+
+```javascript
+const handleStageClick = (e) => {
+
+  if (e.target !== e.target.getStage()) return
+  if (!activeTool) return
+
+  const stage = e.target.getStage()
+  const pointer = stage.getPointerPosition()
+
+  const tool = ELEMENT_REGISTRY[activeTool]
+
+  const newElement = {
+    id: crypto.randomUUID(),
+    type: activeTool,
+    x: pointer.x,
+    y: pointer.y,
+    ...tool.defaults
+  }
+
+  S.setSymbols(prev => [...prev, newElement])
+}
+```
+
+---
+
+# 7️⃣ Архітектура буде така
+
+```
+ToolPalette
+     │
+     │ activeTool
+     ▼
+DiagramEditor
+     │
+     │ click
+     ▼
+symbols state
+     │
+     ▼
+DiagramSymbols
+     │
+     ▼
+<Group>
+   <Shape/>
+</Group>
+```
+
+---
+
+# 8️⃣ Наступний крок (дуже рекомендую)
+
+Зробити **2 режими додавання**:
+
+### Draw.io style
+
+клік → додати
+
+### Figma style
+
+drag → створити rectangle
+
+```
+mousedown → start
+mousemove → resize
+mouseup → finish
+```
+
+Я можу показати **архітектуру drag-creation**, яка використовується у Figma / Miro.
+Це буде дуже корисно для твого редактора схем.

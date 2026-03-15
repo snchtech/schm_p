@@ -1,0 +1,448 @@
+У тебе вже дуже хороший фундамент (React + Konva + registry + state hook). Але я бачу кілька **архітектурних моментів**, які зараз не критичні, але через 2-3 етапи розвитку редактора можуть сильно ускладнити код. Я поясню їх максимально практично — саме з точки зору **редактора схем**, який ти будуєш.
+
+Я розділю на **5 ключових моментів**.
+
+---
+
+# 1️⃣ Змішування Editor Logic і UI Logic
+
+Зараз у `DiagramEditor` знаходиться дуже багато різної логіки:
+
+* zoom/pan (`setupLayerZoomPan`)
+* створення елементів
+* selection
+* context menu
+* delete logic
+* nodeRefs
+* stage events
+* toolbar state
+* menu state
+
+Тобто один компонент робить **занадто багато речей**.
+
+### Поточна структура
+
+```
+DiagramEditor
+ ├ Stage
+ ├ DiagramConnections
+ ├ DiagramSymbols
+ ├ ContextMenu
+ ├ Zoom buttons
+ ├ Add connector buttons
+ └ graph logic
+```
+
+### Правильніше
+
+```
+EditorRoot
+ ├ Toolbar
+ ├ Canvas
+ │    ├ Stage
+ │    ├ SymbolsLayer
+ │    ├ ConnectionsLayer
+ │    └ TransformerLayer
+ └ ContextMenu
+```
+
+Тобто:
+
+**Canvas** відповідає тільки за canvas.
+
+---
+
+# 2️⃣ Відсутність єдиного Graph Model
+
+Зараз ти використовуєш:
+
+```
+S.symbols
+S.connections
+```
+
+Але редактори схем майже завжди мають **єдину модель графа**.
+
+Наприклад:
+
+```
+graph = {
+  nodes: [],
+  edges: []
+}
+```
+
+Замість:
+
+```
+symbols
+connections
+anchors
+```
+
+### Краще
+
+```
+graph
+ ├ nodes
+ ├ edges
+ └ metadata
+```
+
+Наприклад:
+
+```javascript
+graph = {
+  nodes: [
+    {id:"1", type:"rect", x:100, y:100}
+  ],
+
+  edges: [
+    {id:"e1", from:"1", to:"2"}
+  ]
+}
+```
+
+Тоді:
+
+```
+delete node
+```
+
+може автоматично:
+
+```
+delete edges
+```
+
+---
+
+# 3️⃣ Registry зараз частково дублюється
+
+У тебе зараз є:
+
+```
+ELEMENT_REGISTRY
+GraphLibrary
+ELEMENT_COMPONENTS
+```
+
+Тобто одна і та сама інформація розкидана.
+
+### Поточна схема
+
+```
+registry
+ └ defaults
+
+GraphLibrary
+ └ components
+
+DiagramSymbols
+ └ mapping
+```
+
+### Краще
+
+Registry має містити **все**.
+
+```
+ELEMENT_REGISTRY = {
+ rect: {
+   component: RectShape,
+   defaults: {...},
+   anchors: [...]
+ }
+}
+```
+
+Тоді:
+
+```
+DiagramSymbols
+```
+
+просто бере:
+
+```
+registry[type].component
+```
+
+---
+
+# 4️⃣ Ref Map для nodeRefs може стати проблемою
+
+Зараз ти робиш:
+
+```
+nodeRefs = Map()
+registerNodeRef
+```
+
+Це нормально для невеликого редактора.
+
+Але якщо буде:
+
+```
+500 елементів
+1000 елементів
+```
+
+реєстрація через `useEffect` може створювати зайві перерендери.
+
+У великих редакторах роблять:
+
+```
+Konva.findOne("#node-id")
+```
+
+або
+
+```
+stage.find()
+```
+
+Тобто refs не зберігаються вручну.
+
+---
+
+# 5️⃣ Stage events краще централізувати
+
+Зараз події розкидані:
+
+```
+Stage onMouseDown
+Group onMouseDown
+Group onDragMove
+Circle onClick
+```
+
+Коли редактор росте, це створює хаос.
+
+Краще мати **один controller**.
+
+Наприклад:
+
+```
+CanvasController
+```
+
+який обробляє:
+
+```
+mouseDown
+mouseMove
+mouseUp
+```
+
+І вже всередині вирішує:
+
+```
+selection
+creation
+drag
+connection
+```
+
+---
+
+# 6️⃣ Відсутній Editor Mode
+
+Зараз є:
+
+```
+activeTool
+isAddingConnector
+isAddingAnchor
+```
+
+Але краще мати **один режим редактора**.
+
+```
+editorMode
+```
+
+Наприклад:
+
+```javascript
+mode =
+
+"select"
+"add-node"
+"add-connector"
+"drag"
+```
+
+Тоді Stage handler виглядає так:
+
+```javascript
+switch(mode) {
+
+ case "add-node":
+   createNode()
+   break
+
+ case "select":
+   selectNode()
+   break
+}
+```
+
+---
+
+# 7️⃣ Canvas Layout
+
+Ти вже зіткнувся з проблемою:
+
+```
+Drawer перекриває Stage
+```
+
+Це означає що layout не розділений.
+
+Краще зробити:
+
+```
+EditorLayout
+ ├ Sidebar
+ └ Canvas
+```
+
+---
+
+# 8️⃣ DiagramSymbols зараз занадто важкий
+
+Зараз один компонент робить:
+
+```
+anchors
+hover
+selection
+drag
+context
+shape
+```
+
+Краще:
+
+```
+Symbol
+ ├ Shape
+ ├ AnchorLayer
+ └ SelectionOutline
+```
+
+---
+
+# 9️⃣ State з useDiagramState може розростися
+
+Зараз там вже багато:
+
+```
+symbols
+connections
+hovered
+selection
+anchors
+```
+
+Коли редактор росте, це перетворюється на:
+
+```
+2000 рядків hook
+```
+
+Краще використовувати:
+
+```
+Zustand
+Redux
+Jotai
+```
+
+для графу.
+
+---
+
+# 10️⃣ Зараз немає Command System
+
+Редактор схем майже завжди має:
+
+```
+undo
+redo
+```
+
+Для цього краще робити:
+
+```
+commands
+```
+
+Наприклад:
+
+```
+ADD_NODE
+DELETE_NODE
+MOVE_NODE
+```
+
+А не одразу змінювати state.
+
+---
+
+# 11️⃣ Але головне — у тебе вже дуже правильний фундамент
+
+Ти вже зробив:
+
+✔ registry
+✔ symbols
+✔ connectors
+✔ anchor system
+✔ transformer
+✔ context menu
+
+Це **90% основи редактора**.
+
+---
+
+# ⭐ Найважливіша порада
+
+Тобі зараз треба стабілізувати **3 речі**:
+
+1️⃣ вставка елементів
+2️⃣ selection
+3️⃣ drag
+
+І тільки після цього рухатись далі.
+
+---
+
+# 🚀 Якщо хочеш — я можу показати
+
+**ідеальну архітектуру React + Konva редактора схем**
+
+(яку використовують у production):
+
+```
+/editor
+   EditorRoot
+   EditorLayout
+   Canvas
+   CanvasController
+   GraphStore
+   Registry
+
+/graph
+   nodes
+   edges
+   anchors
+   utils
+
+/ui
+   Toolbar
+   ContextMenu
+   Inspector
+```
+
+Це дозволить твоєму редактору **спокійно вирости до 10-20k рядків коду без хаосу**.

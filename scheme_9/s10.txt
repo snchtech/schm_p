@@ -1,0 +1,373 @@
+Добре. Тепер зробимо **один з найсильніших архітектурних кроків — винесемо Graph State у Zustand store**.
+Це те, що реально використовують більшість canvas-редакторів (включно з tldraw).
+
+Це дасть тобі:
+
+✔ менше props
+✔ централізований graph state
+✔ прості undo/redo
+✔ кращу продуктивність
+✔ простіший код
+
+Я покажу **покроково**, щоб не зламати твій редактор.
+
+---
+
+# Крок 1. Встановити Zustand
+
+```bash
+npm install zustand
+```
+
+---
+
+# Крок 2. Створити store
+
+Створи файл:
+
+```text
+graph/store/useGraphStore.js
+```
+
+---
+
+## Код store
+
+```javascript
+import { create } from "zustand";
+
+export const useGraphStore = create((set, get) => ({
+
+  nodes: [],
+  edges: [],
+
+  selection: null,
+
+  hoveredNode: null,
+  hoveredAnchor: null,
+
+  setNodes: (fn) =>
+    set((state) => ({
+      nodes: typeof fn === "function" ? fn(state.nodes) : fn
+    })),
+
+  addNode: (node) =>
+    set((state) => ({
+      nodes: [...state.nodes, node]
+    })),
+
+  updateNodePosition: (id, x, y) =>
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === id ? { ...n, x, y } : n
+      )
+    })),
+
+  deleteNode: (id) =>
+    set((state) => ({
+      nodes: state.nodes.filter((n) => n.id !== id),
+      edges: state.edges.filter(
+        (e) => e.from !== id && e.to !== id
+      )
+    })),
+
+  setSelection: (selection) => set({ selection }),
+
+  setHoveredNode: (id) => set({ hoveredNode: id }),
+
+  setHoveredAnchor: (anchor) => set({ hoveredAnchor: anchor }),
+
+}));
+```
+
+---
+
+# Крок 3. Використати store у DiagramEditor
+
+Раніше ти використовував:
+
+```javascript
+const S = useDiagramState()
+```
+
+Тепер замінимо на Zustand.
+
+---
+
+## У `DiagramEditor.jsx`
+
+```javascript
+import { useGraphStore } from "../graph/store/useGraphStore";
+```
+
+---
+
+### Дістати state
+
+```javascript
+const nodes = useGraphStore((s) => s.nodes);
+const addNode = useGraphStore((s) => s.addNode);
+const setSelection = useGraphStore((s) => s.setSelection);
+```
+
+---
+
+# Крок 4. Оновити Stage handler
+
+Було:
+
+```javascript
+S.setSymbols((prev) => [...prev, newElement])
+```
+
+Тепер:
+
+```javascript
+addNode(newElement)
+```
+
+---
+
+### Повна функція
+
+```javascript
+const handleStageMouseDown = (e) => {
+
+  const stage = e.target.getStage()
+  if (!stage) return
+
+  if (e.target !== stage) return
+
+  const pointer = stage.getPointerPosition()
+  if (!pointer) return
+
+  if (editorMode === "add-node" && activeTool) {
+
+    const newElement = createElementFromTool(
+      activeTool,
+      pointer.x,
+      pointer.y
+    )
+
+    if (!newElement) return
+
+    addNode(newElement)
+
+  }
+
+}
+```
+
+---
+
+# Крок 5. Використати store у DiagramSymbols
+
+Було:
+
+```javascript
+symbols
+```
+
+Тепер:
+
+```javascript
+const nodes = useGraphStore((s) => s.nodes)
+```
+
+---
+
+## DiagramSymbols
+
+```javascript
+const nodes = useGraphStore((s) => s.nodes)
+
+return (
+  <>
+    {nodes.map((el) => (
+      <DiagramSymbolItem
+        key={el.id}
+        el={el}
+      />
+    ))}
+  </>
+)
+```
+
+---
+
+# Крок 6. Drag Move
+
+Було:
+
+```javascript
+handleDragMove
+```
+
+Тепер:
+
+```javascript
+const updateNodePosition = useGraphStore(
+  (s) => s.updateNodePosition
+);
+```
+
+---
+
+### У Symbol
+
+```javascript
+onDragMove={(e) => {
+
+  const pos = e.target.position()
+
+  updateNodePosition(
+    el.id,
+    pos.x,
+    pos.y
+  )
+
+}}
+```
+
+---
+
+# Крок 7. Selection
+
+```javascript
+const selection = useGraphStore((s) => s.selection)
+```
+
+---
+
+### При кліку
+
+```javascript
+onMouseDown={() => setSelection({
+  type: "node",
+  id: el.id
+})}
+```
+
+---
+
+# Крок 8. Delete node
+
+Було:
+
+```javascript
+deleteNodeWithLinks
+```
+
+Тепер у store вже є:
+
+```javascript
+deleteNode
+```
+
+---
+
+### Виклик
+
+```javascript
+const deleteNode = useGraphStore((s) => s.deleteNode)
+
+deleteNode(selected.id)
+```
+
+---
+
+# Крок 9. DiagramEditor тепер значно простіший
+
+Раніше:
+
+```text
+DiagramEditor
+ ├ symbols
+ ├ connections
+ ├ selection
+ ├ hover
+```
+
+Тепер:
+
+```text
+DiagramEditor
+ ├ nodes (store)
+ ├ edges (store)
+ ├ selection (store)
+```
+
+---
+
+# Крок 10. Найважливіша перевага
+
+Тепер **будь-який компонент може читати graph state**.
+
+Наприклад:
+
+```javascript
+const nodes = useGraphStore(s => s.nodes)
+```
+
+у:
+
+* Toolbar
+* Inspector panel
+* Export tool
+* History
+* Minimap
+
+---
+
+# Крок 11. Undo/Redo тепер можна зробити за 20 рядків
+
+Бо store централізований.
+
+---
+
+# Крок 12. Архітектура тепер виглядає так
+
+```text
+EditorWorkspace
+     │
+     ▼
+ToolPalette
+
+DiagramEditor
+     │
+     ▼
+Stage
+
+GraphStore (Zustand)
+     │
+     ├ nodes
+     ├ edges
+     ├ selection
+     └ hover
+```
+
+---
+
+# 🚀 Наступний крок (дуже важливий)
+
+Тепер, коли store з'явився, можна зробити **одну з найсильніших оптимізацій редактора**:
+
+### CanvasController
+
+Він буде керувати:
+
+```
+mouseDown
+mouseMove
+mouseUp
+drag
+selection
+creation
+connection
+```
+
+І Stage буде мати **один handler замість десятків**.
+
+Це зменшує складність редактора **в 2-3 рази**.
+
+Якщо хочеш — покажу як це зробити.

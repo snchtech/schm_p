@@ -1,0 +1,909 @@
+Так. Розкладемо це по файлах, щоб у тебе вийшла **робоча схема додавання елементів на основний Konva Stage після кліку по SVG-іконці в панелі**.
+
+Я покажу базовий варіант:
+
+* у `ToolPalette` вибирається тип елемента
+* цей тип передається в `DiagramEditor`
+* при кліку по порожньому місцю `Stage` створюється новий елемент
+* `DiagramSymbols` його відмалює через `Group`
+
+---
+
+# 1. Що має вийти логічно
+
+Потік буде такий:
+
+```text
+ToolPalette
+  -> onSelectTool("twoRectangle")
+
+activeTool у батьківському компоненті
+  -> передається в DiagramEditor
+
+DiagramEditor
+  -> при кліку по Stage створює новий object
+  -> додає його в S.symbols
+
+DiagramSymbols
+  -> проходить symbols.map(...)
+  -> для type="twoRectangle" рендерить потрібний shape
+```
+
+---
+
+# 2. Які файли треба змінити
+
+Мінімально тобі треба змінити такі файли:
+
+1. `graph/registry.js`
+2. файл-батько, де одночасно рендеряться `ToolPalette` і `DiagramEditor`
+3. `DiagramEditor.jsx`
+4. `DiagramSymbols.jsx`
+5. `graph/index.js` або файл, де лежать Konva-компоненти фігур
+6. бажано додатково створити helper `createElementFromTool.js`
+
+---
+
+# 3. Файл `graph/registry.js`
+
+Тут ти описуєш, які типи елементів існують і які в них дефолтні параметри.
+
+Наприклад:
+
+```javascript
+export const ELEMENT_REGISTRY = {
+  rect: {
+    title: "Rectangle",
+    defaults: {
+      w: 120,
+      h: 70,
+    },
+  },
+
+  circle: {
+    title: "Circle",
+    defaults: {
+      r: 40,
+    },
+  },
+
+  twoRectangle: {
+    title: "Two rectangles",
+    defaults: {
+      w: 120,
+      h: 50,
+    },
+  },
+};
+```
+
+## Що тут важливо
+
+* ключ `twoRectangle` — це твій `type`
+* саме цей `type` має приходити з `ToolPalette`
+* саме по ньому `DiagramSymbols` має зрозуміти, що рендерити
+
+---
+
+# 4. Створи helper `createElementFromTool.js`
+
+Це не обов’язково, але дуже рекомендую.
+Наприклад файл:
+
+`/components/diagram/createElementFromTool.js`
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+export function createElementFromTool(type, x, y) {
+  const config = ELEMENT_REGISTRY[type];
+
+  if (!config) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    x,
+    y,
+    ...config.defaults,
+  };
+}
+```
+
+## Навіщо це
+
+Щоб не писати логіку створення елементів прямо всередині `DiagramEditor`.
+
+---
+
+# 5. Батьківський компонент, де разом є `ToolPalette` і `DiagramEditor`
+
+У тебе повинен бути якийсь файл-сторінка або контейнер, наприклад:
+
+`EditorPage.jsx`
+або
+`page.jsx`
+або
+`DiagramWorkspace.jsx`
+
+Саме тут треба зберігати `activeTool`.
+
+## Приклад
+
+```javascript
+"use client";
+
+import { useState } from "react";
+import ToolPalette from "./ToolPalette";
+import DiagramEditor from "./DiagramEditor";
+
+export default function DiagramWorkspace() {
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [activeTool, setActiveTool] = useState(null);
+
+  return (
+    <>
+      <ToolPalette
+        open={paletteOpen}
+        activeTool={activeTool}
+        onToggle={() => setPaletteOpen((prev) => !prev)}
+        onSelectTool={setActiveTool}
+      />
+
+      <DiagramEditor activeTool={activeTool} />
+    </>
+  );
+}
+```
+
+## Що тут відбувається
+
+* `activeTool` живе на рівні вище
+* `ToolPalette` змінює `activeTool`
+* `DiagramEditor` читає `activeTool`
+
+---
+
+# 6. Файл `ToolPalette.jsx`
+
+Тут у тебе вже майже все готово.
+Потрібно тільки переконатися, що при кліку на іконку викликається:
+
+```javascript
+onSelectTool(type)
+```
+
+У тебе це вже є в `pickTool`.
+
+Ось ключова частина:
+
+```javascript
+const pickTool = (type) => {
+  onSelectTool(type);
+
+  setRecent((prev) => {
+    const next = [type, ...prev.filter((x) => x !== type)].slice(0, RECENT_LIMIT);
+    saveArray(STORAGE_REC, next);
+    return next;
+  });
+};
+```
+
+І далі в `ToolCard`:
+
+```javascript
+<ToolCard
+  key={type}
+  type={type}
+  item={item}
+  active={activeTool === type}
+  isFav={favSet.has(type)}
+  onPick={pickTool}
+  onToggleFav={toggleFav}
+/>
+```
+
+І в самому `ToolCard`:
+
+```javascript
+<IconButton
+  onClick={() => onPick(type)}
+  sx={{ width: "100%", height: "100%", borderRadius: 2, p: 0 }}
+>
+```
+
+## Результат
+
+Коли ти натискаєш SVG-іконку:
+
+* в `activeTool` записується `"twoRectangle"`
+
+---
+
+# 7. Файл `DiagramEditor.jsx`
+
+Тепер сюди треба додати логіку створення елемента на сцені.
+
+---
+
+## 7.1 Прийми `activeTool` у props
+
+Було:
+
+```javascript
+export default function DiagramEditor() {
+```
+
+Стане:
+
+```javascript
+export default function DiagramEditor({ activeTool }) {
+```
+
+---
+
+## 7.2 Імпортуй helper
+
+На початку файлу:
+
+```javascript
+import { createElementFromTool } from "./createElementFromTool";
+```
+
+Шлях підстав свій реальний.
+
+---
+
+## 7.3 Додай функцію кліку по Stage
+
+Всередині `DiagramEditor` додай:
+
+```javascript
+const handleStageMouseDown = (e) => {
+  // якщо tool не вибраний — нічого не робимо
+  if (!activeTool) return;
+
+  // створюємо елемент лише при кліку по порожньому canvas,
+  // а не по вже існуючому shape
+  const stage = e.target.getStage();
+  if (e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+  if (!newElement) return;
+
+  S.setSymbols((prev) => [...prev, newElement]);
+};
+```
+
+---
+
+## 7.4 Підключи ref і handler до `Stage`
+
+У тебе зараз Stage приблизно такий:
+
+```jsx
+<Stage width={1000} height={600} style={{ border: "1px solid #ccc" }}>
+```
+
+Замінити на:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  style={{ border: "1px solid #ccc" }}
+  onMouseDown={handleStageMouseDown}
+>
+```
+
+---
+
+## 7.5 Додай `ref` на `Layer`
+
+У тебе є `layerRef`, але в JSX його треба теж підключити:
+
+Було:
+
+```jsx
+<Layer>
+```
+
+Стане:
+
+```jsx
+<Layer ref={layerRef}>
+```
+
+---
+
+## 7.6 Фрагмент готового блоку Stage
+
+```jsx
+<section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+  <Stage
+    ref={stageRef}
+    width={1000}
+    height={600}
+    style={{ border: "1px solid #ccc" }}
+    onMouseDown={handleStageMouseDown}
+  >
+    <Layer ref={layerRef}>
+      <DiagramConnections
+        connections={S.connections}
+        hoveredConnectionId={S.hoveredConnectionId}
+        hoveredLineAnchorId={S.hoveredLineAnchorId}
+        isAddingConnector={S.isAddingConnector}
+        setHoveredConnectionId={S.setHoveredConnectionId}
+        setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+        handleLineClick={S.handleLineClick}
+        handleAnchorClick={S.handleAnchorClick}
+        updateConnectionOffset={S.updateConnectionOffset}
+      />
+
+      <DiagramSymbols
+        symbols={S.symbols}
+        isAddingConnector={S.isAddingConnector}
+        hoveredElement={S.hoveredElement}
+        hoveredAnchor={S.hoveredAnchor}
+        getAnchorPoints={S.getAnchorPoints}
+        setHoveredElement={S.setHoveredElement}
+        setHoveredAnchor={S.setHoveredAnchor}
+        handleDragMove={S.handleDragMove}
+        handleAnchorClick={S.handleAnchorClick}
+        onElementContextMenu={handleElementContextMenu}
+        onMouseDown={S.selectHightlightEl}
+        isSelected={S.selected}
+        registerNodeRef={registerNodeRef}
+      />
+
+      <SelectionTransformer
+        selectedNode={selectedKonvaNode}
+        enabled={!!selectedKonvaNode}
+      />
+    </Layer>
+  </Stage>
+
+  <GraphContextMenuMui
+    open={menuState.open}
+    anchorPosition={menuState.anchorPosition}
+    onClose={closeMenu}
+    onDelete={handleDelete}
+  />
+</section>
+```
+
+---
+
+# 8. Файл з Konva-компонентами фігур
+
+Тобто твій `GraphLibrary`.
+
+Наприклад у тебе є файл:
+
+`graph/index.js`
+
+Там має бути експорт компонентів:
+
+```javascript
+import { Rect, Circle } from "react-konva";
+
+function RectShape({ el }) {
+  return (
+    <Rect
+      width={el.w}
+      height={el.h}
+      fill="white"
+      stroke="black"
+      strokeWidth={2}
+    />
+  );
+}
+
+function CircleShape({ el }) {
+  return (
+    <Circle
+      radius={el.r}
+      fill="white"
+      stroke="black"
+      strokeWidth={2}
+    />
+  );
+}
+
+function TwoRectangleShape({ el }) {
+  return (
+    <>
+      <Rect
+        x={0}
+        y={0}
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+        strokeWidth={2}
+      />
+      <Rect
+        x={0}
+        y={el.h}
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+        strokeWidth={2}
+      />
+    </>
+  );
+}
+
+const GraphLibrary = {
+  rect: RectShape,
+  circle: CircleShape,
+  twoRectangle: TwoRectangleShape,
+};
+
+export default GraphLibrary;
+```
+
+---
+
+# 9. Файл `DiagramSymbols.jsx`
+
+Тут треба зв’язати `type` з Konva-компонентом.
+
+На початку файлу:
+
+```javascript
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  twoRectangle: GraphLibrary.twoRectangle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+};
+```
+
+---
+
+## Але в тебе зараз є серйозна проблема в `symbols.map`
+
+У твоєму коді зараз всередині `map` стоїть `const Shape = ...` і `useEffect(...)` прямо всередині callback `map`, а так не можна.
+
+**Хуки не можна викликати всередині циклів, умов чи `map`.**
+
+Тут треба винести один елемент в окремий компонент.
+
+---
+
+# 10. Як правильно переробити `DiagramSymbols.jsx`
+
+Ось правильна структура.
+
+```javascript
+"use client";
+
+import React, { useEffect, useRef } from "react";
+import { Group, Rect, Circle } from "react-konva";
+import GraphLibrary from "../graph";
+
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  twoRectangle: GraphLibrary.twoRectangle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+};
+
+function DiagramSymbolItem({
+  el,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  isSelected,
+  registerNodeRef,
+}) {
+  const groupRef = useRef(null);
+  const Shape = ELEMENT_COMPONENTS[el.type];
+
+  useEffect(() => {
+    if (!registerNodeRef) return;
+
+    registerNodeRef(el.id, groupRef.current);
+
+    return () => {
+      registerNodeRef(el.id, null);
+    };
+  }, [el.id, registerNodeRef]);
+
+  return (
+    <Group
+      ref={groupRef}
+      x={el.x}
+      y={el.y}
+      draggable
+      onDragMove={(e) => handleDragMove(el.id, e)}
+      onMouseEnter={() => isAddingConnector && setHoveredElement(el.id)}
+      onMouseLeave={() => isAddingConnector && setHoveredElement(null)}
+      onContextMenu={(e) => onElementContextMenu(e, { type: "node", id: el.id })}
+      onMouseDown={() => onMouseDown(el)}
+    >
+      {Shape && <Shape el={el} />}
+
+      {isSelected && el.w && el.h && (
+        <Rect
+          x={-6}
+          y={-6}
+          width={el.w + 12}
+          height={el.h + 12}
+          cornerRadius={12}
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dash={[6, 4]}
+          listening={false}
+        />
+      )}
+
+      {hoveredElement === el.id &&
+        getAnchorPoints(el).map((point, i) => (
+          <Circle
+            key={i}
+            x={point.x - el.x}
+            y={point.y - el.y}
+            radius={6}
+            fill={
+              hoveredAnchor &&
+              hoveredAnchor.x === point.x &&
+              hoveredAnchor.y === point.y
+                ? "yellow"
+                : "green"
+            }
+            stroke="black"
+            strokeWidth={1}
+            onMouseEnter={() => setHoveredAnchor(point)}
+            onMouseLeave={() => setHoveredAnchor(null)}
+            onClick={() =>
+              handleAnchorClick({
+                ...point,
+                parentId: el.id,
+                kind: "symbolAnchor",
+              })
+            }
+          />
+        ))}
+    </Group>
+  );
+}
+
+export const DiagramSymbols = ({
+  symbols,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  isSelected,
+  registerNodeRef,
+}) => {
+  return (
+    <>
+      {symbols.map((el) => (
+        <DiagramSymbolItem
+          key={el.id}
+          el={el}
+          isAddingConnector={isAddingConnector}
+          hoveredElement={hoveredElement}
+          hoveredAnchor={hoveredAnchor}
+          getAnchorPoints={getAnchorPoints}
+          setHoveredElement={setHoveredElement}
+          setHoveredAnchor={setHoveredAnchor}
+          handleDragMove={handleDragMove}
+          handleAnchorClick={handleAnchorClick}
+          onElementContextMenu={onElementContextMenu}
+          onMouseDown={onMouseDown}
+          isSelected={isSelected?.id === el.id}
+          registerNodeRef={registerNodeRef}
+        />
+      ))}
+    </>
+  );
+};
+```
+
+---
+
+# 11. Як буде виглядати новий елемент у state
+
+Коли ти натиснеш на кнопку `twoRectangle`, а потім клікнеш по сцені, в `S.symbols` додасться щось таке:
+
+```javascript
+{
+  id: "9d4c5f...",
+  type: "twoRectangle",
+  x: 300,
+  y: 180,
+  w: 120,
+  h: 50
+}
+```
+
+Після цього `DiagramSymbols` візьме:
+
+* `el.type = "twoRectangle"`
+* знайде `GraphLibrary.twoRectangle`
+* відмалює його в `<Group x={300} y={180}>`
+
+---
+
+# 12. Важливий нюанс: чи треба скидати tool після вставки
+
+Є два режими.
+
+## Варіант 1 — одна вставка
+
+Після додавання елемента tool очищається:
+
+```javascript
+onSelectTool(null)
+```
+
+Тоді кожен елемент вставляється по окремому вибору інструмента.
+
+## Варіант 2 — багато вставок підряд
+
+Tool залишається активним, і можна багато разів клацати по сцені.
+
+На старті я б радив **другий варіант**. Він простіший і зручний.
+
+---
+
+# 13. Якщо хочеш скидати tool після одного кліку
+
+Тоді треба в `DiagramEditor` мати ще `setActiveTool`.
+
+Тобто передавати:
+
+```jsx
+<DiagramEditor
+  activeTool={activeTool}
+  setActiveTool={setActiveTool}
+/>
+```
+
+і після створення елемента:
+
+```javascript
+setActiveTool(null);
+```
+
+Але це вже додаткова поведінка, не обов’язкова.
+
+---
+
+# 14. Мінімальний список того, що реально треба зробити прямо зараз
+
+Ось коротко по кроках:
+
+## `graph/registry.js`
+
+Додати:
+
+```javascript
+twoRectangle: {
+  title: "Two rectangles",
+  defaults: {
+    w: 120,
+    h: 50,
+  },
+}
+```
+
+## `createElementFromTool.js`
+
+Створити helper:
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+export function createElementFromTool(type, x, y) {
+  const config = ELEMENT_REGISTRY[type];
+  if (!config) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    x,
+    y,
+    ...config.defaults,
+  };
+}
+```
+
+## батьківський компонент
+
+Додати state:
+
+```javascript
+const [activeTool, setActiveTool] = useState(null);
+```
+
+і передати:
+
+```jsx
+<ToolPalette onSelectTool={setActiveTool} activeTool={activeTool} />
+<DiagramEditor activeTool={activeTool} />
+```
+
+## `DiagramEditor.jsx`
+
+1. прийняти `activeTool`
+2. додати `handleStageMouseDown`
+3. повісити `onMouseDown` на `Stage`
+
+## `graph/index.js`
+
+Додати Konva shape:
+
+```javascript
+twoRectangle: TwoRectangleShape
+```
+
+## `DiagramSymbols.jsx`
+
+Додати:
+
+```javascript
+twoRectangle: GraphLibrary.twoRectangle
+```
+
+і бажано переробити файл через окремий `DiagramSymbolItem`
+
+---
+
+# 15. На що звернути увагу у твоєму поточному `DiagramEditor`
+
+У тебе в коді є кілька друкарських помилок, які завадять роботі. Наприклад:
+
+* `ukeRef(null)` замість `useRef(null)`
+* `nul1` замість `null`
+* `clientx` замість `clientX`
+* `Iselected` замість `!selected` або `if (!selected) return`
+* `apiRef.current ?. destroy()` — пробіл між `current` і `?.` краще прибрати
+* імпорт `GraphContextMenuMui` має дивний шлях `./ .. /graph/interface-elements/...`
+* `SelectionTransformer` імпортується як `selectionTransformer`, а використовується як компонент `SelectionTransformer`
+
+Тобто перед інтеграцією логіки додавання елементів краще ще трохи почистити синтаксис.
+
+---
+
+# 16. Найпростіший робочий варіант `DiagramEditor.jsx`
+
+Ось компактний приклад саме під додавання елементів:
+
+```javascript
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+import { useDiagramState } from "./useDiagramState";
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import { setupLayerZoomPan } from "./LayerZoom";
+import { createElementFromTool } from "./createElementFromTool";
+
+export default function DiagramEditor({ activeTool }) {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+  const apiRef = useRef(null);
+  const nodeRefs = useRef(new Map());
+
+  const registerNodeRef = (id, node) => {
+    if (!node) nodeRefs.current.delete(id);
+    else nodeRefs.current.set(id, node);
+  };
+
+  const S = useDiagramState();
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    apiRef.current = setupLayerZoomPan(stage, layer, { panMode: "mmb_or_space" });
+
+    return () => {
+      apiRef.current?.destroy();
+    };
+  }, []);
+
+  const handleStageMouseDown = (e) => {
+    if (!activeTool) return;
+
+    const stage = e.target.getStage();
+    if (e.target !== stage) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+    if (!newElement) return;
+
+    S.setSymbols((prev) => [...prev, newElement]);
+  };
+
+  return (
+    <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        style={{ border: "1px solid #ccc" }}
+        onMouseDown={handleStageMouseDown}
+      >
+        <Layer ref={layerRef}>
+          <DiagramConnections
+            connections={S.connections}
+            hoveredConnectionId={S.hoveredConnectionId}
+            hoveredLineAnchorId={S.hoveredLineAnchorId}
+            isAddingConnector={S.isAddingConnector}
+            setHoveredConnectionId={S.setHoveredConnectionId}
+            setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+            handleLineClick={S.handleLineClick}
+            handleAnchorClick={S.handleAnchorClick}
+            updateConnectionOffset={S.updateConnectionOffset}
+          />
+
+          <DiagramSymbols
+            symbols={S.symbols}
+            isAddingConnector={S.isAddingConnector}
+            hoveredElement={S.hoveredElement}
+            hoveredAnchor={S.hoveredAnchor}
+            getAnchorPoints={S.getAnchorPoints}
+            setHoveredElement={S.setHoveredElement}
+            setHoveredAnchor={S.setHoveredAnchor}
+            handleDragMove={S.handleDragMove}
+            handleAnchorClick={S.handleAnchorClick}
+            onElementContextMenu={() => {}}
+            onMouseDown={S.selectHightlightEl}
+            isSelected={S.selected}
+            registerNodeRef={registerNodeRef}
+          />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+---
+
+# 17. Що я б радив тобі зробити далі
+
+Найкращий порядок такий:
+
+1. спочатку зробити **вставку елемента по кліку на Stage**
+2. потім перевірити, що `twoRectangle` рендериться
+3. потім уже доробити:
+
+   * selection
+   * transformer
+   * context menu
+   * connectors
+
+Бо якщо спочатку стабільно не працює базова вставка shape, далі редактор буде важко дебажити.
+
+Якщо хочеш, я в наступному повідомленні можу вже зібрати тобі **повністю готовий комплект із 5 файлів** у фінальному вигляді, щоб ти просто вставив їх у проект.

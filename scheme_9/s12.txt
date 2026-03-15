@@ -1,0 +1,217 @@
+Тут є **два різні підходи**, і важливо вибрати правильний, щоб архітектура редактора залишалась чистою.
+
+Зараз у тебе:
+
+* **ToolPalette** — використовує `Drawer` + **floating open button** над canvas.
+* **LeftSidebar** — звичайний `Box` у layout сторінки.
+
+Тобто вони працюють **по різній моделі UI**.
+
+Тобі потрібно зробити **LeftSidebar таким самим overlay-panel**, як ToolPalette.
+
+Найкращий спосіб — **перевести LeftSidebar на Drawer + open button**, і прибрати внутрішній `isSidebarVisible`.
+
+---
+
+# 1. Правильна архітектура компонента
+
+Замість внутрішнього `isSidebarVisible`:
+
+```
+const [isSidebarVisible, setIsSidebarVisible] = useState(true);
+```
+
+краще використовувати **props з батьківського компонента**:
+
+```
+open
+onToggle
+```
+
+як у `ToolPalette`.
+
+---
+
+# 2. Нова структура LeftSidebar
+
+Твій компонент повинен виглядати приблизно так:
+
+```javascript
+export default function LeftSidebar({ open, onToggle, onLayerChange }) {
+```
+
+---
+
+# 3. Використовуємо Drawer (як у ToolPalette)
+
+Заміни весь layout на:
+
+```javascript
+<Drawer
+  anchor="left"
+  open={open}
+  variant="temporary"
+  hideBackdrop
+  ModalProps={{ keepMounted: true }}
+  PaperProps={{
+    sx: {
+      width: 300,
+      height: "100%",
+      borderRight: "1px solid",
+      borderColor: "divider",
+      bgcolor: "#f5f5f5",
+      p: 1.5
+    }
+  }}
+>
+```
+
+---
+
+# 4. Кнопка відкриття над canvas
+
+Так само як у ToolPalette.
+
+```
+{!open && (
+  <Paper
+    elevation={6}
+    sx={{
+      position: "fixed",
+      top: 70,
+      left: 12,
+      borderRadius: 3,
+      overflow: "hidden",
+      zIndex: 1301
+    }}
+  >
+    <Tooltip title="Відкрити панель">
+      <IconButton onClick={onToggle}>
+        <ArrowForwardIosIcon />
+      </IconButton>
+    </Tooltip>
+  </Paper>
+)}
+```
+
+---
+
+# 5. Header з кнопкою закриття
+
+Додай зверху:
+
+```javascript
+<Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
+  <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 700 }}>
+    Scheme panel
+  </Typography>
+
+  <IconButton size="small" onClick={onToggle}>
+    <ArrowBackIosNewIcon />
+  </IconButton>
+</Box>
+```
+
+---
+
+# 6. Scrollable контент
+
+Твої Accordion помісти в:
+
+```
+<Box sx={{ flex: 1, overflowY: "auto" }}>
+```
+
+---
+
+# 7. Як викликати з Editor сторінки
+
+У сторінці редактора:
+
+```javascript
+const [sidebarOpen, setSidebarOpen] = useState(false);
+```
+
+```
+<LeftSidebar
+  open={sidebarOpen}
+  onToggle={() => setSidebarOpen(v => !v)}
+  onLayerChange={handleLayerChange}
+/>
+```
+
+---
+
+# 8. Візуально це буде працювати так
+
+```
+┌─────────────────────────────┐
+│   ◀ sidebar button          │
+│                             │
+│        CANVAS               │
+│                             │
+│                             │
+└─────────────────────────────┘
+```
+
+натиснув →
+
+```
+┌──────────────┬──────────────┐
+│ LeftSidebar  │              │
+│              │   CANVAS     │
+│              │              │
+└──────────────┴──────────────┘
+```
+
+---
+
+# 9. Дуже важливий UX момент
+
+Я рекомендую **не ставити кнопку LeftSidebar у те саме місце що ToolPalette**, інакше буде плутанина.
+
+Наприклад:
+
+```
+ліва верхня зона:
+
+[ ◀ Layers ]    [ ◀ Tools ]
+```
+
+або
+
+```
+ліва сторона:
+
+[tools]
+[layers]
+```
+
+---
+
+# 10. Найкращий варіант для Diagram Editor
+
+У більшості редакторів (Figma, Miro, diagrams.net):
+
+```
+ліва сторона
+├─ Tools
+├─ Layers
+├─ Navigator
+```
+
+Тобто можна **об'єднати ToolPalette + LeftSidebar в один Drawer**.
+
+Але це вже **архітектура Editor UI**, і це наступний крок.
+
+---
+
+✅ Якщо хочеш — я покажу **набагато кращу архітектуру Editor Layout**, де:
+
+* ToolPalette
+* LeftSidebar
+* Canvas
+* Inspector panel
+
+працюють **як у Figma / draw.io**.
+Це реально сильно спрощує код редактора.

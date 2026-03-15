@@ -1,0 +1,272 @@
+Тобі потрібно зробити **те саме, що і для LeftSidebar та ToolPalette** —
+перетворити `EditorTopBar` у **overlay-panel**, яка відкривається **floating кнопкою**.
+
+Тобто логіка буде така:
+
+```
+floating toolbar
+[tools] [settings] [top tools]
+```
+
+і по кліку відкривається **панель з верхніми інструментами**.
+
+Я покажу **повністю готове рішення**.
+
+---
+
+# 1. Іконка для TopTool
+
+Рекомендую використати іконку **Tune** або **Menu**.
+
+```javascript
+import TuneIcon from "@mui/icons-material/Tune";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+```
+
+---
+
+# 2. Новий компонент `TopToolsPanel`
+
+Створи файл:
+
+```
+components/editor/TopToolsPanel.js
+```
+
+### Код
+
+```javascript
+"use client";
+
+import React from "react";
+import {
+  Drawer,
+  Box,
+  IconButton,
+  Tooltip,
+  Divider,
+  Typography
+} from "@mui/material";
+
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+
+import ScaleControl from "./controls/ScaleControl";
+import BindingsControl from "./controls/BindingsControl";
+import CheckSchemeControl from "./controls/CheckSchemeControl";
+import RefreshControl from "./controls/RefreshControl";
+
+const DRAWER_HEIGHT = 70;
+
+export default function TopToolsPanel({
+  open,
+  onToggle,
+  onZoomIn,
+  onZoomOut,
+  onDelete,
+  onRefresh
+}) {
+  return (
+    <Drawer
+      anchor="top"
+      open={open}
+      variant="temporary"
+      hideBackdrop
+      ModalProps={{ keepMounted: true }}
+      PaperProps={{
+        sx: {
+          height: DRAWER_HEIGHT,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "center",
+          backgroundColor: "#fff"
+        }
+      }}
+    >
+      <Box
+        sx={{
+          width: "100%",
+          maxWidth: 900,
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          px: 2
+        }}
+      >
+        <Typography sx={{ fontWeight: 700 }}>
+          Editor tools
+        </Typography>
+
+        <Divider orientation="vertical" flexItem />
+
+        <ScaleControl
+          onZoomIn={onZoomIn}
+          onZoomOut={onZoomOut}
+          onDelete={onDelete}
+        />
+
+        <Divider orientation="vertical" flexItem />
+
+        <BindingsControl />
+
+        <Divider orientation="vertical" flexItem />
+
+        <CheckSchemeControl />
+
+        <Divider orientation="vertical" flexItem />
+
+        <RefreshControl onRefresh={onRefresh} />
+
+        <Box sx={{ flex: 1 }} />
+
+        <Tooltip title="Закрити">
+          <IconButton onClick={onToggle}>
+            <ChevronLeftIcon />
+          </IconButton>
+        </Tooltip>
+      </Box>
+    </Drawer>
+  );
+}
+```
+
+---
+
+# 3. Додати кнопку до floating toolbar
+
+Тепер у твоєму floating toolbar (де вже є tools і sidebar)
+додаємо **третю кнопку**.
+
+### Імпорт
+
+```javascript
+import TuneIcon from "@mui/icons-material/Tune";
+```
+
+---
+
+### Floating panel
+
+```javascript
+<Paper
+  elevation={6}
+  sx={{
+    position: "fixed",
+    top: 16,
+    left: 12,
+    borderRadius: 3,
+    overflow: "hidden",
+    zIndex: 1301,
+    display: "flex",
+    flexDirection: "column"
+  }}
+>
+  {/* Tools */}
+  <Tooltip title="Інструменти">
+    <IconButton onClick={() => setToolsOpen(true)}>
+      <ChevronRightIcon />
+    </IconButton>
+  </Tooltip>
+
+  {/* Sidebar */}
+  <Tooltip title="Панель схеми">
+    <IconButton onClick={() => setSidebarOpen(true)}>
+      <SettingsIcon />
+    </IconButton>
+  </Tooltip>
+
+  {/* Top tools */}
+  <Tooltip title="Editor tools">
+    <IconButton onClick={() => setTopToolsOpen(true)}>
+      <TuneIcon />
+    </IconButton>
+  </Tooltip>
+</Paper>
+```
+
+---
+
+# 4. State у Editor
+
+У сторінці редактора:
+
+```javascript
+const [toolsOpen, setToolsOpen] = useState(false);
+const [sidebarOpen, setSidebarOpen] = useState(false);
+const [topToolsOpen, setTopToolsOpen] = useState(false);
+```
+
+---
+
+# 5. Підключення панелі
+
+```javascript
+<TopToolsPanel
+  open={topToolsOpen}
+  onToggle={() => setTopToolsOpen(v => !v)}
+  onZoomIn={handleZoomIn}
+  onZoomOut={handleZoomOut}
+  onDelete={handleDelete}
+  onRefresh={handleRefresh}
+/>
+```
+
+---
+
+# 6. Результат UI
+
+Тепер редактор виглядатиме так:
+
+```
+floating toolbar
+
+┌───┐
+│ > │  tools
+│ ⚙ │  sidebar
+│ 🎛 │  top tools
+└───┘
+```
+
+і панель відкриється зверху:
+
+```
+┌─────────────────────────────┐
+│ zoom | bindings | check | refresh |
+└─────────────────────────────┘
+```
+
+---
+
+# 7. Дуже важлива порада для твого редактора
+
+Коли у тебе буде:
+
+```
+ToolPalette
+LeftSidebar
+TopTools
+Canvas
+```
+
+краще перейти на **повний layout редактора** (як у Figma / draw.io):
+
+```
+┌────────TopBar──────────────┐
+│                            │
+│ Tools │ Canvas │ Inspector │
+│       │        │           │
+└────────────────────────────┘
+```
+
+Це **в 2-3 рази спростить код Konva-редактора**.
+
+---
+
+✅ Якщо хочеш — я покажу **архітектуру Layout редактора**, яка зробить:
+
+* **Canvas масштабування**
+* **панелі**
+* **context menu**
+* **drag tools**
+
+набагато стабільнішими.

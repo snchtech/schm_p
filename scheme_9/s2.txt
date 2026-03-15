@@ -1,0 +1,275 @@
+Тепер у тебе стало навіть **правильніше архітектурно** 👍
+SVG-іконки в панелі — це **тільки UI**, а **Konva Stage — це canvas-редактор**. Їх не треба змішувати.
+
+Тобі потрібно реалізувати **один простий потік даних**:
+
+```
+ToolPalette (SVG icon click)
+        ↓
+activeTool = "twoRectangle"
+        ↓
+DiagramEditor
+        ↓
+click on Stage
+        ↓
+create element
+        ↓
+S.symbols.push(...)
+        ↓
+DiagramSymbols render
+```
+
+Я покажу **мінімальну і чисту реалізацію**.
+
+---
+
+# 1️⃣ Registry (типи елементів)
+
+registry має тільки **дані**, не компоненти.
+
+```javascript
+export const ELEMENT_REGISTRY = {
+  twoRectangle: {
+    title: "Two rectangles",
+    defaults: {
+      w: 120,
+      h: 60,
+    }
+  },
+
+  circle: {
+    title: "Circle",
+    defaults: {
+      r: 40
+    }
+  }
+}
+```
+
+---
+
+# 2️⃣ ToolPalette — передає type
+
+У тебе це майже готово.
+
+```javascript
+const pickTool = (type) => {
+  onSelectTool(type)
+}
+```
+
+і
+
+```jsx
+<ToolCard
+   key={type}
+   type={type}
+   onPick={pickTool}
+/>
+```
+
+---
+
+# 3️⃣ Батьківський компонент
+
+Тут зберігаємо **activeTool**.
+
+```javascript
+const [activeTool, setActiveTool] = useState(null)
+
+<ToolPalette
+  activeTool={activeTool}
+  onSelectTool={setActiveTool}
+/>
+
+<DiagramEditor activeTool={activeTool} />
+```
+
+---
+
+# 4️⃣ DiagramEditor
+
+Приймаємо tool.
+
+```javascript
+export default function DiagramEditor({ activeTool }) {
+```
+
+---
+
+# 5️⃣ Додаємо element на Stage
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry"
+
+const handleStageMouseDown = (e) => {
+
+  if (!activeTool) return
+
+  // щоб не створювало при кліку по element
+  if (e.target !== e.target.getStage()) return
+
+  const stage = e.target.getStage()
+  const pos = stage.getPointerPosition()
+
+  const tool = ELEMENT_REGISTRY[activeTool]
+
+  const newElement = {
+    id: crypto.randomUUID(),
+    type: activeTool,
+    x: pos.x,
+    y: pos.y,
+    ...tool.defaults
+  }
+
+  S.setSymbols(prev => [...prev, newElement])
+}
+```
+
+---
+
+# 6️⃣ Підключаємо до Stage
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={handleStageMouseDown}
+>
+```
+
+---
+
+# 7️⃣ DiagramSymbols автоматично відмалює
+
+Ти вже зробив правильну систему:
+
+```javascript
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+}
+```
+
+Треба тільки додати
+
+```javascript
+twoRectangle: GraphLibrary.twoRectangle
+```
+
+---
+
+# 8️⃣ GraphLibrary.twoRectangle
+
+```javascript
+export const twoRectangle = ({ el }) => {
+  return (
+    <>
+      <Rect
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+      />
+
+      <Rect
+        y={el.h}
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+      />
+    </>
+  )
+}
+```
+
+---
+
+# 9️⃣ У symbols буде вигляд
+
+```
+[
+ {
+   id: "123",
+   type: "twoRectangle",
+   x: 300,
+   y: 200,
+   w: 120,
+   h: 60
+ }
+]
+```
+
+---
+
+# 🔟 DiagramSymbols
+
+вже працює:
+
+```
+<Group x y draggable>
+   <TwoRectangle/>
+</Group>
+```
+
+---
+
+# ⭐ Дуже важлива порада
+
+Зроби **одну функцію createElementFromTool**
+
+щоб код був чистим.
+
+```
+graph/createElement.js
+```
+
+```javascript
+export function createElementFromTool(type, x, y) {
+
+  const tool = ELEMENT_REGISTRY[type]
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    x,
+    y,
+    ...tool.defaults
+  }
+}
+```
+
+і в editor
+
+```javascript
+const el = createElementFromTool(activeTool, pos.x, pos.y)
+
+S.setSymbols(prev => [...prev, el])
+```
+
+---
+
+# 🚀 Після цього твій редактор вже буде як draw.io
+
+✔ панель інструментів
+✔ stage
+✔ додавання елементів
+✔ drag
+✔ selection
+✔ context menu
+
+---
+
+Якщо хочеш — я покажу **архітектуру рівня Figma / Miro**, яка дозволить:
+
+* drag creation (малювати rectangle мишкою)
+* snap anchors
+* connection routing
+* selection box
+* multi-select
+
+Це **наступний правильний крок для твого редактора**.

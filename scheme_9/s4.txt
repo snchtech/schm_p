@@ -1,0 +1,371 @@
+Дуже хороше питання — тут є **два різних UX-підходи**, і від цього залежить архітектура редактора. Розберемо все детально.
+
+---
+
+# 1️⃣ Як працюють більшість редакторів схем
+
+У Figma / Draw.io / Miro / Excalidraw логіка така:
+
+```
+1. Клік по іконці інструмента
+2. Активується tool
+3. Клік по canvas
+4. Елемент створюється в місці кліку
+```
+
+Тобто:
+
+```
+Toolbar → вибір інструмента
+Canvas → позиція вставки
+```
+
+Саме це реалізує код з `handleStageMouseDown`.
+
+---
+
+# 2️⃣ Що робить handleStageMouseDown
+
+Розберемо построково.
+
+```javascript
+const handleStageMouseDown = (e) => {
+```
+
+Konva передає подію кліку по Stage.
+
+---
+
+### Перевірка чи вибраний tool
+
+```
+if (!activeTool) return;
+```
+
+Якщо користувач не вибрав інструмент — нічого не робимо.
+
+---
+
+### Перевірка що клік був по порожньому canvas
+
+```
+const stage = e.target.getStage();
+if (e.target !== stage) return;
+```
+
+Konva працює так:
+
+```
+Stage
+ └ Layer
+     └ Group
+         └ Rect
+```
+
+Якщо клік по:
+
+```
+Rect
+Circle
+Group
+```
+
+то `e.target` буде не Stage.
+
+Ми хочемо створювати новий елемент **лише коли клік по порожньому canvas**.
+
+---
+
+### Отримання координат кліку
+
+```
+const pointer = stage.getPointerPosition();
+```
+
+Це координати мишки у canvas.
+
+Наприклад:
+
+```
+x = 350
+y = 200
+```
+
+---
+
+### Створення нового елемента
+
+```
+const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+```
+
+Наприклад повернеться:
+
+```
+{
+ id: "uuid",
+ type: "twoRectangle",
+ x: 350,
+ y: 200,
+ w: 120,
+ h: 60
+}
+```
+
+---
+
+### Додавання в state
+
+```
+S.setSymbols((prev) => [...prev, newElement]);
+```
+
+Тепер state:
+
+```
+symbols = [
+  { id:1, type:'rect', x:100, y:100 },
+  { id:2, type:'twoRectangle', x:350, y:200 }
+]
+```
+
+---
+
+### DiagramSymbols автоматично намалює
+
+```
+symbols.map(...)
+```
+
+і Konva відмалює нову Group.
+
+---
+
+# 3️⃣ Як підключити handler до Stage
+
+Було:
+
+```jsx
+<Stage width={1000} height={600}>
+```
+
+Стає:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={handleStageMouseDown}
+>
+```
+
+Тепер **будь-який клік на Stage** викликає функцію.
+
+---
+
+# 4️⃣ Для чого потрібен ref
+
+```
+ref={stageRef}
+```
+
+Ref дозволяє отримати Stage API:
+
+```
+stageRef.current.scale()
+stageRef.current.position()
+stageRef.current.getPointerPosition()
+```
+
+Він також потрібен для:
+
+```
+zoom
+pan
+export
+центр canvas
+```
+
+У тебе він вже використовується в `setupLayerZoomPan`.
+
+---
+
+# 5️⃣ Layer ref
+
+У тебе є
+
+```
+const layerRef = useRef(null)
+```
+
+Але ти не передаєш його в JSX.
+
+Було:
+
+```
+<Layer>
+```
+
+Треба:
+
+```
+<Layer ref={layerRef}>
+```
+
+Інакше `setupLayerZoomPan` не зможе працювати з layer.
+
+---
+
+# 6️⃣ Відповідь на головне питання
+
+> я клікаю на панель з кнопками і далі клікаю по stage?
+
+Так.
+
+Це **стандарт UX для редакторів**.
+
+```
+click tool
+click canvas
+```
+
+---
+
+# 7️⃣ Чи можна одразу вставляти без кліку на canvas?
+
+Так.
+
+Наприклад:
+
+```
+Toolbar click
+↓
+element з'являється в центрі canvas
+```
+
+Тоді код буде:
+
+```
+const center = {
+ x: stage.width()/2,
+ y: stage.height()/2
+}
+```
+
+Але це **менш зручно** для користувача.
+
+---
+
+# 8️⃣ Найкращий UX
+
+Я рекомендую:
+
+### режим 1 — click to place
+
+```
+select tool
+click canvas
+```
+
+### режим 2 — drag to create (пізніше)
+
+```
+mousedown
+mousemove
+mouseup
+```
+
+Це як у Figma.
+
+---
+
+# 9️⃣ Твоя проблема з панеллю
+
+Ти написав:
+
+> при відкритій панелі я не можу взаємодіяти зі stage
+
+Це через
+
+```
+MUI Drawer
+```
+
+Він перекриває canvas.
+
+---
+
+## рішення
+
+Замість
+
+```
+variant="temporary"
+```
+
+краще використати
+
+```
+variant="persistent"
+```
+
+або
+
+```
+variant="permanent"
+```
+
+---
+
+### або змістити canvas
+
+```
+<Box sx={{ ml: open ? "180px" : "0px" }}>
+   <DiagramEditor />
+</Box>
+```
+
+---
+
+# 10️⃣ Ідеальна layout схема
+
+```
+-----------------------------------
+| Toolbar |       Canvas          |
+|         |                       |
+|         |        Stage          |
+|         |                       |
+-----------------------------------
+```
+
+Canvas **ніколи не перекривається** панеллю.
+
+---
+
+# 11️⃣ Якщо хочеш — я покажу правильний layout
+
+Я можу показати **повністю правильну архітектуру редактора**, яку використовують:
+
+```
+Figma
+Miro
+tldraw
+Excalidraw
+```
+
+Вона вирішує одразу:
+
+* toolbar
+* canvas
+* zoom
+* selection
+* multi-select
+* drag create
+* connectors
+* snap
+* grid
+
+І твій редактор стане **набагато стабільнішим**.
+
+Бо зараз у твоєму коді є кілька архітектурних моментів, які потім буде важко масштабувати.

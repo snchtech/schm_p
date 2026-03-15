@@ -1,0 +1,721 @@
+Так. Пропоную не намагатися переробити все одразу, а пройтися **поетапно**, щоб у тебе після кожного кроку редактор залишався робочим.
+
+Я б рухався так:
+
+1. розділити layout редактора і canvas
+2. ввести єдиний `editorMode` замість набору прапорців
+3. винести створення елемента в окремий helper
+4. централізувати Stage events
+5. спростити `DiagramSymbols`
+6. поступово підготувати store під `nodes / edges`
+
+Почнемо з того, що дасть тобі найбільший ефект одразу.
+
+---
+
+# Крок 1. Розділити layout і сам canvas
+
+Зараз у тебе `ToolPalette` і `DiagramEditor` логічно пов’язані, але layout зроблений так, що `Drawer` перекриває `Stage`.
+Через це ти не можеш нормально працювати з canvas, коли панель відкрита.
+
+## Що треба змінити
+
+Потрібно зробити окремий контейнер, наприклад:
+
+* `EditorWorkspace`
+* або `DiagramWorkspace`
+
+У ньому буде:
+
+* стан відкриття панелі
+* `activeTool`
+* далі рендер `ToolPalette`
+* і окремо `DiagramEditor`
+
+---
+
+## Приклад нового контейнера
+
+### `DiagramWorkspace.jsx`
+
+```jsx
+"use client";
+
+import { useState } from "react";
+import Box from "@mui/material/Box";
+import ToolPalette from "./ToolPalette";
+import DiagramEditor from "./DiagramEditor";
+
+const DRAWER_W = 180;
+
+export default function DiagramWorkspace() {
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [activeTool, setActiveTool] = useState(null);
+
+  return (
+    <Box sx={{ display: "flex", width: "100%", height: "100vh", overflow: "hidden" }}>
+      <ToolPalette
+        open={paletteOpen}
+        activeTool={activeTool}
+        onToggle={() => setPaletteOpen((prev) => !prev)}
+        onSelectTool={setActiveTool}
+      />
+
+      <Box
+        sx={{
+          flex: 1,
+          minWidth: 0,
+          ml: paletteOpen ? `${DRAWER_W}px` : 0,
+          transition: "margin-left 0.2s ease",
+          p: 2,
+          boxSizing: "border-box",
+        }}
+      >
+        <DiagramEditor activeTool={activeTool} />
+      </Box>
+    </Box>
+  );
+}
+```
+
+---
+
+## Що це дає
+
+Тепер панель існує окремо, а canvas фізично зсувається вправо:
+
+* панель відкрита → `Stage` не під нею
+* панель закрита → `Stage` займає більше місця
+
+Це вже прибирає твою поточну проблему.
+
+---
+
+# Крок 2. Не тримати в `DiagramEditor` усе підряд
+
+Поки що не будемо робити глобальну велику реорганізацію, але вже зараз треба трохи очистити `DiagramEditor`.
+
+У ньому мають лишитися:
+
+* `Stage`
+* `Layer`
+* stage refs
+* stage handlers
+* рендер `DiagramConnections`
+* рендер `DiagramSymbols`
+* transformer
+* context menu
+
+Але **toolbar-кнопки** краще потім винести окремо.
+
+---
+
+# Крок 3. Ввести єдиний `editorMode`
+
+Зараз у тебе є кілька станів типу:
+
+* `activeTool`
+* `isAddingConnector`
+* `isAddingAnchor`
+
+Це дуже швидко почне конфліктувати.
+
+Краще зробити один режим редактора.
+
+---
+
+## Як саме
+
+Наприклад:
+
+```jsx
+const [editorMode, setEditorMode] = useState("select");
+```
+
+Можливі значення:
+
+```js
+"select"
+"add-node"
+"add-connector"
+"add-line-anchor"
+```
+
+А `activeTool` залишити тільки для типу ноди:
+
+```js
+"twoRectangle"
+"circle"
+"rect"
+```
+
+---
+
+## Логіка
+
+* якщо вибрали shape у `ToolPalette`:
+
+  * `setActiveTool("twoRectangle")`
+  * `setEditorMode("add-node")`
+
+* якщо натиснули кнопку “Новий connector”:
+
+  * `setEditorMode("add-connector")`
+
+* якщо натиснули escape або кнопку скасування:
+
+  * `setEditorMode("select")`
+  * `setActiveTool(null)`
+
+---
+
+## Де зберігати
+
+Поки що можна зберігати у `DiagramWorkspace`.
+
+### Оновлена версія
+
+```jsx
+"use client";
+
+import { useState } from "react";
+import Box from "@mui/material/Box";
+import ToolPalette from "./ToolPalette";
+import DiagramEditor from "./DiagramEditor";
+
+const DRAWER_W = 180;
+
+export default function DiagramWorkspace() {
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [activeTool, setActiveTool] = useState(null);
+  const [editorMode, setEditorMode] = useState("select");
+
+  const handleSelectTool = (toolType) => {
+    setActiveTool(toolType);
+    setEditorMode("add-node");
+  };
+
+  return (
+    <Box sx={{ display: "flex", width: "100%", height: "100vh", overflow: "hidden" }}>
+      <ToolPalette
+        open={paletteOpen}
+        activeTool={activeTool}
+        onToggle={() => setPaletteOpen((prev) => !prev)}
+        onSelectTool={handleSelectTool}
+      />
+
+      <Box
+        sx={{
+          flex: 1,
+          minWidth: 0,
+          ml: paletteOpen ? `${DRAWER_W}px` : 0,
+          transition: "margin-left 0.2s ease",
+          p: 2,
+          boxSizing: "border-box",
+        }}
+      >
+        <DiagramEditor
+          activeTool={activeTool}
+          editorMode={editorMode}
+          setEditorMode={setEditorMode}
+          clearActiveTool={() => setActiveTool(null)}
+        />
+      </Box>
+    </Box>
+  );
+}
+```
+
+---
+
+# Крок 4. Винести створення елемента в helper
+
+Це один з найкорисніших маленьких рефакторингів.
+
+---
+
+## Створи файл
+
+### `createElementFromTool.js`
+
+```js
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+export function createElementFromTool(type, x, y) {
+  const config = ELEMENT_REGISTRY[type];
+  if (!config) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    x,
+    y,
+    ...config.defaults,
+  };
+}
+```
+
+---
+
+## Навіщо це
+
+Щоб `DiagramEditor` не знав деталей:
+
+* які дефолтні поля в `twoRectangle`
+* які в `circle`
+* які в `text`
+
+Він просто каже:
+
+> створи мені елемент цього типу в цій точці
+
+---
+
+# Крок 5. Централізувати Stage click
+
+Ось тепер переходимо до твого питання про `handleStageMouseDown`.
+
+У новій схемі ця функція вже має враховувати `editorMode`.
+
+---
+
+## Так краще, ніж просто `if (!activeTool) return`
+
+### У `DiagramEditor.jsx`
+
+```jsx
+const handleStageMouseDown = (e) => {
+  const stage = e.target.getStage();
+  if (!stage) return;
+
+  // Клік не по пустому Stage — не створюємо новий елемент
+  if (e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  if (editorMode === "add-node" && activeTool) {
+    const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+    if (!newElement) return;
+
+    S.setSymbols((prev) => [...prev, newElement]);
+
+    // якщо хочеш одноразову вставку:
+    // clearActiveTool();
+    // setEditorMode("select");
+    return;
+  }
+
+  if (editorMode === "select") {
+    S.setSelection?.(null);
+  }
+};
+```
+
+---
+
+## Чому це краще
+
+Бо далі сюди ж ти додаси:
+
+* `add-connector`
+* `selection box`
+* `drag create`
+* `canvas deselect`
+
+І не треба буде розкидати логіку по різних місцях.
+
+---
+
+# Крок 6. Привести `DiagramEditor` до чистішого вигляду
+
+Ось більш правильний каркас.
+
+### `DiagramEditor.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+import { Stage, Layer } from "react-konva";
+import { useDiagramState } from "./useDiagramState";
+import { DiagramConnections } from "./DiagramConnections";
+import { DiagramSymbols } from "./DiagramSymbols";
+import { setupLayerZoomPan } from "./LayerZoom";
+import { createElementFromTool } from "./createElementFromTool";
+import { deleteLine, deleteNodeWithLinks } from "./useGraphDelete";
+import GraphContextMenuMui from "../graph/interface-elements/GraphContextMenuMui";
+import SelectionTransformer from "./SelectionTransformer";
+
+export default function DiagramEditor({
+  activeTool,
+  editorMode,
+  setEditorMode,
+  clearActiveTool,
+}) {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+  const apiRef = useRef(null);
+  const nodeRefs = useRef(new Map());
+
+  const [menuState, setMenuState] = useState({
+    open: false,
+    anchorPosition: null,
+    target: null,
+  });
+
+  const S = useDiagramState();
+
+  const registerNodeRef = (id, node) => {
+    if (!node) nodeRefs.current.delete(id);
+    else nodeRefs.current.set(id, node);
+  };
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return;
+
+    apiRef.current = setupLayerZoomPan(stage, layer, { panMode: "mmb_or_space" });
+
+    return () => {
+      apiRef.current?.destroy();
+    };
+  }, []);
+
+  const closeMenu = () => {
+    setMenuState({
+      open: false,
+      anchorPosition: null,
+      target: null,
+    });
+  };
+
+  const openMenuAtEvent = (e, target) => {
+    const { clientX, clientY } = e.evt;
+
+    setMenuState({
+      open: true,
+      anchorPosition: { top: clientY, left: clientX },
+      target,
+    });
+  };
+
+  const handleElementContextMenu = (e, elementInfo) => {
+    e.evt.preventDefault();
+    S.setSelection?.(elementInfo);
+    openMenuAtEvent(e, elementInfo);
+  };
+
+  const handleDelete = () => {
+    const selected = S.selection;
+    if (!selected) return;
+
+    if (selected.type === "node") {
+      const res = deleteNodeWithLinks(selected.id, S.symbols, S.connections);
+      S.setSymbols(res.symbols);
+      S.setConnections?.(res.connections);
+    }
+
+    if (selected.type === "line") {
+      const nextConnections = deleteLine(selected.id, S.connections);
+      S.setConnections?.(nextConnections);
+    }
+
+    S.setSelection?.(null);
+    closeMenu();
+  };
+
+  const handleStageMouseDown = (e) => {
+    const stage = e.target.getStage();
+    if (!stage) return;
+
+    if (e.target !== stage) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    if (editorMode === "add-node" && activeTool) {
+      const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+      if (!newElement) return;
+
+      S.setSymbols((prev) => [...prev, newElement]);
+      return;
+    }
+
+    if (editorMode === "select") {
+      S.setSelection?.(null);
+      closeMenu();
+    }
+  };
+
+  const selectedKonvaNode =
+    S.selection?.type && S.selection.type !== "connector"
+      ? nodeRefs.current.get(S.selection.id)
+      : null;
+
+  return (
+    <>
+      <nav style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+        <button type="button" onClick={() => apiRef.current?.zoomOut()}>
+          -
+        </button>
+        <button type="button" onClick={() => apiRef.current?.zoomIn()}>
+          +
+        </button>
+        <button type="button" onClick={() => apiRef.current?.reset()}>
+          Reset
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            clearActiveTool();
+            setEditorMode("select");
+          }}
+        >
+          Select
+        </button>
+      </nav>
+
+      <section style={{ border: "1px solid #ccc", display: "inline-block" }}>
+        <Stage
+          ref={stageRef}
+          width={1000}
+          height={600}
+          style={{ border: "1px solid #ccc" }}
+          onMouseDown={handleStageMouseDown}
+        >
+          <Layer ref={layerRef}>
+            <DiagramConnections
+              connections={S.connections}
+              hoveredConnectionId={S.hoveredConnectionId}
+              hoveredLineAnchorId={S.hoveredLineAnchorId}
+              isAddingConnector={editorMode === "add-connector"}
+              setHoveredConnectionId={S.setHoveredConnectionId}
+              setHoveredLineAnchorId={S.setHoveredLineAnchorId}
+              handleLineClick={S.handleLineClick}
+              handleAnchorClick={S.handleAnchorClick}
+              updateConnectionOffset={S.updateConnectionOffset}
+            />
+
+            <DiagramSymbols
+              symbols={S.symbols}
+              isAddingConnector={editorMode === "add-connector"}
+              hoveredElement={S.hoveredElement}
+              hoveredAnchor={S.hoveredAnchor}
+              getAnchorPoints={S.getAnchorPoints}
+              setHoveredElement={S.setHoveredElement}
+              setHoveredAnchor={S.setHoveredAnchor}
+              handleDragMove={S.handleDragMove}
+              handleAnchorClick={S.handleAnchorClick}
+              onElementContextMenu={handleElementContextMenu}
+              onMouseDown={S.selectHightlightEl}
+              isSelected={S.selection}
+              registerNodeRef={registerNodeRef}
+            />
+
+            <SelectionTransformer
+              selectedNode={selectedKonvaNode}
+              enabled={!!selectedKonvaNode}
+            />
+          </Layer>
+        </Stage>
+
+        <GraphContextMenuMui
+          open={menuState.open}
+          anchorPosition={menuState.anchorPosition}
+          onClose={closeMenu}
+          onDelete={handleDelete}
+        />
+      </section>
+    </>
+  );
+}
+```
+
+---
+
+# Крок 7. Виправити `DiagramSymbols` — це важливо
+
+У тебе там зараз головна архітектурна помилка: `useEffect` усередині `map`.
+
+Так не можна.
+
+---
+
+## Правильний варіант
+
+Треба зробити окремий компонент для одного символу.
+
+### `DiagramSymbols.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useRef } from "react";
+import { Group, Rect, Circle } from "react-konva";
+import GraphLibrary from "../graph";
+
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+  twoRectangle: GraphLibrary.twoRectangle,
+};
+
+function DiagramSymbolItem({
+  el,
+  isAddingConnector,
+  hoveredElement,
+  hoveredAnchor,
+  getAnchorPoints,
+  setHoveredElement,
+  setHoveredAnchor,
+  handleDragMove,
+  handleAnchorClick,
+  onElementContextMenu,
+  onMouseDown,
+  isSelected,
+  registerNodeRef,
+}) {
+  const groupRef = useRef(null);
+  const Shape = ELEMENT_COMPONENTS[el.type];
+
+  useEffect(() => {
+    registerNodeRef?.(el.id, groupRef.current);
+
+    return () => {
+      registerNodeRef?.(el.id, null);
+    };
+  }, [el.id, registerNodeRef]);
+
+  return (
+    <Group
+      ref={groupRef}
+      x={el.x}
+      y={el.y}
+      draggable
+      onDragMove={(e) => handleDragMove(el.id, e)}
+      onMouseEnter={() => isAddingConnector && setHoveredElement(el.id)}
+      onMouseLeave={() => isAddingConnector && setHoveredElement(null)}
+      onContextMenu={(e) => onElementContextMenu(e, { type: "node", id: el.id })}
+      onMouseDown={() => onMouseDown(el)}
+    >
+      {Shape ? <Shape el={el} /> : null}
+
+      {isSelected && el.w && el.h ? (
+        <Rect
+          x={-6}
+          y={-6}
+          width={el.w + 12}
+          height={el.h + 12}
+          cornerRadius={12}
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dash={[6, 4]}
+          listening={false}
+        />
+      ) : null}
+
+      {hoveredElement === el.id &&
+        getAnchorPoints(el).map((point, i) => (
+          <Circle
+            key={i}
+            x={point.x - el.x}
+            y={point.y - el.y}
+            radius={6}
+            fill={
+              hoveredAnchor &&
+              hoveredAnchor.x === point.x &&
+              hoveredAnchor.y === point.y
+                ? "yellow"
+                : "green"
+            }
+            stroke="black"
+            strokeWidth={1}
+            onMouseEnter={() => setHoveredAnchor(point)}
+            onMouseLeave={() => setHoveredAnchor(null)}
+            onClick={() =>
+              handleAnchorClick({
+                ...point,
+                parentId: el.id,
+                kind: "symbolAnchor",
+              })
+            }
+          />
+        ))}
+    </Group>
+  );
+}
+
+export function DiagramSymbols(props) {
+  const { symbols, isSelected } = props;
+
+  return (
+    <>
+      {symbols.map((el) => (
+        <DiagramSymbolItem
+          key={el.id}
+          {...props}
+          el={el}
+          isSelected={isSelected?.id === el.id}
+        />
+      ))}
+    </>
+  );
+}
+```
+
+---
+
+# Крок 8. Поступово готувати модель до `nodes / edges`
+
+Поки не треба ламати весь `useDiagramState`, але вже зараз краще думати так:
+
+* `symbols` = це `nodes`
+* `connections` = це `edges`
+
+Тобто ти можеш навіть тимчасово просто перейменувати для себе ментально:
+
+```js
+symbols -> nodes
+connections -> edges
+```
+
+А реальний рефакторинг зробити пізніше.
+
+---
+
+# Як я пропоную рухатися далі
+
+Щоб не розвалити проект, робимо не все одразу, а так:
+
+### Етап 1
+
+* зробити `DiagramWorkspace`
+* передати `activeTool`
+* передати `editorMode`
+
+### Етап 2
+
+* виправити `DiagramEditor`
+* підключити `handleStageMouseDown`
+* вставка елемента по кліку на Stage
+
+### Етап 3
+
+* виправити `DiagramSymbols`
+* винести `DiagramSymbolItem`
+
+### Етап 4
+
+* перевести `isAddingConnector` на `editorMode === "add-connector"`
+
+### Етап 5
+
+* потім уже перейти до `nodes / edges`
+
+---
+
+Я б почав прямо зараз з **першого реального кроку — `DiagramWorkspace` + передача `activeTool` і `editorMode`**, бо це основа для всього іншого.

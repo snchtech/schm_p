@@ -1,0 +1,384 @@
+Добре. Це **третій і дуже важливий крок архітектури** — зробити **єдиний registry елементів**.
+Це прибере дублювання між:
+
+* `ELEMENT_REGISTRY`
+* `GraphLibrary`
+* `ELEMENT_COMPONENTS`
+
+і зробить систему значно простішою для масштабування.
+
+Це саме той підхід, який використовують редактори типу **Figma / Miro / tldraw**.
+
+---
+
+# 1️⃣ Проблема поточної архітектури
+
+Зараз у тебе приблизно так:
+
+```
+registry
+   ↓
+defaults
+
+GraphLibrary
+   ↓
+shape components
+
+DiagramSymbols
+   ↓
+ELEMENT_COMPONENTS mapping
+```
+
+Тобто один і той самий тип елемента описаний **у трьох місцях**.
+
+Наприклад `twoRectangle`:
+
+```
+registry
+GraphLibrary
+DiagramSymbols
+```
+
+Це дуже швидко призводить до хаосу.
+
+---
+
+# 2️⃣ Правильна архітектура
+
+Registry має містити **все про елемент**:
+
+```
+ELEMENT_REGISTRY
+   │
+   ├ component
+   ├ defaults
+   ├ anchors
+   ├ preview
+   └ metadata
+```
+
+Тоді **будь-який код бере все з одного місця**.
+
+---
+
+# 3️⃣ Нова структура папок (рекомендована)
+
+```
+graph
+   registry.js
+   shapes
+        RectShape.jsx
+        CircleShape.jsx
+        TwoRectangleShape.jsx
+```
+
+---
+
+# 4️⃣ Створи shape компоненти
+
+## Rect
+
+### `graph/shapes/RectShape.jsx`
+
+```jsx
+import { Rect } from "react-konva";
+
+export default function RectShape({ el }) {
+  return (
+    <Rect
+      width={el.w}
+      height={el.h}
+      fill="white"
+      stroke="black"
+      strokeWidth={2}
+    />
+  );
+}
+```
+
+---
+
+## Circle
+
+### `graph/shapes/CircleShape.jsx`
+
+```jsx
+import { Circle } from "react-konva";
+
+export default function CircleShape({ el }) {
+  return (
+    <Circle
+      radius={el.r}
+      fill="white"
+      stroke="black"
+      strokeWidth={2}
+    />
+  );
+}
+```
+
+---
+
+## TwoRectangle
+
+### `graph/shapes/TwoRectangleShape.jsx`
+
+```jsx
+import { Rect } from "react-konva";
+
+export default function TwoRectangleShape({ el }) {
+  return (
+    <>
+      <Rect
+        x={0}
+        y={0}
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+      />
+
+      <Rect
+        x={0}
+        y={el.h}
+        width={el.w}
+        height={el.h}
+        fill="white"
+        stroke="black"
+      />
+    </>
+  );
+}
+```
+
+---
+
+# 5️⃣ Створи новий registry
+
+### `graph/registry.js`
+
+```javascript
+import RectShape from "./shapes/RectShape";
+import CircleShape from "./shapes/CircleShape";
+import TwoRectangleShape from "./shapes/TwoRectangleShape";
+
+export const ELEMENT_REGISTRY = {
+
+  rect: {
+    title: "Rectangle",
+
+    component: RectShape,
+
+    defaults: {
+      w: 120,
+      h: 60
+    }
+  },
+
+  circle: {
+    title: "Circle",
+
+    component: CircleShape,
+
+    defaults: {
+      r: 40
+    }
+  },
+
+  twoRectangle: {
+    title: "Two rectangles",
+
+    component: TwoRectangleShape,
+
+    defaults: {
+      w: 120,
+      h: 50
+    }
+  }
+
+};
+```
+
+---
+
+# 6️⃣ Спрощуємо DiagramSymbolItem
+
+Тепер **не потрібен `ELEMENT_COMPONENTS`**.
+
+Відкрий:
+
+```
+DiagramSymbolItem.jsx
+```
+
+і заміни:
+
+```javascript
+const Shape = ELEMENT_COMPONENTS[el.type]
+```
+
+на:
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+const Shape = ELEMENT_REGISTRY[el.type]?.component;
+```
+
+---
+
+### Повний фрагмент
+
+```javascript
+const Shape = ELEMENT_REGISTRY[el.type]?.component;
+```
+
+---
+
+### Рендер
+
+```jsx
+{Shape && <Shape el={el} />}
+```
+
+---
+
+# 7️⃣ createElementFromTool тепер ще простіший
+
+### `createElementFromTool.js`
+
+```javascript
+import { ELEMENT_REGISTRY } from "../graph/registry";
+
+export function createElementFromTool(type, x, y) {
+
+  const config = ELEMENT_REGISTRY[type];
+  if (!config) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    x,
+    y,
+    ...config.defaults
+  };
+
+}
+```
+
+---
+
+# 8️⃣ ToolPalette теж працює через registry
+
+У тебе вже є:
+
+```javascript
+const allTypes = Object.keys(ELEMENT_REGISTRY)
+```
+
+і це правильно.
+
+---
+
+# 9️⃣ Що ми виграли
+
+Було:
+
+```
+GraphLibrary
+ELEMENT_COMPONENTS
+registry
+```
+
+Стало:
+
+```
+ELEMENT_REGISTRY
+```
+
+І тепер будь-який код бере дані звідти.
+
+---
+
+# 🔟 Додавання нового shape тепер займає 30 секунд
+
+Наприклад хочеш новий shape:
+
+```
+Valve
+```
+
+### 1️⃣ створюєш
+
+```
+ValveShape.jsx
+```
+
+### 2️⃣ додаєш у registry
+
+```javascript
+valve: {
+  title: "Valve",
+  component: ValveShape,
+  defaults: { w: 80, h: 80 }
+}
+```
+
+Готово.
+
+Він автоматично працює у:
+
+* toolbar
+* stage
+* selection
+* delete
+
+---
+
+# 11️⃣ Це ще не все — можна зробити ще краще
+
+Наступний крок (дуже важливий):
+
+### додати anchors у registry
+
+Наприклад:
+
+```javascript
+twoRectangle: {
+  component: TwoRectangleShape,
+
+  defaults: { w:120, h:50 },
+
+  anchors: (el) => [
+    {x:0, y:el.h/2},
+    {x:el.w, y:el.h/2},
+    {x:el.w/2, y:0},
+    {x:el.w/2, y:el.h*2}
+  ]
+}
+```
+
+І тоді:
+
+```
+getAnchorPoints
+```
+
+взагалі не потрібна.
+
+---
+
+# 🚀 Якщо хочеш — покажу наступний дуже важливий крок
+
+Це **одна з найсильніших оптимізацій редактора**:
+
+### винести Graph State в Zustand Store
+
+Це:
+
+* прибере 90% props
+* зробить editor стабільним
+* дозволить легко зробити undo/redo
+* дозволить працювати з 500+ елементами
+
+І код стане **в 3-4 рази простіший**.

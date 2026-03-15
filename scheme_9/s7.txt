@@ -1,0 +1,293 @@
+Добре. Почнемо з **першого стабілізуючого кроку — створення `DiagramWorkspace`**, який буде керувати:
+
+* панеллю інструментів
+* режимом редактора
+* активним інструментом
+* canvas
+
+Це прибере проблему перекриття Stage панеллю і дасть нормальну архітектуру для наступних кроків.
+
+Я покажу **конкретно що і де створити**.
+
+---
+
+# Крок 1. Створити контейнер редактора
+
+Створи новий файл:
+
+```
+components/diagram/DiagramWorkspace.jsx
+```
+
+### Код
+
+```jsx
+"use client";
+
+import { useState } from "react";
+import Box from "@mui/material/Box";
+
+import ToolPalette from "./ToolPalette";
+import DiagramEditor from "./DiagramEditor";
+
+const DRAWER_W = 180;
+
+export default function DiagramWorkspace() {
+  const [paletteOpen, setPaletteOpen] = useState(true);
+
+  const [activeTool, setActiveTool] = useState(null);
+
+  const [editorMode, setEditorMode] = useState("select");
+
+  const handleSelectTool = (toolType) => {
+    setActiveTool(toolType);
+    setEditorMode("add-node");
+  };
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        width: "100%",
+        height: "100vh",
+        overflow: "hidden",
+      }}
+    >
+      <ToolPalette
+        open={paletteOpen}
+        activeTool={activeTool}
+        onToggle={() => setPaletteOpen((prev) => !prev)}
+        onSelectTool={handleSelectTool}
+      />
+
+      <Box
+        sx={{
+          flex: 1,
+          minWidth: 0,
+          ml: paletteOpen ? `${DRAWER_W}px` : 0,
+          transition: "margin-left 0.2s ease",
+          p: 2,
+          boxSizing: "border-box",
+        }}
+      >
+        <DiagramEditor
+          activeTool={activeTool}
+          editorMode={editorMode}
+          setEditorMode={setEditorMode}
+          clearActiveTool={() => setActiveTool(null)}
+        />
+      </Box>
+    </Box>
+  );
+}
+```
+
+---
+
+# Крок 2. Використати DiagramWorkspace у сторінці
+
+Якщо у тебе є сторінка NextJS:
+
+```
+app/editor/page.jsx
+```
+
+або
+
+```
+pages/editor.jsx
+```
+
+то заміни рендер редактора на:
+
+```jsx
+import DiagramWorkspace from "@/components/diagram/DiagramWorkspace";
+
+export default function Page() {
+  return <DiagramWorkspace />;
+}
+```
+
+---
+
+# Крок 3. Переконатися що ToolPalette працює
+
+У `ToolPalette` у тебе вже є:
+
+```javascript
+const pickTool = (type) => {
+  onSelectTool(type);
+};
+```
+
+Це означає:
+
+```
+SVG icon click
+↓
+onSelectTool("twoRectangle")
+↓
+handleSelectTool
+↓
+activeTool = "twoRectangle"
+editorMode = "add-node"
+```
+
+---
+
+# Крок 4. Передати props у DiagramEditor
+
+Тепер `DiagramEditor` повинен приймати:
+
+```javascript
+export default function DiagramEditor({
+  activeTool,
+  editorMode,
+  setEditorMode,
+  clearActiveTool
+}) {
+```
+
+---
+
+# Крок 5. Додати Stage handler
+
+Всередині `DiagramEditor` додай:
+
+```javascript
+import { createElementFromTool } from "./createElementFromTool";
+```
+
+і функцію:
+
+```javascript
+const handleStageMouseDown = (e) => {
+  const stage = e.target.getStage();
+
+  if (!stage) return;
+
+  if (e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  if (editorMode === "add-node" && activeTool) {
+    const newElement = createElementFromTool(activeTool, pointer.x, pointer.y);
+
+    if (!newElement) return;
+
+    S.setSymbols((prev) => [...prev, newElement]);
+  }
+};
+```
+
+---
+
+# Крок 6. Підключити handler до Stage
+
+Було:
+
+```jsx
+<Stage width={1000} height={600}>
+```
+
+Стає:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={handleStageMouseDown}
+>
+```
+
+---
+
+# Крок 7. Підключити ref до Layer
+
+Було:
+
+```jsx
+<Layer>
+```
+
+Стає:
+
+```jsx
+<Layer ref={layerRef}>
+```
+
+---
+
+# Що тепер буде працювати
+
+Тепер workflow такий:
+
+```
+1. Клік на SVG іконку
+2. activeTool = "twoRectangle"
+3. editorMode = "add-node"
+
+4. Клік на canvas
+
+5. createElementFromTool
+6. елемент додається в symbols
+7. DiagramSymbols його малює
+```
+
+---
+
+# Важливий тест
+
+Після цього перевір:
+
+### 1️⃣ Панель відкрита
+
+```
+ToolPalette open
+```
+
+### 2️⃣ Клік по canvas
+
+Canvas має реагувати.
+
+---
+
+# Якщо щось не працює
+
+Перевір:
+
+### ToolPalette Drawer
+
+Якщо там є
+
+```javascript
+variant="temporary"
+```
+
+залиш, але переконайся що є
+
+```javascript
+hideBackdrop
+```
+
+---
+
+# Далі (наступний крок)
+
+Коли це запрацює, ми зробимо **другий великий крок**, який реально покращить архітектуру:
+
+### виправимо `DiagramSymbols`
+
+Бо зараз там є критична помилка React:
+
+```
+useEffect inside map
+```
+
+Це може зламати рендер.
+
+Я покажу як правильно зробити **DiagramSymbolItem компонент**, як у Figma / Miro редакторах.
+
+Це займе ~30 рядків коду і сильно стабілізує систему.
