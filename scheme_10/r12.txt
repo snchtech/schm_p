@@ -1,0 +1,285 @@
+Круто, у тебе вже дуже хороша панель 🔥
+Зараз зробимо **правильний flow:**
+
+👉 клік по Tool → вибрали tool
+👉 клік по Stage → створили node
+
+І це буде **через Zustand + controller + нову архітектуру**
+
+---
+
+# 🧠 ГОЛОВНА ІДЕЯ
+
+## 🔁 Flow
+
+```text
+ToolPalette → setActiveTool
+↓
+Stage click → controller
+↓
+create node → store.nodes
+```
+
+---
+
+# 🔥 1. STORE — activeTool
+
+## 📁 `useCanvasStore.js`
+
+```js
+activeTool: null,
+
+setActiveTool: (tool) => set({ activeTool: tool }),
+resetActiveTool: () => set({ activeTool: null }),
+```
+
+---
+
+# 🔥 2. ПЕРЕПИС ToolPalette
+
+👉 ти зараз передаєш `onSelectTool`
+👉 замість цього — напряму в store
+
+---
+
+## ❗ заміни `pickTool`
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+const setActiveTool = useCanvasStore.getState().setActiveTool;
+
+const pickTool = (type) => {
+  setActiveTool(type);
+
+  setRecent((prev) => {
+    const next = [type, ...prev.filter((x) => x !== type)].slice(0, RECENT_LIMIT);
+    saveArray(STORAGE_REC, next);
+    return next;
+  });
+};
+```
+
+---
+
+## ❗ activeTool тепер з store
+
+```js
+const activeTool = useCanvasStore((s) => s.activeTool);
+```
+
+---
+
+👉 тепер ToolPalette **не залежить від props**
+
+---
+
+# 🔥 3. CREATE NODE FROM TOOL
+
+## 📁 `utils/createNodeFromTool.js`
+
+```js
+import { ELEMENT_REGISTRY } from "@/components/graph/registry";
+
+export function createNodeFromTool(type, x, y) {
+  const def = ELEMENT_REGISTRY[type];
+  if (!def) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+
+    position: {
+      x,
+      y,
+    },
+
+    data: {
+      width: def.preview?.w || 80,
+      height: def.preview?.h || 50,
+      ...def.defaults,
+    },
+  };
+}
+```
+
+---
+
+# 🔥 4. CONTROLLER — обробка кліку по Stage
+
+## 📁 `canvasController.js`
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createNodeFromTool } from "@/utils/createNodeFromTool";
+
+handleStageMouseDown(e) {
+  const store = useCanvasStore.getState();
+
+  const activeTool = store.activeTool;
+  if (!activeTool) return;
+
+  const stage = e.target.getStage();
+
+  // 👉 тільки якщо клік по пустому canvas
+  if (e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  const node = createNodeFromTool(
+    activeTool,
+    pointer.x,
+    pointer.y
+  );
+
+  if (!node) return;
+
+  store.addNode(node);
+  store.resetActiveTool(); // 👈 після вставки
+}
+```
+
+---
+
+# 🔥 5. ПІДКЛЮЧЕННЯ ДО STAGE
+
+## 📁 `DiagramCanvas.jsx`
+
+```jsx
+import { canvasController } from "@/controllers/canvasController";
+
+<Stage
+  width={width}
+  height={height}
+  onMouseDown={(e) => canvasController.handleStageMouseDown(e)}
+>
+```
+
+---
+
+# 🔥 6. ВАЖЛИВО: КООРДИНАТИ ПРИ ZOOM
+
+👉 у тебе вже є zoom/pan → тому pointer треба нормалізувати
+
+---
+
+## 🔥 helper
+
+```js
+export function getRelativePointer(stage, layer) {
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return null;
+
+  const scale = layer.scaleX();
+  const pos = layer.position();
+
+  return {
+    x: (pointer.x - pos.x) / scale,
+    y: (pointer.y - pos.y) / scale,
+  };
+}
+```
+
+---
+
+## 🔥 використовуємо в controller
+
+```js
+import { getRelativePointer } from "@/utils/coords";
+
+const pointer = getRelativePointer(stage, store.layerRef);
+```
+
+---
+
+# 🔥 7. STORE — addNode
+
+```js
+addNode: (node) =>
+  set((state) => ({
+    nodes: [...state.nodes, node],
+  })),
+```
+
+---
+
+# 🔥 8. UX (дуже рекомендую)
+
+## 👉 показати курсор tool
+
+```js
+useEffect(() => {
+  const stage = stageRef.current;
+  const container = stage?.container();
+
+  if (!container) return;
+
+  if (activeTool) {
+    container.style.cursor = "crosshair";
+  } else {
+    container.style.cursor = "default";
+  }
+}, [activeTool]);
+```
+
+---
+
+# 🧨 ЩО ВАЖЛИВО
+
+## ❗ КРИТИЧНИЙ момент:
+
+```js
+if (e.target !== stage) return;
+```
+
+👉 це не дає створювати node поверх інших node
+👉 дуже важливо
+
+---
+
+# 🧠 ЩО ТИ ОТРИМАВ
+
+## Flow:
+
+```text
+ToolPalette (SVG)
+↓
+setActiveTool(type)
+↓
+Stage click
+↓
+createNodeFromTool
+↓
+store.nodes.push
+↓
+NodesLayer рендерить
+```
+
+---
+
+# 🚀 ЩО ДАЛІ
+
+Тепер у тебе вже є:
+
+✅ Tool palette
+✅ Insert node
+✅ Zustand
+✅ Controller
+✅ Canvas
+
+---
+
+## Наступний рівень:
+
+👉 **drag tool (drag з панелі → canvas)**
+👉 або
+👉 **preview елемента під курсором**
+
+---
+
+Якщо хочеш прям як Figma:
+
+👉 напиши **"робимо preview елемента під курсором"**
+
+це дасть дуже сильний UX 🔥

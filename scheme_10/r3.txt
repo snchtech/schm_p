@@ -1,0 +1,446 @@
+Дуже правильне питання. І це вже наступний рівень архітектури 👇
+
+👉 Якщо коротко:
+**перехід на `nodes + edges` — це правильний крок**, і він ідеально лягає на ту архітектуру, яку ми щойно побудували (Zustand + controller).
+
+---
+
+# 🔥 Чому `nodes + edges` краще
+
+Зараз у тебе:
+
+```js
+symbols   // вузли
+connections // лінії
+```
+
+Проблеми:
+
+* різні структури
+* різна логіка
+* складно масштабувати (групи, типи, метадані)
+
+---
+
+## ✅ Після переходу:
+
+```js
+nodes = []  // всі елементи (rect, circle, text, etc.)
+edges = []  // всі зв'язки
+```
+
+👉 Це стандарт:
+
+* React Flow
+* Cytoscape
+* всі graph editors
+
+---
+
+# 🧠 Нова модель даних
+
+## Node
+
+```js
+{
+  id: 'n1',
+  type: 'rect', // або 'circle', 'text', etc.
+  position: { x: 100, y: 100 },
+
+  data: {
+    width: 80,
+    height: 50,
+    fill: 'gray',
+  }
+}
+```
+
+---
+
+## Edge
+
+```js
+{
+  id: 'e1',
+
+  source: {
+    nodeId: 'n1',
+    anchor: 'right'
+  },
+
+  target: {
+    nodeId: 'n2',
+    anchor: 'left'
+  },
+
+  points: [...],
+
+  data: {
+    routing: { startOffset: 20, endOffset: 20 },
+    anchors: []
+  }
+}
+```
+
+---
+
+# 🔄 Як змінюється твій код
+
+Зараз покажу **конкретно по файлах**, що міняти.
+
+---
+
+# 1. Zustand store (ПЕРЕРОБКА)
+
+## `useCanvasStore.js`
+
+```js
+import { create } from 'zustand'
+
+export const useCanvasStore = create((set, get) => ({
+  // ===== GRAPH =====
+  nodes: [],
+  edges: [],
+
+  // ===== UI =====
+  selection: null, // { type: 'node' | 'edge', id }
+
+  // ===== ACTIONS =====
+
+  // --- NODES ---
+  addNode: (node) =>
+    set((s) => ({ nodes: [...s.nodes, node] })),
+
+  updateNodePosition: (id, x, y) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? { ...n, position: { x, y } } : n
+      ),
+    })),
+
+  removeNode: (id) =>
+    set((s) => ({
+      nodes: s.nodes.filter((n) => n.id !== id),
+      edges: s.edges.filter(
+        (e) => e.source.nodeId !== id && e.target.nodeId !== id
+      ),
+    })),
+
+  // --- EDGES ---
+  addEdge: (edge) =>
+    set((s) => ({ edges: [...s.edges, edge] })),
+
+  updateEdge: (id, data) =>
+    set((s) => ({
+      edges: s.edges.map((e) =>
+        e.id === id ? { ...e, ...data } : e
+      ),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+    })),
+
+  // --- SELECTION ---
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+}))
+```
+
+---
+
+# 2. Controller (ЗМІНА ЛОГІКИ)
+
+## ❗ Було:
+
+```js
+symbols
+connections
+```
+
+## ✅ Стало:
+
+```js
+nodes
+edges
+```
+
+---
+
+## 🔧 handleDrag
+
+```js
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+
+  const store = useCanvasStore.getState();
+  store.updateNodePosition(id, x, y);
+
+  // 🔥 оновлення edges
+  const nodes = store.nodes.map(n =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = store.edges.map(edge => {
+    if (
+      edge.source.nodeId !== id &&
+      edge.target.nodeId !== id
+    ) return edge;
+
+    const start = getAnchorPoint(edge.source, nodes);
+    const end = getAnchorPoint(edge.target, nodes);
+
+    const points = calculateOrthogonalPath(start, end);
+
+    return { ...edge, points };
+  });
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 3. SymbolsLayer → NodesLayer
+
+## Було:
+
+```jsx
+symbols.map(...)
+```
+
+## Стало:
+
+```jsx
+nodes.map(...)
+```
+
+---
+
+## `NodesLayer.jsx`
+
+```jsx
+const nodes = useCanvasStore(s => s.nodes)
+
+return nodes.map(node => (
+  <Group
+    key={node.id}
+    x={node.position.x}
+    y={node.position.y}
+    draggable
+    onDragMove={(e) =>
+      canvasController.handleNodeDragMove(node.id, e)
+    }
+  >
+```
+
+---
+
+# 4. ConnectionsLayer → EdgesLayer
+
+## Було:
+
+```jsx
+connections.map(...)
+```
+
+## Стало:
+
+```jsx
+edges.map(...)
+```
+
+---
+
+## `EdgesLayer.jsx`
+
+```jsx
+const edges = useCanvasStore(s => s.edges)
+
+return edges.map(edge => (
+  <Line
+    key={edge.id}
+    points={edge.points}
+    onClick={(e) =>
+      canvasController.handleEdgeClick(edge.id, e)
+    }
+  />
+))
+```
+
+---
+
+# 5. Створення зв’язку (ВАЖЛИВО)
+
+## ❗ Було:
+
+```js
+from = { symbolId, direction }
+to = { symbolId, direction }
+```
+
+## ✅ Стало:
+
+```js
+edge = {
+  id,
+  source: { nodeId, anchor },
+  target: { nodeId, anchor },
+}
+```
+
+---
+
+## Controller
+
+```js
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState()
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor)
+    return
+  }
+
+  const edge = {
+    id: crypto.randomUUID(),
+
+    source: {
+      nodeId: store.tempSource.nodeId,
+      anchor: store.tempSource.anchor,
+    },
+
+    target: {
+      nodeId: anchor.nodeId,
+      anchor: anchor.anchor,
+    },
+
+    points: []
+  }
+
+  store.addEdge(edge)
+  store.setTempSource(null)
+}
+```
+
+---
+
+# 6. Anchor модель (оновлення)
+
+Замість:
+
+```js
+{ parentId, direction }
+```
+
+👉 робимо:
+
+```js
+{
+  nodeId: 'n1',
+  anchor: 'top' // або {x,y}
+}
+```
+
+---
+
+# 7. Geometry адаптація
+
+Було:
+
+```js
+resolveAttachmentPoint(from, symbols, connections)
+```
+
+Стало:
+
+```js
+resolveAttachmentPoint(att, nodes, edges)
+```
+
+---
+
+## приклад
+
+```js
+function getAnchorPoint(att, nodes) {
+  const node = nodes.find(n => n.id === att.nodeId)
+
+  if (!node) return null
+
+  const { x, y } = node.position
+
+  if (att.anchor === 'top') return { x, y }
+  if (att.anchor === 'right') return { x: x + 80, y }
+}
+```
+
+---
+
+# 🔥 Що ти виграєш
+
+Після переходу:
+
+### ✅ 1. Єдина модель
+
+* не symbols + connections
+* а graph (nodes + edges)
+
+---
+
+### ✅ 2. Легко додати:
+
+* групи
+* типи вузлів
+* кастомні edges
+* labels
+* undo/redo
+
+---
+
+### ✅ 3. Controller стає простішим
+
+---
+
+# ⚠️ Що НЕ треба робити
+
+❌ не міксувати стару модель і нову
+❌ не залишати `symbols` і `nodes` разом
+❌ не переносити useDiagramState як є
+
+---
+
+# 🧠 Рекомендація
+
+👉 Твій кейс вже **достатньо складний**, тому:
+
+### 🔥 Я рекомендую:
+
+1. Зробити **перехід на nodes/edges ДО кінця**
+2. НЕ підтримувати стару модель
+3. Поступово переносити:
+
+   * drag
+   * selection
+   * edges routing
+   * anchors
+
+---
+
+# 👉 Далі
+
+Найкращий наступний крок:
+
+👉 Я можу:
+
+* переписати **твою складну логіку routing (calculateOrthogonalPath)** під nodes/edges
+* або показати **як правильно зробити anchor систему (symbol ↔ edge ↔ edge)**
+
+Напиши:
+
+👉 **"перепиши routing під nodes/edges"**
+або
+👉 **"зробимо нормальні anchors як у draw.io"**
+
+і підемо глибше 💪

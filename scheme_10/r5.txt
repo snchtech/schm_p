@@ -1,0 +1,409 @@
+Оце вже **серце редактора** 🔥
+Якщо правильно зробити anchors — все інше (routing, UX, масштабування) стане простим.
+
+Я дам тобі **нормальну універсальну систему anchors**, як у draw.io / Figma / React Flow — але адаптовану під твою логіку (orthogonal routing + offsets).
+
+---
+
+# 🧠 Головна ідея
+
+## ❌ Було (хаос)
+
+* symbol anchors
+* line anchors
+* різні формати
+* normalizeAttachment
+* купа умов
+
+---
+
+## ✅ Стало (єдина модель)
+
+👉 **ВСІ точки підключення = Anchor**
+
+```js
+anchor = {
+  id,
+  type: 'node' | 'edge',
+
+  // для node
+  nodeId,
+
+  // для edge
+  edgeId,
+
+  kind: 'port' | 'free',
+
+  // позиція
+  x,
+  y,
+
+  // напрямок (ВАЖЛИВО для routing)
+  direction: 'top' | 'bottom' | 'left' | 'right' | 'auto',
+
+  // для edge anchor
+  segIndex,
+  t,
+}
+```
+
+---
+
+# 🔥 1. Edge тепер виглядає так
+
+```js
+edge = {
+  id,
+
+  source: anchor,
+  target: anchor,
+
+  data: {
+    anchors: [] // ВСІ додаткові точки
+  },
+
+  points: []
+}
+```
+
+---
+
+# 🔥 2. Типи anchors
+
+## 1. Node anchor (порт)
+
+```js
+{
+  type: 'node',
+  nodeId: 'n1',
+  kind: 'port',
+  direction: 'right',
+  x, y
+}
+```
+
+---
+
+## 2. Edge anchor (на лінії)
+
+```js
+{
+  type: 'edge',
+  edgeId: 'e1',
+  kind: 'free',
+  x,
+  y,
+  segIndex,
+  t
+}
+```
+
+---
+
+# 🔥 3. Єдина функція: resolveAnchor
+
+👉 заміняє ВСЕ:
+
+* normalizeAttachment
+* resolveAttachmentPoint
+* getAnchorPoints
+
+---
+
+## 📁 `anchorUtils.js`
+
+```js
+export function resolveAnchor(anchor, nodes, edges) {
+  if (!anchor) return null;
+
+  // ===== NODE =====
+  if (anchor.type === 'node') {
+    const node = nodes.find(n => n.id === anchor.nodeId);
+    if (!node) return null;
+
+    return getNodeAnchorPosition(node, anchor.direction);
+  }
+
+  // ===== EDGE =====
+  if (anchor.type === 'edge') {
+    const edge = edges.find(e => e.id === anchor.edgeId);
+    if (!edge) return null;
+
+    // якщо є segIndex → обчислюємо
+    if (anchor.segIndex != null && anchor.t != null) {
+      const pts = edge.points;
+
+      const i = anchor.segIndex;
+
+      if (2 * i + 3 >= pts.length) return anchor;
+
+      const x1 = pts[2 * i];
+      const y1 = pts[2 * i + 1];
+      const x2 = pts[2 * i + 2];
+      const y2 = pts[2 * i + 3];
+
+      return {
+        x: x1 + anchor.t * (x2 - x1),
+        y: y1 + anchor.t * (y2 - y1),
+        direction: 'auto'
+      };
+    }
+
+    return {
+      x: anchor.x,
+      y: anchor.y,
+      direction: 'auto'
+    };
+  }
+
+  return null;
+}
+```
+
+---
+
+# 🔥 4. Node anchor positions
+
+```js
+export function getNodeAnchorPosition(node, direction) {
+  const { x, y } = node.position;
+  const { width, height } = node.data;
+
+  switch (direction) {
+    case 'top':
+      return { x: x + width / 2, y, direction: 'top' };
+    case 'bottom':
+      return { x: x + width / 2, y: y + height, direction: 'bottom' };
+    case 'left':
+      return { x, y: y + height / 2, direction: 'left' };
+    case 'right':
+      return { x: x + width, y: y + height / 2, direction: 'right' };
+    default:
+      return { x, y, direction: 'right' };
+  }
+}
+```
+
+---
+
+# 🔥 5. Вибір direction (ВАЖЛИВО)
+
+Якщо anchor = auto → треба визначити напрямок
+
+```js
+export function resolveDirection(anchor, otherPoint) {
+  if (anchor.direction !== 'auto') return anchor.direction;
+
+  const dx = otherPoint.x - anchor.x;
+  const dy = otherPoint.y - anchor.y;
+
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? 'right' : 'left';
+  }
+
+  return dy > 0 ? 'bottom' : 'top';
+}
+```
+
+---
+
+# 🔥 6. Routing тепер виглядає так
+
+```js
+export function buildEdgePath(edge, nodes, edges) {
+  const start = resolveAnchor(edge.source, nodes, edges);
+  const end = resolveAnchor(edge.target, nodes, edges);
+
+  if (!start || !end) return [];
+
+  const dirFrom = resolveDirection(start, end);
+  const dirTo = resolveDirection(end, start);
+
+  return calculateOrthogonalPath(
+    { ...start, direction: dirFrom },
+    { ...end, direction: dirTo },
+    edge.data.routing,
+    boxFromNode(nodes.find(n => n.id === edge.source.nodeId)),
+    boxFromNode(nodes.find(n => n.id === edge.target.nodeId))
+  );
+}
+```
+
+---
+
+# 🔥 7. Створення edge
+
+```js
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor);
+    return;
+  }
+
+  const edge = {
+    id: crypto.randomUUID(),
+    source: store.tempSource,
+    target: anchor,
+
+    data: {
+      routing: { startOffset: 20, endOffset: 20 },
+      anchors: []
+    },
+
+    points: []
+  };
+
+  edge.points = buildEdgePath(edge, store.nodes, store.edges);
+
+  store.addEdge(edge);
+  store.setTempSource(null);
+}
+```
+
+---
+
+# 🔥 8. Додавання anchor на edge
+
+```js
+handleEdgeClick(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== 'add-anchor') return;
+
+  const stage = e.target.getStage();
+  const pointer = stage.getPointerPosition();
+
+  const edge = store.edges.find(e => e.id === edgeId);
+
+  const closest = findClosestSegment(edge.points, pointer.x, pointer.y);
+
+  const newAnchor = {
+    id: crypto.randomUUID(),
+    type: 'edge',
+    edgeId,
+    kind: 'free',
+    x: closest.x,
+    y: closest.y,
+    segIndex: closest.segIndex,
+    t: closest.t,
+    direction: 'auto'
+  };
+
+  const nextEdges = store.edges.map(e =>
+    e.id === edgeId
+      ? {
+          ...e,
+          data: {
+            ...e.data,
+            anchors: [...(e.data.anchors || []), newAnchor]
+          }
+        }
+      : e
+  );
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 🔥 9. Оновлення anchor після routing
+
+```js
+export function updateEdgeAnchors(edge) {
+  const pts = edge.points;
+
+  const anchors = (edge.data.anchors || []).map(a => {
+    if (a.type !== 'edge') return a;
+
+    const i = a.segIndex;
+
+    if (2 * i + 3 >= pts.length) return a;
+
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+
+    return {
+      ...a,
+      x: x1 + a.t * (x2 - x1),
+      y: y1 + a.t * (y2 - y1),
+    };
+  });
+
+  return {
+    ...edge,
+    data: {
+      ...edge.data,
+      anchors
+    }
+  };
+}
+```
+
+---
+
+# 🧨 ЩО ТИ ОТРИМАВ
+
+## ✅ 1. ЄДИНА система
+
+| Було                | Стало       |
+| ------------------- | ----------- |
+| symbol anchor       | node anchor |
+| line anchor         | edge anchor |
+| normalizeAttachment | ❌           |
+| resolveAttachment   | ❌           |
+
+---
+
+## ✅ 2. Підтримка:
+
+✔ node → node
+✔ node → edge
+✔ edge → edge
+✔ edge → node
+
+---
+
+## ✅ 3. Routing чистий
+
+```js
+edge → source/target → resolveAnchor → routing
+```
+
+---
+
+## ✅ 4. Масштабування
+
+Тепер ти легко додаси:
+
+* snap
+* магніти
+* multiple ports
+* dynamic anchors
+* labels
+
+---
+
+# 🚀 Далі (рекомендую)
+
+Тепер наступний крок, який зробить редактор **як у Figma**:
+
+👉 зробити:
+
+### 1. hover preview лінії
+
+### 2. drag-to-connect
+
+### 3. snap до anchor
+
+---
+
+Якщо хочеш — напиши:
+
+👉 **"зробимо drag connection (як draw.io)"**
+
+і я покажу тобі, як зробити UX рівня нормального редактора 💪

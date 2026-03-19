@@ -1,0 +1,356 @@
+Це вже дуже хороший модуль 👍 — у тебе тут правильна базова логіка zoom/pan.
+Але його треба **адаптувати під нову архітектуру редактора (Zustand + controller + selection + anchors)**.
+
+Я покажу:
+
+1. 🔧 що тут добре (залишаємо)
+2. ⚠️ що треба змінити (важливо!)
+3. 🚀 як інтегрувати в нову систему (правильно)
+4. 🧠 невеликий апгрейд (щоб працювало як Figma)
+
+---
+
+# ✅ 1. ЩО ТУТ ВЖЕ КРУТО
+
+✔ zoom до pointer — ідеально
+✔ clamp scale — ок
+✔ pan через space/MMB — UX як у Figma
+✔ drag lock — дуже правильна ідея
+
+👉 це все залишаємо
+
+---
+
+# ⚠️ 2. ПРОБЛЕМА (ВАЖЛИВА)
+
+Ось це:
+
+```js
+layer.find("*").each((node) => {
+  if (typeof node.draggable === "function") {
+    prev.set(node._id, node.draggable());
+    node.draggable(false);
+  }
+});
+```
+
+## ❌ проблема
+
+* ти лізеш у ВСІ node Konva
+* використовуєш `_id` (внутрішній API ❌)
+* не синхронізовано зі store
+
+👉 це ламає архітектуру
+
+---
+
+# ✅ 3. ПРАВИЛЬНИЙ ПІДХІД (через Zustand)
+
+## 🔥 замість "перебирати DOM"
+
+👉 ти просто в store вмикаєш режим:
+
+```js
+isPanning: false
+```
+
+---
+
+## 🔥 store
+
+```js
+setIsPanning: (isPanning) => set({ isPanning })
+```
+
+---
+
+## 🔥 NodesLayer.jsx
+
+```jsx
+const isPanning = useCanvasStore(s => s.isPanning);
+
+<Group
+  draggable={!isPanning}   // 👈 ВСЕ!
+>
+```
+
+---
+
+👉 ВСЕ
+👉 не треба `find("*")`
+👉 не треба `_id`
+
+---
+
+# 🔥 4. ПЕРЕПИСУЄМО createDraggableLock
+
+## ❌ видаляємо
+
+```js
+createDraggableLock
+```
+
+---
+
+## ✅ замінюємо на
+
+```js
+function setPanMode(isActive) {
+  const store = useCanvasStore.getState();
+  store.setIsPanning(isActive);
+}
+```
+
+---
+
+# 🔥 5. ОНОВЛЕНИЙ setupLayerZoomPan
+
+Ось правильна версія під твою нову архітектуру:
+
+---
+
+## ✅ новий варіант
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export function setupLayerZoomPan(stage, layer, {
+  zoomStep = 1.15,
+  minScale = 0.2,
+  maxScale = 6,
+  requireCtrlForWheel = false,
+  panMode = "mmb_or_space",
+} = {}) {
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+
+  const getScale = () => layer.scaleX() || 1;
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? {
+      x: stage.width() / 2,
+      y: stage.height() / 2,
+    };
+
+    const layerPos = layer.position();
+
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    layer.scale({ x: newScale, y: newScale });
+
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+  }
+
+  // ---------- ZOOM ----------
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // ---------- PAN ----------
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const keyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const keyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+
+    if (!canStartPan(evt)) return;
+
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    useCanvasStore.getState().setIsPanning(true);
+
+    container.style.cursor = "grabbing";
+    evt.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({
+      x: layer.x() + dx,
+      y: layer.y() + dy,
+    });
+
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    layer.batchDraw();
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+
+    isPanning = false;
+    lastClient = null;
+
+    useCanvasStore.getState().setIsPanning(false);
+
+    container.style.cursor = spaceDown ? "grab" : "default";
+  }
+
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  // ---------- API ----------
+  function zoomIn() {
+    zoomToPoint(getScale() * zoomStep);
+  }
+
+  function zoomOut() {
+    zoomToPoint(getScale() / zoomStep);
+  }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+  }
+
+  function destroy() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mousemove", onMouseMove);
+    stage.off("mouseup", stopPan);
+    stage.off("mouseleave", stopPan);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+
+    useCanvasStore.getState().setIsPanning(false);
+    container.style.cursor = "default";
+  }
+
+  return {
+    zoomIn,
+    zoomOut,
+    reset,
+    getScale,
+    setScale: (s) => zoomToPoint(s),
+    destroy,
+  };
+}
+```
+
+---
+
+# 🔥 6. БОНУС (ВАЖЛИВИЙ UX FIX)
+
+## ❗ проблема зараз
+
+При zoom/pan:
+
+* selection може "зависати"
+* drag може конфліктувати
+
+---
+
+## ✅ додай:
+
+```js
+useCanvasStore.getState().clearHoverStates();
+```
+
+у:
+
+```js
+onMouseDown
+```
+
+---
+
+# 🚀 7. ЩО ТИ ОТРИМАВ
+
+## Було:
+
+❌ DOM hack
+❌ Konva _id
+❌ не синхронізовано зі store
+
+---
+
+## Стало:
+
+✅ чистий Zustand control
+✅ predictable state
+✅ сумісність з selection
+✅ сумісність з anchors
+✅ масштабування без багів
+
+---
+
+# 🔥 Далі (рекомендую)
+
+Тепер у тебе вже майже production редактор.
+
+Наступні сильні апгрейди:
+
+👉 **drag-to-connect preview (як у draw.io)**
+👉 **selection box (як Figma)**
+👉 **snap anchors**
+
+---
+
+Якщо хочеш — зробимо наступне:
+
+👉 напиши **"робимо preview connection (лінія під курсором)"**
+
+це прям великий UX стрибок 🚀

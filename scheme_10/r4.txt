@@ -1,0 +1,458 @@
+Окей, це якраз **найважливіший шматок** у твоєму редакторі 🔥
+Я перепишу routing під **nodes/edges модель**, але з урахуванням того, що у тебе вже є складна логіка (anchors, offsets, обхід box).
+
+---
+
+# 🧠 Нова концепція routing (nodes/edges)
+
+## Було:
+
+```js
+connection = {
+  from: { type: 'symbol', symbolId, direction }
+  to: { ... }
+}
+```
+
+## Стало:
+
+```js
+edge = {
+  id,
+
+  source: {
+    nodeId,
+    anchor: 'top' | 'bottom' | 'left' | 'right'
+  },
+
+  target: {
+    nodeId,
+    anchor: 'top' | 'bottom' | 'left' | 'right'
+  },
+
+  data: {
+    routing: { startOffset, endOffset },
+    anchors: [] // line anchors
+  },
+
+  points: []
+}
+```
+
+---
+
+# 🔧 1. Базові helper-функції (НОВІ)
+
+## 📁 `lib/geometry/edgeRouting.js`
+
+---
+
+## 1.1 Отримати node
+
+```js
+export function getNodeById(nodes, id) {
+  return nodes.find(n => n.id === id);
+}
+```
+
+---
+
+## 1.2 Anchor → координата
+
+```js
+export function getAnchorPoint(node, anchor) {
+  const { x, y } = node.position;
+  const w = node.data.width;
+  const h = node.data.height;
+
+  switch (anchor) {
+    case 'top':
+      return { x: x + w / 2, y };
+    case 'bottom':
+      return { x: x + w / 2, y: y + h };
+    case 'left':
+      return { x, y: y + h / 2 };
+    case 'right':
+      return { x: x + w, y: y + h / 2 };
+    default:
+      return { x, y };
+  }
+}
+```
+
+---
+
+## 1.3 Обгортка для edge
+
+```js
+export function resolveEdgePoints(edge, nodes) {
+  const sourceNode = getNodeById(nodes, edge.source.nodeId);
+  const targetNode = getNodeById(nodes, edge.target.nodeId);
+
+  if (!sourceNode || !targetNode) return null;
+
+  const start = getAnchorPoint(sourceNode, edge.source.anchor);
+  const end = getAnchorPoint(targetNode, edge.target.anchor);
+
+  return { start, end };
+}
+```
+
+---
+
+# 🔥 2. Routing (ядро)
+
+Тепер переписуємо твою логіку:
+
+## 📁 `edgeRouting.js`
+
+```js
+import { calculateOrthogonalPath } from './diagramGeometry';
+import { boxFromNode } from './boxUtils'; // нова функція
+
+export function buildEdgePath(edge, nodes) {
+  const res = resolveEdgePoints(edge, nodes);
+  if (!res) return [];
+
+  const { start, end } = res;
+
+  const routing = edge.data?.routing || {
+    startOffset: 20,
+    endOffset: 20,
+  };
+
+  const startDir = getDirectionFromAnchor(edge.source.anchor);
+  const endDir = getDirectionFromAnchor(edge.target.anchor);
+
+  const startBox = boxFromNode(
+    nodes.find(n => n.id === edge.source.nodeId)
+  );
+
+  const endBox = boxFromNode(
+    nodes.find(n => n.id === edge.target.nodeId)
+  );
+
+  return calculateOrthogonalPath(
+    { ...start, direction: startDir },
+    { ...end, direction: endDir },
+    routing,
+    startBox,
+    endBox
+  );
+}
+```
+
+---
+
+## 2.1 Напрямок
+
+```js
+export function getDirectionFromAnchor(anchor) {
+  switch (anchor) {
+    case 'top':
+      return 'top';
+    case 'bottom':
+      return 'bottom';
+    case 'left':
+      return 'left';
+    case 'right':
+      return 'right';
+    default:
+      return 'right';
+  }
+}
+```
+
+---
+
+## 2.2 Box для node
+
+```js
+export function boxFromNode(node, padding = 10) {
+  const { x, y } = node.position;
+  const { width, height } = node.data;
+
+  return {
+    x: x - padding,
+    y: y - padding,
+    width: width + padding * 2,
+    height: height + padding * 2,
+  };
+}
+```
+
+---
+
+# 🔄 3. Controller (оновлений)
+
+## 🔧 handleDrag
+
+```js
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+
+  const store = useCanvasStore.getState();
+
+  store.updateNodePosition(id, x, y);
+
+  const nodes = store.nodes.map(n =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = store.edges.map(edge => {
+    if (
+      edge.source.nodeId !== id &&
+      edge.target.nodeId !== id
+    ) return edge;
+
+    const points = buildEdgePath(edge, nodes);
+
+    return { ...edge, points };
+  });
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 🔗 4. Створення edge
+
+```js
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor);
+    return;
+  }
+
+  const edge = {
+    id: crypto.randomUUID(),
+
+    source: {
+      nodeId: store.tempSource.nodeId,
+      anchor: store.tempSource.anchor,
+    },
+
+    target: {
+      nodeId: anchor.nodeId,
+      anchor: anchor.anchor,
+    },
+
+    data: {
+      routing: {
+        startOffset: 20,
+        endOffset: 20,
+      },
+      anchors: []
+    },
+
+    points: []
+  };
+
+  const nodes = store.nodes;
+
+  edge.points = buildEdgePath(edge, nodes);
+
+  store.addEdge(edge);
+  store.setTempSource(null);
+}
+```
+
+---
+
+# 🔁 5. Оновлення offset (ВАЖЛИВО)
+
+Твоя складна логіка з offsets → тепер так:
+
+```js
+updateEdgeOffset(edgeId, newOffset) {
+  const store = useCanvasStore.getState();
+
+  const edges = store.edges.map(edge => {
+    if (edge.id !== edgeId) return edge;
+
+    return {
+      ...edge,
+      data: {
+        ...edge.data,
+        routing: {
+          startOffset: newOffset,
+          endOffset: newOffset,
+        }
+      }
+    };
+  });
+
+  const nodes = store.nodes;
+
+  const nextEdges = edges.map(edge => ({
+    ...edge,
+    points: buildEdgePath(edge, nodes)
+  }));
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 🔵 6. Line anchors (перенесення логіки)
+
+Твоя стара логіка:
+
+```js
+additionalAnchors
+```
+
+## Тепер:
+
+```js
+edge.data.anchors = [
+  {
+    id,
+    x,
+    y,
+    segIndex,
+    t
+  }
+]
+```
+
+---
+
+## Додавання anchor
+
+```js
+handleEdgeClick(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== 'add-anchor') return;
+
+  const stage = e.target.getStage();
+  const pointer = stage.getPointerPosition();
+
+  const edge = store.edges.find(e => e.id === edgeId);
+
+  const closest = findClosestSegment(edge.points, pointer.x, pointer.y);
+
+  const newAnchor = {
+    id: crypto.randomUUID(),
+    x: closest.x,
+    y: closest.y,
+    segIndex: closest.segIndex,
+    t: closest.t,
+  };
+
+  const nextEdges = store.edges.map(e =>
+    e.id === edgeId
+      ? {
+          ...e,
+          data: {
+            ...e.data,
+            anchors: [...(e.data.anchors || []), newAnchor]
+          }
+        }
+      : e
+  );
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 🔄 7. Перерахунок anchor після routing
+
+```js
+function updateEdgeAnchors(edge) {
+  const pts = edge.points;
+
+  const updated = (edge.data.anchors || []).map(a => {
+    const i = a.segIndex;
+
+    if (2 * i + 3 >= pts.length) return a;
+
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+
+    return {
+      ...a,
+      x: x1 + a.t * (x2 - x1),
+      y: y1 + a.t * (y2 - y1),
+    };
+  });
+
+  return {
+    ...edge,
+    data: {
+      ...edge.data,
+      anchors: updated
+    }
+  };
+}
+```
+
+---
+
+# 🧨 ВАЖЛИВО (ключова ідея)
+
+👉 Вся логіка routing тепер:
+
+```js
+edge = source + target + routing
+→ buildEdgePath(edge, nodes)
+→ points
+```
+
+---
+
+# 🧠 Що ти отримав
+
+### ✅ 1. Повністю graph-based модель
+
+* nodes
+* edges
+
+---
+
+### ✅ 2. Routing ізольований
+
+* не в store
+* не в компонентах
+
+---
+
+### ✅ 3. Controller став простим
+
+---
+
+### ✅ 4. Легко масштабувати
+
+* multi-edges
+* edge → edge connection
+* labels
+* undo/redo
+
+---
+
+# 🚀 Далі (дуже важливо)
+
+Наступний крок, який тобі **сильно спростить життя**:
+
+👉 зробити **універсальну систему anchors (як у draw.io)**:
+
+* node anchors
+* edge anchors
+* connection-to-connection
+
+---
+
+Якщо хочеш — напиши:
+
+👉 **"зробимо нормальні anchors систему"**
+
+і я покажу, як зробити це без болю (це ключ до всього редактора).

@@ -1,0 +1,355 @@
+Окей, тепер картина повністю зрозуміла — і чесно: ти **вже вперся в межу цієї архітектури**. Далі її підтримувати буде тільки гірше.
+
+Я не буду зараз переписувати код — давай спочатку дам **чіткий план нової архітектури**, щоб ти зрозумів *як правильно перебудувати*, а потім підемо по кроках рефакторингу.
+
+---
+
+# 🔥 Головні проблеми зараз
+
+### ❌ 1. Занадто глибока вкладеність
+
+```
+page
+ → CanvasArea
+   → SchemeEditorPage
+     → EditorCanvas
+       → DiagramSymbols / DiagramConnections
+         → SymbolGroup
+```
+
+👉 Це **не потрібно взагалі**
+👉 Має бути максимум **2 рівні**
+
+---
+
+### ❌ 2. Prop drilling (передача всього вниз)
+
+Ти вже відчуваєш:
+
+> "я не можу передавати пропси"
+
+👉 Це 100% сигнал → треба **глобальний store**
+
+---
+
+### ❌ 3. useDiagramState = монстр
+
+* 500+ рядків
+* логіка, стан, геометрія, івенти — все разом
+
+👉 Це треба **розрізати**
+
+---
+
+### ❌ 4. Логіка розмазана по компонентах
+
+* drag → в Symbol
+* click → в DiagramSymbols
+* delete → в Editor
+* selection → десь ще
+
+👉 немає **єдиного контролера**
+
+---
+
+# ✅ Як має виглядати нормальна архітектура
+
+## 1. 📁 НОВА структура файлів
+
+Замість 10 файлів → робимо так:
+
+```
+/editor
+  /components
+    EditorCanvas.jsx      ← Stage + Layer (ТОЧКА ВХОДУ)
+    SymbolsLayer.jsx
+    ConnectionsLayer.jsx
+    SelectionOverlay.jsx
+    ContextMenu.jsx
+
+  /store
+    useCanvasStore.js     ← Zustand
+
+  /controllers
+    canvasController.js   ← ВСЯ логіка подій
+
+  /utils
+    geometry.js (залишається)
+```
+
+👉 ВСЕ. Більше нічого не треба.
+
+---
+
+## 2. 🧠 Zustand store (це ключове)
+
+Ти абсолютно правильно подумав — **Zustand тут ідеально підходить**
+
+### Мінімальний store:
+
+```js
+import { create } from 'zustand'
+
+export const useCanvasStore = create((set, get) => ({
+  // ===== STATE =====
+  symbols: [],
+  connections: [],
+  selection: null,
+
+  mode: null, // 'add-connector' | 'add-anchor'
+
+  hovered: {
+    elementId: null,
+    anchor: null,
+  },
+
+  // ===== ACTIONS =====
+  setSymbols: (symbols) => set({ symbols }),
+
+  addSymbol: (symbol) =>
+    set((state) => ({ symbols: [...state.symbols, symbol] })),
+
+  updateSymbolPosition: (id, x, y) =>
+    set((state) => ({
+      symbols: state.symbols.map((s) =>
+        s.id === id ? { ...s, x, y } : s
+      ),
+    })),
+
+  setSelection: (selection) => set({ selection }),
+
+  clearSelection: () => set({ selection: null }),
+
+  setMode: (mode) => set({ mode }),
+
+}))
+```
+
+---
+
+## ⚠️ ВАЖЛИВО: розділення store
+
+Ти питав:
+
+> робити окремо symbols і actions?
+
+👉 Моя рекомендація:
+
+### ❌ НЕ роби 2 store (це ускладнить)
+
+### ✅ Роби 1 store, але логічно розділений:
+
+```
+state
+ui state
+actions
+```
+
+---
+
+## 3. 🎯 Central Controller (НАЙВАЖЛИВІШЕ)
+
+👉 Це те, чого у тебе зараз немає
+
+---
+
+### 📁 `/controllers/canvasController.js`
+
+```js
+import { useCanvasStore } from "../store/useCanvasStore";
+
+export const canvasController = {
+  handleStageMouseDown: (e) => {
+    const { mode } = useCanvasStore.getState();
+
+    const stage = e.target.getStage();
+
+    // клік по пустому місцю
+    if (e.target === stage) {
+      useCanvasStore.getState().clearSelection();
+    }
+  },
+
+  handleElementClick: (element) => {
+    useCanvasStore.getState().setSelection({
+      type: "node",
+      id: element.id,
+    });
+  },
+
+  handleDragMove: (id, e) => {
+    const { x, y } = e.target.position();
+
+    useCanvasStore
+      .getState()
+      .updateSymbolPosition(id, x, y);
+  },
+
+  handleContextMenu: (e, element) => {
+    e.evt.preventDefault();
+
+    useCanvasStore.getState().setContextMenu({
+      open: true,
+      position: {
+        x: e.evt.clientX,
+        y: e.evt.clientY,
+      },
+      target: element,
+    });
+  },
+};
+```
+
+---
+
+👉 Тепер:
+
+* ❌ немає логіки в компонентах
+* ❌ немає пропсів
+* ✅ все через controller
+
+---
+
+## 4. 🧱 EditorCanvas (спрощення)
+
+Тепер він виглядає так:
+
+```jsx
+import { Stage, Layer } from "react-konva";
+import { SymbolsLayer } from "./SymbolsLayer";
+import { ConnectionsLayer } from "./ConnectionsLayer";
+import { canvasController } from "../controllers/canvasController";
+
+export default function EditorCanvas() {
+  return (
+    <Stage
+      width={1000}
+      height={600}
+      onMouseDown={canvasController.handleStageMouseDown}
+    >
+      <Layer>
+        <ConnectionsLayer />
+        <SymbolsLayer />
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+## 5. 🧩 SymbolsLayer (без пропсів!)
+
+```jsx
+import { useCanvasStore } from "../store/useCanvasStore";
+import { canvasController } from "../controllers/canvasController";
+import { Group } from "react-konva";
+
+export function SymbolsLayer() {
+  const symbols = useCanvasStore((s) => s.symbols);
+  const selection = useCanvasStore((s) => s.selection);
+
+  return symbols.map((el) => (
+    <Group
+      key={el.id}
+      x={el.x}
+      y={el.y}
+      draggable
+      onClick={() => canvasController.handleElementClick(el)}
+      onDragMove={(e) =>
+        canvasController.handleDragMove(el.id, e)
+      }
+    >
+      {/* shape */}
+    </Group>
+  ));
+}
+```
+
+---
+
+# 🧨 Що робимо з useDiagramState
+
+## ❌ НЕ залишаємо як є
+
+---
+
+## ✅ Розбиваємо на 3 частини:
+
+### 1. store (Zustand)
+
+→ symbols, connections, selection
+
+### 2. controller
+
+→ handleDrag, handleClick, handleAnchor
+
+### 3. utils
+
+→ geometry (вже є 👍)
+
+---
+
+# 🔄 Як будемо рефакторити (план)
+
+### КРОК 1
+
+👉 створюємо Zustand store
+👉 переносимо symbols + selection
+
+---
+
+### КРОК 2
+
+👉 прибираємо useDiagramState з компонентів
+👉 підключаємо store
+
+---
+
+### КРОК 3
+
+👉 створюємо canvasController
+👉 переносимо handleDrag, click
+
+---
+
+### КРОК 4
+
+👉 спрощуємо структуру:
+
+```
+page.js
+  → EditorCanvas
+```
+
+❌ CanvasArea — ВИДАЛЯЄМО
+❌ SchemeEditorPage — ВИДАЛЯЄМО
+
+---
+
+# 💡 Висновок
+
+Твоя проблема не в коді — а в архітектурі:
+
+| Було                     | Має бути           |
+| ------------------------ | ------------------ |
+| багато компонентів       | 3–5 максимум       |
+| пропси                   | Zustand            |
+| логіка в UI              | controller         |
+| useDiagramState (монстр) | store + controller |
+
+---
+
+# 👉 Далі
+
+Пропоную рухатися так:
+
+1. Я допоможу тобі **створити правильний Zustand store (під твою модель)**
+2. Потім **перенесемо symbols**
+3. Потім **перенесемо drag + selection**
+4. Потім **конектори (найскладніше)**
+
+---
+
+👉 Напиши:
+**"робимо Zustand store"** — і я тобі зразу зберу готову структуру під твій кейс (з урахуванням connections, anchors, routing і т.д.)

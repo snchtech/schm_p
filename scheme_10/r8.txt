@@ -1,0 +1,342 @@
+Оце вже **рівень “нормальний редактор”** 🔥
+Transformer + nodeRefs — це те, що відрізняє “іграшку” від **реального інструмента**.
+
+Я покажу тобі **правильну архітектуру**, яка:
+
+✅ працює стабільно
+✅ не ламається при ререндері
+✅ підтримує multi-select
+✅ не залежить від вкладеності компонентів
+
+---
+
+# 🧠 Головна ідея
+
+## ❌ НЕ РОБИ ТАК:
+
+* передавати ref через props
+* тримати ref в компоненті
+* прив’язувати Transformer локально
+
+---
+
+## ✅ РОБИ ТАК:
+
+👉 **всі refs зберігаються в Zustand store**
+
+```js
+nodeRefs: {
+  [nodeId]: Konva.Node
+}
+```
+
+---
+
+# 🔥 1. Store — nodeRefs
+
+## `useCanvasStore.js`
+
+```js
+nodeRefs: {},
+
+registerNodeRef: (id, ref) =>
+  set((state) => ({
+    nodeRefs: {
+      ...state.nodeRefs,
+      [id]: ref,
+    },
+  })),
+
+unregisterNodeRef: (id) =>
+  set((state) => {
+    const next = { ...state.nodeRefs };
+    delete next[id];
+    return { nodeRefs: next };
+  }),
+```
+
+---
+
+# 🔥 2. NodesLayer — правильний register
+
+👉 ВАЖЛИВО: `useEffect` **всередині map — це погано**
+ми це виправляємо через callback ref
+
+---
+
+## ❌ Було (неправильно)
+
+```js
+useEffect(() => {
+  registerNodeRef(node.id, groupRef.current);
+}, []);
+```
+
+---
+
+## ✅ Стало (правильно)
+
+```jsx
+<Group
+  ref={(ref) => {
+    const store = useCanvasStore.getState();
+
+    if (ref) {
+      store.registerNodeRef(node.id, ref);
+    } else {
+      store.unregisterNodeRef(node.id);
+    }
+  }}
+```
+
+---
+
+# 🔥 3. Новий компонент: `SelectionTransformer.jsx`
+
+## 📁 `components/SchemeEditor/SelectionTransformer.jsx`
+
+```jsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Transformer } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function SelectionTransformer() {
+  const transformerRef = useRef(null);
+
+  const selection = useCanvasStore((s) => s.selection);
+  const nodeRefs = useCanvasStore((s) => s.nodeRefs);
+
+  useEffect(() => {
+    const transformer = transformerRef.current;
+    if (!transformer) return;
+
+    // 🔥 MULTI SELECT support
+    const selectedIds =
+      selection?.type === "nodes"
+        ? selection.ids
+        : selection?.type === "node"
+        ? [selection.id]
+        : [];
+
+    const nodes = selectedIds
+      .map((id) => nodeRefs[id])
+      .filter(Boolean);
+
+    transformer.nodes(nodes);
+    transformer.getLayer()?.batchDraw();
+  }, [selection, nodeRefs]);
+
+  return (
+    <Transformer
+      ref={transformerRef}
+      rotateEnabled={false}
+      anchorSize={8}
+      borderStroke="#3b82f6"
+      anchorFill="#3b82f6"
+      anchorStroke="white"
+      anchorStrokeWidth={1}
+    />
+  );
+}
+```
+
+---
+
+# 🔥 4. Додати в Stage
+
+## 📁 `DiagramCanvas.jsx`
+
+```jsx
+<Stage ...>
+  <Layer>
+    <EdgesLayer />
+    <NodesLayer />
+    <SelectionTransformer /> {/* 👈 ВАЖЛИВО */}
+  </Layer>
+</Stage>
+```
+
+---
+
+# 🔥 5. Resize логіка (CRITICAL)
+
+Transformer сам міняє scale, але нам треба:
+
+👉 записати нові width/height в store
+
+---
+
+## додаємо в `SelectionTransformer`
+
+```jsx
+onTransformEnd={() => {
+  const store = useCanvasStore.getState();
+  const transformer = transformerRef.current;
+  const nodes = transformer.nodes();
+
+  nodes.forEach((nodeRef) => {
+    const id = Object.keys(store.nodeRefs).find(
+      (key) => store.nodeRefs[key] === nodeRef
+    );
+
+    if (!id) return;
+
+    const scaleX = nodeRef.scaleX();
+    const scaleY = nodeRef.scaleY();
+
+    const node = store.nodes.find((n) => n.id === id);
+    if (!node) return;
+
+    const newWidth = Math.max(20, node.data.width * scaleX);
+    const newHeight = Math.max(20, node.data.height * scaleY);
+
+    // reset scale
+    nodeRef.scaleX(1);
+    nodeRef.scaleY(1);
+
+    store.updateNodeSize(id, newWidth, newHeight);
+  });
+}}
+```
+
+---
+
+# 🔥 6. Store — updateNodeSize
+
+```js
+updateNodeSize: (id, width, height) =>
+  set((state) => ({
+    nodes: state.nodes.map((n) =>
+      n.id === id
+        ? {
+            ...n,
+            data: {
+              ...n.data,
+              width,
+              height,
+            },
+          }
+        : n
+    ),
+  })),
+```
+
+---
+
+# 🔥 7. Оновлення edges при resize
+
+👉 ДУЖЕ ВАЖЛИВО
+
+після resize — edges треба перерахувати
+
+---
+
+## додаємо після updateNodeSize:
+
+```js
+const nextNodes = store.nodes.map((n) =>
+  n.id === id
+    ? {
+        ...n,
+        data: { ...n.data, width, height },
+      }
+    : n
+);
+
+const nextEdges = store.edges.map((edge) => {
+  if (
+    edge.source.nodeId !== id &&
+    edge.target.nodeId !== id
+  ) return edge;
+
+  return {
+    ...edge,
+    points: buildEdgePath(edge, nextNodes, store.edges),
+  };
+});
+
+store.setEdges(nextEdges);
+```
+
+---
+
+# 🔥 8. Multi-select (готово майже)
+
+Тепер ти можеш робити:
+
+```js
+setSelection({
+  type: "nodes",
+  ids: ["n1", "n2"]
+});
+```
+
+Transformer автоматично:
+
+✅ обведе всі
+✅ дозволить resize
+✅ рухати групу
+
+---
+
+# 🧨 Типові помилки (уникай)
+
+### ❌ 1. useEffect в map
+
+→ ми це виправили
+
+---
+
+### ❌ 2. ref через props
+
+→ тепер через store
+
+---
+
+### ❌ 3. не reset scale
+
+→ буде баг з розмірами
+
+---
+
+### ❌ 4. не перераховувати edges
+
+→ лінії “відваляться”
+
+---
+
+# 🚀 Що ти отримав
+
+## Тепер у тебе:
+
+✅ нормальний selection
+✅ нормальний resize
+✅ multi-select
+✅ стабільний Transformer
+✅ правильна архітектура
+
+---
+
+# 🔥 Далі (next level)
+
+Тепер ти готовий до:
+
+## 1. Box selection (як у Figma)
+
+## 2. Drag selection
+
+## 3. Snap до grid / anchors
+
+## 4. Rotate
+
+## 5. Resize constraints
+
+---
+
+Якщо хочеш — наступний крок:
+
+👉 **"зробимо multi-select drag box (як у Figma)"**
+
+це дуже сильно прокачає UX редактора 💪

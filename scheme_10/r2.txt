@@ -1,0 +1,1155 @@
+Добре. Нижче дам **покроковий план з готовим кодом**, щоб ти міг **перебудувати редактор на нову архітектуру**:
+
+* без зайвої вкладеності
+* без prop drilling
+* із **Zustand**
+* з **central controller**
+* з можливістю далі спокійно розширювати `useDiagramState` логіку, але вже не у вигляді моноліту
+
+---
+
+# 1. Нова структура файлів
+
+Пропоную привести редактор до такої структури:
+
+```txt
+app/
+  schemes/
+    [id]/
+      page.js
+
+components/
+  SchemeEditor/
+    EditorShell.jsx
+    EditorCanvas.jsx
+    SymbolsLayer.jsx
+    ConnectionsLayer.jsx
+    SelectionOverlay.jsx
+    GraphContextMenu.jsx
+
+store/
+  useCanvasStore.js
+
+controllers/
+  canvasController.js
+
+lib/
+  geometry/
+    diagramGeometry.js
+  diagram/
+    deleteUtils.js
+    initialData.js
+```
+
+---
+
+# 2. Спрощуємо page.js
+
+Тобі більше не треба:
+
+* `CanvasArea`
+* `SchemeEditorPage`
+* додаткові “прокладки”
+
+`page.js` має підключати **один головний компонент редактора**.
+
+## `app/schemes/[id]/page.js`
+
+```jsx
+'use client';
+
+import dynamic from 'next/dynamic';
+import LeftSidebar from '@/components/Scheme/LeftSidebar';
+import TopToolbar from '@/components/Scheme/TopToolbar';
+
+const EditorShell = dynamic(
+  () => import('@/components/SchemeEditor/EditorShell'),
+  { ssr: false }
+);
+
+export default function SchemePage() {
+  const handleZoomIn = () => console.log('Zoom In');
+  const handleZoomOut = () => console.log('Zoom Out');
+  const handleDelete = () => console.log('Delete Element');
+  const handleRefresh = () => console.log('Refresh Data');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', flex: 1 }}>
+        <LeftSidebar />
+
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          <TopToolbar
+            onZoomIn={handleZoomIn}
+            onZoomOut={handleZoomOut}
+            onDelete={handleDelete}
+            onRefresh={handleRefresh}
+          />
+
+          <EditorShell />
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+# 3. Початкові дані винеси окремо
+
+Щоб store не був захаращений тестовими елементами, винеси їх окремо.
+
+## `lib/diagram/initialData.js`
+
+```js
+export const initialSymbols = [
+  {
+    id: 'symbol-1',
+    type: 'rect',
+    x: 100,
+    y: 100,
+    width: 80,
+    height: 50,
+    fill: 'gray',
+    stroke: 'black',
+    strokeWidth: 2,
+  },
+  {
+    id: 'symbol-2',
+    type: 'circle',
+    x: 300,
+    y: 200,
+    width: 60,
+    height: 60,
+    radius: 30,
+    fill: 'gray',
+    stroke: 'black',
+    strokeWidth: 2,
+  },
+  {
+    id: 'symbol-3',
+    type: 'rect',
+    x: 450,
+    y: 200,
+    width: 80,
+    height: 50,
+    fill: 'gray',
+    stroke: 'black',
+    strokeWidth: 2,
+  },
+];
+
+export const initialConnections = [];
+```
+
+---
+
+# 4. Створюємо Zustand store
+
+Це буде **центральне місце стану**.
+
+## `store/useCanvasStore.js`
+
+```js
+import { create } from 'zustand';
+import { initialSymbols, initialConnections } from '@/lib/diagram/initialData';
+
+export const useCanvasStore = create((set, get) => ({
+  // ===== DATA =====
+  symbols: initialSymbols,
+  connections: initialConnections,
+
+  // ===== UI =====
+  selection: null, // { type: 'node' | 'connection', id }
+  hoveredElementId: null,
+  hoveredAnchor: null,
+  hoveredConnectionId: null,
+  hoveredLineAnchorId: null,
+
+  // ===== MODES =====
+  mode: null, // 'add-connector' | 'add-anchor' | null
+  selectedAnchor: null,
+  message: '',
+
+  // ===== CONTEXT MENU =====
+  contextMenu: {
+    open: false,
+    position: null, // { top, left }
+    target: null,   // { type, id }
+  },
+
+  // ===== STAGE / REFS =====
+  stageRef: null,
+  layerRef: null,
+  apiRef: null,
+
+  setStageRef: (ref) => set({ stageRef: ref }),
+  setLayerRef: (ref) => set({ layerRef: ref }),
+  setApiRef: (ref) => set({ apiRef: ref }),
+
+  // ===== SYMBOLS =====
+  setSymbols: (symbols) => set({ symbols }),
+
+  addSymbol: (symbol) =>
+    set((state) => ({
+      symbols: [...state.symbols, symbol],
+    })),
+
+  updateSymbolPosition: (id, x, y) =>
+    set((state) => ({
+      symbols: state.symbols.map((item) =>
+        item.id === id ? { ...item, x, y } : item
+      ),
+    })),
+
+  removeSymbol: (id) =>
+    set((state) => ({
+      symbols: state.symbols.filter((item) => item.id !== id),
+    })),
+
+  // ===== CONNECTIONS =====
+  setConnections: (connections) => set({ connections }),
+
+  addConnection: (connection) =>
+    set((state) => ({
+      connections: [...state.connections, connection],
+    })),
+
+  updateConnection: (id, updater) =>
+    set((state) => ({
+      connections: state.connections.map((conn) =>
+        conn.id === id ? { ...conn, ...updater } : conn
+      ),
+    })),
+
+  removeConnection: (id) =>
+    set((state) => ({
+      connections: state.connections.filter((conn) => conn.id !== id),
+    })),
+
+  // ===== SELECTION =====
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  // ===== HOVER =====
+  setHoveredElementId: (hoveredElementId) => set({ hoveredElementId }),
+  setHoveredAnchor: (hoveredAnchor) => set({ hoveredAnchor }),
+  setHoveredConnectionId: (hoveredConnectionId) => set({ hoveredConnectionId }),
+  setHoveredLineAnchorId: (hoveredLineAnchorId) => set({ hoveredLineAnchorId }),
+
+  // ===== MODES =====
+  setMode: (mode) => set({ mode }),
+  setSelectedAnchor: (selectedAnchor) => set({ selectedAnchor }),
+  setMessage: (message) => set({ message }),
+
+  startAddConnectorMode: () =>
+    set({
+      mode: 'add-connector',
+      selectedAnchor: null,
+      message: '',
+    }),
+
+  startAddAnchorMode: () =>
+    set({
+      mode: 'add-anchor',
+      selectedAnchor: null,
+      message: '',
+    }),
+
+  resetMode: () =>
+    set({
+      mode: null,
+      selectedAnchor: null,
+      hoveredAnchor: null,
+      hoveredElementId: null,
+      hoveredLineAnchorId: null,
+      message: '',
+    }),
+
+  // ===== CONTEXT MENU =====
+  openContextMenu: (position, target) =>
+    set({
+      contextMenu: {
+        open: true,
+        position,
+        target,
+      },
+    }),
+
+  closeContextMenu: () =>
+    set({
+      contextMenu: {
+        open: false,
+        position: null,
+        target: null,
+      },
+    }),
+}));
+```
+
+---
+
+# 5. Геометрію залишаємо окремо
+
+Твої функції з `geometry.js` не треба змішувати зі store.
+
+Просто перенеси їх у:
+
+## `lib/geometry/diagramGeometry.js`
+
+Сюди перенеси:
+
+* `projectPointOnSegment`
+* `findClosestSegment`
+* `calculateOrthogonalPath`
+* `segmentIsHorizontal`
+* `getExitDirForLineAttachment`
+* `getExitDir`
+* `getPolylineElbows`
+* `boxFromSymbol`
+
+Поки що тут без змін.
+
+---
+
+# 6. Видалення вузлів і ліній винеси окремо
+
+## `lib/diagram/deleteUtils.js`
+
+```js
+export function deleteConnection(connectionId, connections) {
+  return connections.filter((item) => item.id !== connectionId);
+}
+
+export function deleteNodeWithLinks(nodeId, symbols, connections) {
+  const nextSymbols = symbols.filter((item) => item.id !== nodeId);
+
+  const nextConnections = connections.filter((conn) => {
+    const fromSymbol = conn.from?.type === 'symbol' && conn.from.symbolId === nodeId;
+    const toSymbol = conn.to?.type === 'symbol' && conn.to.symbolId === nodeId;
+    return !fromSymbol && !toSymbol;
+  });
+
+  return {
+    symbols: nextSymbols,
+    connections: nextConnections,
+  };
+}
+```
+
+---
+
+# 7. Центральний контролер
+
+Оце тепер головна частина архітектури.
+
+## `controllers/canvasController.js`
+
+```js
+import { useCanvasStore } from '@/store/useCanvasStore';
+import {
+  findClosestSegment,
+  calculateOrthogonalPath,
+  getExitDir,
+  boxFromSymbol,
+} from '@/lib/geometry/diagramGeometry';
+import {
+  deleteConnection,
+  deleteNodeWithLinks,
+} from '@/lib/diagram/deleteUtils';
+
+function getAnchorPoints(element) {
+  const { x, y, width, height, type } = element;
+
+  if (type === 'rect') {
+    return [
+      { x: x + width / 2, y: y, direction: 'top' },
+      { x: x + width / 2, y: y + height, direction: 'bottom' },
+      { x, y: y + height / 2, direction: 'left' },
+      { x: x + width, y: y + height / 2, direction: 'right' },
+    ];
+  }
+
+  if (type === 'circle') {
+    return [
+      { x, y: y - height / 2, direction: 'top' },
+      { x, y: y + height / 2, direction: 'bottom' },
+      { x: x - width / 2, y, direction: 'left' },
+      { x: x + width / 2, y, direction: 'right' },
+    ];
+  }
+
+  return [];
+}
+
+function normalizeAttachment(anchor) {
+  if (anchor?.kind === 'lineAnchor') {
+    return {
+      type: 'line',
+      connectionId: anchor.parentConnectionId || anchor.connectionId,
+      anchorId: anchor.id,
+      segIndex: anchor.segIndex,
+      t: anchor.t,
+      x: anchor.x,
+      y: anchor.y,
+    };
+  }
+
+  return {
+    type: 'symbol',
+    symbolId: anchor.parentId || anchor.symbolId || anchor.id,
+    direction: anchor.direction,
+  };
+}
+
+function resolveAttachmentPoint(att, symbols, connections) {
+  if (!att) return null;
+
+  if (att.type === 'symbol') {
+    const symbol = symbols.find((s) => s.id === att.symbolId);
+    if (!symbol) return null;
+    return getAnchorPoints(symbol).find((p) => p.direction === att.direction) || null;
+  }
+
+  if (att.type === 'line') {
+    const parent = connections.find((c) => c.id === att.connectionId);
+    if (!parent) {
+      return { x: att.x, y: att.y, direction: 'mid' };
+    }
+
+    const live = (parent.additionalAnchors || []).find((a) => a.id === att.anchorId);
+    if (live) {
+      return { x: live.x, y: live.y, direction: 'mid' };
+    }
+
+    return { x: att.x, y: att.y, direction: 'mid' };
+  }
+
+  return null;
+}
+
+function getBoxForAttachment(att, symbols) {
+  if (!att || att.type !== 'symbol') return null;
+  const symbol = symbols.find((s) => s.id === att.symbolId);
+  return symbol ? boxFromSymbol(symbol, 10) : null;
+}
+
+export const canvasController = {
+  getAnchorPoints,
+
+  handleStageMouseDown(e) {
+    const stage = e.target.getStage();
+    if (e.target === stage) {
+      useCanvasStore.getState().clearSelection();
+      useCanvasStore.getState().closeContextMenu();
+    }
+  },
+
+  handleSymbolMouseDown(symbol) {
+    useCanvasStore.getState().setSelection({
+      type: 'node',
+      id: symbol.id,
+    });
+  },
+
+  handleSymbolDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    store.updateSymbolPosition(id, x, y);
+
+    const symbolsNext = store.symbols.map((s) =>
+      s.id === id ? { ...s, x, y } : s
+    );
+
+    const nextConnections = store.connections.map((conn) => {
+      const touchesMovedSymbol =
+        (conn.from?.type === 'symbol' && conn.from.symbolId === id) ||
+        (conn.to?.type === 'symbol' && conn.to.symbolId === id);
+
+      if (!touchesMovedSymbol) return conn;
+
+      const startPoint = resolveAttachmentPoint(conn.from, symbolsNext, store.connections);
+      const endPoint = resolveAttachmentPoint(conn.to, symbolsNext, store.connections);
+
+      if (!startPoint || !endPoint) return conn;
+
+      const dirFrom = getExitDir(conn.from, endPoint, store.connections);
+      const dirTo = getExitDir(conn.to, startPoint, store.connections);
+
+      const routing = {
+        startOffset: conn.routing?.startOffset ?? 20,
+        endOffset: conn.routing?.endOffset ?? 20,
+      };
+
+      const points = calculateOrthogonalPath(
+        { ...startPoint, direction: dirFrom },
+        { ...endPoint, direction: dirTo },
+        routing,
+        getBoxForAttachment(conn.from, symbolsNext),
+        getBoxForAttachment(conn.to, symbolsNext),
+      );
+
+      return {
+        ...conn,
+        points,
+        fromExitDir: dirFrom,
+        toExitDir: dirTo,
+      };
+    });
+
+    store.setConnections(nextConnections);
+  },
+
+  handleSymbolContextMenu(e, symbol) {
+    e.evt.preventDefault();
+
+    useCanvasStore.getState().setSelection({
+      type: 'node',
+      id: symbol.id,
+    });
+
+    useCanvasStore.getState().openContextMenu(
+      {
+        top: e.evt.clientY,
+        left: e.evt.clientX,
+      },
+      {
+        type: 'node',
+        id: symbol.id,
+      }
+    );
+  },
+
+  handleDeleteSelected() {
+    const store = useCanvasStore.getState();
+    const target = store.contextMenu.target || store.selection;
+
+    if (!target) return;
+
+    if (target.type === 'node') {
+      const result = deleteNodeWithLinks(
+        target.id,
+        store.symbols,
+        store.connections
+      );
+
+      store.setSymbols(result.symbols);
+      store.setConnections(result.connections);
+      store.clearSelection();
+      store.closeContextMenu();
+      return;
+    }
+
+    if (target.type === 'connection') {
+      const nextConnections = deleteConnection(target.id, store.connections);
+      store.setConnections(nextConnections);
+      store.clearSelection();
+      store.closeContextMenu();
+    }
+  },
+
+  handleAnchorHover(anchor) {
+    useCanvasStore.getState().setHoveredAnchor(anchor);
+  },
+
+  handleElementHover(elementId) {
+    useCanvasStore.getState().setHoveredElementId(elementId);
+  },
+
+  handleAnchorClick(anchor) {
+    const store = useCanvasStore.getState();
+
+    if (store.mode !== 'add-connector') return;
+
+    if (!store.selectedAnchor) {
+      store.setSelectedAnchor(anchor);
+      store.setMessage("Оберіть наступну точку прив'язки");
+      return;
+    }
+
+    const from = normalizeAttachment(store.selectedAnchor);
+    const to = normalizeAttachment(anchor);
+
+    const startPoint = resolveAttachmentPoint(from, store.symbols, store.connections);
+    const endPoint = resolveAttachmentPoint(to, store.symbols, store.connections);
+
+    if (!startPoint || !endPoint) {
+      store.resetMode();
+      store.setMessage("Не вдалося визначити точки прив'язки");
+      return;
+    }
+
+    const dirFrom = getExitDir(from, endPoint, store.connections);
+    const dirTo = getExitDir(to, startPoint, store.connections);
+
+    const routing = { startOffset: 20, endOffset: 20 };
+
+    const points = calculateOrthogonalPath(
+      { ...startPoint, direction: dirFrom },
+      { ...endPoint, direction: dirTo },
+      routing,
+      getBoxForAttachment(from, store.symbols),
+      getBoxForAttachment(to, store.symbols),
+    );
+
+    const newConnection = {
+      id: crypto.randomUUID(),
+      from,
+      to,
+      points,
+      routing,
+      fromExitDir: dirFrom,
+      toExitDir: dirTo,
+      additionalAnchors: [],
+    };
+
+    store.addConnection(newConnection);
+    store.resetMode();
+  },
+
+  handleConnectionClick(connectionId, event) {
+    const store = useCanvasStore.getState();
+
+    if (store.mode !== 'add-anchor') return;
+
+    event.cancelBubble = true;
+
+    const stage = event.target.getStage();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const connection = store.connections.find((c) => c.id === connectionId);
+    if (!connection) return;
+
+    const closest = findClosestSegment(connection.points, pointer.x, pointer.y);
+
+    const newAnchor = {
+      id: crypto.randomUUID(),
+      x: closest.x,
+      y: closest.y,
+      parentConnectionId: connectionId,
+      segIndex: closest.segIndex,
+      t: closest.t,
+      vertexIndex: null,
+      kind: 'lineAnchor',
+    };
+
+    const nextConnections = store.connections.map((conn) => {
+      if (conn.id !== connectionId) return conn;
+
+      return {
+        ...conn,
+        additionalAnchors: [...(conn.additionalAnchors || []), newAnchor],
+      };
+    });
+
+    store.setConnections(nextConnections);
+    store.resetMode();
+  },
+
+  handleConnectionContextMenu(e, connection) {
+    e.evt.preventDefault();
+
+    useCanvasStore.getState().setSelection({
+      type: 'connection',
+      id: connection.id,
+    });
+
+    useCanvasStore.getState().openContextMenu(
+      {
+        top: e.evt.clientY,
+        left: e.evt.clientX,
+      },
+      {
+        type: 'connection',
+        id: connection.id,
+      }
+    );
+  },
+};
+```
+
+---
+
+# 8. Головна оболонка редактора
+
+Це заміна для старих `CanvasArea + SchemeEditorPage`.
+
+## `components/SchemeEditor/EditorShell.jsx`
+
+```jsx
+'use client';
+
+import EditorCanvas from './EditorCanvas';
+import GraphContextMenu from './GraphContextMenu';
+import { useCanvasStore } from '@/store/useCanvasStore';
+
+export default function EditorShell() {
+  const message = useCanvasStore((s) => s.message);
+  const startAddConnectorMode = useCanvasStore((s) => s.startAddConnectorMode);
+  const startAddAnchorMode = useCanvasStore((s) => s.startAddAnchorMode);
+  const resetMode = useCanvasStore((s) => s.resetMode);
+  const mode = useCanvasStore((s) => s.mode);
+
+  return (
+    <div style={{ padding: 12, flex: 1, overflow: 'auto' }}>
+      <header style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <button onClick={startAddConnectorMode}>Новий connector</button>
+        <button onClick={startAddAnchorMode}>Нова точка прив'язки</button>
+        {mode && <button onClick={resetMode}>Відмінити режим</button>}
+      </header>
+
+      {message && <p>{message}</p>}
+
+      <EditorCanvas />
+      <GraphContextMenu />
+    </div>
+  );
+}
+```
+
+---
+
+# 9. Canvas компонент
+
+Тепер це **реальна точка входу** для Stage + Layer.
+
+## `components/SchemeEditor/EditorCanvas.jsx`
+
+```jsx
+'use client';
+
+import { useEffect, useRef } from 'react';
+import { Stage, Layer } from 'react-konva';
+import { useCanvasStore } from '@/store/useCanvasStore';
+import { canvasController } from '@/controllers/canvasController';
+import SymbolsLayer from './SymbolsLayer';
+import ConnectionsLayer from './ConnectionsLayer';
+import SelectionOverlay from './SelectionOverlay';
+// import { setupLayerZoomPan } from '@/lib/diagram/setupLayerZoomPan';
+
+export default function EditorCanvas() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const setStageRef = useCanvasStore((s) => s.setStageRef);
+  const setLayerRef = useCanvasStore((s) => s.setLayerRef);
+  const setApiRef = useCanvasStore((s) => s.setApiRef);
+
+  useEffect(() => {
+    setStageRef(stageRef);
+    setLayerRef(layerRef);
+
+    // Коли підключиш zoom/pan:
+    // const api = setupLayerZoomPan(stageRef.current, layerRef.current, { panMode: 'mmb_or_space' });
+    // setApiRef(api);
+    // return () => api?.destroy?.();
+
+    setApiRef(null);
+  }, [setStageRef, setLayerRef, setApiRef]);
+
+  return (
+    <section style={{ border: '1px solid #ccc', display: 'inline-block' }}>
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        style={{ border: '1px solid #ccc', background: '#fff' }}
+        onMouseDown={canvasController.handleStageMouseDown}
+      >
+        <Layer ref={layerRef}>
+          <ConnectionsLayer />
+          <SymbolsLayer />
+          <SelectionOverlay />
+        </Layer>
+      </Stage>
+    </section>
+  );
+}
+```
+
+---
+
+# 10. Layer для символів
+
+Тепер він нічого не знає про пропси зверху. Все бере із store і controller.
+
+## `components/SchemeEditor/SymbolsLayer.jsx`
+
+```jsx
+'use client';
+
+import { Group, Rect, Circle } from 'react-konva';
+import { useCanvasStore } from '@/store/useCanvasStore';
+import { canvasController } from '@/controllers/canvasController';
+
+function SymbolShape({ symbol }) {
+  if (symbol.type === 'rect') {
+    return (
+      <Rect
+        width={symbol.width}
+        height={symbol.height}
+        fill={symbol.fill}
+        stroke={symbol.stroke}
+        strokeWidth={symbol.strokeWidth}
+      />
+    );
+  }
+
+  if (symbol.type === 'circle') {
+    return (
+      <Circle
+        x={symbol.width / 2}
+        y={symbol.height / 2}
+        radius={symbol.radius}
+        fill={symbol.fill}
+        stroke={symbol.stroke}
+        strokeWidth={symbol.strokeWidth}
+      />
+    );
+  }
+
+  return null;
+}
+
+export default function SymbolsLayer() {
+  const symbols = useCanvasStore((s) => s.symbols);
+  const selection = useCanvasStore((s) => s.selection);
+  const hoveredElementId = useCanvasStore((s) => s.hoveredElementId);
+  const hoveredAnchor = useCanvasStore((s) => s.hoveredAnchor);
+  const mode = useCanvasStore((s) => s.mode);
+  const setHoveredElementId = useCanvasStore((s) => s.setHoveredElementId);
+  const setHoveredAnchor = useCanvasStore((s) => s.setHoveredAnchor);
+
+  return (
+    <>
+      {symbols.map((symbol) => {
+        const isSelected =
+          selection?.type === 'node' && selection?.id === symbol.id;
+
+        const anchorPoints = canvasController.getAnchorPoints(symbol);
+
+        return (
+          <Group
+            key={symbol.id}
+            x={symbol.x}
+            y={symbol.y}
+            draggable
+            onMouseDown={() => canvasController.handleSymbolMouseDown(symbol)}
+            onDragMove={(e) => canvasController.handleSymbolDragMove(symbol.id, e)}
+            onContextMenu={(e) => canvasController.handleSymbolContextMenu(e, symbol)}
+            onMouseEnter={() => {
+              if (mode === 'add-connector') {
+                setHoveredElementId(symbol.id);
+              }
+            }}
+            onMouseLeave={() => {
+              if (mode === 'add-connector') {
+                setHoveredElementId(null);
+              }
+            }}
+          >
+            <SymbolShape symbol={symbol} />
+
+            {isSelected && (
+              <Rect
+                x={-6}
+                y={-6}
+                width={symbol.width + 12}
+                height={symbol.height + 12}
+                cornerRadius={12}
+                stroke="#3b82f6"
+                strokeWidth={1}
+                dash={[6, 4]}
+                listening={false}
+              />
+            )}
+
+            {hoveredElementId === symbol.id &&
+              anchorPoints.map((point, index) => (
+                <Circle
+                  key={index}
+                  x={point.x - symbol.x}
+                  y={point.y - symbol.y}
+                  radius={6}
+                  fill={
+                    hoveredAnchor?.x === point.x && hoveredAnchor?.y === point.y
+                      ? 'yellow'
+                      : 'green'
+                  }
+                  stroke="black"
+                  strokeWidth={1}
+                  onMouseEnter={() => setHoveredAnchor(point)}
+                  onMouseLeave={() => setHoveredAnchor(null)}
+                  onClick={() =>
+                    canvasController.handleAnchorClick({
+                      ...point,
+                      parentId: symbol.id,
+                      kind: 'symbolAnchor',
+                    })
+                  }
+                />
+              ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 11. Layer для connections
+
+Поки дам базову версію, яку легко далі розширити.
+
+## `components/SchemeEditor/ConnectionsLayer.jsx`
+
+```jsx
+'use client';
+
+import { Group, Line, Circle } from 'react-konva';
+import { useCanvasStore } from '@/store/useCanvasStore';
+import { canvasController } from '@/controllers/canvasController';
+
+export default function ConnectionsLayer() {
+  const connections = useCanvasStore((s) => s.connections);
+  const selection = useCanvasStore((s) => s.selection);
+
+  return (
+    <>
+      {connections.map((connection) => {
+        const isSelected =
+          selection?.type === 'connection' && selection?.id === connection.id;
+
+        return (
+          <Group key={connection.id}>
+            <Line
+              points={connection.points || []}
+              stroke={isSelected ? '#2563eb' : '#222'}
+              strokeWidth={2}
+              lineCap="round"
+              lineJoin="round"
+              onClick={(e) => canvasController.handleConnectionClick(connection.id, e)}
+              onMouseDown={() =>
+                useCanvasStore.getState().setSelection({
+                  type: 'connection',
+                  id: connection.id,
+                })
+              }
+              onContextMenu={(e) =>
+                canvasController.handleConnectionContextMenu(e, connection)
+              }
+            />
+
+            {(connection.additionalAnchors || []).map((anchor) => (
+              <Circle
+                key={anchor.id}
+                x={anchor.x}
+                y={anchor.y}
+                radius={5}
+                fill="#2563eb"
+                stroke="black"
+                strokeWidth={1}
+                onClick={() => canvasController.handleAnchorClick(anchor)}
+              />
+            ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 12. Selection overlay
+
+У тебе раніше був `SelectionTransformer`. Тепер його теж треба робити окремим шаром/компонентом.
+
+Поки зробимо заглушку. Потім підключимо nodeRefs нормально.
+
+## `components/SchemeEditor/SelectionOverlay.jsx`
+
+```jsx
+'use client';
+
+export default function SelectionOverlay() {
+  return null;
+}
+```
+
+Коли підемо далі, тут зробимо:
+
+* `Transformer`
+* `nodeRefs`
+* `registerNodeRef`
+* підсвітку саме через ref вузла
+
+Але зараз головне — **перебудувати архітектуру**.
+
+---
+
+# 13. Контекстне меню
+
+## `components/SchemeEditor/GraphContextMenu.jsx`
+
+```jsx
+'use client';
+
+import { useCanvasStore } from '@/store/useCanvasStore';
+import { canvasController } from '@/controllers/canvasController';
+
+export default function GraphContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const closeContextMenu = useCanvasStore((s) => s.closeContextMenu);
+
+  if (!contextMenu.open || !contextMenu.position) return null;
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: contextMenu.position.top,
+        left: contextMenu.position.left,
+        background: '#fff',
+        border: '1px solid #ccc',
+        boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
+        borderRadius: 8,
+        zIndex: 9999,
+        minWidth: 180,
+      }}
+      onMouseLeave={closeContextMenu}
+    >
+      <button
+        style={{
+          display: 'block',
+          width: '100%',
+          textAlign: 'left',
+          padding: '10px 12px',
+          border: 'none',
+          background: 'transparent',
+          cursor: 'pointer',
+        }}
+        onClick={canvasController.handleDeleteSelected}
+      >
+        Видалити
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+# 14. Що тепер видаляємо
+
+Після цього рефакторингу тобі більше не потрібні:
+
+* `CanvasArea.js`
+* `SchemeEditorPage.js`
+* старий `EditorCanvas.js` у поточному вигляді
+* старий `DiagramSymbols.js` у поточному вигляді
+* старий великий `useDiagramState.js`
+
+---
+
+# 15. Що робити з useDiagramState
+
+Його **не треба переносити як є**.
+
+Треба забрати з нього:
+
+### У store:
+
+* `symbols`
+* `connections`
+* `selection`
+* `hovered...`
+* `mode`
+* `selectedAnchor`
+* `message`
+
+### У controller:
+
+* `handleDragMove`
+* `handleAnchorClick`
+* `handleLineClick`
+* `delete`
+* `select`
+* `context menu`
+
+### У geometry:
+
+* вся чиста математика
+
+Тобто `useDiagramState` в новій архітектурі **зникає як сутність**.
+
+---
+
+# 16. Порядок реального переходу
+
+Щоб не зламати все одразу, роби так:
+
+## Крок 1
+
+Створи нові файли:
+
+* `useCanvasStore.js`
+* `canvasController.js`
+* `EditorShell.jsx`
+* `EditorCanvas.jsx`
+* `SymbolsLayer.jsx`
+* `ConnectionsLayer.jsx`
+* `GraphContextMenu.jsx`
+
+## Крок 2
+
+Підключи `EditorShell` у `page.js`
+
+## Крок 3
+
+Перенеси тільки `symbols` і їх drag/select
+
+## Крок 4
+
+Перенеси `connections`
+
+## Крок 5
+
+Перенеси `anchor click / add connector`
+
+## Крок 6
+
+Перенеси `add line anchor`
+
+## Крок 7
+
+Поверни `Transformer`
+
+---
+
+# 17. Який результат ти отримаєш
+
+Після цього в тебе буде така логіка:
+
+* `page.js` → просто сторінка
+* `EditorShell` → оболонка редактора
+* `EditorCanvas` → Stage/Layer
+* `SymbolsLayer` → тільки рендер символів
+* `ConnectionsLayer` → тільки рендер ліній
+* `canvasController` → вся поведінка
+* `useCanvasStore` → весь стан
+
+Це вже **нормальна архітектура редактора**, з якою можна жити далі.
+
+---
+
+# 18. Що я раджу робити далі
+
+Наступним повідомленням найкраще піти вже в **другий етап**:
+**я покажу тобі, як правильно дописати `SelectionTransformer` + `nodeRefs` + zoom/pan у цю нову архітектуру**, щоб ти не втратив поточний функціонал.

@@ -1,0 +1,549 @@
+Так, саме так: **preview може бути SVG**, а не Konva-елементом.
+І це навіть хороший підхід.
+
+Тобто:
+
+* у панелі в тебе іконки = **SVG**
+* при виборі tool ми зберігаємо `activeTool`
+* при русі курсора над canvas показуємо **HTML/SVG overlay**
+* при кліку по Stage створюємо вже **реальний node** у store
+
+Це кращий варіант, ніж намагатися рендерити preview через Konva, якщо твоя бібліотека прев’юшок уже SVG/React-based.
+
+---
+
+# Як це має працювати
+
+## Flow
+
+```text
+ToolPalette
+→ activeTool = "rect"
+
+Canvas mousemove
+→ оновлюємо previewPosition
+
+Поверх Stage
+→ показуємо SVG preview в absolute overlay
+
+Canvas click
+→ створюємо node у store
+→ прибираємо preview
+```
+
+---
+
+# Нова структура
+
+Додамо ще 2 частини:
+
+```txt
+components/SchemeEditor/
+  ToolCursorPreview.jsx
+  EditorCanvas.jsx
+
+store/
+  useCanvasStore.js
+
+controllers/
+  canvasController.js
+```
+
+---
+
+# 1. Розширюємо store
+
+## `store/useCanvasStore.js`
+
+Додай:
+
+```js
+activeTool: null,
+previewPosition: null, // { x, y } в координатах canvas
+isPointerInsideStage: false,
+
+setActiveTool: (activeTool) => set({ activeTool }),
+resetActiveTool: () =>
+  set({
+    activeTool: null,
+    previewPosition: null,
+  }),
+
+setPreviewPosition: (previewPosition) => set({ previewPosition }),
+setIsPointerInsideStage: (isPointerInsideStage) => set({ isPointerInsideStage }),
+```
+
+---
+
+# 2. helper для координат з урахуванням zoom/pan
+
+Оскільки в тебе layer може бути зсунений і масштабований, треба переводити pointer у **world coordinates**.
+
+## `lib/diagram/coords.js`
+
+```js
+export function getRelativePointer(stage, layer) {
+  const pointer = stage.getPointerPosition();
+  if (!pointer || !layer) return null;
+
+  const scaleX = layer.scaleX() || 1;
+  const scaleY = layer.scaleY() || 1;
+  const pos = layer.position();
+
+  return {
+    x: (pointer.x - pos.x) / scaleX,
+    y: (pointer.y - pos.y) / scaleY,
+  };
+}
+```
+
+---
+
+# 3. створення node з tool
+
+## `lib/diagram/createNodeFromTool.js`
+
+Тут actual node для canvas.
+
+```js
+import { ELEMENT_REGISTRY } from "@/components/graph/registry";
+
+export function createNodeFromTool(type, x, y) {
+  const item = ELEMENT_REGISTRY[type];
+  if (!item) return null;
+
+  const width = item.preview?.w || item.defaults?.width || 80;
+  const height = item.preview?.h || item.defaults?.height || 50;
+
+  return {
+    id: crypto.randomUUID(),
+    type,
+    position: {
+      x: x - width / 2,
+      y: y - height / 2,
+    },
+    data: {
+      width,
+      height,
+      ...(item.defaults || {}),
+    },
+  };
+}
+```
+
+Я спеціально центрую вставку відносно курсора.
+
+---
+
+# 4. controller: mouse move + stage click
+
+## `controllers/canvasController.js`
+
+Додай/онови:
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { getRelativePointer } from "@/lib/diagram/coords";
+import { createNodeFromTool } from "@/lib/diagram/createNodeFromTool";
+
+export const canvasController = {
+  handleStageMouseMove(e) {
+    const store = useCanvasStore.getState();
+    const { activeTool, layerRef } = store;
+
+    if (!activeTool) return;
+
+    const stage = e.target.getStage();
+    const layer = layerRef?.current || layerRef;
+    if (!stage || !layer) return;
+
+    const point = getRelativePointer(stage, layer);
+    if (!point) return;
+
+    store.setPreviewPosition(point);
+  },
+
+  handleStageMouseEnter() {
+    const store = useCanvasStore.getState();
+    store.setIsPointerInsideStage(true);
+  },
+
+  handleStageMouseLeave() {
+    const store = useCanvasStore.getState();
+    store.setIsPointerInsideStage(false);
+    store.setPreviewPosition(null);
+  },
+
+  handleStageMouseDown(e) {
+    const store = useCanvasStore.getState();
+    const { activeTool, layerRef } = store;
+
+    const stage = e.target.getStage();
+
+    if (activeTool) {
+      if (e.target !== stage) return;
+
+      const layer = layerRef?.current || layerRef;
+      if (!layer) return;
+
+      const point = getRelativePointer(stage, layer);
+      if (!point) return;
+
+      const node = createNodeFromTool(activeTool, point.x, point.y);
+      if (!node) return;
+
+      store.addNode(node);
+      store.resetActiveTool();
+      return;
+    }
+
+    if (e.target === stage) {
+      store.clearSelection();
+      store.closeContextMenu?.();
+    }
+  },
+};
+```
+
+---
+
+# 5. Підключаємо це в EditorCanvas
+
+## `components/SchemeEditor/EditorCanvas.jsx`
+
+```jsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Stage, Layer } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { setupLayerZoomPan } from "@/lib/diagram/LayerZoom";
+
+import NodesLayer from "./NodesLayer";
+import EdgesLayer from "./EdgesLayer";
+import SelectionTransformer from "./SelectionTransformer";
+import ToolCursorPreview from "./ToolCursorPreview";
+
+export default function EditorCanvas() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const setStageRef = useCanvasStore((s) => s.setStageRef);
+  const setLayerRef = useCanvasStore((s) => s.setLayerRef);
+  const setApiRef = useCanvasStore((s) => s.setApiRef);
+  const activeTool = useCanvasStore((s) => s.activeTool);
+
+  useEffect(() => {
+    setStageRef(stageRef);
+    setLayerRef(layerRef);
+
+    if (!stageRef.current || !layerRef.current) return;
+
+    const api = setupLayerZoomPan(stageRef.current, layerRef.current, {
+      panMode: "mmb_or_space",
+    });
+
+    setApiRef(api);
+
+    return () => {
+      api?.destroy?.();
+    };
+  }, [setStageRef, setLayerRef, setApiRef]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const container = stage?.container();
+    if (!container) return;
+
+    container.style.cursor = activeTool ? "crosshair" : "default";
+  }, [activeTool]);
+
+  return (
+    <section
+      style={{
+        position: "relative",
+        border: "1px solid #ccc",
+        display: "inline-block",
+        background: "#fff",
+      }}
+    >
+      <Stage
+        ref={stageRef}
+        width={1000}
+        height={600}
+        onMouseDown={canvasController.handleStageMouseDown}
+        onMouseMove={canvasController.handleStageMouseMove}
+        onMouseEnter={canvasController.handleStageMouseEnter}
+        onMouseLeave={canvasController.handleStageMouseLeave}
+      >
+        <Layer ref={layerRef}>
+          <EdgesLayer />
+          <NodesLayer />
+          <SelectionTransformer />
+        </Layer>
+      </Stage>
+
+      <ToolCursorPreview />
+    </section>
+  );
+}
+```
+
+---
+
+# 6. SVG preview overlay
+
+Оце головний шматок.
+
+Він буде рендеритися **поверх Stage як HTML absolute overlay**, але позиціонуватись у тих самих world coordinates, що й canvas.
+
+## `components/SchemeEditor/ToolCursorPreview.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { ELEMENT_REGISTRY } from "@/components/graph/registry";
+
+export default function ToolCursorPreview() {
+  const activeTool = useCanvasStore((s) => s.activeTool);
+  const previewPosition = useCanvasStore((s) => s.previewPosition);
+  const isPointerInsideStage = useCanvasStore((s) => s.isPointerInsideStage);
+  const layerRef = useCanvasStore((s) => s.layerRef);
+
+  if (!activeTool || !previewPosition || !isPointerInsideStage) {
+    return null;
+  }
+
+  const item = ELEMENT_REGISTRY[activeTool];
+  if (!item?.Icon && !item?.SvgPreview && !item?.previewSvg) {
+    return null;
+  }
+
+  const layer = layerRef?.current || layerRef;
+  if (!layer) return null;
+
+  const scaleX = layer.scaleX() || 1;
+  const scaleY = layer.scaleY() || 1;
+  const layerPos = layer.position();
+
+  const width = item.preview?.w || item.defaults?.width || 80;
+  const height = item.preview?.h || item.defaults?.height || 50;
+
+  const screenX = previewPosition.x * scaleX + layerPos.x;
+  const screenY = previewPosition.y * scaleY + layerPos.y;
+
+  const left = screenX - (width * scaleX) / 2;
+  const top = screenY - (height * scaleY) / 2;
+
+  const SvgPreview =
+    item.SvgPreview || item.Icon || item.previewSvg || null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left,
+        top,
+        width: width * scaleX,
+        height: height * scaleY,
+        pointerEvents: "none",
+        opacity: 0.65,
+        zIndex: 5,
+        transformOrigin: "top left",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {typeof SvgPreview === "function" ? (
+        <SvgPreview width="100%" height="100%" />
+      ) : (
+        SvgPreview
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+# 7. Як має виглядати registry для SVG preview
+
+У тебе зараз registry, ймовірно, вже містить дані для Konva element.
+Треба просто додати ще поле для SVG preview.
+
+## приклад `registry.js`
+
+```js
+import RectPreviewSvg from "./svg/RectPreviewSvg";
+import CirclePreviewSvg from "./svg/CirclePreviewSvg";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    title: "Rectangle",
+    keywords: ["box", "rect"],
+    preview: { w: 80, h: 50 },
+    defaults: {
+      width: 80,
+      height: 50,
+      fill: "#d9d9d9",
+      stroke: "#222",
+      strokeWidth: 2,
+    },
+    SvgPreview: RectPreviewSvg,
+  },
+
+  circle: {
+    title: "Circle",
+    keywords: ["round", "circle"],
+    preview: { w: 60, h: 60 },
+    defaults: {
+      width: 60,
+      height: 60,
+      radius: 30,
+      fill: "#d9d9d9",
+      stroke: "#222",
+      strokeWidth: 2,
+    },
+    SvgPreview: CirclePreviewSvg,
+  },
+};
+```
+
+---
+
+# 8. Приклад SVG preview компонента
+
+## `components/graph/svg/RectPreviewSvg.jsx`
+
+```jsx
+"use client";
+
+export default function RectPreviewSvg({ width = "100%", height = "100%" }) {
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox="0 0 80 50"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect
+        x="2"
+        y="2"
+        width="76"
+        height="46"
+        rx="4"
+        fill="#d9d9d9"
+        stroke="#222"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+```
+
+## `components/graph/svg/CirclePreviewSvg.jsx`
+
+```jsx
+"use client";
+
+export default function CirclePreviewSvg({ width = "100%", height = "100%" }) {
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox="0 0 60 60"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <circle
+        cx="30"
+        cy="30"
+        r="28"
+        fill="#d9d9d9"
+        stroke="#222"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+```
+
+---
+
+# 9. Якщо хочеш залишити ToolPalette майже без змін
+
+Твоя панель може далі показувати SVG іконки, але при кліку треба просто викликати store.
+
+У `ToolPalette`:
+
+```jsx
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function ToolPalette({ open, onToggle }) {
+  const activeTool = useCanvasStore((s) => s.activeTool);
+  const setActiveTool = useCanvasStore((s) => s.setActiveTool);
+
+  // ...
+
+  const pickTool = (type) => {
+    setActiveTool(type);
+
+    setRecent((prev) => {
+      const next = [type, ...prev.filter((x) => x !== type)].slice(0, RECENT_LIMIT);
+      saveArray(STORAGE_REC, next);
+      return next;
+    });
+  };
+
+  // ...
+}
+```
+
+Тобто `onSelectTool` уже не потрібен.
+
+---
+
+# 10. Чому SVG preview тут правильний
+
+Ти правильно зауважив, що preview має бути SVG, а не Konva element.
+
+Цей підхід хороший, бо:
+
+* preview легкий
+* не засмічує Stage тимчасовими node
+* не конфліктує з drag/select/transformer
+* використовує ту ж саму SVG-візуалізацію, що і в панелі
+* легко масштабувати разом із zoom/pan через layer scale/position
+
+---
+
+# 11. Що ще я б одразу покращив
+
+Щоб tool не скидався після вставки, якщо хочеш режим “ставити багато однакових елементів”, замість:
+
+```js
+store.resetActiveTool();
+```
+
+можна зробити умову, наприклад через `isStickyTool`.
+
+Але базово краще спочатку залишити одну вставку = один клік.
+
+---
+
+# Підсумок
+
+Тепер у тебе буде така схема:
+
+* `ToolPalette` вибирає `activeTool`
+* `EditorCanvas` слухає `mousemove`
+* `ToolCursorPreview` показує **SVG overlay**
+* `Stage click` створює реальний Konva node через store
+* preview зникає після вставки
+
+---
+
+Наступний сильний крок після цього — зробити, щоб preview ще й **прилипав до grid / snap lines**, якщо у тебе це планується.

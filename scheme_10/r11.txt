@@ -1,0 +1,258 @@
+Добре, це якраз місце, де треба **перейти з старої моделі (elements/lines)** на нову:
+
+👉 `nodes + edges + anchors`
+
+Зараз у тебе функції дуже прості, але:
+
+❌ не враховують edges при видаленні node
+❌ не враховують anchors
+❌ не інтегровані з новою архітектурою
+
+---
+
+# 🧠 НОВА ЛОГІКА ВИДАЛЕННЯ
+
+## 🎯 Правила:
+
+### 1. Видалення node
+
+👉 треба:
+
+* видалити node
+* видалити ВСІ edges, де він використовується
+
+---
+
+### 2. Видалення edge
+
+👉 просто видалити edge
+
+---
+
+### 3. Видалення anchor (опціонально)
+
+👉 видалити тільки anchor з edge
+
+---
+
+# 🔥 1. НОВИЙ ФАЙЛ
+
+## 📁 `diagramDelete.js`
+
+---
+
+## ✅ deleteNodeWithEdges
+
+```js
+export function deleteNodeWithEdges(nodeId, nodes, edges) {
+  const nextNodes = nodes.filter((n) => n.id !== nodeId);
+
+  const nextEdges = edges.filter((e) => {
+    return (
+      e.source?.nodeId !== nodeId &&
+      e.target?.nodeId !== nodeId
+    );
+  });
+
+  return {
+    nodes: nextNodes,
+    edges: nextEdges,
+  };
+}
+```
+
+---
+
+## ✅ deleteEdge
+
+```js
+export function deleteEdge(edgeId, edges) {
+  return edges.filter((e) => e.id !== edgeId);
+}
+```
+
+---
+
+## ✅ deleteEdgeAnchor (дуже корисно)
+
+```js
+export function deleteEdgeAnchor(edgeId, anchorId, edges) {
+  return edges.map((e) => {
+    if (e.id !== edgeId) return e;
+
+    return {
+      ...e,
+      data: {
+        ...e.data,
+        anchors: (e.data?.anchors || []).filter(
+          (a) => a.id !== anchorId
+        ),
+      },
+    };
+  });
+}
+```
+
+---
+
+# 🔥 2. ІНТЕГРАЦІЯ В CONTROLLER
+
+👉 це важливо — не викликати ці функції напряму з UI
+
+---
+
+## 📁 `canvasController.js`
+
+---
+
+### ✅ delete node
+
+```js
+import { deleteNodeWithEdges } from "@/utils/diagramDelete";
+
+deleteNode(nodeId) {
+  const store = useCanvasStore.getState();
+
+  const { nodes, edges } = deleteNodeWithEdges(
+    nodeId,
+    store.nodes,
+    store.edges
+  );
+
+  store.setNodes(nodes);
+  store.setEdges(edges);
+
+  store.clearSelection();
+}
+```
+
+---
+
+### ✅ delete edge
+
+```js
+import { deleteEdge } from "@/utils/diagramDelete";
+
+deleteEdge(edgeId) {
+  const store = useCanvasStore.getState();
+
+  const edges = deleteEdge(edgeId, store.edges);
+
+  store.setEdges(edges);
+  store.clearSelection();
+}
+```
+
+---
+
+### ✅ delete anchor
+
+```js
+import { deleteEdgeAnchor } from "@/utils/diagramDelete";
+
+deleteAnchor(edgeId, anchorId) {
+  const store = useCanvasStore.getState();
+
+  const edges = deleteEdgeAnchor(edgeId, anchorId, store.edges);
+
+  store.setEdges(edges);
+}
+```
+
+---
+
+# 🔥 3. ГАРЯЧІ КЛАВІШІ (рекомендую)
+
+👉 видалення через клавішу Delete
+
+---
+
+## 📁 `useDeleteKey.js`
+
+```js
+import { useEffect } from "react";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export function useDeleteKey() {
+  const selection = useCanvasStore((s) => s.selection);
+
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.key !== "Delete") return;
+      if (!selection) return;
+
+      if (selection.type === "node") {
+        canvasController.deleteNode(selection.id);
+      }
+
+      if (selection.type === "edge") {
+        canvasController.deleteEdge(selection.id);
+      }
+
+      if (selection.type === "anchor") {
+        canvasController.deleteAnchor(
+          selection.edgeId,
+          selection.id
+        );
+      }
+    }
+
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [selection]);
+}
+```
+
+---
+
+# 🔥 4. ЩО МИ ПОКРАЩИЛИ
+
+## Було:
+
+```js
+deleteNodeWithLinks(nodeId, elements, lines)
+```
+
+❌ не видаляє зв’язки
+❌ не враховує anchors
+❌ не підходить під нову модель
+
+---
+
+## Стало:
+
+```js
+deleteNodeWithEdges(nodeId, nodes, edges)
+```
+
+✅ чиста модель
+✅ працює з anchors
+✅ централізовано через controller
+
+---
+
+# 🧨 ВАЖЛИВО
+
+Після цього:
+
+👉 UI більше не видаляє нічого напряму
+👉 тільки через controller
+
+---
+
+# 🚀 Далі (дуже логічний крок)
+
+Тепер ти можеш зробити:
+
+👉 **undo/redo (історію дій)**
+👉 або
+👉 **context menu (delete / duplicate / copy)**
+
+---
+
+Якщо хочеш наступний рівень:
+
+👉 напиши **"робимо undo/redo для редактора"**
+
+це вже буде рівень production 🔥

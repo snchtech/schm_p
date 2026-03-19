@@ -1,0 +1,362 @@
+Супер, це якраз друга половина переходу 🔥
+Зараз ми перетворимо твій `DiagramSymbols` → у **новий `NodesLayer`**:
+
+* без пропсів
+* через Zustand
+* з новою anchor-системою
+* сумісний з `edges + anchors + controller`
+
+---
+
+# 🧠 Що змінюється концептуально
+
+## ❌ Було
+
+```js
+symbols
+el.x / el.y
+getAnchorPoints(el)
+handleDragMove
+props з 10 параметрів
+```
+
+---
+
+## ✅ Стало
+
+```js
+nodes
+node.position
+anchors = універсальні (node anchor objects)
+controller керує всім
+```
+
+---
+
+# 🧱 Нова структура Node
+
+```js
+node = {
+  id: 'n1',
+  type: 'rect',
+
+  position: { x: 100, y: 100 },
+
+  data: {
+    width: 80,
+    height: 50,
+    fill: 'gray',
+    stroke: 'black',
+  }
+}
+```
+
+---
+
+# 🔥 1. Новий файл: `NodesLayer.jsx`
+
+```jsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Group, Rect, Circle } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import GraphLibrary from "@/components/graph";
+
+// мапа компонентів
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+};
+
+// helper: отримати anchors для node
+function getNodeAnchors(node) {
+  const { x, y } = node.position;
+  const { width, height } = node.data;
+
+  return [
+    {
+      id: `${node.id}-top`,
+      type: "node",
+      nodeId: node.id,
+      direction: "top",
+      x: x + width / 2,
+      y: y,
+    },
+    {
+      id: `${node.id}-bottom`,
+      type: "node",
+      nodeId: node.id,
+      direction: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      id: `${node.id}-left`,
+      type: "node",
+      nodeId: node.id,
+      direction: "left",
+      x: x,
+      y: y + height / 2,
+    },
+    {
+      id: `${node.id}-right`,
+      type: "node",
+      nodeId: node.id,
+      direction: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+  ];
+}
+
+export default function NodesLayer() {
+  const nodes = useCanvasStore((s) => s.nodes);
+  const selection = useCanvasStore((s) => s.selection);
+  const hoveredNodeId = useCanvasStore((s) => s.hoveredNodeId);
+  const hoveredAnchor = useCanvasStore((s) => s.hoveredAnchor);
+  const mode = useCanvasStore((s) => s.mode);
+
+  const setHoveredNodeId = useCanvasStore((s) => s.setHoveredNodeId);
+  const setHoveredAnchor = useCanvasStore((s) => s.setHoveredAnchor);
+
+  return (
+    <>
+      {nodes.map((node) => {
+        const groupRef = useRef(null);
+
+        const Shape = ELEMENT_COMPONENTS[node.type];
+
+        const isSelected =
+          selection?.type === "node" && selection?.id === node.id;
+
+        // 🔥 register ref для Transformer
+        useEffect(() => {
+          const store = useCanvasStore.getState();
+          if (!store.registerNodeRef) return;
+
+          store.registerNodeRef(node.id, groupRef.current);
+          return () => store.registerNodeRef(node.id, null);
+        }, [node.id]);
+
+        const anchors = getNodeAnchors(node);
+
+        return (
+          <Group
+            key={node.id}
+            ref={groupRef}
+            x={node.position.x}
+            y={node.position.y}
+            draggable
+            onDragMove={(e) =>
+              canvasController.handleNodeDragMove(node.id, e)
+            }
+            onMouseEnter={() => {
+              if (mode === "add-connector") {
+                setHoveredNodeId(node.id);
+              }
+            }}
+            onMouseLeave={() => {
+              if (mode === "add-connector") {
+                setHoveredNodeId(null);
+              }
+            }}
+            onMouseDown={() =>
+              canvasController.handleNodeMouseDown(node)
+            }
+            onContextMenu={(e) =>
+              canvasController.handleNodeContextMenu(e, node)
+            }
+          >
+            {/* 🔷 SHAPE */}
+            {Shape && <Shape node={node} />}
+
+            {/* 🔷 SELECTED OUTLINE */}
+            {isSelected && (
+              <Rect
+                x={-6}
+                y={-6}
+                width={node.data.width + 12}
+                height={node.data.height + 12}
+                cornerRadius={12}
+                stroke="#3b82f6"
+                strokeWidth={1}
+                dash={[6, 4]}
+                listening={false}
+              />
+            )}
+
+            {/* 🔷 ANCHORS */}
+            {hoveredNodeId === node.id &&
+              anchors.map((anchor) => (
+                <Circle
+                  key={anchor.id}
+                  x={anchor.x - node.position.x}
+                  y={anchor.y - node.position.y}
+                  radius={6}
+                  fill={
+                    hoveredAnchor?.id === anchor.id
+                      ? "yellow"
+                      : "green"
+                  }
+                  stroke="black"
+                  strokeWidth={1}
+                  onMouseEnter={() => setHoveredAnchor(anchor)}
+                  onMouseLeave={() => setHoveredAnchor(null)}
+                  onClick={(e) => {
+                    e.cancelBubble = true;
+                    canvasController.handleAnchorClick(anchor);
+                  }}
+                />
+              ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 🔥 2. Що треба додати в store
+
+У `useCanvasStore.js`:
+
+```js
+hoveredNodeId: null,
+hoveredAnchor: null,
+
+setHoveredNodeId: (hoveredNodeId) => set({ hoveredNodeId }),
+setHoveredAnchor: (hoveredAnchor) => set({ hoveredAnchor }),
+```
+
+---
+
+# 🔥 3. Controller (мінімум для nodes)
+
+Додай у `canvasController`:
+
+---
+
+## select node
+
+```js
+handleNodeMouseDown(node) {
+  useCanvasStore.getState().setSelection({
+    type: "node",
+    id: node.id,
+  });
+}
+```
+
+---
+
+## context menu
+
+```js
+handleNodeContextMenu(e, node) {
+  e.evt.preventDefault();
+
+  const store = useCanvasStore.getState();
+
+  store.setSelection({ type: "node", id: node.id });
+
+  store.openContextMenu(
+    {
+      top: e.evt.clientY,
+      left: e.evt.clientX,
+    },
+    {
+      type: "node",
+      id: node.id,
+    }
+  );
+}
+```
+
+---
+
+## drag (як уже робили)
+
+```js
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+
+  const store = useCanvasStore.getState();
+
+  store.updateNodePosition(id, x, y);
+
+  const nodes = store.nodes.map(n =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = store.edges.map(edge => {
+    if (
+      edge.source.nodeId !== id &&
+      edge.target.nodeId !== id
+    ) return edge;
+
+    return {
+      ...edge,
+      points: buildEdgePath(edge, nodes, store.edges),
+    };
+  });
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# 🔥 4. Головна різниця з твоїм старим кодом
+
+| Було                    | Стало              |
+| ----------------------- | ------------------ |
+| symbols                 | nodes              |
+| el.x                    | node.position.x    |
+| getAnchorPoints         | getNodeAnchors     |
+| symbolAnchor            | node anchor object |
+| props з 10 параметрів   | Zustand            |
+| registerNodeRef пропсом | через store        |
+
+---
+
+# 🧨 ВАЖЛИВИЙ МОМЕНТ (який ти відчуєш одразу)
+
+Після цього:
+
+👉 ти більше **ніколи не передаєш props вниз**
+👉 всі компоненти читають store
+👉 вся логіка в controller
+
+---
+
+# 🚀 Що далі (дуже рекомендую)
+
+Тепер у тебе вже є:
+
+✅ NodesLayer
+✅ EdgesLayer
+✅ anchors
+✅ routing
+✅ controller
+✅ Zustand
+
+---
+
+## Наступний логічний крок:
+
+👉 зробити **SelectionTransformer нормально (через nodeRefs)**
+👉 або зробити **drag-to-connect UX як у draw.io**
+
+---
+
+Якщо хочеш максимально прокачати редактор — напиши:
+
+👉 **"робимо Transformer + nodeRefs правильно"**
+
+це буде наступний critical step 💪

@@ -1,0 +1,323 @@
+Круто, це вже **серйозний рівень геометрії** 🔥
+Але чесно: зараз твій `geometry.js` — це мікс **старої моделі (connections + symbol/line attachment)** і нової (nodes/edges + anchors).
+
+Я тобі зараз зроблю **чітку декомпозицію і рефакторинг під нову архітектуру**, щоб:
+
+* не було `att.type === "symbol"`
+* не було `connectionsState`
+* не було legacy
+* все працювало через **anchors + nodes + edges**
+
+---
+
+# 🧠 ГОЛОВНА ПРОБЛЕМА ЗАРАЗ
+
+У тебе тут є:
+
+### ❌ legacy
+
+```js
+getExitDir(att, otherPoint, connectionsState)
+getExitDirForLineAttachment(...)
+att.type === "symbol"
+att.type === "line"
+```
+
+👉 це все треба ВИДАЛИТИ
+
+---
+
+# ✅ НОВА МОДЕЛЬ
+
+👉 direction береться тільки з:
+
+```js
+anchor.direction
+```
+
+або
+
+```js
+resolveDirection(anchor, otherPoint)
+```
+
+---
+
+# 🔥 ЩО ЗАЛИШАЄМО (100% добре)
+
+Ці функції — ідеальні:
+
+```js
+projectPointOnSegment
+findClosestSegment
+mergeCollinear
+fixDiagonals
+getPolylineElbows
+getMainRunElbows
+```
+
+👉 їх не чіпаємо
+
+---
+
+# 🔥 1. ВИДАЛЯЄМО СТАРЕ
+
+❌ повністю прибрати:
+
+```js
+getExitDirForLineAttachment
+getExitDir
+connectionsState
+att.type === "symbol"
+att.type === "line"
+```
+
+---
+
+# 🔥 2. ДОДАЄМО НОВУ ФУНКЦІЮ (ключова)
+
+## `resolveDirection`
+
+```js
+export function resolveDirection(anchor, otherPoint) {
+  if (anchor.direction && anchor.direction !== "auto") {
+    return anchor.direction;
+  }
+
+  if (!otherPoint) return "right";
+
+  const dx = otherPoint.x - anchor.x;
+  const dy = otherPoint.y - anchor.y;
+
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? "right" : "left";
+  }
+
+  return dy > 0 ? "bottom" : "top";
+}
+```
+
+---
+
+# 🔥 3. ДОДАЄМО RESOLVE ANCHOR
+
+## `resolveAnchor`
+
+```js
+export function resolveAnchor(anchor, nodes, edges) {
+  if (!anchor) return null;
+
+  // NODE
+  if (anchor.type === "node") {
+    const node = nodes.find(n => n.id === anchor.nodeId);
+    if (!node) return null;
+
+    const { x, y } = node.position;
+    const { width, height } = node.data;
+
+    switch (anchor.direction) {
+      case "top":
+        return { x: x + width / 2, y, direction: "top" };
+      case "bottom":
+        return { x: x + width / 2, y: y + height, direction: "bottom" };
+      case "left":
+        return { x, y: y + height / 2, direction: "left" };
+      case "right":
+        return { x: x + width, y: y + height / 2, direction: "right" };
+      default:
+        return { x, y, direction: "right" };
+    }
+  }
+
+  // EDGE
+  if (anchor.type === "edge") {
+    const edge = edges.find(e => e.id === anchor.edgeId);
+    if (!edge) return null;
+
+    if (anchor.segIndex != null && anchor.t != null) {
+      const pts = edge.points;
+      const i = anchor.segIndex;
+
+      if (2 * i + 3 >= pts.length) return anchor;
+
+      const x1 = pts[2 * i];
+      const y1 = pts[2 * i + 1];
+      const x2 = pts[2 * i + 2];
+      const y2 = pts[2 * i + 3];
+
+      return {
+        x: x1 + anchor.t * (x2 - x1),
+        y: y1 + anchor.t * (y2 - y1),
+        direction: "auto"
+      };
+    }
+
+    return {
+      x: anchor.x,
+      y: anchor.y,
+      direction: "auto"
+    };
+  }
+
+  return null;
+}
+```
+
+---
+
+# 🔥 4. ГОЛОВНИЙ ROUTING ENTRY POINT
+
+👉 це заміняє ВСЕ
+
+## `buildEdgePath`
+
+```js
+export function buildEdgePath(edge, nodes, edges) {
+  const start = resolveAnchor(edge.source, nodes, edges);
+  const end = resolveAnchor(edge.target, nodes, edges);
+
+  if (!start || !end) return [];
+
+  const dirFrom = resolveDirection(start, end);
+  const dirTo = resolveDirection(end, start);
+
+  const startBox = boxFromNode(
+    nodes.find(n => n.id === edge.source.nodeId)
+  );
+
+  const endBox = boxFromNode(
+    nodes.find(n => n.id === edge.target.nodeId)
+  );
+
+  let pts = calculateOrthogonalPath(
+    { ...start, direction: dirFrom },
+    { ...end, direction: dirTo },
+    edge.data?.routing,
+    startBox,
+    endBox
+  );
+
+  pts = mergeCollinear(pts);
+  pts = fixDiagonals(pts);
+
+  return pts;
+}
+```
+
+---
+
+# 🔥 5. boxFromSymbol → boxFromNode
+
+## ❌ було
+
+```js
+boxFromSymbol(sym)
+```
+
+## ✅ стало
+
+```js
+export function boxFromNode(node, pad = 6) {
+  if (!node) return null;
+
+  const { x, y } = node.position;
+  const { width, height } = node.data;
+
+  return {
+    left: x - pad,
+    right: x + width + pad,
+    top: y - pad,
+    bottom: y + height + pad,
+  };
+}
+```
+
+---
+
+# 🔥 6. calculateOrthogonalPath — залишаємо
+
+👉 у тебе тут реально складна логіка
+👉 її не треба ламати
+
+АЛЕ:
+
+## ❗ маленький апгрейд
+
+в кінці:
+
+```js
+points.push(x2, y2);
+
+return mergeCollinear(fixDiagonals(points));
+```
+
+---
+
+# 🔥 7. ПІДСУМОК РЕФАКТОРИНГУ
+
+## ❌ видалили
+
+* getExitDir
+* getExitDirForLineAttachment
+* att.type
+* connectionsState
+
+---
+
+## ✅ додали
+
+* resolveAnchor
+* resolveDirection
+* buildEdgePath
+* boxFromNode
+
+---
+
+## ✅ залишили
+
+* calculateOrthogonalPath
+* findClosestSegment
+* projectPointOnSegment
+* elbows
+* mergeCollinear
+* fixDiagonals
+
+---
+
+# 🧨 ВАЖЛИВО
+
+Після цього:
+
+👉 geometry.js стає **чистим math layer**
+👉 без React
+👉 без store
+👉 без legacy
+
+---
+
+# 🚀 Що далі (дуже важливо)
+
+Тепер у тебе вже є:
+
+✅ anchors
+✅ routing
+✅ geometry
+✅ nodes
+✅ edges
+✅ transformer
+
+---
+
+## Наступний рівень:
+
+👉 **drag-to-connect preview (як у draw.io)**
+👉 або
+👉 **snap anchors (магніти)**
+
+---
+
+Якщо хочеш реально добити UX редактора:
+
+👉 напиши **"робимо preview лінії при створенні connection"**
+
+це прям дуже сильний апгрейд 🔥

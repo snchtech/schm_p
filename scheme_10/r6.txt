@@ -1,0 +1,724 @@
+Так, цей файл якраз добре показує, **що саме треба перенести в нову `nodes/edges` архітектуру**, а що — змінити.
+
+У старому `DiagramConnections.js` було змішано одразу 4 ролі:
+
+1. рендер edge
+2. hover-стан
+3. edge anchors
+4. offset-handles для routing
+
+У новій архітектурі це краще залишити в **одному `EdgesLayer.jsx`**, але вже працювати не з `connections`, а з `edges`, і не з `conn.additionalAnchors`, а з `edge.data.anchors`.
+
+---
+
+# Що міняється концептуально
+
+## Було
+
+```js
+conn = {
+  id,
+  from,
+  to,
+  points,
+  fromExitDir,
+  toExitDir,
+  additionalAnchors: []
+}
+```
+
+## Стало
+
+```js
+edge = {
+  id,
+  source,   // anchor
+  target,   // anchor
+  points,
+  data: {
+    routing: {
+      startOffset: 20,
+      endOffset: 20,
+    },
+    anchors: [], // edge anchors
+  }
+}
+```
+
+---
+
+# Як виглядатиме новий файл
+
+Я рекомендую зробити файл:
+
+## `components/SchemeEditor/EdgesLayer.jsx`
+
+Нижче даю вже **переписану версію по новій моделі**.
+
+---
+
+## `EdgesLayer.jsx`
+
+```jsx
+"use client";
+
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+const eq = (a, b, eps = 0.001) => Math.abs(a - b) < eps;
+const key1 = (v) => Math.round(v * 10) / 10;
+
+// зібрати всі коліна (місця зміни орієнтації)
+function collectElbows(pts) {
+  const elbows = [];
+  const n = Math.floor(pts.length / 2);
+  if (n < 3) return elbows;
+
+  const isHoriz = (i) => {
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+    return Math.abs(y2 - y1) <= Math.abs(x2 - x1);
+  };
+
+  for (let i = 0; i < n - 2; i++) {
+    const h1 = isHoriz(i);
+    const h2 = isHoriz(i + 1);
+
+    if (h1 !== h2) {
+      const idx = i + 1;
+      elbows.push({
+        x: pts[2 * idx],
+        y: pts[2 * idx + 1],
+        idx,
+      });
+    }
+  }
+
+  return elbows;
+}
+
+export default function EdgesLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const hoveredEdgeId = useCanvasStore((s) => s.hoveredEdgeId);
+  const hoveredEdgeAnchorId = useCanvasStore((s) => s.hoveredEdgeAnchorId);
+  const mode = useCanvasStore((s) => s.mode);
+  const selection = useCanvasStore((s) => s.selection);
+
+  const setHoveredEdgeId = useCanvasStore((s) => s.setHoveredEdgeId);
+  const setHoveredEdgeAnchorId = useCanvasStore((s) => s.setHoveredEdgeAnchorId);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  // ---- «переможці» для прямих без зламів ----
+  const straightGroups = new Map();
+
+  edges.forEach((edge) => {
+    const p = edge.points || [];
+    if (p.length !== 4) return;
+
+    const [x1, y1, x2, y2] = p;
+
+    if (eq(x1, x2)) {
+      const key = `V:${key1(x1)}`;
+      const arr = straightGroups.get(key) || [];
+      arr.push({ id: edge.id, topY: Math.min(y1, y2) });
+      straightGroups.set(key, arr);
+    } else if (eq(y1, y2)) {
+      const key = `H:${key1(y1)}`;
+      const arr = straightGroups.get(key) || [];
+      arr.push({ id: edge.id, leftX: Math.min(x1, x2) });
+      straightGroups.set(key, arr);
+    }
+  });
+
+  const straightWinners = new Set();
+
+  for (const [key, arr] of straightGroups.entries()) {
+    if (!arr.length) continue;
+
+    if (key.startsWith("V:")) {
+      arr.sort((a, b) => a.topY - b.topY);
+      straightWinners.add(arr[0].id);
+    } else {
+      arr.sort((a, b) => a.leftX - b.leftX);
+      straightWinners.add(arr[0].id);
+    }
+  }
+
+  return (
+    <>
+      {edges.map((edge) => {
+        const pts = edge.points || [];
+        const isSelected =
+          selection?.type === "edge" && selection?.id === edge.id;
+
+        const routing = edge.data?.routing || {
+          startOffset: 20,
+          endOffset: 20,
+        };
+
+        const edgeAnchors = edge.data?.anchors || [];
+
+        const dirFrom = edge.source?.direction || "right";
+        const dirTo = edge.target?.direction || "right";
+
+        // --- Пряма лінія ---
+        if (pts.length === 4) {
+          const [x1, y1, x2, y2] = pts;
+          const isVert = eq(x1, x2);
+          const isHorz = eq(y1, y2);
+
+          if (isVert || isHorz) {
+            const show = straightWinners.has(edge.id);
+            const hx = isVert ? x1 : Math.min(x1, x2);
+            const hy = isVert ? Math.min(y1, y2) : y1;
+
+            return (
+              <Group key={edge.id}>
+                <Line
+                  points={pts}
+                  stroke={
+                    hoveredEdgeId === edge.id || isSelected ? "#2F80ED" : "black"
+                  }
+                  strokeWidth={
+                    hoveredEdgeId === edge.id || isSelected ? 4 : 2
+                  }
+                  lineJoin="round"
+                  lineCap="round"
+                  shadowColor={
+                    hoveredEdgeId === edge.id ? "#2F80ED" : "transparent"
+                  }
+                  shadowBlur={hoveredEdgeId === edge.id ? 8 : 0}
+                  onMouseEnter={(e) => {
+                    setHoveredEdgeId(edge.id);
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    setHoveredEdgeId(null);
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                  onMouseDown={(e) => {
+                    e.cancelBubble = true;
+                    setSelection({ type: "edge", id: edge.id });
+                  }}
+                  onClick={(e) => {
+                    e.cancelBubble = true;
+                    canvasController.handleEdgeClick(edge.id, e);
+                  }}
+                  onContextMenu={(e) => {
+                    canvasController.handleEdgeContextMenu(e, edge);
+                  }}
+                />
+
+                {show && (
+                  <Rect
+                    x={hx - 6}
+                    y={hy - 6}
+                    width={12}
+                    height={12}
+                    fill={
+                      hoveredEdgeId === edge.id ? "#F2C94C" : "#2D9CDB"
+                    }
+                    stroke="black"
+                    strokeWidth={1}
+                  />
+                )}
+
+                {edgeAnchors.map((anchor) => (
+                  <Circle
+                    key={anchor.id}
+                    x={anchor.x}
+                    y={anchor.y}
+                    radius={6}
+                    fill={
+                      mode === "add-connector" &&
+                      hoveredEdgeAnchorId === anchor.id
+                        ? "yellow"
+                        : "blue"
+                    }
+                    stroke="black"
+                    strokeWidth={1}
+                    onMouseEnter={(e) => {
+                      if (mode !== "add-connector") return;
+                      setHoveredEdgeAnchorId(anchor.id);
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor = "pointer";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      setHoveredEdgeAnchorId(null);
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor = "default";
+                      }
+                    }}
+                    onClick={(e) => {
+                      e.cancelBubble = true;
+                      canvasController.handleAnchorClick(anchor);
+                    }}
+                  />
+                ))}
+              </Group>
+            );
+          }
+        }
+
+        // --- Ламані ---
+        if (pts.length < 6) return null;
+
+        const elbows = collectElbows(pts);
+
+        // пропускаємо перше коліно-стік
+        const startElbow = elbows.length >= 2 ? elbows[1] : null;
+        const endElbow = elbows.length >= 1 ? elbows[elbows.length - 1] : null;
+
+        const sameElbow =
+          startElbow && endElbow && startElbow.idx === endElbow.idx;
+
+        const showStartHandle = !!startElbow;
+        const showEndHandle =
+          !!endElbow && (!sameElbow || (sameElbow && !showStartHandle));
+
+        return (
+          <Group key={edge.id}>
+            <Line
+              points={pts}
+              stroke={
+                hoveredEdgeId === edge.id || isSelected ? "#2F80ED" : "black"
+              }
+              strokeWidth={
+                hoveredEdgeId === edge.id || isSelected ? 4 : 2
+              }
+              lineJoin="round"
+              lineCap="round"
+              shadowColor={
+                hoveredEdgeId === edge.id ? "#2F80ED" : "transparent"
+              }
+              shadowBlur={hoveredEdgeId === edge.id ? 8 : 0}
+              onMouseEnter={(e) => {
+                setHoveredEdgeId(edge.id);
+                const stage = e.target.getStage();
+                if (stage?.container()?.style) {
+                  stage.container().style.cursor = "pointer";
+                }
+              }}
+              onMouseLeave={(e) => {
+                setHoveredEdgeId(null);
+                const stage = e.target.getStage();
+                if (stage?.container()?.style) {
+                  stage.container().style.cursor = "default";
+                }
+              }}
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: edge.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                canvasController.handleEdgeClick(edge.id, e);
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleEdgeContextMenu(e, edge);
+              }}
+            />
+
+            {showStartHandle && (
+              <Rect
+                x={startElbow.x - 6}
+                y={startElbow.y - 6}
+                width={12}
+                height={12}
+                fill={hoveredEdgeId === edge.id ? "#F2C94C" : "#2D9CDB"}
+                stroke="black"
+                strokeWidth={1}
+                draggable
+                dragBoundFunc={(pos) =>
+                  dirFrom === "left" || dirFrom === "right"
+                    ? { x: pos.x, y: startElbow.y - 6 }
+                    : { x: startElbow.x - 6, y: pos.y }
+                }
+                onDragMove={(e) => {
+                  const p = e.target.position();
+                  const baseX = pts[0];
+                  const baseY = pts[1];
+
+                  const raw =
+                    dirFrom === "left" || dirFrom === "right"
+                      ? Math.abs(p.x + 6 - baseX)
+                      : Math.abs(p.y + 6 - baseY);
+
+                  const desiredY =
+                    dirFrom === "top" || dirFrom === "bottom"
+                      ? p.y + 6
+                      : undefined;
+
+                  const desiredX =
+                    dirFrom === "left" || dirFrom === "right"
+                      ? p.x + 6
+                      : undefined;
+
+                  canvasController.updateEdgeOffset(
+                    edge.id,
+                    raw,
+                    "start",
+                    { desiredX, desiredY }
+                  );
+                }}
+              />
+            )}
+
+            {showEndHandle && (
+              <Rect
+                x={endElbow.x - 6}
+                y={endElbow.y - 6}
+                width={12}
+                height={12}
+                fill={hoveredEdgeId === edge.id ? "#F2C94C" : "#2D9CDB"}
+                stroke="black"
+                strokeWidth={1}
+                draggable
+                dragBoundFunc={(pos) =>
+                  dirTo === "left" || dirTo === "right"
+                    ? { x: pos.x, y: endElbow.y - 6 }
+                    : { x: endElbow.x - 6, y: pos.y }
+                }
+                onDragMove={(e) => {
+                  const p = e.target.position();
+                  const baseX = pts[pts.length - 2];
+                  const baseY = pts[pts.length - 1];
+
+                  const raw =
+                    dirTo === "left" || dirTo === "right"
+                      ? Math.abs(p.x + 6 - baseX)
+                      : Math.abs(p.y + 6 - baseY);
+
+                  const desiredY =
+                    dirTo === "top" || dirTo === "bottom"
+                      ? p.y + 6
+                      : undefined;
+
+                  const desiredX =
+                    dirTo === "left" || dirTo === "right"
+                      ? p.x + 6
+                      : undefined;
+
+                  canvasController.updateEdgeOffset(
+                    edge.id,
+                    raw,
+                    "end",
+                    { desiredX, desiredY }
+                  );
+                }}
+              />
+            )}
+
+            {edgeAnchors.map((anchor) => (
+              <Circle
+                key={anchor.id}
+                x={anchor.x}
+                y={anchor.y}
+                radius={6}
+                fill={
+                  mode === "add-connector" && hoveredEdgeAnchorId === anchor.id
+                    ? "yellow"
+                    : "blue"
+                }
+                stroke="black"
+                strokeWidth={1}
+                onMouseEnter={(e) => {
+                  if (mode !== "add-connector") return;
+                  setHoveredEdgeAnchorId(anchor.id);
+                  const stage = e.target.getStage();
+                  if (stage?.container()?.style) {
+                    stage.container().style.cursor = "pointer";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  setHoveredEdgeAnchorId(null);
+                  const stage = e.target.getStage();
+                  if (stage?.container()?.style) {
+                    stage.container().style.cursor = "default";
+                  }
+                }}
+                onClick={(e) => {
+                  e.cancelBubble = true;
+                  canvasController.handleAnchorClick(anchor);
+                }}
+              />
+            ))}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# Що треба змінити в store під цей файл
+
+Щоб цей компонент працював, у Zustand store треба мати такі поля:
+
+## у `useCanvasStore.js`
+
+```js
+hoveredEdgeId: null,
+hoveredEdgeAnchorId: null,
+
+setHoveredEdgeId: (hoveredEdgeId) => set({ hoveredEdgeId }),
+setHoveredEdgeAnchorId: (hoveredEdgeAnchorId) => set({ hoveredEdgeAnchorId }),
+```
+
+---
+
+# Що треба змінити в edge-моделі
+
+Цей новий `EdgesLayer` очікує, що edge виглядає приблизно так:
+
+```js
+{
+  id: "edge-1",
+  source: {
+    type: "node",
+    nodeId: "node-1",
+    direction: "right"
+  },
+  target: {
+    type: "node",
+    nodeId: "node-2",
+    direction: "left"
+  },
+  points: [100, 100, 150, 100, 150, 200, 220, 200],
+  data: {
+    routing: {
+      startOffset: 20,
+      endOffset: 20,
+    },
+    anchors: [
+      {
+        id: "a-1",
+        type: "edge",
+        edgeId: "edge-1",
+        kind: "free",
+        x: 150,
+        y: 140,
+        segIndex: 1,
+        t: 0.4,
+        direction: "auto",
+      }
+    ]
+  }
+}
+```
+
+---
+
+# Що треба змінити в controller
+
+Щоб цей `EdgesLayer` став повністю робочим, у `canvasController` потрібні такі методи:
+
+```js
+handleEdgeClick(edgeId, e)
+handleEdgeContextMenu(e, edge)
+handleAnchorClick(anchor)
+updateEdgeOffset(edgeId, raw, side, extra)
+```
+
+---
+
+# Мінімальні сигнатури для controller
+
+## `handleEdgeClick`
+
+```js
+handleEdgeClick(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== "add-anchor") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  const edge = store.edges.find((item) => item.id === edgeId);
+  if (!edge) return;
+
+  const closest = findClosestSegment(edge.points, pointer.x, pointer.y);
+
+  const newAnchor = {
+    id: crypto.randomUUID(),
+    type: "edge",
+    edgeId,
+    kind: "free",
+    x: closest.x,
+    y: closest.y,
+    segIndex: closest.segIndex,
+    t: closest.t,
+    direction: "auto",
+  };
+
+  const nextEdges = store.edges.map((item) =>
+    item.id === edgeId
+      ? {
+          ...item,
+          data: {
+            ...item.data,
+            anchors: [...(item.data?.anchors || []), newAnchor],
+          },
+        }
+      : item
+  );
+
+  store.setEdges(nextEdges);
+  store.resetMode();
+}
+```
+
+---
+
+## `handleEdgeContextMenu`
+
+```js
+handleEdgeContextMenu(e, edge) {
+  e.evt.preventDefault();
+
+  const store = useCanvasStore.getState();
+
+  store.setSelection({ type: "edge", id: edge.id });
+  store.openContextMenu(
+    {
+      top: e.evt.clientY,
+      left: e.evt.clientX,
+    },
+    {
+      type: "edge",
+      id: edge.id,
+    }
+  );
+}
+```
+
+---
+
+## `handleAnchorClick`
+
+```js
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== "add-connector") return;
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor);
+    return;
+  }
+
+  const newEdge = {
+    id: crypto.randomUUID(),
+    source: store.tempSource,
+    target: anchor,
+    points: [],
+    data: {
+      routing: {
+        startOffset: 20,
+        endOffset: 20,
+      },
+      anchors: [],
+    },
+  };
+
+  newEdge.points = buildEdgePath(newEdge, store.nodes, store.edges);
+
+  store.addEdge(newEdge);
+  store.setTempSource(null);
+  store.resetMode();
+}
+```
+
+---
+
+## `updateEdgeOffset`
+
+Тут уже йде перерахунок routing. Базова версія може бути така:
+
+```js
+updateEdgeOffset(edgeId, newOffset, side = "both", extra = {}) {
+  const store = useCanvasStore.getState();
+
+  const nextEdges = store.edges.map((edge) => {
+    if (edge.id !== edgeId) return edge;
+
+    const prevRouting = edge.data?.routing || {
+      startOffset: 20,
+      endOffset: 20,
+    };
+
+    let routing = { ...prevRouting };
+
+    if (side === "start") {
+      routing.startOffset = newOffset;
+    } else if (side === "end") {
+      routing.endOffset = newOffset;
+    } else {
+      routing.startOffset = newOffset;
+      routing.endOffset = newOffset;
+    }
+
+    const updatedEdge = {
+      ...edge,
+      data: {
+        ...edge.data,
+        routing,
+      },
+    };
+
+    return {
+      ...updatedEdge,
+      points: buildEdgePath(updatedEdge, store.nodes, store.edges),
+    };
+  });
+
+  store.setEdges(nextEdges);
+}
+```
+
+---
+
+# Що ще я б порадив трохи покращити
+
+У цьому переписаному `EdgesLayer` ще можна зробити один невеликий рефакторинг:
+
+замість одного великого компонента — розбити на:
+
+* `EdgeShape`
+* `EdgeHandles`
+* `EdgeAnchors`
+
+Але на поточному етапі це не обов’язково.
+Поки що головне — **перенести стару логіку на нову модель**, не втративши поведінку.
+
+---
+
+# Підсумок
+
+Твій старий `DiagramConnections.js` у новій архітектурі перетворюється на `EdgesLayer.jsx`, де:
+
+* `connections` → `edges`
+* `conn.additionalAnchors` → `edge.data.anchors`
+* `conn.fromExitDir / toExitDir` → `edge.source.direction / edge.target.direction`
+* `handleLineClick` → `handleEdgeClick`
+* `updateConnectionOffset` → `updateEdgeOffset`
+
+---
+
+Наступним логічним кроком буде вже **переписати твій старий `DiagramSymbols.js` під `NodesLayer.jsx`**, щоб обидві частини редактора були в одній новій моделі.
