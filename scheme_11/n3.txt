@@ -1,0 +1,492 @@
+Так. У новій архітектурі це треба робити не через сам `ToolPalette`, а через зв’язку:
+
+**ToolPalette → Zustand store (`activeTool`) → CanvasController (`handleStageMouseDown`) → store symbols**
+
+Тобто клік по іконці `rect` лише **вибирає інструмент**, а сам `rect` створюється вже **по кліку на canvas** у головному контролері.
+
+Нижче покажу повний мінімальний ланцюжок.
+
+---
+
+# 1. Store: activeTool + symbols
+
+Приклад спрощеного store.
+
+## `src/features/scheme-editor/model/editorStore.js`
+
+```js
+import { create } from "zustand";
+
+export const TOOL_IDS = {
+  SELECT: "select",
+  RECT: "rect",
+  CIRCLE: "circle",
+  CONNECTOR: "connector",
+  LINE_ANCHOR: "line-anchor",
+};
+
+function genId(prefix = "el") {
+  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+}
+
+export const useEditorStore = create((set) => ({
+  activeTool: TOOL_IDS.SELECT,
+
+  symbols: [],
+
+  setActiveTool: (tool) => set({ activeTool: tool }),
+  resetTool: () => set({ activeTool: TOOL_IDS.SELECT }),
+
+  addSymbol: (symbol) =>
+    set((state) => ({
+      symbols: [...state.symbols, symbol],
+    })),
+
+  addSymbolFromTool: ({ tool, x, y }) =>
+    set((state) => {
+      const base = createElementFromTool(tool, x, y);
+      if (!base) return state;
+
+      return {
+        symbols: [...state.symbols, base],
+      };
+    }),
+}));
+
+function createElementFromTool(tool, x, y) {
+  switch (tool) {
+    case TOOL_IDS.RECT:
+      return {
+        id: genId("rect"),
+        type: "rect",
+        x,
+        y,
+        width: 120,
+        height: 70,
+        rotation: 0,
+        fill: "#ffffff",
+        stroke: "#222222",
+        strokeWidth: 2,
+      };
+
+    case TOOL_IDS.CIRCLE:
+      return {
+        id: genId("circle"),
+        type: "circle",
+        x,
+        y,
+        radius: 35,
+        fill: "#ffffff",
+        stroke: "#222222",
+        strokeWidth: 2,
+      };
+
+    default:
+      return null;
+  }
+}
+```
+
+---
+
+# 2. ToolPalette: клік по rect лише активує tool
+
+У тебе вже є `onSelectTool`.
+Треба просто передати в нього `"rect"`.
+
+## Важливий принцип
+
+Ось це:
+
+```jsx
+onClick={() => onPick(type)}
+```
+
+у `ToolCard` — вже правильно.
+
+Тобто якщо в `ELEMENT_REGISTRY` є `rect`, то при кліку на іконку прямокутника викличеться:
+
+```js
+onSelectTool("rect")
+```
+
+Далі цей `onSelectTool` має вести в Zustand.
+
+---
+
+# 3. Батьківський компонент: зв’язати ToolPalette зі store
+
+Наприклад там, де рендериш toolbar + canvas.
+
+## `src/features/scheme-editor/ui/SchemeEditorShell.jsx`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import ToolPalette from "./toolbar/ToolPalette";
+import CanvasController from "../canvas/CanvasController";
+import { useEditorStore } from "../model/editorStore";
+
+export default function SchemeEditorShell() {
+  const [paletteOpen, setPaletteOpen] = useState(true);
+
+  const activeTool = useEditorStore((s) => s.activeTool);
+  const setActiveTool = useEditorStore((s) => s.setActiveTool);
+
+  return (
+    <>
+      <ToolPalette
+        open={paletteOpen}
+        activeTool={activeTool}
+        onToggle={() => setPaletteOpen((v) => !v)}
+        onSelectTool={setActiveTool}
+      />
+
+      <CanvasController />
+    </>
+  );
+}
+```
+
+---
+
+# 4. CanvasController: додавання елемента по кліку на порожній canvas
+
+Оце головне місце, де створюється `rect`.
+
+## `src/features/scheme-editor/canvas/CanvasController.jsx`
+
+```jsx
+"use client";
+
+import React, { useRef } from "react";
+import { Stage, Layer } from "react-konva";
+import { useEditorStore, TOOL_IDS } from "../model/editorStore";
+import DiagramSymbols from "./DiagramSymbols";
+
+export default function CanvasController() {
+  const stageRef = useRef(null);
+
+  const activeTool = useEditorStore((s) => s.activeTool);
+  const addSymbolFromTool = useEditorStore((s) => s.addSymbolFromTool);
+  const resetTool = useEditorStore((s) => s.resetTool);
+
+  const handleStageMouseDown = (e) => {
+    const stage = e.target.getStage();
+    if (!stage) return;
+
+    // створюємо елемент тільки при кліку по пустому canvas
+    if (e.target !== stage) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    // shape tools
+    if (activeTool === TOOL_IDS.RECT || activeTool === TOOL_IDS.CIRCLE) {
+      addSymbolFromTool({
+        tool: activeTool,
+        x: pointer.x,
+        y: pointer.y,
+      });
+
+      // якщо хочеш одноразове додавання -> повертаємось в select
+      resetTool();
+      return;
+    }
+
+    // інші режими типу connector / line-anchor оброблятимуться окремо
+  };
+
+  return (
+    <Stage
+      ref={stageRef}
+      width={1200}
+      height={800}
+      onMouseDown={handleStageMouseDown}
+      style={{ background: "#f8f8f8" }}
+    >
+      <Layer>
+        <DiagramSymbols />
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+# 5. DiagramSymbols: рендер масиву symbols зі store
+
+## `src/features/scheme-editor/canvas/DiagramSymbols.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { useEditorStore } from "../model/editorStore";
+import { Rect, Circle } from "react-konva";
+
+export default function DiagramSymbols() {
+  const symbols = useEditorStore((s) => s.symbols);
+
+  return (
+    <>
+      {symbols.map((el) => {
+        if (el.type === "rect") {
+          return (
+            <Rect
+              key={el.id}
+              x={el.x}
+              y={el.y}
+              width={el.width}
+              height={el.height}
+              fill={el.fill}
+              stroke={el.stroke}
+              strokeWidth={el.strokeWidth}
+              rotation={el.rotation || 0}
+              draggable
+            />
+          );
+        }
+
+        if (el.type === "circle") {
+          return (
+            <Circle
+              key={el.id}
+              x={el.x}
+              y={el.y}
+              radius={el.radius}
+              fill={el.fill}
+              stroke={el.stroke}
+              strokeWidth={el.strokeWidth}
+              draggable
+            />
+          );
+        }
+
+        return null;
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 6. Як це працює по кроках
+
+Для `rect` ланцюжок такий:
+
+1. Користувач натискає іконку `rect` у `ToolPalette`
+2. `ToolPalette` викликає `onSelectTool("rect")`
+3. `setActiveTool("rect")` записує це в Zustand
+4. Користувач клікає на порожній canvas
+5. `CanvasController.handleStageMouseDown()` бачить, що `activeTool === "rect"`
+6. Контролер бере координати кліку
+7. Викликає `addSymbolFromTool({ tool: "rect", x, y })`
+8. Store додає новий елемент у `symbols`
+9. `DiagramSymbols` автоматично перемальовується
+
+---
+
+# 7. Якщо у тебе вже є `ELEMENT_REGISTRY`, краще створювати елемент через нього
+
+Щоб не дублювати shape-метадані в store, можна зробити так:
+
+## `registry.js`
+
+```js
+export const ELEMENT_REGISTRY = {
+  rect: {
+    title: "Rectangle",
+    defaults: {
+      width: 120,
+      height: 70,
+      rotation: 0,
+      fill: "#ffffff",
+      stroke: "#222222",
+      strokeWidth: 2,
+    },
+  },
+  circle: {
+    title: "Circle",
+    defaults: {
+      radius: 35,
+      fill: "#ffffff",
+      stroke: "#222222",
+      strokeWidth: 2,
+    },
+  },
+};
+```
+
+## create factory
+
+```js
+import { ELEMENT_REGISTRY } from "../ui/graph/registry";
+
+function createElementFromTool(tool, x, y) {
+  const reg = ELEMENT_REGISTRY[tool];
+  if (!reg) return null;
+
+  return {
+    id: `${tool}_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+    type: tool,
+    x,
+    y,
+    ...reg.defaults,
+  };
+}
+```
+
+Це краще, бо всі дефолтні параметри shape лежать в одному місці.
+
+---
+
+# 8. Якщо canvas має viewport з zoom/pan
+
+Тоді є важливий момент: `pointer.x`, `pointer.y` — це координати stage, а не world coordinates шару.
+
+Тому якщо у тебе вже є `viewport` з `x/y/scale`, треба переводити координати.
+
+## приклад
+
+```js
+const viewport = useEditorStore.getState().viewport;
+
+const worldX = (pointer.x - viewport.x) / viewport.scale;
+const worldY = (pointer.y - viewport.y) / viewport.scale;
+```
+
+І тоді:
+
+```js
+addSymbolFromTool({
+  tool: activeTool,
+  x: worldX,
+  y: worldY,
+});
+```
+
+---
+
+## Оновлений handler для zoom/pan архітектури
+
+```jsx
+const viewport = useEditorStore((s) => s.viewport);
+
+const handleStageMouseDown = (e) => {
+  const stage = e.target.getStage();
+  if (!stage) return;
+
+  if (e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  if (activeTool === TOOL_IDS.RECT || activeTool === TOOL_IDS.CIRCLE) {
+    const x = (pointer.x - viewport.x) / viewport.scale;
+    const y = (pointer.y - viewport.y) / viewport.scale;
+
+    addSymbolFromTool({
+      tool: activeTool,
+      x,
+      y,
+    });
+
+    resetTool();
+  }
+};
+```
+
+---
+
+# 9. Якщо ти хочеш не одноразове, а багаторазове додавання rect
+
+Зараз я показав варіант:
+
+```js
+resetTool();
+```
+
+тобто після одного кліку інструмент скидається в `select`.
+
+Якщо хочеш режим “штампування”, просто прибери:
+
+```js
+resetTool();
+```
+
+І тоді:
+
+* вибрав `rect`
+* клікаєш багато разів
+* додається багато прямокутників
+
+---
+
+# 10. Найправильніша структура для тебе
+
+Я б радив так:
+
+```txt
+src/features/scheme-editor/
+  model/
+    editorStore.js
+
+  ui/
+    toolbar/
+      ToolPalette.jsx
+    graph/
+      registry.js
+
+  canvas/
+    CanvasController.jsx
+    DiagramSymbols.jsx
+```
+
+---
+
+# 11. Найкоротший практичний висновок
+
+Щоб додати `rect` по новій архітектурі, треба:
+
+* в `ToolPalette` вибирати `"rect"`
+* в Zustand зберігати `activeTool`
+* в `CanvasController` по кліку на порожній Stage створювати елемент
+* записувати його в `symbols`
+* в `DiagramSymbols` рендерити `symbols`
+
+---
+
+# 12. Готовий мінімальний шматок логіки
+
+Ось ядро, яке тобі реально треба:
+
+```jsx
+const activeTool = useEditorStore((s) => s.activeTool);
+const addSymbolFromTool = useEditorStore((s) => s.addSymbolFromTool);
+const viewport = useEditorStore((s) => s.viewport);
+
+const handleStageMouseDown = (e) => {
+  const stage = e.target.getStage();
+  if (!stage || e.target !== stage) return;
+
+  const pointer = stage.getPointerPosition();
+  if (!pointer) return;
+
+  if (activeTool === "rect") {
+    addSymbolFromTool({
+      tool: "rect",
+      x: (pointer.x - viewport.x) / viewport.scale,
+      y: (pointer.y - viewport.y) / viewport.scale,
+    });
+  }
+};
+```
+
+---
+
+Якщо хочеш, я далі можу вже показати це **точно під твої назви файлів**:
+`ToolPalette.jsx`, `CanvasController.jsx`, `editorStore.js`, і окремо як це підключити до твого `ELEMENT_REGISTRY`.

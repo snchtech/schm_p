@@ -1,0 +1,447 @@
+Так, тепер це краще зробити не “через локальний хук у Stage”, а через **Zustand + CanvasController**, щоб grid був частиною загальної canvas-архітектури.
+
+Нижче даю варіант саме **під оновлену архітектуру**, де:
+
+* **Zustand** зберігає стан grid
+* **CanvasController** читає цей стан і керує viewport
+* **GridLayer** тільки малює
+* toolbar / кнопки лише міняють store
+
+---
+
+# Що саме радив би зробити тепер
+
+## 1. Додати grid-state в Zustand
+
+Якщо в тебе є основний store редактора, додай туди окремий slice або просто блок для grid.
+
+### `store/editorStore.js`
+
+```js
+import { create } from "zustand";
+
+export const useEditorStore = create((set) => ({
+  viewport: {
+    x: 0,
+    y: 0,
+    scale: 1,
+  },
+
+  grid: {
+    visible: true,
+    size: 40,
+    subDiv: 4,
+    snapEnabled: false,
+  },
+
+  setViewport: (patch) =>
+    set((state) => ({
+      viewport: {
+        ...state.viewport,
+        ...patch,
+      },
+    })),
+
+  toggleGrid: () =>
+    set((state) => ({
+      grid: {
+        ...state.grid,
+        visible: !state.grid.visible,
+      },
+    })),
+
+  setGridVisible: (visible) =>
+    set((state) => ({
+      grid: {
+        ...state.grid,
+        visible,
+      },
+    })),
+
+  setGridSize: (size) =>
+    set((state) => ({
+      grid: {
+        ...state.grid,
+        size,
+      },
+    })),
+
+  setGridSubDiv: (subDiv) =>
+    set((state) => ({
+      grid: {
+        ...state.grid,
+        subDiv,
+      },
+    })),
+
+  toggleSnapToGrid: () =>
+    set((state) => ({
+      grid: {
+        ...state.grid,
+        snapEnabled: !state.grid.snapEnabled,
+      },
+    })),
+}));
+```
+
+---
+
+## 2. Зробити чисту утиліту побудови ліній grid
+
+Щоб Controller і Layer не містили формул.
+
+### `features/canvas/utils/buildGridLines.js`
+
+```js
+export function buildGridLines({
+  width,
+  height,
+  scale = 1,
+  offsetX = 0,
+  offsetY = 0,
+  gridSize = 40,
+  subDiv = 4,
+}) {
+  const safeScale = scale || 1;
+  const minorStep = gridSize / subDiv;
+
+  const startX = -offsetX / safeScale;
+  const startY = -offsetY / safeScale;
+  const endX = startX + width / safeScale;
+  const endY = startY + height / safeScale;
+
+  const lines = [];
+
+  const firstX = Math.floor(startX / minorStep) * minorStep;
+  const firstY = Math.floor(startY / minorStep) * minorStep;
+
+  for (let x = firstX; x <= endX; x += minorStep) {
+    const isMajor = Math.abs(x / gridSize - Math.round(x / gridSize)) < 0.0001;
+    lines.push({
+      points: [x, startY, x, endY],
+      major: isMajor,
+    });
+  }
+
+  for (let y = firstY; y <= endY; y += minorStep) {
+    const isMajor = Math.abs(y / gridSize - Math.round(y / gridSize)) < 0.0001;
+    lines.push({
+      points: [startX, y, endX, y],
+      major: isMajor,
+    });
+  }
+
+  return lines;
+}
+```
+
+---
+
+## 3. Окремий GridLayer
+
+Він не знає нічого про toolbar, store чи controller. Отримує тільки props.
+
+### `features/canvas/components/layers/GridLayer.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Layer, Line } from "react-konva";
+import { buildGridLines } from "@/features/canvas/utils/buildGridLines";
+
+export default function GridLayer({
+  width,
+  height,
+  viewport,
+  visible,
+  gridSize = 40,
+  subDiv = 4,
+}) {
+  const lines = useMemo(() => {
+    if (!visible) return [];
+
+    return buildGridLines({
+      width,
+      height,
+      scale: viewport.scale,
+      offsetX: viewport.x,
+      offsetY: viewport.y,
+      gridSize,
+      subDiv,
+    });
+  }, [width, height, viewport, visible, gridSize, subDiv]);
+
+  if (!visible) return null;
+
+  return (
+    <Layer listening={false}>
+      {lines.map((line, index) => (
+        <Line
+          key={index}
+          points={line.points}
+          stroke={line.major ? "#cfcfcf" : "#ebebeb"}
+          strokeWidth={line.major ? 1 : 0.5}
+          perfectDrawEnabled={false}
+        />
+      ))}
+    </Layer>
+  );
+}
+```
+
+---
+
+## 4. CanvasController має читати viewport і grid зі store
+
+Оце головний момент у новій архітектурі:
+**не Stage рахує grid**, а controller передає актуальний viewport у GridLayer.
+
+### `features/canvas/controllers/CanvasController.jsx`
+
+```jsx
+"use client";
+
+import React, { useRef, useState, useCallback } from "react";
+import { Stage, Layer } from "react-konva";
+import { useEditorStore } from "@/store/editorStore";
+import GridLayer from "@/features/canvas/components/layers/GridLayer";
+import ElementsLayer from "@/features/canvas/components/layers/ElementsLayer";
+
+export default function CanvasController() {
+  const stageRef = useRef(null);
+
+  const viewport = useEditorStore((s) => s.viewport);
+  const setViewport = useEditorStore((s) => s.setViewport);
+  const grid = useEditorStore((s) => s.grid);
+
+  const [stageSize, setStageSize] = useState({
+    width: 1200,
+    height: 800,
+  });
+
+  const handleWheel = useCallback((e) => {
+    e.evt.preventDefault();
+
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const oldScale = viewport.scale;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const scaleBy = 1.05;
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const newScale = direction > 0 ? oldScale * scaleBy : oldScale / scaleBy;
+
+    const mousePointTo = {
+      x: (pointer.x - viewport.x) / oldScale,
+      y: (pointer.y - viewport.y) / oldScale,
+    };
+
+    const newX = pointer.x - mousePointTo.x * newScale;
+    const newY = pointer.y - mousePointTo.y * newScale;
+
+    setViewport({
+      scale: newScale,
+      x: newX,
+      y: newY,
+    });
+  }, [viewport, setViewport]);
+
+  const handleDragEnd = useCallback((e) => {
+    setViewport({
+      x: e.target.x(),
+      y: e.target.y(),
+    });
+  }, [setViewport]);
+
+  return (
+    <Stage
+      ref={stageRef}
+      width={stageSize.width}
+      height={stageSize.height}
+      onWheel={handleWheel}
+    >
+      <GridLayer
+        width={stageSize.width}
+        height={stageSize.height}
+        viewport={viewport}
+        visible={grid.visible}
+        gridSize={grid.size}
+        subDiv={grid.subDiv}
+      />
+
+      <Layer
+        x={viewport.x}
+        y={viewport.y}
+        scaleX={viewport.scale}
+        scaleY={viewport.scale}
+        draggable
+        onDragEnd={handleDragEnd}
+      >
+        <ElementsLayer />
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+# Важливий архітектурний момент
+
+У тебе є два варіанти:
+
+### Варіант A — grid окремим Layer без transform
+
+Це те, що я показав вище.
+
+Плюс:
+
+* grid завжди під контролем
+* легко рахувати через viewport
+* чиста архітектура
+
+### Варіант B — grid всередині того ж transform Layer
+
+Теж можливо, але гірше:
+
+* grid сильніше зав’язується на внутрішню структуру canvas
+* важче контролювати продуктивність
+* менш чистий controller
+
+Для твоєї архітектури з **головним CanvasController** я б лишав **окремий GridLayer**.
+
+---
+
+## 5. Кнопку toggle винести окремо
+
+### `features/editor/components/GridToggleButton.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { useEditorStore } from "@/store/editorStore";
+
+export default function GridToggleButton() {
+  const visible = useEditorStore((s) => s.grid.visible);
+  const toggleGrid = useEditorStore((s) => s.toggleGrid);
+
+  return (
+    <button onClick={toggleGrid}>
+      {visible ? "Grid ON" : "Grid OFF"}
+    </button>
+  );
+}
+```
+
+---
+
+## 6. Якщо хочеш snap до grid — теж через store
+
+Тоді логіка drag елемента перевіряє `grid.snapEnabled`.
+
+### утиліта
+
+```js
+export function snapValueToGrid(value, gridSize) {
+  return Math.round(value / gridSize) * gridSize;
+}
+```
+
+### під час drag елемента
+
+```js
+import { useEditorStore } from "@/store/editorStore";
+import { snapValueToGrid } from "@/features/canvas/utils/snapValueToGrid";
+
+const grid = useEditorStore.getState().grid;
+
+if (grid.snapEnabled) {
+  node.x(snapValueToGrid(node.x(), grid.size));
+  node.y(snapValueToGrid(node.y(), grid.size));
+}
+```
+
+---
+
+# Як це правильно вписується у твою нову архітектуру
+
+Я б розклав так:
+
+```txt
+src/
+  store/
+    editorStore.js
+
+  features/
+    canvas/
+      controllers/
+        CanvasController.jsx
+      components/
+        layers/
+          GridLayer.jsx
+          ElementsLayer.jsx
+      utils/
+        buildGridLines.js
+        snapValueToGrid.js
+
+    editor/
+      components/
+        GridToggleButton.jsx
+        Toolbar.jsx
+```
+
+---
+
+# Що тут головне
+
+У новій схемі:
+
+* **Zustand** = джерело істини
+* **CanvasController** = координує Stage / viewport / layer transform
+* **GridLayer** = тільки відмальовка
+* **Toolbar button** = тільки зміна стану
+
+Тобто:
+
+**UI → store → controller/layers → render**
+
+а не
+
+**UI → напряму лізе в Konva**
+
+---
+
+# Що ще раджу одразу додати
+
+Щоб потім не переробляти, grid-стан краще тримати одразу таким:
+
+```js
+grid: {
+  visible: true,
+  size: 40,
+  subDiv: 4,
+  snapEnabled: false,
+  colorMinor: "#ebebeb",
+  colorMajor: "#cfcfcf",
+}
+```
+
+Тоді потім легко додаси:
+
+* selector розміру grid
+* зміни кольору
+* different grid presets
+* zoom-aware grid behavior
+
+---
+
+# Якщо хочеш, я можу одразу дати тобі наступним повідомленням вже готовий варіант у стилі твого редактора:
+
+1. **повний `editorStore.js` slice для grid + viewport**,
+2. **готовий `CanvasController.jsx`**,
+3. **готовий `GridLayer.jsx`**,
+4. і **toolbar кнопку під MUI**.

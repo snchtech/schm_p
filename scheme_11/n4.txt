@@ -1,0 +1,697 @@
+Так, це вже треба винести в **нову архітектуру навколо EditorCanvas**, а не тримати як окремий старий `CanvasArea`.
+
+Тобто зараз у тебе має бути такий поділ:
+
+* **Konva canvas** — тільки схема, вузли, зв’язки, selection
+* **sheet overlay UI** — таблиця, примітки, заголовок
+* **Zustand store** — зберігає дані таблиці, примітки, видимість заголовка
+* **modal components** — редагують store
+
+І головне: таблиця / примітки / заголовок у твоєму випадку краще робити **не всередині Konva**, а як **absolute HTML overlay** поверх контейнера канваса. Це простіше, стабільніше і ближче до того, як у тебе вже було.
+
+---
+
+# Що я бачу одразу
+
+У тебе зараз:
+
+* `EditorCanvas` — новий canvas
+* старі `SchemeTable`, `NotesBlock`, `CanvasHeader`
+* `AddNoteModal` у прикладі фактично дублює **форму таблиці**, а не форму примітки
+
+Тобто `AddNoteModal` зараз треба **переробити**, бо він не для note.
+
+---
+
+# Як правильно скласти це в новій архітектурі
+
+Я б зробив таку структуру:
+
+```txt
+src/features/scheme-editor/
+  model/
+    useCanvasStore.js
+
+  ui/
+    canvas/
+      EditorCanvas.jsx
+      NodesLayer.jsx
+      EdgesLayer.jsx
+      SelectionTransformer.jsx
+      ToolCursorPreview.jsx
+
+    sheet-overlay/
+      SheetOverlay.jsx
+      SchemeHeader.jsx
+      SchemeTable.jsx
+      NotesBlock.jsx
+
+    modals/
+      AddTableModal.jsx
+      EditNoteModal.jsx
+```
+
+---
+
+# 1. Додати стан в `useCanvasStore`
+
+Тобі треба, щоб store зберігав:
+
+* рядки таблиці
+* note
+* видимість заголовка
+* дані заголовка
+
+## `store/useCanvasStore.js`
+
+```js
+import { create } from "zustand";
+
+const defaultHeader = {
+  albumCode: "3.ТГ.000-СШ",
+  point: "55",
+  system: "Q1",
+  schemeName: "Схема розміщення системи Q1",
+  sheetNumber: "3",
+};
+
+export const useCanvasStore = create((set) => ({
+  stageRef: null,
+  layerRef: null,
+  apiRef: null,
+
+  activeTool: null,
+
+  nodes: [],
+  edges: [],
+
+  header: defaultHeader,
+  headerVisible: true,
+
+  tableRows: [],
+  note: "",
+
+  setStageRef: (ref) => set({ stageRef: ref }),
+  setLayerRef: (ref) => set({ layerRef: ref }),
+  setApiRef: (api) => set({ apiRef: api }),
+
+  setHeader: (patch) =>
+    set((state) => ({
+      header: {
+        ...state.header,
+        ...patch,
+      },
+    })),
+
+  toggleHeaderVisible: () =>
+    set((state) => ({
+      headerVisible: !state.headerVisible,
+    })),
+
+  setHeaderVisible: (visible) => set({ headerVisible: visible }),
+
+  addTableRow: (row) =>
+    set((state) => ({
+      tableRows: [...state.tableRows, row],
+    })),
+
+  updateTableRow: (index, nextRow) =>
+    set((state) => ({
+      tableRows: state.tableRows.map((row, i) => (i === index ? nextRow : row)),
+    })),
+
+  deleteTableRow: (index) =>
+    set((state) => ({
+      tableRows: state.tableRows.filter((_, i) => i !== index),
+    })),
+
+  setNote: (note) => set({ note }),
+}));
+```
+
+---
+
+# 2. EditorCanvas має стати контейнером для canvas + overlay
+
+Тобто не лише `Stage`, а спільний sheet-container.
+
+## `EditorCanvas.jsx`
+
+```jsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Stage, Layer } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { setupLayerZoomPan } from "@/lib/diagram/LayerZoom";
+
+import NodesLayer from "./NodesLayer";
+import EdgesLayer from "./EdgesLayer";
+import SelectionTransformer from "./SelectionTransformer";
+import ToolCursorPreview from "./ToolCursorPreview";
+import SheetOverlay from "../sheet-overlay/SheetOverlay";
+
+const SHEET_W = 1123;
+const SHEET_H = 794;
+
+export default function EditorCanvas() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const setStageRef = useCanvasStore((s) => s.setStageRef);
+  const setLayerRef = useCanvasStore((s) => s.setLayerRef);
+  const setApiRef = useCanvasStore((s) => s.setApiRef);
+  const activeTool = useCanvasStore((s) => s.activeTool);
+
+  useEffect(() => {
+    setStageRef(stageRef);
+    setLayerRef(layerRef);
+
+    if (!stageRef.current || !layerRef.current) return;
+
+    const api = setupLayerZoomPan(stageRef.current, layerRef.current, {
+      panMode: "mmb_or_space",
+    });
+
+    setApiRef(api);
+
+    return () => {
+      api?.destroy?.();
+    };
+  }, [setStageRef, setLayerRef, setApiRef]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const container = stage?.container();
+    if (!container) return;
+
+    container.style.cursor = activeTool ? "crosshair" : "default";
+  }, [activeTool]);
+
+  return (
+    <section
+      style={{
+        position: "relative",
+        width: SHEET_W,
+        height: SHEET_H,
+        margin: "auto",
+        border: "1px solid #ccc",
+        background: "#fff",
+        overflow: "hidden",
+      }}
+    >
+      <Stage
+        ref={stageRef}
+        width={SHEET_W}
+        height={SHEET_H}
+        onMouseDown={canvasController.handleStageMouseDown}
+        onMouseMove={canvasController.handleStageMouseMove}
+        onMouseEnter={canvasController.handleStageMouseEnter}
+        onMouseLeave={canvasController.handleStageMouseLeave}
+      >
+        <Layer ref={layerRef}>
+          <EdgesLayer />
+          <NodesLayer />
+          <SelectionTransformer />
+        </Layer>
+      </Stage>
+
+      <SheetOverlay />
+      <ToolCursorPreview />
+    </section>
+  );
+}
+```
+
+---
+
+# 3. Зробити єдиний overlay-компонент
+
+## `ui/sheet-overlay/SheetOverlay.jsx`
+
+```jsx
+"use client";
+
+import SchemeHeader from "./SchemeHeader";
+import SchemeTable from "./SchemeTable";
+import NotesBlock from "./NotesBlock";
+
+export default function SheetOverlay() {
+  return (
+    <>
+      <SchemeHeader />
+      <SchemeTable />
+      <NotesBlock />
+    </>
+  );
+}
+```
+
+---
+
+# 4. Заголовок, який приховується
+
+Тобто це не окремий canvas element, а overlay в абсолютному позиціонуванні.
+
+## `ui/sheet-overlay/SchemeHeader.jsx`
+
+```jsx
+"use client";
+
+import { Box, Typography, IconButton, Tooltip, Paper } from "@mui/material";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function SchemeHeader() {
+  const header = useCanvasStore((s) => s.header);
+  const headerVisible = useCanvasStore((s) => s.headerVisible);
+  const toggleHeaderVisible = useCanvasStore((s) => s.toggleHeaderVisible);
+
+  return (
+    <>
+      <Paper
+        elevation={2}
+        sx={{
+          position: "absolute",
+          top: 8,
+          right: 8,
+          zIndex: 20,
+        }}
+      >
+        <Tooltip title={headerVisible ? "Сховати заголовок" : "Показати заголовок"}>
+          <IconButton size="small" onClick={toggleHeaderVisible}>
+            {headerVisible ? <VisibilityOffIcon /> : <VisibilityIcon />}
+          </IconButton>
+        </Tooltip>
+      </Paper>
+
+      {headerVisible && (
+        <Box
+          sx={{
+            position: "absolute",
+            top: 16,
+            left: 16,
+            right: 120,
+            border: "1px solid #000",
+            bgcolor: "#fff",
+            px: 2,
+            py: 1.5,
+            zIndex: 10,
+          }}
+        >
+          <Typography variant="body2"><b>Альбом:</b> {header.albumCode}</Typography>
+          <Typography variant="body2"><b>Точка:</b> {header.point}</Typography>
+          <Typography variant="body2"><b>Система:</b> {header.system}</Typography>
+          <Typography variant="body2"><b>Назва:</b> {header.schemeName}</Typography>
+          <Typography variant="body2"><b>Аркуш:</b> {header.sheetNumber}</Typography>
+        </Box>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+# 5. Таблиця в новому підході
+
+У тебе таблиця зараз має жити не в локальному `useState`, а в store.
+
+## `ui/sheet-overlay/SchemeTable.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  IconButton,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  Tooltip,
+} from "@mui/material";
+
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteIcon from "@mui/icons-material/Delete";
+import AddIcon from "@mui/icons-material/Add";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import AddTableModal from "../modals/AddTableModal";
+
+export default function SchemeTable() {
+  const rows = useCanvasStore((s) => s.tableRows);
+  const addTableRow = useCanvasStore((s) => s.addTableRow);
+  const updateTableRow = useCanvasStore((s) => s.updateTableRow);
+  const deleteTableRow = useCanvasStore((s) => s.deleteTableRow);
+
+  const [openModal, setOpenModal] = useState(false);
+  const [editableIndex, setEditableIndex] = useState(null);
+
+  const editableRow = useMemo(() => {
+    if (editableIndex == null) return null;
+    return rows[editableIndex] || null;
+  }, [editableIndex, rows]);
+
+  const handleAddOrUpdate = (row) => {
+    if (editableIndex == null) addTableRow(row);
+    else updateTableRow(editableIndex, row);
+
+    setEditableIndex(null);
+    setOpenModal(false);
+  };
+
+  const handleOpenAdd = () => {
+    setEditableIndex(null);
+    setOpenModal(true);
+  };
+
+  const handleOpenEdit = (index) => {
+    setEditableIndex(index);
+    setOpenModal(true);
+  };
+
+  const bottomOffset = rows.length > 0 ? 180 : 60;
+
+  return (
+    <Box
+      sx={{
+        position: "absolute",
+        right: 10,
+        bottom: 10,
+        zIndex: 15,
+        maxWidth: 520,
+      }}
+    >
+      <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpenAdd}>
+        Додати рядок
+      </Button>
+
+      {rows.length > 0 && (
+        <TableContainer component={Paper} sx={{ mt: 1.5, maxHeight: 260 }}>
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>Позиція</TableCell>
+                <TableCell>Позначення</TableCell>
+                <TableCell>Найменування</TableCell>
+                <TableCell>Кількість</TableCell>
+                <TableCell>Примітка</TableCell>
+                <TableCell align="center">Дії</TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {rows.map((row, index) => (
+                <TableRow key={index}>
+                  <TableCell>{row.position}</TableCell>
+                  <TableCell>{row.designation}</TableCell>
+                  <TableCell>{row.name}</TableCell>
+                  <TableCell>{row.quantity}</TableCell>
+                  <TableCell>{row.note}</TableCell>
+                  <TableCell align="center">
+                    <Tooltip title="Редагувати">
+                      <IconButton onClick={() => handleOpenEdit(index)}>
+                        <EditIcon />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Видалити">
+                      <IconButton onClick={() => deleteTableRow(index)}>
+                        <DeleteIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+
+      <AddTableModal
+        open={openModal}
+        onClose={() => {
+          setOpenModal(false);
+          setEditableIndex(null);
+        }}
+        onAddRow={handleAddOrUpdate}
+        editableRow={editableRow}
+      />
+    </Box>
+  );
+}
+```
+
+---
+
+# 6. Примітки
+
+Тут теж дані мають жити в store, а не в локальному стані компонента.
+
+## `ui/sheet-overlay/NotesBlock.jsx`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import {
+  Box,
+  Typography,
+  IconButton,
+  Tooltip,
+} from "@mui/material";
+
+import NoteAddIcon from "@mui/icons-material/NoteAdd";
+import EditIcon from "@mui/icons-material/Edit";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import EditNoteModal from "../modals/EditNoteModal";
+
+export default function NotesBlock() {
+  const note = useCanvasStore((s) => s.note);
+  const tableRows = useCanvasStore((s) => s.tableRows);
+
+  const [open, setOpen] = useState(false);
+
+  const noteBottom = tableRows.length > 0 ? 190 : 70;
+
+  return (
+    <>
+      <Tooltip title={note ? "Редагувати примітку" : "Додати примітку"}>
+        <IconButton
+          color="primary"
+          onClick={() => setOpen(true)}
+          sx={{
+            position: "absolute",
+            right: 10,
+            bottom: noteBottom + 80,
+            zIndex: 16,
+            bgcolor: "#fff",
+            border: "1px solid",
+            borderColor: "divider",
+          }}
+        >
+          {note ? <EditIcon /> : <NoteAddIcon />}
+        </IconButton>
+      </Tooltip>
+
+      {note && (
+        <Box
+          sx={{
+            position: "absolute",
+            right: 10,
+            bottom: noteBottom,
+            border: "1px dashed gray",
+            p: 1,
+            backgroundColor: "#f9f9f9",
+            maxWidth: 260,
+            borderRadius: 1,
+            zIndex: 14,
+          }}
+        >
+          <Typography variant="caption" fontWeight="bold">
+            Примітка:
+          </Typography>
+          <Typography variant="body2">{note}</Typography>
+        </Box>
+      )}
+
+      <EditNoteModal open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+```
+
+---
+
+# 7. Нормальний modal для note
+
+Твій поточний `AddNoteModal` зараз заповнений полями таблиці. Це треба замінити.
+
+## `ui/modals/EditNoteModal.jsx`
+
+```jsx
+"use client";
+
+import React, { useEffect, useState } from "react";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+} from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function EditNoteModal({ open, onClose }) {
+  const note = useCanvasStore((s) => s.note);
+  const setNote = useCanvasStore((s) => s.setNote);
+
+  const [value, setValue] = useState("");
+
+  useEffect(() => {
+    if (open) setValue(note || "");
+  }, [open, note]);
+
+  const handleSubmit = () => {
+    setNote(value);
+    onClose?.();
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>{note ? "Редагувати примітку" : "Додати примітку"}</DialogTitle>
+
+      <DialogContent>
+        <TextField
+          autoFocus
+          fullWidth
+          multiline
+          minRows={4}
+          margin="dense"
+          label="Текст примітки"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Скасувати</Button>
+        <Button variant="contained" onClick={handleSubmit}>
+          Зберегти
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+```
+
+---
+
+# 8. Що робити з позицією примітки відносно таблиці
+
+У старому варіанті в тебе був `noteOffset`.
+
+У новому підході це не треба явно зберігати в стані, бо можна обчислювати від `tableRows.length`.
+
+Наприклад:
+
+```js
+const noteBottom = tableRows.length > 0 ? 190 : 70;
+```
+
+Або трохи точніше:
+
+```js
+const noteBottom = 70 + Math.min(tableRows.length, 6) * 28;
+```
+
+Тобто примітка не зберігає offset, а просто вираховує його на рендері.
+
+---
+
+# 9. Якщо хочеш, щоб заголовок не просто ховався, а взагалі не впливав на схему
+
+Тоді все вже ок, бо він overlay. Він не є частиною Konva layer і не впливає на zoom/pan об’єктів.
+
+---
+
+# 10. Важливий момент про zoom/pan
+
+Оскільки таблиця, note і header — це HTML overlay, а не елементи Konva:
+
+* вони **не будуть масштабуватись разом із canvas**
+* вони **завжди залишаться “аркушевими” UI-блоками**
+
+Для твого кейсу це зазвичай правильно, бо:
+
+* заголовок аркуша
+* таблиця
+* примітки
+
+це радше **оформлення листа**, а не графічні об’єкти схеми.
+
+---
+
+# 11. Якщо захочеш, щоб вони друкувались як частина листа
+
+Це теж нормально, бо вони лежать у тому ж контейнері `section` з фіксованими розмірами аркуша `1123 x 794`.
+
+---
+
+# 12. Що треба виправити прямо зараз
+
+Найперше:
+
+1. **переробити `AddNoteModal`** — зараз він помилково дублює таблицю
+2. **перенести `rows`, `note`, `headerVisible` у Zustand**
+3. **обгорнути Stage в sheet-container**
+4. **додати `SheetOverlay` поверх Stage**
+
+---
+
+# Мінімальний робочий результат
+
+Якщо дуже стисло, тобі зараз треба:
+
+* у `EditorCanvas` додати:
+
+```jsx
+<SheetOverlay />
+```
+
+* у `useCanvasStore` додати:
+
+```js
+tableRows, addTableRow, updateTableRow, deleteTableRow, note, setNote, headerVisible, toggleHeaderVisible
+```
+
+* замінити старий `AddNoteModal` на нормальний `EditNoteModal`
+
+---
+
+# Окремо звертаю увагу
+
+Ось цей файл:
+
+`src/features/scheme-editor/ui/modals/AddNoteModal/AddNoteModal.js`
+
+у тебе зараз **не відповідає своїй назві**.
+Його або:
+
+* перейменувати в `EditNoteModal`
+* або повністю переписати під note
+
+Бо зараз це фактично ще один `AddTableModal`.
+
+---
+
+Якщо хочеш, я можу наступним повідомленням зібрати тобі **готовий комплект файлів** у твоїх шляхах:
+`useCanvasStore.js`, `EditorCanvas.jsx`, `SheetOverlay.jsx`, `SchemeHeader.jsx`, `SchemeTable.jsx`, `NotesBlock.jsx`, `EditNoteModal.jsx`.

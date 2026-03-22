@@ -1,0 +1,739 @@
+Так, це вже треба робити не як “окремі кнопки над Stage”, а як **частину єдиної панелі інструментів** і через **єдиний active tool / canvas mode** в Zustand.
+Тобто логіка має бути така:
+
+* `ToolPalette` показує **shape tools** + **connection tools**
+* при кліку ти не викликаєш старі `startAddConnector()` напряму з UI-компонента, а переводиш редактор у потрібний **режим**
+* `CanvasController` або `DiagramEditorCanvas` читає цей режим зі store і вже там обробляє кліки по canvas / елементах
+
+Це і є правильний перехід зі старого підходу до нового “головного контролера”.
+
+---
+
+# 1. Що саме змінити концептуально
+
+У старому коді було так:
+
+* кнопка `Новий connector` → `S.startAddConnector()`
+* кнопка `Нова точка привязки на лінії` → `S.startAddLineAnchor()`
+
+У новій архітектурі краще зробити так:
+
+* toolbar не знає, **як саме** будуються зв’язки
+* toolbar лише виставляє **editor mode**
+* canvas controller знає, що робити в цьому mode
+
+Тобто замість:
+
+```js
+startAddConnector()
+startAddLineAnchor()
+```
+
+краще мати щось типу:
+
+```js
+setTool("connector")
+setTool("line-anchor")
+setTool("select")
+setTool("rect")
+setTool("ellipse")
+```
+
+або ще краще:
+
+```js
+setCanvasMode({ type: "tool", tool: "connector" })
+setCanvasMode({ type: "tool", tool: "line-anchor" })
+setCanvasMode({ type: "tool", tool: "rect" })
+setCanvasMode({ type: "idle" })
+```
+
+Але для простоти можна почати з одного поля `activeTool`.
+
+---
+
+# 2. Як я раджу організувати store
+
+Зараз у тебе вже є `activeTool` в `ToolPalette`. Його треба зробити **єдиним джерелом істини** в Zustand.
+
+## Приклад store
+
+### `src/features/scheme-editor/model/editorStore.js`
+
+```js
+import { create } from "zustand";
+
+export const TOOL_IDS = {
+  SELECT: "select",
+  CONNECTOR: "connector",
+  LINE_ANCHOR: "line-anchor",
+};
+
+export const useEditorStore = create((set) => ({
+  activeTool: TOOL_IDS.SELECT,
+
+  connectionDraft: null,
+  // приклад:
+  // {
+  //   fromElementId: "node-1",
+  //   fromAnchorId: "right",
+  // }
+
+  setActiveTool: (tool) => set({ activeTool: tool }),
+
+  resetTool: () => set({ activeTool: TOOL_IDS.SELECT }),
+
+  startConnectionDraft: (payload) =>
+    set({
+      connectionDraft: payload,
+    }),
+
+  clearConnectionDraft: () =>
+    set({
+      connectionDraft: null,
+    }),
+}));
+```
+
+---
+
+# 3. Як перенести кнопки зв’язків у ToolPalette
+
+Тобто в `ToolPalette` треба додати ще один блок, наприклад **Connections** або **Actions**.
+
+Зараз у тебе є `ELEMENT_REGISTRY` для shapes.
+Для connection-інструментів краще зробити **окремий registry**, бо це не shape, а mode/action tool.
+
+---
+
+## 3.1. Створи registry для connection tools
+
+### `src/features/scheme-editor/ui/toolbar/connectionTools.js`
+
+```jsx
+import HubIcon from "@mui/icons-material/Hub";
+import LinkIcon from "@mui/icons-material/Link";
+
+export const CONNECTION_TOOLS = {
+  connector: {
+    id: "connector",
+    title: "Створити зв'язок",
+    keywords: ["connection", "connector", "link", "edge"],
+    Icon: HubIcon,
+  },
+  "line-anchor": {
+    id: "line-anchor",
+    title: "Додати точку прив'язки",
+    keywords: ["anchor", "line", "point"],
+    Icon: LinkIcon,
+  },
+};
+```
+
+---
+
+## 3.2. Додай універсальну карточку для mode tools
+
+Тут вже не потрібен `ToolPreviewIcon`, бо це не shape preview, а просто action icon.
+
+### додатковий компонент у тому ж файлі або окремо
+
+```jsx
+function ModeToolCard({ item, active, onPick }) {
+  const Icon = item.Icon;
+
+  return (
+    <Tooltip title={item.title} placement="right">
+      <Box
+        sx={{
+          width: 56,
+          height: 56,
+          borderRadius: 2,
+          border: "1px solid",
+          borderColor: active ? "primary.main" : "divider",
+          bgcolor: active ? "action.selected" : "transparent",
+          overflow: "hidden",
+        }}
+      >
+        <IconButton
+          onClick={() => onPick(item.id)}
+          sx={{ width: "100%", height: "100%", borderRadius: 2 }}
+        >
+          <Icon fontSize="medium" />
+        </IconButton>
+      </Box>
+    </Tooltip>
+  );
+}
+```
+
+---
+
+## 3.3. Додай секцію в `ToolPalette`
+
+### імпорт
+
+```jsx
+import { CONNECTION_TOOLS } from "./connectionTools";
+```
+
+### всередині `ToolPalette`
+
+```jsx
+const connectionTypes = useMemo(() => Object.keys(CONNECTION_TOOLS), []);
+```
+
+І в JSX, наприклад **перед Favorites** або **після Search**:
+
+```jsx
+<SectionHeader
+  title="Connections"
+  right={
+    <Typography variant="caption" sx={{ opacity: 0.6, mr: 0.5 }}>
+      {connectionTypes.length}
+    </Typography>
+  }
+  open={true}
+  onToggle={() => {}}
+/>
+
+<Box sx={gridSx}>
+  {connectionTypes.map((type) => {
+    const item = CONNECTION_TOOLS[type];
+    return (
+      <ModeToolCard
+        key={type}
+        item={item}
+        active={activeTool === type}
+        onPick={onSelectTool}
+      />
+    );
+  })}
+</Box>
+
+<Divider />
+```
+
+Якщо хочеш згортання:
+
+```jsx
+const [showConnections, setShowConnections] = useState(true);
+```
+
+і тоді через `Collapse`.
+
+---
+
+# 4. Як тепер має працювати клік
+
+Оце найважливіше.
+
+У старому коді кнопка одразу запускала логіку “додавання connector”.
+У новому коді `ToolPalette` лише викликає:
+
+```js
+onSelectTool("connector")
+```
+
+або
+
+```js
+onSelectTool("line-anchor")
+```
+
+Далі `CanvasController` читає `activeTool` і вже вирішує, що робити при:
+
+* кліку по пустому canvas
+* кліку по node
+* кліку по line
+* drag
+* context menu
+
+---
+
+# 5. Як побудувати події в CanvasController
+
+Тобі потрібен один центральний dispatcher подій.
+
+---
+
+## 5.1. Логіка обробки кліку по Stage
+
+### приклад
+
+```jsx
+const activeTool = useEditorStore((s) => s.activeTool);
+const startConnectionDraft = useEditorStore((s) => s.startConnectionDraft);
+const clearConnectionDraft = useEditorStore((s) => s.clearConnectionDraft);
+const connectionDraft = useEditorStore((s) => s.connectionDraft);
+const resetTool = useEditorStore((s) => s.resetTool);
+```
+
+---
+
+## 5.2. Клік по node
+
+Умовно в `CanvasController` або в handler, який передаєш у shape:
+
+```js
+const handleNodeClick = (e, nodeModel) => {
+  if (activeTool === "connector") {
+    e.cancelBubble = true;
+
+    if (!connectionDraft) {
+      startConnectionDraft({
+        fromElementId: nodeModel.id,
+      });
+      return;
+    }
+
+    if (connectionDraft.fromElementId === nodeModel.id) {
+      clearConnectionDraft();
+      return;
+    }
+
+    // тут створюємо connection
+    createConnection({
+      fromId: connectionDraft.fromElementId,
+      toId: nodeModel.id,
+    });
+
+    clearConnectionDraft();
+    resetTool();
+    return;
+  }
+
+  if (activeTool === "line-anchor") {
+    // по node цей tool може нічого не робити
+    return;
+  }
+
+  // default select mode
+  selectElement(nodeModel.id);
+};
+```
+
+---
+
+## 5.3. Клік по line
+
+```js
+const handleLineClick = (e, lineModel) => {
+  if (activeTool === "line-anchor") {
+    e.cancelBubble = true;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    addAnchorToLine({
+      lineId: lineModel.id,
+      x: pointer.x,
+      y: pointer.y,
+    });
+
+    resetTool();
+    return;
+  }
+
+  selectElement(lineModel.id);
+};
+```
+
+---
+
+## 5.4. Клік по пустому canvas
+
+```js
+const handleStageMouseDown = (e) => {
+  const stage = e.target.getStage();
+  if (!stage) return;
+
+  const clickedOnEmpty = e.target === stage;
+  if (!clickedOnEmpty) return;
+
+  if (activeTool === "connector") {
+    // клік в пустоту скасовує побудову зв’язку
+    clearConnectionDraft();
+    return;
+  }
+
+  if (activeTool === "line-anchor") {
+    // теж можна скасувати
+    resetTool();
+    return;
+  }
+
+  clearSelection();
+};
+```
+
+---
+
+# 6. Якщо у тебе вже є головний CanvasController — як краще рознести код
+
+Я б зробив так:
+
+```txt
+src/features/scheme-editor/
+  model/
+    editorStore.js
+    tools.js
+
+  ui/
+    toolbar/
+      ToolPalette.jsx
+      connectionTools.js
+
+  canvas/
+    CanvasController.jsx
+    handlers/
+      handleNodeClick.js
+      handleLineClick.js
+      handleStageMouseDown.js
+```
+
+Або хоча б винести логіку в окремий hook:
+
+### `useCanvasToolHandlers.js`
+
+```js
+"use client";
+
+import { useEditorStore } from "@/features/scheme-editor/model/editorStore";
+
+export function useCanvasToolHandlers({
+  createConnection,
+  addAnchorToLine,
+  selectElement,
+  clearSelection,
+}) {
+  const activeTool = useEditorStore((s) => s.activeTool);
+  const connectionDraft = useEditorStore((s) => s.connectionDraft);
+  const startConnectionDraft = useEditorStore((s) => s.startConnectionDraft);
+  const clearConnectionDraft = useEditorStore((s) => s.clearConnectionDraft);
+  const resetTool = useEditorStore((s) => s.resetTool);
+
+  const handleNodeClick = (e, nodeModel) => {
+    if (activeTool === "connector") {
+      e.cancelBubble = true;
+
+      if (!connectionDraft) {
+        startConnectionDraft({ fromElementId: nodeModel.id });
+        return;
+      }
+
+      if (connectionDraft.fromElementId !== nodeModel.id) {
+        createConnection({
+          fromId: connectionDraft.fromElementId,
+          toId: nodeModel.id,
+        });
+      }
+
+      clearConnectionDraft();
+      resetTool();
+      return;
+    }
+
+    selectElement(nodeModel.id);
+  };
+
+  const handleLineClick = (e, lineModel) => {
+    if (activeTool === "line-anchor") {
+      e.cancelBubble = true;
+
+      const stage = e.target.getStage();
+      const pointer = stage?.getPointerPosition();
+      if (!pointer) return;
+
+      addAnchorToLine({
+        lineId: lineModel.id,
+        x: pointer.x,
+        y: pointer.y,
+      });
+
+      resetTool();
+      return;
+    }
+
+    selectElement(lineModel.id);
+  };
+
+  const handleStageMouseDown = (e) => {
+    const stage = e.target.getStage();
+    if (!stage) return;
+
+    if (e.target !== stage) return;
+
+    if (activeTool === "connector") {
+      clearConnectionDraft();
+      return;
+    }
+
+    if (activeTool === "line-anchor") {
+      resetTool();
+      return;
+    }
+
+    clearSelection();
+  };
+
+  return {
+    handleNodeClick,
+    handleLineClick,
+    handleStageMouseDown,
+  };
+}
+```
+
+---
+
+# 7. Як це підключити до твоїх shape / line компонентів
+
+Тобто в новій архітектурі shape-компонент не має всередині знати про store інструментів.
+Він просто отримує callback.
+
+## Наприклад node-компонент
+
+```jsx
+<ElementNode
+  key={node.id}
+  node={node}
+  onClick={(e) => handleNodeClick(e, node)}
+  onContextMenu={(e) => handleNodeContextMenu(e, node)}
+/>
+```
+
+## line-компонент
+
+```jsx
+<ConnectionLine
+  key={line.id}
+  line={line}
+  onClick={(e) => handleLineClick(e, line)}
+  onContextMenu={(e) => handleLineContextMenu(e, line)}
+/>
+```
+
+## Stage
+
+```jsx
+<Stage onMouseDown={handleStageMouseDown}>
+```
+
+---
+
+# 8. Що робити з підсвіченням активного інструмента
+
+Це вже автоматично:
+
+```jsx
+active={activeTool === type}
+```
+
+Тобто коли вибрано `connector`, у `ToolPalette` відповідна іконка буде активна.
+
+---
+
+# 9. Що раджу перейменувати
+
+Старі назви типу:
+
+* `startAddConnector`
+* `startAddLineAnchor`
+* `isAddingConnector`
+* `isAddingAnchor`
+
+у новій архітектурі вже краще не тягнути.
+
+Краще:
+
+* `activeTool === "connector"`
+* `activeTool === "line-anchor"`
+
+А якщо захочеш складніший режим, тоді:
+
+* `canvasMode`
+* `interactionMode`
+* `pendingConnection`
+
+---
+
+# 10. Практичний мінімум, який я б зробив зараз
+
+Щоб не ламати все одразу, зроби 3 кроки.
+
+### Крок 1
+
+У store заміни старі булеві прапори:
+
+```js
+isAddingConnector
+isAddingAnchor
+```
+
+на одне поле:
+
+```js
+activeTool
+```
+
+---
+
+### Крок 2
+
+Додай в `ToolPalette` окрему секцію `Connections` з іконками.
+
+---
+
+### Крок 3
+
+У `CanvasController` напиши 3 handler-и:
+
+* `handleStageMouseDown`
+* `handleNodeClick`
+* `handleLineClick`
+
+і в них зроби розгалуження по `activeTool`.
+
+---
+
+# 11. Як виглядатиме інтеграція саме у твій `ToolPalette`
+
+Ось спрощений фрагмент, який можна вставити майже одразу.
+
+### Додай імпорт
+
+```jsx
+import HubIcon from "@mui/icons-material/Hub";
+import LinearScaleIcon from "@mui/icons-material/LinearScale";
+```
+
+### Додай registry зверху файла
+
+```jsx
+const CONNECTION_TOOLS = {
+  connector: {
+    id: "connector",
+    title: "Створити зв'язок",
+    Icon: HubIcon,
+  },
+  "line-anchor": {
+    id: "line-anchor",
+    title: "Додати точку прив'язки",
+    Icon: LinearScaleIcon,
+  },
+};
+```
+
+### Додай компонент
+
+```jsx
+function ActionToolCard({ item, active, onPick }) {
+  const Icon = item.Icon;
+
+  return (
+    <Tooltip title={item.title} placement="top">
+      <Box
+        sx={{
+          width: 56,
+          height: 56,
+          borderRadius: 2,
+          border: "1px solid",
+          borderColor: active ? "primary.main" : "divider",
+          bgcolor: active ? "action.selected" : "transparent",
+        }}
+      >
+        <IconButton
+          onClick={() => onPick(item.id)}
+          sx={{ width: "100%", height: "100%", borderRadius: 2 }}
+        >
+          <Icon />
+        </IconButton>
+      </Box>
+    </Tooltip>
+  );
+}
+```
+
+### Додай state
+
+```jsx
+const [showConnections, setShowConnections] = useState(true);
+const connectionTypes = useMemo(() => Object.keys(CONNECTION_TOOLS), []);
+```
+
+### Додай секцію в Drawer
+
+```jsx
+<SectionHeader
+  title="Connections"
+  right={
+    <Typography variant="caption" sx={{ opacity: 0.6, mr: 0.5 }}>
+      {connectionTypes.length}
+    </Typography>
+  }
+  open={showConnections}
+  onToggle={() => setShowConnections((v) => !v)}
+/>
+
+<Collapse in={showConnections} timeout="auto" unmountOnExit>
+  <Box sx={gridSx}>
+    {connectionTypes.map((type) => {
+      const item = CONNECTION_TOOLS[type];
+      return (
+        <ActionToolCard
+          key={type}
+          item={item}
+          active={activeTool === type}
+          onPick={pickTool}
+        />
+      );
+    })}
+  </Box>
+</Collapse>
+
+<Divider />
+```
+
+---
+
+# 12. Головне правило для нового підходу
+
+Ось це важливо тримати як основу:
+
+* **ToolPalette**: тільки вибирає інструмент
+* **CanvasController**: вирішує, що означає клік
+* **Node/Line components**: тільки пробрасывають події нагору
+* **Store**: зберігає activeTool і тимчасовий draft для побудови зв’язку
+
+---
+
+# 13. Що я рекомендую ще одразу додати
+
+Для `connector` майже напевно тобі скоро знадобиться:
+
+* `connectionDraft`
+* preview-лінія від першого вузла до курсора
+* Escape для скасування режиму
+* повторне натискання на активний tool = скинути tool до `select`
+
+Наприклад у `pickTool` можна зробити так:
+
+```js
+const pickTool = (type) => {
+  onSelectTool(activeTool === type ? "select" : type);
+
+  setRecent((prev) => {
+    const next = [type, ...prev.filter((x) => x !== type)].slice(0, RECENT_LIMIT);
+    saveArray(STORAGE_REC, next);
+    return next;
+  });
+};
+```
+
+Але для `connector` / `line-anchor` recent, можливо, взагалі не треба. Їх можна не додавати в recent.
+
+---
+
+Якщо хочеш, я в наступному повідомленні можу вже зібрати тобі **готовий переписаний `ToolPalette.jsx`** з секцією `Connections`, і окремо дати **готовий `useCanvasToolHandlers.js`** під твій новий CanvasController.
