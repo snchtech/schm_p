@@ -1,0 +1,381 @@
+Так, ці обробники **можуть впливати опосередковано**, але головна причина майже напевно ось у чому:
+
+`container.style.cursor = "crosshair"` задає курсор **для DOM-контейнера stage**.
+А коли ти наводишся на фігуру, Konva часто сам або через твої hover/drag/listening механізми починає працювати вже через hit detection по shape, і курсор може:
+
+* або скидатися,
+* або перекриватися іншим значенням,
+* або браузер бере курсор не з контейнера так, як ти очікуєш.
+
+Тобто проблема не в самому `useEffect`, а в тому, що **курсор треба контролювати не один раз при зміні `activeTool`, а реактивно під час входу/руху/виходу курсора над stage і shape**.
+
+---
+
+## Чому зараз так стається
+
+Оцей код:
+
+```js
+useEffect(() => {
+  const stage = stageRef.current;
+  const container = stage?.container();
+  if (!container) return;
+
+  container.style.cursor = activeTool ? "crosshair" : "default";
+}, [activeTool]);
+```
+
+спрацьовує **лише коли змінюється `activeTool`**.
+
+Але далі:
+
+* ти наводишся на shape,
+* Konva обробляє pointer/mouse events,
+* десь курсор фактично перестає братися з контейнера,
+* а твій `useEffect` вже не викликається повторно.
+
+Тому поза фігурою курсор видно, а над фігурою — ні.
+
+---
+
+# Найкращий підхід
+
+Треба зробити **єдину функцію синхронізації курсора** і викликати її:
+
+* при зміні `activeTool`,
+* при `mouseEnter`,
+* при `mouseMove`,
+* при `mouseLeave`,
+* за потреби при `mouseOver`/`mouseOut` shape.
+
+---
+
+## Рішення 1 — централізовано керувати курсором через controller
+
+Зроби helper:
+
+```js
+function syncStageCursor() {
+  const store = useCanvasStore.getState();
+  const stage = store.stageRef?.current || store.stageRef;
+  const container = stage?.container?.();
+
+  if (!container) return;
+
+  container.style.cursor = store.activeTool ? "crosshair" : "default";
+}
+```
+
+І викликай його всюди, де потрібно.
+
+---
+
+## Оновлений controller
+
+```js
+function syncStageCursor() {
+  const store = useCanvasStore.getState();
+  const stage = store.stageRef?.current || store.stageRef;
+  const container = stage?.container?.();
+
+  if (!container) return;
+
+  container.style.cursor = store.activeTool ? "crosshair" : "default";
+}
+
+export const canvasController = {
+  handleStageMouseMove(e) {
+    const store = useCanvasStore.getState();
+    const { activeTool, layerRef } = store;
+
+    syncStageCursor();
+
+    if (!activeTool) return;
+
+    const stage = e.target.getStage();
+    const layer = layerRef?.current || layerRef;
+    if (!stage || !layer) return;
+
+    const point = getRelativePointer(stage, layer);
+    if (!point) return;
+
+    store.setPreviewPosition(point);
+  },
+
+  handleStageMouseEnter() {
+    const store = useCanvasStore.getState();
+    store.setIsPointerInsideStage(true);
+    syncStageCursor();
+  },
+
+  handleStageMouseLeave() {
+    const store = useCanvasStore.getState();
+    store.setIsPointerInsideStage(false);
+    store.setPreviewPosition(null);
+
+    const stage = store.stageRef?.current || store.stageRef;
+    const container = stage?.container?.();
+    if (container) {
+      container.style.cursor = "default";
+    }
+  },
+
+  handleStageMouseDown(e) {
+    const store = useCanvasStore.getState();
+    const { activeTool, layerRef } = store;
+
+    const stage = e.target.getStage();
+
+    if (activeTool) {
+      if (e.target !== stage) return;
+
+      const layer = layerRef?.current || layerRef;
+      if (!layer) return;
+
+      const point = getRelativePointer(stage, layer);
+      if (!point) return;
+
+      const node = createNodeFromTool(activeTool, point.x, point.y);
+      if (!node) return;
+
+      store.addNode(node);
+      store.resetActiveTool();
+
+      requestAnimationFrame(() => {
+        syncStageCursor();
+      });
+
+      return;
+    }
+
+    if (e.target === stage) {
+      store.clearSelection();
+      store.closeContextMenu?.();
+    }
+
+    syncStageCursor();
+  },
+};
+```
+
+---
+
+## І в `EditorCanvas` лишити теж синхронізацію
+
+```js
+useEffect(() => {
+  const stage = stageRef.current;
+  const container = stage?.container();
+  if (!container) return;
+
+  container.style.cursor = activeTool ? "crosshair" : "default";
+}, [activeTool]);
+```
+
+Цей `useEffect` нехай лишається, але він уже буде не єдиним місцем.
+
+---
+
+# Рішення 2 — якщо проблема саме при hover над shape
+
+Якщо у деяких shape є обробники типу:
+
+```js
+onMouseEnter={(e) => {
+  e.target.getStage().container().style.cursor = "move";
+}}
+onMouseLeave={(e) => {
+  e.target.getStage().container().style.cursor = "default";
+}}
+```
+
+то вони **перетирають твій `crosshair`**.
+
+Тоді треба всюди змінити логіку так:
+
+```js
+onMouseEnter={(e) => {
+  const store = useCanvasStore.getState();
+  const container = e.target.getStage().container();
+
+  container.style.cursor = store.activeTool ? "crosshair" : "pointer";
+}}
+
+onMouseLeave={(e) => {
+  const store = useCanvasStore.getState();
+  const container = e.target.getStage().container();
+
+  container.style.cursor = store.activeTool ? "crosshair" : "default";
+}}
+```
+
+Тобто будь-який hover shape має поважати `activeTool`.
+
+---
+
+# Що я підозрюю найбільше саме у тебе
+
+З опису:
+
+> при наведенні на фігуру курсі не видно тільки виходжу із фігури його знову видно
+
+це дуже схоже на одну з двох речей:
+
+### 1. Десь у shape є власний cursor-handling
+
+Наприклад:
+
+* `mouseenter`
+* `mouseover`
+* `dragstart`
+* `dragend`
+
+і там задається `cursor = "default"` або щось інше.
+
+### 2. Preview-елемент або overlay перехоплює події
+
+Якщо в тебе є `ToolCursorPreview`, він теж може впливати, особливо якщо:
+
+* він `listening={true}`,
+* він знаходиться поверх shape,
+* або має дивну hit-area.
+
+Тоді треба для preview поставити:
+
+```jsx
+listening={false}
+```
+
+для всіх його Konva-елементів.
+
+Це дуже важливо.
+
+---
+
+# Перевір `ToolCursorPreview`
+
+Якщо в тебе preview малюється окремим Konva shape, то він має бути таким:
+
+```jsx
+<Group listening={false}>
+  ...
+</Group>
+```
+
+або для кожного елемента:
+
+```jsx
+<Line listening={false} />
+<Circle listening={false} />
+<Group listening={false} />
+```
+
+Бо інакше preview може ловити hover і ламати нормальну поведінку курсора.
+
+---
+
+# Найпрактичніше виправлення
+
+Я б зробив так:
+
+## 1. Helper для курсора
+
+```js
+export function setCanvasCursor(cursor) {
+  const store = useCanvasStore.getState();
+  const stage = store.stageRef?.current || store.stageRef;
+  const container = stage?.container?.();
+  if (!container) return;
+  container.style.cursor = cursor;
+}
+
+export function syncCanvasCursor() {
+  const store = useCanvasStore.getState();
+  setCanvasCursor(store.activeTool ? "crosshair" : "default");
+}
+```
+
+---
+
+## 2. В controller викликати `syncCanvasCursor()`
+
+Особливо в:
+
+* `handleStageMouseEnter`
+* `handleStageMouseMove`
+* `handleStageMouseDown`
+
+---
+
+## 3. У всіх shape hover-обробниках врахувати `activeTool`
+
+---
+
+## 4. Для `ToolCursorPreview` поставити `listening={false}`
+
+---
+
+# Ще один хороший варіант
+
+Коли активний tool, можна взагалі **відключити hover-cursor логіку у shape**.
+
+Наприклад:
+
+```js
+const activeTool = useCanvasStore((s) => s.activeTool);
+
+const handleNodeMouseEnter = (e) => {
+  if (activeTool) return;
+  e.target.getStage().container().style.cursor = "pointer";
+};
+
+const handleNodeMouseLeave = (e) => {
+  if (activeTool) {
+    e.target.getStage().container().style.cursor = "crosshair";
+    return;
+  }
+  e.target.getStage().container().style.cursor = "default";
+};
+```
+
+Це дуже чистий підхід:
+
+* коли режим вставки активний — завжди `crosshair`,
+* коли не активний — нормальний pointer/default для взаємодії з фігурами.
+
+---
+
+# Висновок
+
+Твій `useEffect` сам по собі нормальний, але він **недостатній**.
+Проблема майже точно в одному з цих місць:
+
+1. hover-обробники shape перезаписують курсор,
+2. `ToolCursorPreview` перехоплює події,
+3. курсор треба синхронізувати не лише при зміні `activeTool`, а й під час mouse events.
+
+---
+
+Ось мінімум, що я б перевірив прямо зараз:
+
+```jsx
+<Group listening={false}> ...preview... </Group>
+```
+
+і додав би в controller:
+
+```js
+handleStageMouseMove() {
+  syncStageCursor();
+  ...
+}
+
+handleStageMouseEnter() {
+  ...
+  syncStageCursor();
+}
+```
+
+і у всіх `onMouseEnter/onMouseLeave` shape перевірку на `activeTool`.
+
+Якщо хочеш, я можу одразу показати, **як правильно перебудувати `EditorCanvas`, `NodesLayer` і `ToolCursorPreview`, щоб курсор працював стабільно у всіх режимах**.

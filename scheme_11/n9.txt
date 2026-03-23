@@ -1,0 +1,249 @@
+Так само: приводимо до формату `({ node })` і додаємо anchors у `registry`.
+
+## Оновлений `TwoTrianglesZigzag.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Path, Rect } from "react-konva";
+
+export const TWO_TRIANGLES_ZIGZAG_MODEL = {
+  VIEWBOX_WIDTH: 200,
+  VIEWBOX_HEIGHT: 140,
+
+  LEFT_TRIANGLE: [30, 40, 30, 110, 100, 75],
+  RIGHT_TRIANGLE: [170, 40, 170, 110, 100, 75],
+
+  ZIGZAG_PATH:
+    "M100 75 L100 60 L90 52 L110 44 L90 36 L110 28 L100 20 L100 12",
+
+  TOP_CAP: {
+    x: 90,
+    y: 0,
+    w: 20,
+    h: 14,
+  },
+
+  APEX: {
+    x: 100,
+    y: 75,
+  },
+
+  TOP_CENTER: {
+    x: 100,
+    y: 0,
+  },
+
+  ZIGZAG_END: {
+    x: 100,
+    y: 12,
+  },
+};
+
+export default function TwoTrianglesZigzag({ node }) {
+  const scale = node?.data?.scale || 1;
+  const stroke = node?.style?.stroke || "black";
+  const strokeWidth = node?.style?.strokeWidth || 10;
+
+  const M = TWO_TRIANGLES_ZIGZAG_MODEL;
+
+  return (
+    <Group scaleX={scale} scaleY={scale}>
+      <Line
+        points={M.LEFT_TRIANGLE}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Line
+        points={M.RIGHT_TRIANGLE}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Path
+        data={M.ZIGZAG_PATH}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+        fillEnabled={false}
+      />
+
+      <Rect
+        x={M.TOP_CAP.x}
+        y={M.TOP_CAP.y}
+        width={M.TOP_CAP.w}
+        height={M.TOP_CAP.h}
+        fill={stroke}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+## Що додати в `registry.js`
+
+Якщо тобі потрібна одна точка зверху, то найпростіше так:
+
+```js
+import TwoTrianglesZigzag, {
+  TWO_TRIANGLES_ZIGZAG_MODEL,
+} from "./TwoTrianglesZigzag";
+```
+
+і в `ELEMENT_REGISTRY`:
+
+```js
+twoTrianglesZigzag: {
+  component: TwoTrianglesZigzag,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+    const M = TWO_TRIANGLES_ZIGZAG_MODEL;
+
+    return [
+      {
+        id: `${node.id}-top`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top",
+        x: M.TOP_CENTER.x * scale,
+        y: M.TOP_CENTER.y * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+## Якщо хочеш кілька anchor-точок
+
+Для цієї іконки логічно можуть бути 3 точки:
+
+* верхня на ковпачку
+* центральна в apex
+* нижня умовно в центрі фігури
+
+Ось варіант:
+
+```js
+twoTrianglesZigzag: {
+  component: TwoTrianglesZigzag,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+    const M = TWO_TRIANGLES_ZIGZAG_MODEL;
+
+    return [
+      {
+        id: `${node.id}-top`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top",
+        x: M.TOP_CENTER.x * scale,
+        y: M.TOP_CENTER.y * scale,
+      },
+      {
+        id: `${node.id}-apex`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "center",
+        x: M.APEX.x * scale,
+        y: M.APEX.y * scale,
+      },
+      {
+        id: `${node.id}-zigzagEnd`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top-inner",
+        x: M.ZIGZAG_END.x * scale,
+        y: M.ZIGZAG_END.y * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+## Що саме тут змінилось
+
+З цього компонента ти фактично прибрав би старий API:
+
+```js
+x = 0,
+y = 0,
+scale = 1,
+stroke = "black",
+strokeWidth = 10,
+```
+
+і замінив на:
+
+```js
+function TwoTrianglesZigzag({ node })
+```
+
+А всередині читаєш:
+
+```js
+const scale = node?.data?.scale || 1;
+const stroke = node?.style?.stroke || "black";
+const strokeWidth = node?.style?.strokeWidth || 10;
+```
+
+---
+
+## Який node тепер очікується
+
+```js
+{
+  id: "zigzag-1",
+  type: "twoTrianglesZigzag",
+  position: { x: 300, y: 180 },
+  data: {
+    scale: 1
+  },
+  style: {
+    stroke: "black",
+    strokeWidth: 10
+  }
+}
+```
+
+---
+
+## Рекомендація по anchor для цієї іконки
+
+Для конекторів я б радив не `TOP_CENTER.y = 0`, а або:
+
+* `ZIGZAG_END (100, 12)` — якщо конектор має “чіплятися” до кінця зигзага
+* `TOP_CENTER (100, 0)` — якщо він має чіплятися до верхнього краю ковпачка
+
+Тобто найчастіше кращий варіант буде такий:
+
+```js
+{
+  id: `${node.id}-top`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "top",
+  x: M.ZIGZAG_END.x * scale,
+  y: M.ZIGZAG_END.y * scale,
+}
+```
+
+бо він ближчий до реальної “лінії підключення”.
+
+Хочеш — я одразу так само перероблю ще й `RectShape`/`CircleShape` під той самий єдиний контракт, щоб у тебе весь registry став однорідним.

@@ -1,0 +1,476 @@
+Добре. Найкраще зараз **уніфікувати всі shape-компоненти під один контракт**:
+
+* `NodesLayer` передає тільки `node`
+* shape сам читає `node.position`, `node.data`, `node.style`
+* `registry` зберігає:
+
+  * `component`
+  * `getAnchors(node)`
+
+Тоді всі елементи працюють однаково.
+
+---
+
+# Який формат робимо
+
+## Shape-компонент
+
+```jsx
+<Shape node={node} />
+```
+
+а всередині:
+
+```js
+const scale = node.data?.scale || 1;
+const stroke = node.style?.stroke || "black";
+```
+
+---
+
+# 1. `TwoTrianglesArrowDown.jsx`
+
+Оновлений під формат `({ node })`:
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Rect } from "react-konva";
+
+export const TWO_TRIANGLES_ARROW_DOWN_MODEL = {
+  APEX_X: 100,
+  APEX_Y: 85,
+
+  SHAFT_X: 96,
+  SHAFT_Y: 10,
+  SHAFT_W: 8,
+  SHAFT_H: 55,
+
+  WIDTH: 200,
+  HEIGHT: 150,
+};
+
+export default function TwoTrianglesArrowDown({ node }) {
+  const scale = node?.data?.scale || 1;
+  const stroke = node?.style?.stroke || "black";
+  const strokeWidth = node?.style?.strokeWidth || 8;
+  const arrowFill = node?.style?.arrowFill || "black";
+
+  const M = TWO_TRIANGLES_ARROW_DOWN_MODEL;
+
+  return (
+    <Group scaleX={scale} scaleY={scale}>
+      <Line
+        points={[30, 50, 30, 120, M.APEX_X, M.APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Line
+        points={[170, 50, 170, 120, M.APEX_X, M.APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Rect
+        x={M.SHAFT_X}
+        y={M.SHAFT_Y}
+        width={M.SHAFT_W}
+        height={M.SHAFT_H}
+        fill={arrowFill}
+      />
+
+      <Line
+        points={[100, 90, 85, 65, 115, 65]}
+        closed
+        fill={arrowFill}
+        strokeEnabled={false}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# 2. `MonitorCrossIcon.jsx`
+
+Так само в єдиному форматі:
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Rect, Line, Shape } from "react-konva";
+
+export const MONITOR_CROSS_MODEL = {
+  VIEWBOX_WIDTH: 65,
+  VIEWBOX_HEIGHT: 62,
+
+  TOP_RECT: {
+    x: 10,
+    y: 2,
+    w: 48,
+    h: 18,
+  },
+
+  STAND: {
+    x1: 34,
+    y1: 20,
+    x2: 34,
+    y2: 45,
+  },
+};
+
+export default function MonitorCrossIcon({ node }) {
+  const scale = node?.data?.scale || 1;
+  const stroke = node?.style?.stroke || "black";
+  const strokeWidth = node?.style?.strokeWidth || 2.5;
+
+  const M = MONITOR_CROSS_MODEL;
+
+  return (
+    <Group scaleX={scale} scaleY={scale}>
+      <Rect
+        x={M.TOP_RECT.x}
+        y={M.TOP_RECT.y}
+        width={M.TOP_RECT.w}
+        height={M.TOP_RECT.h}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      <Rect
+        x={M.TOP_RECT.x}
+        y={M.TOP_RECT.y}
+        width={M.TOP_RECT.w}
+        height={8}
+        fill={stroke}
+        strokeEnabled={false}
+      />
+
+      <Line
+        points={[M.STAND.x1, M.STAND.y1, M.STAND.x2, M.STAND.y2]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="square"
+      />
+
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(2, 32);
+          ctx.lineTo(2, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(62, 32);
+          ctx.lineTo(62, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+
+      <Line
+        points={[2, 58, 62, 32]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+      <Line
+        points={[62, 58, 2, 32]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# 3. `registry.js`
+
+Тепер registry виглядає акуратно і однаково для обох shape:
+
+```js
+import TwoTrianglesArrowDown, {
+  TWO_TRIANGLES_ARROW_DOWN_MODEL,
+} from "./TwoTrianglesArrowDown";
+
+import MonitorCrossIcon, {
+  MONITOR_CROSS_MODEL,
+} from "./MonitorCrossIcon";
+
+import RectShape from "./RectShape";
+import CircleShape from "./CircleShape";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    component: RectShape,
+    getAnchors: (node) => {
+      const { width = 0, height = 0 } = node.data || {};
+
+      return [
+        {
+          id: `${node.id}-top`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: width / 2,
+          y: 0,
+        },
+        {
+          id: `${node.id}-bottom`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "bottom",
+          x: width / 2,
+          y: height,
+        },
+        {
+          id: `${node.id}-left`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "left",
+          x: 0,
+          y: height / 2,
+        },
+        {
+          id: `${node.id}-right`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "right",
+          x: width,
+          y: height / 2,
+        },
+      ];
+    },
+  },
+
+  circle: {
+    component: CircleShape,
+    getAnchors: (node) => {
+      const r = node.data?.radius || 0;
+
+      return [
+        {
+          id: `${node.id}-top`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: r,
+          y: 0,
+        },
+        {
+          id: `${node.id}-bottom`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "bottom",
+          x: r,
+          y: r * 2,
+        },
+        {
+          id: `${node.id}-left`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "left",
+          x: 0,
+          y: r,
+        },
+        {
+          id: `${node.id}-right`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "right",
+          x: r * 2,
+          y: r,
+        },
+      ];
+    },
+  },
+
+  twoTrianglesArrowDown: {
+    component: TwoTrianglesArrowDown,
+    getAnchors: (node) => {
+      const scale = node.data?.scale || 1;
+      const M = TWO_TRIANGLES_ARROW_DOWN_MODEL;
+
+      return [
+        {
+          id: `${node.id}-arrowTop`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: (M.SHAFT_X + M.SHAFT_W / 2) * scale,
+          y: M.SHAFT_Y * scale,
+        },
+      ];
+    },
+  },
+
+  monitorCrossIcon: {
+    component: MonitorCrossIcon,
+    getAnchors: (node) => {
+      const scale = node.data?.scale || 1;
+      const M = MONITOR_CROSS_MODEL;
+
+      return [
+        {
+          id: `${node.id}-topRectCenter`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: (M.TOP_RECT.x + M.TOP_RECT.w / 2) * scale,
+          y: (M.TOP_RECT.y + M.TOP_RECT.h / 2) * scale,
+        },
+      ];
+    },
+  },
+};
+```
+
+---
+
+# 4. Як тепер міняється `NodesLayer`
+
+Раніше ти використовував `ELEMENT_COMPONENTS`, тепер треба перейти на `ELEMENT_REGISTRY`.
+
+## Було
+
+```js
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+};
+```
+
+це можна прибрати.
+
+---
+
+## Має бути
+
+```js
+import { ELEMENT_REGISTRY } from "@/components/graph/registry";
+```
+
+---
+
+## Було
+
+```js
+const Shape = ELEMENT_COMPONENTS[node.type];
+const anchors = getNodeAnchors(node);
+```
+
+## Має бути
+
+```js
+const definition = ELEMENT_REGISTRY[node.type];
+const Shape = definition?.component;
+const anchors = definition?.getAnchors?.(node) || [];
+```
+
+---
+
+# 5. Рендер shape
+
+Тепер не так:
+
+```jsx
+{Shape && <Shape node={node} />}
+```
+
+це якраз лишається правильним.
+Головне, щоб **усі shape були у форматі `({ node })`**.
+
+---
+
+# 6. Що ще важливо узгодити в даних node
+
+Тепер бажано, щоб node мав приблизно таку структуру:
+
+```js
+{
+  id: "n1",
+  type: "monitorCrossIcon",
+  position: { x: 100, y: 200 },
+  data: {
+    scale: 1
+  },
+  style: {
+    stroke: "black",
+    strokeWidth: 2.5
+  }
+}
+```
+
+або для стрілки:
+
+```js
+{
+  id: "n2",
+  type: "twoTrianglesArrowDown",
+  position: { x: 300, y: 150 },
+  data: {
+    scale: 1
+  },
+  style: {
+    stroke: "black",
+    strokeWidth: 8,
+    arrowFill: "black"
+  }
+}
+```
+
+---
+
+# 7. Що це тобі дає
+
+Після цього в тебе буде нормальна схема:
+
+* `registry` знає, **який shape рендерити**
+* `registry` знає, **де його anchors**
+* `NodesLayer` нічого не знає про геометрію конкретного елемента
+* shape не містить логіку hover/click для анкерів
+* усі нові елементи додаються однаково
+
+---
+
+# 8. Я б радив наступний крок
+
+Після цього вже логічно винести один node в окремий компонент `NodeItem`, бо зараз у тебе в `nodes.map(...)` використовуються хуки всередині циклу, а це небезпечно.
+
+Тобто наступний чистий крок:
+
+* `NodesLayer.jsx` — тільки map
+* `NodeItem.jsx` — `useRef`, `useEffect`, рендер shape, selection, anchors
+
+Якщо хочеш, я можу одразу написати тобі готовий `NodeItem.jsx` + оновлений `NodesLayer.jsx`.

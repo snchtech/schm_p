@@ -1,0 +1,389 @@
+Так, цей компонент треба **очистити від логіки анкерів**.
+Тобто:
+
+* **викинути** `showAnchors`, `onAnchorClick`, `onAnchorHover`
+* **викинути** рендер `<Rect />` для anchor
+* **викинути** `TOP_ANCHOR_X`, `TOP_ANCHOR_Y`, `ANCHOR_R` з UI-компонента
+* **додати** опис anchor у `registry`
+
+Нижче покажу готово.
+
+---
+
+# 1. Що прибрати з `TwoTrianglesArrowDown`
+
+Ось це **прибираємо**:
+
+```jsx
+showAnchors = true,
+onAnchorClick,
+onAnchorHover,
+```
+
+Ось це теж **прибираємо**:
+
+```jsx
+const TOP_ANCHOR_X = SHAFT_X + SHAFT_W / 2;
+const TOP_ANCHOR_Y = SHAFT_Y;
+
+const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+```
+
+І весь цей блок **повністю викидаємо**:
+
+```jsx
+{showAnchors && (
+  <Rect
+    x={TOP_ANCHOR_X - ANCHOR_R}
+    y={TOP_ANCHOR_Y - ANCHOR_R}
+    width={ANCHOR_R * 2}
+    height={ANCHOR_R * 2}
+    fill="#fff"
+    stroke={stroke}
+    strokeWidth={2}
+    listening
+    onMouseEnter={() => {
+      document.body.style.cursor = "crosshair";
+      onAnchorHover?.({ id: "arrowTop", x: TOP_ANCHOR_X, y: TOP_ANCHOR_Y });
+    }}
+    onMouseLeave={() => {
+      document.body.style.cursor = "default";
+      onAnchorHover?.(null);
+    }}
+    onMouseDown={(e) => (e.cancelBubble = true)}
+    onClick={(e) => {
+      e.cancelBubble = true;
+      onAnchorClick?.({ id: "arrowTop", x: TOP_ANCHOR_X, y: TOP_ANCHOR_Y });
+    }}
+  />
+)}
+```
+
+---
+
+# 2. Очищений компонент `TwoTrianglesArrowDown`
+
+Ось так він має виглядати після переробки:
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line, Rect } from "react-konva";
+
+/**
+ * TwoTrianglesArrowDown
+ * тільки рендер shape
+ * anchors тепер описуються в registry
+ */
+export default function TwoTrianglesArrowDown({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 8,
+  arrowFill = "black",
+}) {
+  // Координати з SVG viewBox 0 0 200 150
+  const APEX_X = 100;
+  const APEX_Y = 85;
+
+  // Arrow shaft
+  const SHAFT_X = 96;
+  const SHAFT_Y = 10;
+  const SHAFT_W = 8;
+  const SHAFT_H = 55;
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      <Line
+        points={[30, 50, 30, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Line
+        points={[170, 50, 170, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Rect
+        x={SHAFT_X}
+        y={SHAFT_Y}
+        width={SHAFT_W}
+        height={SHAFT_H}
+        fill={arrowFill}
+      />
+
+      <Line
+        points={[100, 90, 85, 65, 115, 65]}
+        closed
+        fill={arrowFill}
+        strokeEnabled={false}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# 3. Що додати в `registry`
+
+Тут залежить від того, як у тебе побудований `registry`, але ідея така:
+
+## Варіант структури registry
+
+```js
+import RectShape from "./RectShape";
+import CircleShape from "./CircleShape";
+import TwoTrianglesArrowDown from "./TwoTrianglesArrowDown";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    component: RectShape,
+    getAnchors: (node) => {
+      const { width = 0, height = 0 } = node.data || {};
+
+      return [
+        {
+          id: `${node.id}-top`,
+          nodeId: node.id,
+          direction: "top",
+          x: width / 2,
+          y: 0,
+        },
+        {
+          id: `${node.id}-bottom`,
+          nodeId: node.id,
+          direction: "bottom",
+          x: width / 2,
+          y: height,
+        },
+        {
+          id: `${node.id}-left`,
+          nodeId: node.id,
+          direction: "left",
+          x: 0,
+          y: height / 2,
+        },
+        {
+          id: `${node.id}-right`,
+          nodeId: node.id,
+          direction: "right",
+          x: width,
+          y: height / 2,
+        },
+      ];
+    },
+  },
+
+  twoTrianglesArrowDown: {
+    component: TwoTrianglesArrowDown,
+    getAnchors: (node) => {
+      const scale = node.data?.scale || 1;
+
+      // ті самі координати, які були в shape
+      const SHAFT_X = 96;
+      const SHAFT_Y = 10;
+      const SHAFT_W = 8;
+
+      const TOP_ANCHOR_X = (SHAFT_X + SHAFT_W / 2) * scale;
+      const TOP_ANCHOR_Y = SHAFT_Y * scale;
+
+      return [
+        {
+          id: `${node.id}-arrowTop`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: TOP_ANCHOR_X,
+          y: TOP_ANCHOR_Y,
+        },
+      ];
+    },
+  },
+};
+```
+
+---
+
+# 4. Якщо хочеш кілька anchor-точок
+
+Наприклад, не тільки верхню, а ще нижню, ліву, праву — це тепер дуже просто:
+
+```js
+twoTrianglesArrowDown: {
+  component: TwoTrianglesArrowDown,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+
+    return [
+      {
+        id: `${node.id}-top`,
+        nodeId: node.id,
+        direction: "top",
+        x: 100 * scale,
+        y: 10 * scale,
+      },
+      {
+        id: `${node.id}-bottom`,
+        nodeId: node.id,
+        direction: "bottom",
+        x: 100 * scale,
+        y: 90 * scale,
+      },
+      {
+        id: `${node.id}-left`,
+        nodeId: node.id,
+        direction: "left",
+        x: 30 * scale,
+        y: 85 * scale,
+      },
+      {
+        id: `${node.id}-right`,
+        nodeId: node.id,
+        direction: "right",
+        x: 170 * scale,
+        y: 85 * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# 5. Що змінити в `NodesLayer`
+
+Якщо раніше було щось таке:
+
+```js
+const Shape = ELEMENT_COMPONENTS[node.type];
+const anchors = getNodeAnchors(node);
+```
+
+то тепер має бути через registry:
+
+```js
+const definition = ELEMENT_REGISTRY[node.type];
+const Shape = definition?.component;
+const anchors = definition?.getAnchors?.(node) || [];
+```
+
+---
+
+# 6. Якщо коротко: що саме викинути / що саме додати
+
+## Викинути з `TwoTrianglesArrowDown`
+
+Ось ці props:
+
+```js
+showAnchors = true,
+onAnchorClick,
+onAnchorHover,
+```
+
+Ось ці константи:
+
+```js
+const TOP_ANCHOR_X = SHAFT_X + SHAFT_W / 2;
+const TOP_ANCHOR_Y = SHAFT_Y;
+const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+```
+
+Ось цей JSX-блок:
+
+```jsx
+{showAnchors && (
+  <Rect ... />
+)}
+```
+
+---
+
+## Додати в `registry`
+
+```js
+twoTrianglesArrowDown: {
+  component: TwoTrianglesArrowDown,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+
+    const SHAFT_X = 96;
+    const SHAFT_Y = 10;
+    const SHAFT_W = 8;
+
+    return [
+      {
+        id: `${node.id}-arrowTop`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top",
+        x: (SHAFT_X + SHAFT_W / 2) * scale,
+        y: SHAFT_Y * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# 7. Рекомендація по архітектурі
+
+Щоб не дублювати “магічні числа” типу `96`, `10`, `8` одночасно і в компоненті, і в registry, краще винести їх в окрему константу.
+
+Наприклад:
+
+## `TwoTrianglesArrowDown.model.js`
+
+```js
+export const TWO_TRIANGLES_ARROW_DOWN_MODEL = {
+  APEX_X: 100,
+  APEX_Y: 85,
+
+  SHAFT_X: 96,
+  SHAFT_Y: 10,
+  SHAFT_W: 8,
+  SHAFT_H: 55,
+
+  WIDTH: 200,
+  HEIGHT: 150,
+};
+```
+
+## у shape:
+
+```js
+import { TWO_TRIANGLES_ARROW_DOWN_MODEL as M } from "./TwoTrianglesArrowDown.model";
+```
+
+## у registry:
+
+```js
+import { TWO_TRIANGLES_ARROW_DOWN_MODEL as M } from "./TwoTrianglesArrowDown.model";
+```
+
+І тоді anchor:
+
+```js
+x: (M.SHAFT_X + M.SHAFT_W / 2) * scale,
+y: M.SHAFT_Y * scale,
+```
+
+Це вже значно чистіше.
+
+---
+
+Якщо хочеш, я наступним повідомленням можу показати тобі **готовий registry.js + оновлений NodesLayer.js**, щоб це одразу вставити в проєкт.

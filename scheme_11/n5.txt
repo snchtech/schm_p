@@ -1,0 +1,524 @@
+Так, тут краще **винести опис анкерів із `NodesLayer` на рівень конкретного shape**.
+Тобто `NodesLayer` більше не має “вгадувати”, де в елемента точки, а має просто питати у shape: **“дай мені свої anchors”**.
+
+У тебе зараз логіка така:
+
+* `NodesLayer` знає тільки `width/height`
+* і будує 4 стандартні точки
+* але для складних фігур цього недостатньо
+
+Правильніше зробити так:
+
+1. у кожного графічного елемента є функція `getAnchors(node)`
+2. `NodesLayer` викликає її
+3. shape повертає **локальні координати** анкерів відносно себе
+4. `NodesLayer` переводить їх у глобальні координати, якщо треба для конекторів
+
+---
+
+## Що саме змінити
+
+### 1. Замість однієї глобальної `getNodeAnchors(node)` зробити універсальний helper
+
+Наприклад так:
+
+```js
+function getNodeAnchors(node) {
+  const Shape = ELEMENT_COMPONENTS[node.type];
+
+  // якщо shape вміє сам визначати anchors
+  if (Shape?.getAnchors) {
+    return Shape.getAnchors(node);
+  }
+
+  // fallback для простих shape
+  const { width = 0, height = 0 } = node.data || {};
+
+  return [
+    {
+      id: `${node.id}-top`,
+      type: "node",
+      nodeId: node.id,
+      direction: "top",
+      x: width / 2,
+      y: 0,
+    },
+    {
+      id: `${node.id}-bottom`,
+      type: "node",
+      nodeId: node.id,
+      direction: "bottom",
+      x: width / 2,
+      y: height,
+    },
+    {
+      id: `${node.id}-left`,
+      type: "node",
+      nodeId: node.id,
+      direction: "left",
+      x: 0,
+      y: height / 2,
+    },
+    {
+      id: `${node.id}-right`,
+      type: "node",
+      nodeId: node.id,
+      direction: "right",
+      x: width,
+      y: height / 2,
+    },
+  ];
+}
+```
+
+Тут важливий момент:
+`x` і `y` краще повертати **локальні**, тобто **всередині Group**, а не абсолютні по canvas.
+
+---
+
+## 2. У `NodesLayer` більше не віднімати `node.position.x/y`
+
+Бо якщо anchors уже локальні, то малювати треба прямо так:
+
+```jsx
+const anchors = getNodeAnchors(node);
+```
+
+і далі:
+
+```jsx
+{hoveredNodeId === node.id &&
+  anchors.map((anchor) => (
+    <Circle
+      key={anchor.id}
+      x={anchor.x}
+      y={anchor.y}
+      radius={6}
+      fill={hoveredAnchor?.id === anchor.id ? "yellow" : "green"}
+      stroke="black"
+      strokeWidth={1}
+      onMouseEnter={() =>
+        setHoveredAnchor({
+          ...anchor,
+          absoluteX: node.position.x + anchor.x,
+          absoluteY: node.position.y + anchor.y,
+        })
+      }
+      onMouseLeave={() => setHoveredAnchor(null)}
+      onClick={(e) => {
+        e.cancelBubble = true;
+        canvasController.handleAnchorClick({
+          ...anchor,
+          absoluteX: node.position.x + anchor.x,
+          absoluteY: node.position.y + anchor.y,
+        });
+      }}
+    />
+  ))}
+```
+
+---
+
+## 3. Додати `getAnchors` у конкретний shape
+
+Твій `TwoTrianglesArrowDown` можна переписати так, щоб він **не малював anchor сам**, а тільки **описував його**.
+
+### Варіант shape-компонента
+
+```js
+"use client";
+
+import React from "react";
+import { Group, Line, Rect } from "react-konva";
+
+function TwoTrianglesArrowDown({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 8,
+  arrowFill = "black",
+}) {
+  const APEX_X = 100;
+  const APEX_Y = 85;
+
+  const SHAFT_X = 96;
+  const SHAFT_Y = 10;
+  const SHAFT_W = 8;
+  const SHAFT_H = 55;
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      <Line
+        points={[30, 50, 30, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Line
+        points={[170, 50, 170, 120, APEX_X, APEX_Y]}
+        closed
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+        lineCap="square"
+      />
+
+      <Rect
+        x={SHAFT_X}
+        y={SHAFT_Y}
+        width={SHAFT_W}
+        height={SHAFT_H}
+        fill={arrowFill}
+      />
+
+      <Line
+        points={[100, 90, 85, 65, 115, 65]}
+        closed
+        fill={arrowFill}
+        strokeEnabled={false}
+      />
+    </Group>
+  );
+}
+```
+
+І нижче додати:
+
+```js
+TwoTrianglesArrowDown.getAnchors = (node) => {
+  const scale = node.data?.scale || 1;
+
+  const SHAFT_X = 96;
+  const SHAFT_Y = 10;
+  const SHAFT_W = 8;
+
+  const TOP_ANCHOR_X = (SHAFT_X + SHAFT_W / 2) * scale;
+  const TOP_ANCHOR_Y = SHAFT_Y * scale;
+
+  return [
+    {
+      id: `${node.id}-arrowTop`,
+      type: "node",
+      nodeId: node.id,
+      direction: "top",
+      x: TOP_ANCHOR_X,
+      y: TOP_ANCHOR_Y,
+    },
+  ];
+};
+
+export default TwoTrianglesArrowDown;
+```
+
+---
+
+# Важлива ідея
+
+`Shape` повинен відповідати за:
+
+* як він виглядає
+* де в нього точки підключення
+
+`NodesLayer` повинен відповідати тільки за:
+
+* рендер node
+* selection
+* hover
+* відображення anchors
+* передачу click у controller
+
+---
+
+# Як тепер виглядатиме `NodesLayer`
+
+Ось спрощений варіант твоєї логіки:
+
+```jsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Group, Rect, Circle } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import GraphLibrary from "@/components/graph";
+
+const ELEMENT_COMPONENTS = {
+  rect: GraphLibrary.rect,
+  circle: GraphLibrary.circle,
+  line: GraphLibrary.line,
+  text: GraphLibrary.text,
+  twoTrianglesArrowDown: GraphLibrary.twoTrianglesArrowDown,
+};
+
+function getNodeAnchors(node) {
+  const Shape = ELEMENT_COMPONENTS[node.type];
+
+  if (Shape?.getAnchors) {
+    return Shape.getAnchors(node);
+  }
+
+  const { width = 0, height = 0 } = node.data || {};
+
+  return [
+    {
+      id: `${node.id}-top`,
+      type: "node",
+      nodeId: node.id,
+      direction: "top",
+      x: width / 2,
+      y: 0,
+    },
+    {
+      id: `${node.id}-bottom`,
+      type: "node",
+      nodeId: node.id,
+      direction: "bottom",
+      x: width / 2,
+      y: height,
+    },
+    {
+      id: `${node.id}-left`,
+      type: "node",
+      nodeId: node.id,
+      direction: "left",
+      x: 0,
+      y: height / 2,
+    },
+    {
+      id: `${node.id}-right`,
+      type: "node",
+      nodeId: node.id,
+      direction: "right",
+      x: width,
+      y: height / 2,
+    },
+  ];
+}
+
+export default function NodesLayer() {
+  const nodes = useCanvasStore((s) => s.nodes);
+  const selection = useCanvasStore((s) => s.selection);
+  const hoveredNodeId = useCanvasStore((s) => s.hoveredNodeId);
+  const hoveredAnchor = useCanvasStore((s) => s.hoveredAnchor);
+  const mode = useCanvasStore((s) => s.mode);
+
+  const setHoveredNodeId = useCanvasStore((s) => s.setHoveredNodeId);
+  const setHoveredAnchor = useCanvasStore((s) => s.setHoveredAnchor);
+
+  return (
+    <>
+      {nodes.map((node) => {
+        const groupRef = useRef(null);
+        const Shape = ELEMENT_COMPONENTS[node.type];
+
+        const isSelected =
+          selection?.type === "node" && selection?.id === node.id;
+
+        useEffect(() => {
+          const store = useCanvasStore.getState();
+          if (!store.registerNodeRef) return;
+
+          store.registerNodeRef(node.id, groupRef.current);
+          return () => store.registerNodeRef(node.id, null);
+        }, [node.id]);
+
+        const anchors = getNodeAnchors(node);
+
+        return (
+          <Group
+            key={node.id}
+            ref={groupRef}
+            x={node.position.x}
+            y={node.position.y}
+            draggable
+            onDragMove={(e) =>
+              canvasController.handleNodeDragMove(node.id, e)
+            }
+            onMouseEnter={() => {
+              if (mode === "add-connector") {
+                setHoveredNodeId(node.id);
+              }
+            }}
+            onMouseLeave={() => {
+              if (mode === "add-connector") {
+                setHoveredNodeId(null);
+              }
+            }}
+            onMouseDown={() =>
+              canvasController.handleNodeMouseDown(node)
+            }
+            onContextMenu={(e) =>
+              canvasController.handleNodeContextMenu(e, node)
+            }
+          >
+            {Shape && <Shape node={node} />}
+
+            {isSelected && (
+              <Rect
+                x={-6}
+                y={-6}
+                width={node.data.width + 12}
+                height={node.data.height + 12}
+                cornerRadius={12}
+                stroke="#3b82f6"
+                strokeWidth={1}
+                dash={[6, 4]}
+                listening={false}
+              />
+            )}
+
+            {hoveredNodeId === node.id &&
+              anchors.map((anchor) => {
+                const anchorPayload = {
+                  ...anchor,
+                  absoluteX: node.position.x + anchor.x,
+                  absoluteY: node.position.y + anchor.y,
+                };
+
+                return (
+                  <Circle
+                    key={anchor.id}
+                    x={anchor.x}
+                    y={anchor.y}
+                    radius={6}
+                    fill={
+                      hoveredAnchor?.id === anchor.id
+                        ? "yellow"
+                        : "green"
+                    }
+                    stroke="black"
+                    strokeWidth={1}
+                    onMouseEnter={() => setHoveredAnchor(anchorPayload)}
+                    onMouseLeave={() => setHoveredAnchor(null)}
+                    onClick={(e) => {
+                      e.cancelBubble = true;
+                      canvasController.handleAnchorClick(anchorPayload);
+                    }}
+                  />
+                );
+              })}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# Ще краще архітектурно
+
+Щоб shape-компонент не змішував UI і метадані, можна зробити так:
+
+## registry.js
+
+```js
+import TwoTrianglesArrowDown from "./TwoTrianglesArrowDown";
+import RectShape from "./RectShape";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    component: RectShape,
+    getAnchors: (node) => {
+      const { width = 0, height = 0 } = node.data || {};
+      return [
+        { id: `${node.id}-top`, nodeId: node.id, x: width / 2, y: 0, direction: "top" },
+        { id: `${node.id}-bottom`, nodeId: node.id, x: width / 2, y: height, direction: "bottom" },
+        { id: `${node.id}-left`, nodeId: node.id, x: 0, y: height / 2, direction: "left" },
+        { id: `${node.id}-right`, nodeId: node.id, x: width, y: height / 2, direction: "right" },
+      ];
+    },
+  },
+
+  twoTrianglesArrowDown: {
+    component: TwoTrianglesArrowDown,
+    getAnchors: (node) => {
+      const scale = node.data?.scale || 1;
+      return [
+        {
+          id: `${node.id}-arrowTop`,
+          nodeId: node.id,
+          direction: "top",
+          x: 100 * scale,
+          y: 10 * scale,
+        },
+      ];
+    },
+  },
+};
+```
+
+Тоді в `NodesLayer`:
+
+```js
+const definition = ELEMENT_REGISTRY[node.type];
+const Shape = definition?.component;
+const anchors = definition?.getAnchors?.(node) || [];
+```
+
+Це навіть чистіше, ніж вішати `getAnchors` як static property на компонент.
+
+---
+
+# Що я раджу тобі
+
+Для твого редактора найкраще підійде саме **registry-підхід**, бо далі в тебе будуть:
+
+* різні SVG-подібні shape
+* різні anchor positions
+* різні connection rules
+* можливо, різні типи anchor: `input`, `output`, `top`, `signal`, `power`
+
+І тоді registry можна розширити:
+
+```js
+{
+  component,
+  getAnchors,
+  getBounds,
+  defaultSize,
+  connectorRules
+}
+```
+
+---
+
+# І ще один важливий момент у твоєму коді
+
+У тебе зараз всередині `nodes.map(...)` використовується:
+
+```js
+const groupRef = useRef(null);
+useEffect(...)
+```
+
+Це **порушення правил хуків React**, бо hooks не можна викликати всередині циклу `map`.
+Поки може “працювати”, але це нестабільна архітектура.
+
+Краще винести один вузол в окремий компонент, наприклад `NodeItem`, і вже там використовувати `useRef` та `useEffect`.
+
+---
+
+# Підсумок
+
+Щоб shape мав свої анкерні точки:
+
+* прибери жорстку логіку anchor з `NodesLayer`
+* зроби `getAnchors(node)` для кожного типу shape
+* повертай **локальні координати**
+* у `NodesLayer` тільки малюй anchors і додавай абсолютні координати перед викликом controller
+
+Найчистіший варіант:
+
+* `ELEMENT_REGISTRY[node.type].component`
+* `ELEMENT_REGISTRY[node.type].getAnchors(node)`
+
+Якщо хочеш, я можу одразу показати тобі **повний рефакторинг у 3 файли**:
+`NodesLayer.jsx`, `NodeItem.jsx`, `registry.js` — вже в готовому робочому вигляді.

@@ -1,0 +1,375 @@
+Так, цю іконку переробляємо абсолютно так само:
+
+* shape-компонент лишаємо тільки для рендера
+* anchor-поведінку прибираємо
+* координати anchor переносимо в `registry`
+* компонент приводимо до формату `({ node })`
+
+У тебе тут anchor був у вузлі `J`:
+
+* `JX = 110`
+* `JY = 70`
+
+Саме цю точку і винесемо в `registry`.
+
+---
+
+# Що прибрати з цього компонента
+
+## 1. Прибрати anchor props
+
+Ось це викидаємо:
+
+```js
+showAnchors = true,
+onAnchorClick,
+onAnchorHover,
+```
+
+---
+
+## 2. Прибрати `ANCHOR_R`
+
+Оце теж більше не потрібно:
+
+```js
+const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+```
+
+---
+
+## 3. Прибрати JSX-блок anchor
+
+Оцей блок повністю видаляємо:
+
+```jsx
+{showAnchors && (
+  <Circle
+    x={JX}
+    y={JY}
+    radius={ANCHOR_R}
+    fill="#fff"
+    stroke={stroke}
+    strokeWidth={2}
+    listening
+    onMouseEnter={() => {
+      document.body.style.cursor = "crosshair";
+      onAnchorHover?.({
+        id: "junction",
+        x: JX,
+        y: JY,
+      });
+    }}
+    onMouseLeave={() => {
+      document.body.style.cursor = "default";
+      onAnchorHover?.(null);
+    }}
+    onMouseDown={(e) => e.cancelBubble = true}
+    onClick={(e) => {
+      e.cancelBubble = true;
+      onAnchorClick?.({
+        id: "junction",
+        x: JX,
+        y: JY,
+      });
+    }}
+  />
+)}
+```
+
+---
+
+# Оновлений компонент
+
+Ось готова версія у єдиному форматі:
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Circle, Line } from "react-konva";
+
+export const CIRCLE_LINE_TWO_TRIANGLES_MODEL = {
+  VIEWBOX_WIDTH: 220,
+  VIEWBOX_HEIGHT: 160,
+
+  LEFT_CIRCLE: {
+    x: 35,
+    y: 40,
+    radius: 16,
+  },
+
+  JUNCTION: {
+    x: 110,
+    y: 70,
+  },
+
+  ELBOW_LINE: [51, 40, 110, 40, 110, 70],
+
+  RIGHT_TRIANGLE: [110, 70, 190, 40, 190, 100],
+
+  BOTTOM_TRIANGLE: [110, 70, 85, 140, 135, 140],
+};
+
+export default function CircleLineTwoTriangles({ node }) {
+  const scale = node?.data?.scale || 1;
+  const stroke = node?.style?.stroke || "black";
+  const strokeWidth = node?.style?.strokeWidth || 8;
+  const lineCap = node?.style?.lineCap || "round";
+  const lineJoin = node?.style?.lineJoin || "round";
+
+  const M = CIRCLE_LINE_TWO_TRIANGLES_MODEL;
+
+  return (
+    <Group scaleX={scale} scaleY={scale}>
+      <Circle
+        x={M.LEFT_CIRCLE.x}
+        y={M.LEFT_CIRCLE.y}
+        radius={M.LEFT_CIRCLE.radius}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      <Line
+        points={M.ELBOW_LINE}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+
+      <Line
+        points={M.RIGHT_TRIANGLE}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+
+      <Line
+        points={M.BOTTOM_TRIANGLE}
+        closed
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap={lineCap}
+        lineJoin={lineJoin}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# Що додати в `registry.js`
+
+Спочатку імпорт:
+
+```js
+import CircleLineTwoTriangles, {
+  CIRCLE_LINE_TWO_TRIANGLES_MODEL,
+} from "./CircleLineTwoTriangles";
+```
+
+Далі запис у `ELEMENT_REGISTRY`:
+
+```js
+circleLineTwoTriangles: {
+  component: CircleLineTwoTriangles,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+    const M = CIRCLE_LINE_TWO_TRIANGLES_MODEL;
+
+    return [
+      {
+        id: `${node.id}-junction`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "center",
+        x: M.JUNCTION.x * scale,
+        y: M.JUNCTION.y * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# Якщо хочеш кілька anchor-точок
+
+Для цієї фігури можуть бути корисні не лише `junction`, а ще, наприклад:
+
+* центр лівого кола
+* центр правої вертикальної сторони трикутника
+* нижній трикутник по центру основи
+
+Ось приклад:
+
+```js
+circleLineTwoTriangles: {
+  component: CircleLineTwoTriangles,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+    const M = CIRCLE_LINE_TWO_TRIANGLES_MODEL;
+
+    return [
+      {
+        id: `${node.id}-junction`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "center",
+        x: M.JUNCTION.x * scale,
+        y: M.JUNCTION.y * scale,
+      },
+      {
+        id: `${node.id}-leftCircle`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "left",
+        x: M.LEFT_CIRCLE.x * scale,
+        y: M.LEFT_CIRCLE.y * scale,
+      },
+      {
+        id: `${node.id}-rightTriangleMid`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "right",
+        x: 190 * scale,
+        y: 70 * scale,
+      },
+      {
+        id: `${node.id}-bottomTriangleBaseMid`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "bottom",
+        x: 110 * scale,
+        y: 140 * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# Що саме викинути / що саме додати
+
+## Викинути з компонента
+
+### props:
+
+```js
+showAnchors = true,
+onAnchorClick,
+onAnchorHover,
+```
+
+### константу:
+
+```js
+const ANCHOR_R = Math.max(4, strokeWidth * 0.6);
+```
+
+### JSX anchor:
+
+```jsx
+{showAnchors && (
+  <Circle ... />
+)}
+```
+
+---
+
+## Додати в компонент
+
+### новий контракт:
+
+```js
+export default function CircleLineTwoTriangles({ node })
+```
+
+### читання стилів і data:
+
+```js
+const scale = node?.data?.scale || 1;
+const stroke = node?.style?.stroke || "black";
+const strokeWidth = node?.style?.strokeWidth || 8;
+const lineCap = node?.style?.lineCap || "round";
+const lineJoin = node?.style?.lineJoin || "round";
+```
+
+### model-константу:
+
+```js
+export const CIRCLE_LINE_TWO_TRIANGLES_MODEL = { ... }
+```
+
+---
+
+## Додати в registry
+
+```js
+circleLineTwoTriangles: {
+  component: CircleLineTwoTriangles,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+    const M = CIRCLE_LINE_TWO_TRIANGLES_MODEL;
+
+    return [
+      {
+        id: `${node.id}-junction`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "center",
+        x: M.JUNCTION.x * scale,
+        y: M.JUNCTION.y * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# Який node тепер очікується
+
+```js
+{
+  id: "n-circle-line-triangles-1",
+  type: "circleLineTwoTriangles",
+  position: { x: 120, y: 220 },
+  data: {
+    scale: 1
+  },
+  style: {
+    stroke: "black",
+    strokeWidth: 8,
+    lineCap: "round",
+    lineJoin: "round"
+  }
+}
+```
+
+---
+
+# Маленьке зауваження
+
+На початку твого коду є опечатка:
+
+Було:
+
+```js
+use client";
+```
+
+Має бути:
+
+```js
+"use client";
+```
+
+---
+
+Далі можемо таким самим способом швидко прогнати ще кілька іконок, а потім я зведу тобі фінальний шаблон для будь-якого нового shape: `model + component + registry entry`.

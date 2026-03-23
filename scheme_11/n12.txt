@@ -1,0 +1,952 @@
+Добре. Тоді я зберу тобі **цільову робочу схему edge-системи** так, щоб ти міг поступово перенести свій код без хаосу.
+
+Я дам 4 частини:
+
+1. **який має бути store**
+2. **які helper-функції винести для edge**
+3. **як має виглядати controller**
+4. **як підключити `EdgesLayer` + context menu + delete**
+
+---
+
+# 1. Цільова модель даних
+
+Почнемо з головного: треба зафіксувати **єдиний формат anchor і edge**.
+
+---
+
+## 1.1. Node anchor
+
+Коли користувач клікає по anchor вузла, ти маєш передавати не “просто координати”, а ось такий об’єкт:
+
+```js
+{
+  id: "anchor-node-n1-right",
+  type: "node",
+  nodeId: "n1",
+  direction: "right"
+}
+```
+
+Можливі `direction`:
+
+* `"top"`
+* `"bottom"`
+* `"left"`
+* `"right"`
+
+---
+
+## 1.2. Edge anchor
+
+Коли користувач додає точку прив’язки на edge, має бути така модель:
+
+```js
+{
+  id: "a1",
+  type: "edge",
+  edgeId: "e7",
+  segIndex: 1,
+  t: 0.35,
+  x: 320,
+  y: 180,
+  direction: "auto"
+}
+```
+
+де:
+
+* `edgeId` — до якого edge належить ця точка
+* `segIndex` — індекс сегмента в `points`
+* `t` — позиція на сегменті від `0` до `1`
+* `x, y` — поточні координати для рендеру
+* `direction: "auto"` — напрямок для routing визначається динамічно
+
+---
+
+## 1.3. Edge
+
+Цільовий формат edge:
+
+```js
+{
+  id: "e1",
+
+  source: {
+    type: "node",
+    nodeId: "n1",
+    direction: "right"
+  },
+
+  target: {
+    type: "edge",
+    edgeId: "e5",
+    segIndex: 2,
+    t: 0.4,
+    x: 280,
+    y: 160,
+    direction: "auto"
+  },
+
+  data: {
+    routing: {
+      startOffset: 20,
+      endOffset: 20
+    },
+    anchors: []
+  },
+
+  points: []
+}
+```
+
+---
+
+# 2. Яким має бути store
+
+Твій поточний store вже має базу, але для нормальної edge-системи треба трохи розширити.
+
+---
+
+## 2.1. Оновлений `useCanvasStore.js`
+
+```js
+import { create } from "zustand";
+
+export const useCanvasStore = create((set, get) => ({
+  // ===== GRAPH =====
+  nodes: [],
+  edges: [],
+
+  // ===== UI =====
+  selection: null, // { type: 'node' | 'edge', id }
+  mode: "select", // select | add-connector | add-edge-anchor
+  tempSource: null, // anchor object
+  hoveredEdgeId: null,
+  hoveredEdgeAnchorId: null,
+
+  contextMenu: null,
+  // {
+  //   type: 'edge' | 'edge-anchor',
+  //   edgeId,
+  //   anchorId?,
+  //   x,
+  //   y
+  // }
+
+  // ===== NODES =====
+  addNode: (node) =>
+    set((s) => ({ nodes: [...s.nodes, node] })),
+
+  updateNodePosition: (id, x, y) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? { ...n, position: { x, y } } : n
+      ),
+    })),
+
+  removeNode: (id) =>
+    set((s) => ({
+      nodes: s.nodes.filter((n) => n.id !== id),
+      edges: s.edges.filter(
+        (e) =>
+          e.source.nodeId !== id &&
+          e.target.nodeId !== id
+      ),
+      selection:
+        s.selection?.type === "node" && s.selection?.id === id
+          ? null
+          : s.selection,
+    })),
+
+  // ===== EDGES =====
+  addEdge: (edge) =>
+    set((s) => ({ edges: [...s.edges, edge] })),
+
+  setEdges: (edges) => set({ edges }),
+
+  updateEdge: (id, data) =>
+    set((s) => ({
+      edges: s.edges.map((e) =>
+        e.id === id ? { ...e, ...data } : e
+      ),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+      selection:
+        s.selection?.type === "edge" && s.selection?.id === id
+          ? null
+          : s.selection,
+      contextMenu:
+        s.contextMenu?.edgeId === id ? null : s.contextMenu,
+    })),
+
+  removeEdgeAnchor: (edgeId, anchorId) =>
+    set((s) => ({
+      edges: s.edges.map((e) =>
+        e.id !== edgeId
+          ? e
+          : {
+              ...e,
+              data: {
+                ...e.data,
+                anchors: (e.data?.anchors || []).filter(
+                  (a) => a.id !== anchorId
+                ),
+              },
+            }
+      ),
+      contextMenu:
+        s.contextMenu?.type === "edge-anchor" &&
+        s.contextMenu?.anchorId === anchorId
+          ? null
+          : s.contextMenu,
+    })),
+
+  // ===== UI ACTIONS =====
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  setMode: (mode) => set({ mode }),
+  setTempSource: (tempSource) => set({ tempSource }),
+
+  setHoveredEdgeId: (hoveredEdgeId) => set({ hoveredEdgeId }),
+  setHoveredEdgeAnchorId: (hoveredEdgeAnchorId) =>
+    set({ hoveredEdgeAnchorId }),
+
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+}));
+```
+
+---
+
+# 3. Які функції винести в edge helpers
+
+Я б радив створити окремий файл, наприклад:
+
+`lib/edges/edgeModel.js`
+
+Туди винести все, що стосується життєвого циклу edge.
+
+---
+
+## 3.1. `createEdge`
+
+```js
+import { buildEdgePath, updateEdgeAnchors } from "./edgeRouting";
+
+export function createEdge(source, target, nodes, edges) {
+  let edge = {
+    id: crypto.randomUUID(),
+    source,
+    target,
+    data: {
+      routing: {
+        startOffset: 20,
+        endOffset: 20,
+      },
+      anchors: [],
+    },
+    points: [],
+  };
+
+  edge.points = buildEdgePath(edge, nodes, edges);
+  edge = updateEdgeAnchors(edge);
+
+  return edge;
+}
+```
+
+---
+
+## 3.2. `rebuildEdge`
+
+Це центральна функція. Усе має йти через неї.
+
+```js
+import { buildEdgePath, updateEdgeAnchors } from "./edgeRouting";
+
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+```
+
+---
+
+## 3.3. `rebuildEdgesForNode`
+
+Коли рухається node, треба перебудувати всі залежні edge.
+
+```js
+import { rebuildEdge } from "./edgeModel";
+
+export function rebuildEdgesForNode(nodeId, edges, nodes) {
+  return edges.map((edge) => {
+    const touchesNode =
+      edge.source?.type === "node" && edge.source.nodeId === nodeId ||
+      edge.target?.type === "node" && edge.target.nodeId === nodeId;
+
+    if (!touchesNode) return edge;
+
+    return rebuildEdge(edge, nodes, edges);
+  });
+}
+```
+
+Тут важливий момент: якщо в майбутньому будуть edge-to-edge зв’язки, то при зміні одного edge може знадобитися каскадний rebuild. Але для першого етапу цього досить.
+
+---
+
+## 3.4. `createEdgeAnchorFromPointer`
+
+```js
+import { findClosestSegment } from "@/lib/geometry/diagramGeometry";
+
+export function createEdgeAnchorFromPointer(edge, x, y) {
+  const closest = findClosestSegment(edge.points, x, y);
+
+  if (!closest) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type: "edge",
+    edgeId: edge.id,
+    segIndex: closest.segIndex,
+    t: closest.t,
+    x: closest.x,
+    y: closest.y,
+    direction: "auto",
+  };
+}
+```
+
+---
+
+# 4. Які функції залишити в routing
+
+Тут в тебе вже хороша база.
+
+Я б лишив:
+
+* `resolveAnchor`
+* `resolveDirection`
+* `buildEdgePath`
+* `updateEdgeAnchors`
+
+---
+
+## 4.1. `buildEdgePath`
+
+```js
+import { calculateOrthogonalPath } from "@/lib/geometry/diagramGeometry";
+import { boxFromNode } from "@/lib/geometry/boxUtils";
+import { resolveAnchor, resolveDirection } from "./anchorUtils";
+
+export function buildEdgePath(edge, nodes, edges) {
+  const start = resolveAnchor(edge.source, nodes, edges);
+  const end = resolveAnchor(edge.target, nodes, edges);
+
+  if (!start || !end) return [];
+
+  const dirFrom = resolveDirection(start, end);
+  const dirTo = resolveDirection(end, start);
+
+  const sourceNode =
+    edge.source?.type === "node"
+      ? nodes.find((n) => n.id === edge.source.nodeId)
+      : null;
+
+  const targetNode =
+    edge.target?.type === "node"
+      ? nodes.find((n) => n.id === edge.target.nodeId)
+      : null;
+
+  return calculateOrthogonalPath(
+    { ...start, direction: dirFrom },
+    { ...end, direction: dirTo },
+    edge.data?.routing || { startOffset: 20, endOffset: 20 },
+    sourceNode ? boxFromNode(sourceNode) : null,
+    targetNode ? boxFromNode(targetNode) : null
+  );
+}
+```
+
+---
+
+## 4.2. `updateEdgeAnchors`
+
+```js
+export function updateEdgeAnchors(edge) {
+  const pts = edge.points || [];
+
+  const anchors = (edge.data?.anchors || []).map((a) => {
+    if (a.type !== "edge") return a;
+
+    const i = a.segIndex;
+    if (2 * i + 3 >= pts.length) return a;
+
+    const x1 = pts[2 * i];
+    const y1 = pts[2 * i + 1];
+    const x2 = pts[2 * i + 2];
+    const y2 = pts[2 * i + 3];
+
+    return {
+      ...a,
+      x: x1 + a.t * (x2 - x1),
+      y: y1 + a.t * (y2 - y1),
+    };
+  });
+
+  return {
+    ...edge,
+    data: {
+      ...edge.data,
+      anchors,
+    },
+  };
+}
+```
+
+---
+
+# 5. Як має виглядати controller
+
+Controller має бути єдиною точкою поведінки.
+
+---
+
+## 5.1. `handleAnchorClick`
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createEdge } from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleAnchorClick(anchor) {
+    const store = useCanvasStore.getState();
+
+    if (store.mode !== "add-connector") return;
+
+    if (!store.tempSource) {
+      store.setTempSource(anchor);
+      return;
+    }
+
+    // щоб не з'єднувати anchor сам із собою
+    const sameAnchor =
+      JSON.stringify(store.tempSource) === JSON.stringify(anchor);
+
+    if (sameAnchor) {
+      store.setTempSource(null);
+      return;
+    }
+
+    const edge = createEdge(
+      store.tempSource,
+      anchor,
+      store.nodes,
+      store.edges
+    );
+
+    store.addEdge(edge);
+    store.setTempSource(null);
+    store.setMode("select");
+  },
+```
+
+За бажанням `setMode("select")` можна не робити, якщо хочеш малювати кілька зв’язків підряд.
+
+---
+
+## 5.2. `handleNodeDragMove`
+
+```js
+import { rebuildEdgesForNode } from "@/lib/edges/edgeModel";
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+
+  const store = useCanvasStore.getState();
+  store.updateNodePosition(id, x, y);
+
+  const nodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = rebuildEdgesForNode(id, store.edges, nodes);
+  store.setEdges(nextEdges);
+},
+```
+
+---
+
+## 5.3. `handleEdgeClick`
+
+Тут важливо розділити два сценарії:
+
+* вибір edge
+* додавання anchor на edge
+
+```js
+import { createEdgeAnchorFromPointer } from "@/lib/edges/edgeModel";
+
+handleEdgeClick(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  e.cancelBubble = true;
+  store.setSelection({ type: "edge", id: edgeId });
+
+  if (store.mode !== "add-edge-anchor") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const edge = store.edges.find((ed) => ed.id === edgeId);
+  if (!edge) return;
+
+  const newAnchor = createEdgeAnchorFromPointer(
+    edge,
+    pointer.x,
+    pointer.y
+  );
+
+  if (!newAnchor) return;
+
+  const nextEdges = store.edges.map((ed) =>
+    ed.id !== edgeId
+      ? ed
+      : {
+          ...ed,
+          data: {
+            ...ed.data,
+            anchors: [...(ed.data?.anchors || []), newAnchor],
+          },
+        }
+  );
+
+  store.setEdges(nextEdges);
+  store.setMode("select");
+},
+```
+
+---
+
+## 5.4. `updateEdgeOffset`
+
+Тут важливо не робити ручного переписування points, а йти через `rebuildEdge`.
+
+```js
+import { rebuildEdge } from "@/lib/edges/edgeModel";
+
+updateEdgeOffset(edgeId, newOffset, side = "start") {
+  const store = useCanvasStore.getState();
+
+  let nextEdges = store.edges.map((edge) => {
+    if (edge.id !== edgeId) return edge;
+
+    const prevRouting = edge.data?.routing || {
+      startOffset: 20,
+      endOffset: 20,
+    };
+
+    const routing =
+      side === "start"
+        ? { ...prevRouting, startOffset: newOffset }
+        : { ...prevRouting, endOffset: newOffset };
+
+    return {
+      ...edge,
+      data: {
+        ...edge.data,
+        routing,
+      },
+    };
+  });
+
+  nextEdges = nextEdges.map((edge) =>
+    edge.id === edgeId
+      ? rebuildEdge(edge, store.nodes, nextEdges)
+      : edge
+  );
+
+  store.setEdges(nextEdges);
+},
+```
+
+---
+
+## 5.5. Context menu для edge
+
+```js
+handleEdgeContextMenu(e, edge) {
+  e.evt.preventDefault();
+  e.cancelBubble = true;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  const store = useCanvasStore.getState();
+
+  store.setSelection({ type: "edge", id: edge.id });
+  store.setContextMenu({
+    type: "edge",
+    edgeId: edge.id,
+    x: pointer?.x || 0,
+    y: pointer?.y || 0,
+  });
+},
+```
+
+---
+
+## 5.6. Context menu для edge-anchor
+
+```js
+handleEdgeAnchorContextMenu(e, edgeId, anchorId) {
+  e.evt.preventDefault();
+  e.cancelBubble = true;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  const store = useCanvasStore.getState();
+
+  store.setContextMenu({
+    type: "edge-anchor",
+    edgeId,
+    anchorId,
+    x: pointer?.x || 0,
+    y: pointer?.y || 0,
+  });
+},
+```
+
+---
+
+## 5.7. Видалення через controller
+
+```js
+deleteContextTarget() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu) return;
+
+  if (menu.type === "edge") {
+    store.removeEdge(menu.edgeId);
+  }
+
+  if (menu.type === "edge-anchor") {
+    store.removeEdgeAnchor(menu.edgeId, menu.anchorId);
+  }
+
+  store.clearContextMenu();
+},
+```
+
+---
+
+# 6. Як змінити `EdgesLayer`
+
+`EdgesLayer` у тебе в цілому вже хороший. Там треба зробити дві речі:
+
+1. додати `onContextMenu` для `edge anchor circle`
+2. не змішувати “selection click” і “add-anchor mode” занадто сильно
+
+---
+
+## 6.1. Для edge circle anchor додай
+
+```js
+onContextMenu={(e) => {
+  canvasController.handleEdgeAnchorContextMenu(e, edge.id, anchor.id);
+}}
+```
+
+Тобто ось так:
+
+```js
+{edgeAnchors.map((anchor) => (
+  <Circle
+    key={anchor.id}
+    x={anchor.x}
+    y={anchor.y}
+    radius={6}
+    fill={
+      mode === "add-connector" && hoveredEdgeAnchorId === anchor.id
+        ? "yellow"
+        : "blue"
+    }
+    stroke="black"
+    strokeWidth={1}
+    onMouseEnter={(e) => {
+      if (mode !== "add-connector") return;
+      setHoveredEdgeAnchorId(anchor.id);
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "pointer";
+      }
+    }}
+    onMouseLeave={(e) => {
+      setHoveredEdgeAnchorId(null);
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+    onClick={(e) => {
+      e.cancelBubble = true;
+      canvasController.handleAnchorClick(anchor);
+    }}
+    onContextMenu={(e) => {
+      canvasController.handleEdgeAnchorContextMenu(
+        e,
+        edge.id,
+        anchor.id
+      );
+    }}
+  />
+))}
+```
+
+---
+
+# 7. Як виглядає context menu компонент
+
+Я б радив зробити окремий React-компонент, наприклад `CanvasContextMenu.jsx`.
+
+---
+
+## 7.1. Приклад
+
+```js
+"use client";
+
+import { Menu, MenuItem } from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  const open = !!contextMenu;
+
+  return (
+    <Menu
+      open={open}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "edge" && (
+        <MenuItem onClick={() => canvasController.deleteContextTarget()}>
+          Видалити зв’язок
+        </MenuItem>
+      )}
+
+      {contextMenu?.type === "edge-anchor" && (
+        <MenuItem onClick={() => canvasController.deleteContextTarget()}>
+          Видалити точку прив’язки
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+```
+
+І цей компонент просто підключається біля canvas.
+
+---
+
+# 8. Як із меню отримати готовий edge
+
+Ось тепер у зібраному вигляді весь pipeline.
+
+---
+
+## 8.1. Натискання в меню
+
+```js
+setMode("add-connector")
+setTempSource(null)
+```
+
+---
+
+## 8.2. Перший клік по anchor
+
+```js
+canvasController.handleAnchorClick(anchor)
+```
+
+Controller:
+
+* бачить `tempSource === null`
+* зберігає source
+
+---
+
+## 8.3. Другий клік по anchor
+
+Той самий handler:
+
+* бачить `tempSource !== null`
+* створює edge через `createEdge(...)`
+* `createEdge` викликає `buildEdgePath(...)`
+* edge додається в store
+* `EdgesLayer` автоматично рендерить його
+
+---
+
+# 9. Як із меню отримати точку прив’язки на edge
+
+---
+
+## 9.1. Натискання в меню
+
+```js
+setMode("add-edge-anchor")
+```
+
+---
+
+## 9.2. Клік по edge
+
+`canvasController.handleEdgeClick(edgeId, e)`
+
+Controller:
+
+* знаходить closest segment
+* створює edge anchor
+* додає його в `edge.data.anchors`
+
+---
+
+## 9.3. Далі цей anchor уже клікабельний
+
+І по ньому можна:
+
+* створювати новий connection
+* відкривати context menu
+* видаляти
+
+---
+
+# 10. Що я рекомендую перейменувати
+
+Щоб архітектура читалась краще:
+
+### зараз
+
+* `handleAnchorClick`
+* `handleEdgeClick`
+
+### краще
+
+* `handleConnectionAnchorClick`
+* `handleEdgeBodyClick`
+* `handleEdgeAnchorContextMenu`
+* `handleEdgeContextMenu`
+
+Не обов’язково, але код стане зрозумілішим.
+
+---
+
+# 11. Де у тебе зараз слабке місце
+
+Найслабше місце не в `EdgesLayer`, а в тому, що:
+
+* store ще не доріс до цієї системи
+* rebuild логіка ще не централізована
+* edge-anchor deletion ще не оформлений
+* нема єдиного context menu state
+* режими `add-connector` і `add-anchor` у тебе трохи змішані
+
+---
+
+# 12. Що я б радив зробити прямо зараз поетапно
+
+Ось безпечний порядок.
+
+### Етап 1
+
+Оновити store:
+
+* `mode`
+* `tempSource`
+* `setEdges`
+* `contextMenu`
+* `removeEdgeAnchor`
+
+### Етап 2
+
+Створити `lib/edges/edgeModel.js`:
+
+* `createEdge`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+* `createEdgeAnchorFromPointer`
+
+### Етап 3
+
+Оновити controller:
+
+* `handleAnchorClick`
+* `handleNodeDragMove`
+* `updateEdgeOffset`
+* `handleEdgeContextMenu`
+* `handleEdgeAnchorContextMenu`
+* `deleteContextTarget`
+
+### Етап 4
+
+Оновити `EdgesLayer`:
+
+* додати context menu для anchor
+* використовувати controller для всіх click/context events
+
+### Етап 5
+
+Підключити `CanvasContextMenu`
+
+---
+
+# 13. Головна думка
+
+У тебе система вже майже сформована.
+Треба просто довести її до правила:
+
+> **edge — це не line points, а окремий доменний об’єкт, у якого points лише похідні**
+
+Тоді все стає на місце:
+
+* створення edge
+* rebuild
+* edge-to-edge
+* anchors on edge
+* delete
+* context menu
+* selection
+
+---
+
+Я можу далі одразу зробити наступний практичний крок:
+**дати тобі готовий комплект файлів**
+`useCanvasStore.js`, `edgeModel.js`, `edgeRouting.js`, `canvasController.js` у вже узгодженому вигляді.

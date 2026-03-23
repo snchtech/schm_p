@@ -1,0 +1,378 @@
+Так можна, але тільки якщо ти **готовий не редагувати старі схеми через новий engine**.
+
+Тобто твоя ідея:
+
+* є один актуальний `buildEdgePath`
+* в реєстрі десь записано `currentRoutingVersion = 3`
+* стару реалізацію ти заміняєш новою
+
+це **нормальний підхід**, але лише в одній із двох моделей:
+
+---
+
+# 1. Коли твій підхід підходить
+
+Він підходить, якщо ти приймаєш таку політику:
+
+### старі схеми
+
+* або тільки перегляд
+* або very limited edit
+* але **без recompute зв’язків новим алгоритмом**
+
+### нові схеми
+
+* будуються поточним engine
+
+Тоді тобі не треба зберігати `orthogonal-v1`, `orthogonal-v2` для кожного edge.
+
+Достатньо:
+
+* у документа є `schemaVersion`
+* у системі є `currentRoutingVersion`
+* старі схеми відкриваються як snapshot
+* нові схеми або нові revision — через current engine
+
+У такій моделі твоя ідея цілком здорова.
+
+---
+
+# 2. Коли твій підхід небезпечний
+
+Він стає небезпечним, якщо ти хочеш:
+
+* відкрити стару схему
+* посунути вузол
+* перерахувати зв’язки
+* і при цьому зберегти стару геометричну поведінку
+
+Бо якщо старий `buildEdgePath` уже замінено новим, то:
+
+* старі `points` стануть іншими
+* edge-anchor може з’їхати
+* візуально схема зміниться
+* користувач скаже, що редактор “поламав схему”
+
+Отже:
+
+> **один current engine без збереження старих engine добре працює тільки тоді, коли старі документи не проходять через повторну геометричну побудову**
+
+---
+
+# 3. Правильний компроміс для тебе
+
+З того, що ти описував раніше, я би радив саме такий компроміс:
+
+## не зберігати `orthogonal-v1`, `orthogonal-v2` на кожному edge
+
+а зберігати на рівні документа:
+
+```js id="8k0hri"
+{
+  schemaVersion: 2,
+  geometryMode: "snapshot",
+  createdWithRoutingVersion: 1,
+  ...
+}
+```
+
+або навіть простіше:
+
+```js id="u3q78j"
+{
+  schemaVersion: 2,
+  createdWithEditorVersion: "0.8.0"
+}
+```
+
+А в runtime мати:
+
+```js id="mh8vmq"
+const CURRENT_ROUTING_VERSION = 3;
+```
+
+---
+
+# 4. Як це тоді працює
+
+---
+
+## Старий документ
+
+Має збережені:
+
+* `nodes`
+* `edges.source/target`
+* `edges.geometry.points`
+* `edges.geometry.anchors`
+
+Редактор:
+
+* просто показує `geometry.points`
+* не запускає current router автоматично
+
+---
+
+## Новий документ
+
+Або нова revision:
+
+* створюється вже з current routing version
+* при drag/rebuild використовує current engine
+
+---
+
+## Якщо старий документ треба редагувати
+
+Ти не редагуєш його “на місці”, а:
+
+* робиш **create new revision**
+* мігруєш документ у новий формат
+* після цього він уже працює на current engine
+
+Оце найздоровіший варіант під твою ідею.
+
+---
+
+# 5. Тобто чи треба зберігати `orthogonal-v1 / v2`?
+
+## Ні, не обов’язково
+
+Якщо ти обираєш архітектуру:
+
+* **legacy = snapshot/read-only або snapshot + limited edit**
+* **editable = only current routing engine**
+* **upgrade = new revision**
+
+У такій схемі достатньо знати:
+
+* це legacy документ чи current
+* чи дозволено recompute
+* чи треба створити нову revision
+
+І не треба тримати кілька живих engine.
+
+---
+
+# 6. Що тоді треба зберігати замість engine-id
+
+Я б радив ось такий мінімум.
+
+---
+
+## На рівні документа
+
+```js id="0k75t7"
+{
+  schemaVersion: 2,
+  compatibilityMode: "legacy-snapshot", // або current
+  createdWithEditorVersion: "0.8.0",
+  migratedAt: null
+}
+```
+
+або:
+
+```js id="u31bb3"
+{
+  schemaVersion: 2,
+  editPolicy: "snapshot-only", // snapshot-only | current-editable
+  createdWithRoutingVersion: 1
+}
+```
+
+---
+
+## На рівні edge
+
+Не engine version, а просто:
+
+```js id="qy85bi"
+{
+  id: "e1",
+  source: {...},
+  target: {...},
+  routing: {
+    startOffset: 20,
+    endOffset: 20
+  },
+  geometry: {
+    points: [...],
+    anchors: [...]
+  }
+}
+```
+
+Тобто зберігаєш **готову геометрію**, а не посилання на старий engine.
+
+---
+
+# 7. Найважливіше правило для цього підходу
+
+Якщо ти не зберігаєш старі engine, тоді обов’язково має бути правило:
+
+> **не можна автоматично перебудовувати legacy geometry current-алгоритмом**
+
+Інакше весь сенс snapshot втрачається.
+
+---
+
+# 8. Яку архітектуру я б радив саме під твій варіант
+
+Ось хороший, практичний варіант.
+
+---
+
+## A. Один current routing engine у коді
+
+Наприклад:
+
+```js id="zjv6ol"
+const routingEngine = currentOrthogonalEngine;
+```
+
+---
+
+## B. Документ має policy
+
+```js id="mhcinm"
+{
+  schemaVersion: 2,
+  editPolicy: "legacy-snapshot"
+}
+```
+
+або
+
+```js id="4jsm1u"
+{
+  schemaVersion: 3,
+  editPolicy: "current-editable"
+}
+```
+
+---
+
+## C. Поведінка редактора
+
+### якщо `legacy-snapshot`
+
+* показуємо `geometry.points`
+* node drag, який тягне recompute, заборонено
+* add/remove edge заборонено
+* можна лише переглядати або редагувати несуттєві метадані
+
+### якщо `current-editable`
+
+* усі зв’язки будуються current engine
+* drag node → rebuild
+* add anchor → rebuild
+* edge routing handles → rebuild
+
+---
+
+## D. Якщо треба редагувати legacy
+
+Кнопка:
+
+**“Створити нову редакцію в актуальному форматі”**
+
+Після цього:
+
+* копія документа
+* `editPolicy = current-editable`
+* `schemaVersion = current`
+* recompute geometry current engine
+
+---
+
+# 9. Чим цей підхід кращий за зберігання `orthogonal-v1/v2`
+
+### плюси
+
+* простіший код
+* менше legacy-тягаря
+* легша підтримка
+* не треба тримати старі routing engine живими
+
+### мінуси
+
+* старі схеми не можна чесно редагувати зі збереженням старої поведінки
+* потрібен режим snapshot-only
+* потрібен revision flow для upgrade
+
+Для твого випадку це, на мою думку, дуже хороший компроміс.
+
+---
+
+# 10. Де саме тримати “поточну версію”
+
+Я б не робив це як “поточна версія функції”, а як конфіг редактора:
+
+```js id="mqn9py"
+export const EDITOR_COMPAT = {
+  currentSchemaVersion: 3,
+  currentRoutingVersion: 3,
+};
+```
+
+і окремо policy helper:
+
+```js id="j6lw6s"
+export function getDocumentEditPolicy(doc) {
+  if (doc.schemaVersion < EDITOR_COMPAT.currentSchemaVersion) {
+    return "legacy-snapshot";
+  }
+
+  return "current-editable";
+}
+```
+
+Тобто не прив’язуєшся до назви router-модуля, а працюєш через policy.
+
+---
+
+# 11. Що я би радив не робити
+
+Я би не радив робити так:
+
+* просто замінити старий router новим
+* і дозволити старим схемам далі редагуватися як новим
+
+Це найризикованіший варіант, бо саме він непомітно ламає layout.
+
+---
+
+# 12. Моя рекомендація по-простому
+
+Так, твоя ідея **робоча**, і для технічної підтримки навіть часто краща, ніж тримати багато engine-ів.
+
+Але тільки за умови, що ти вводиш таке правило:
+
+### старі схеми
+
+* працюють як **snapshot**
+* current router їх не перебудовує автоматично
+
+### нові схеми
+
+* працюють через current router
+
+### редагування старих схем
+
+* тільки через створення нової revision / upgrade
+
+---
+
+# 13. Найкоротший висновок
+
+Отже:
+
+* **зберігати `orthogonal-v1`, `orthogonal-v2` не обов’язково**
+* можна мати **один поточний routing engine**
+* але тоді **старі схеми мають бути snapshot-based, без live recompute**
+* для редагування старої схеми краще робити **нову редакцію**
+
+Це цілком професійний і чистий архітектурний підхід.
+
+Я можу далі показати, як саме виглядатиме **структура JSON схеми для snapshot/current-editable mode**, щоб ти побачив конкретну модель даних.

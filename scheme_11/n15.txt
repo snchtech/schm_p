@@ -1,0 +1,608 @@
+Версію треба ставити не на всі функції підряд, а тільки на ті, що **впливають на контракт документа** або можуть змінити результат геометрії при повторному обчисленні.
+
+Тобто головне правило таке:
+
+> **версіонуємо не UI-обробники, а алгоритми та формати, від яких залежить, як схема відновиться, перебудується або збережеться**
+
+Нижче розкладу саме по твоїх функціях.
+
+---
+
+# 1. Що точно не треба версіонувати
+
+Оце не треба робити у вигляді `handleAnchorClickV2`, `handleEdgeClickV3` і так далі.
+
+### Не версіонувати:
+
+* `handleAnchorClick`
+* `handleEdgeClick`
+* `handleEdgeContextMenu`
+* `handleEdgeAnchorContextMenu`
+* `deleteContextTarget`
+* hover / selection logic
+* відкриття меню
+* konva-render helpers в `EdgesLayer`
+
+Чому:
+бо це **поведінка UI**, а не формат схеми. Їх можна рефакторити без зламу старих документів, якщо вони працюють через стабільний доменний API.
+
+---
+
+# 2. Що треба версіонувати обов’язково
+
+Ось ці речі вже впливають на те, як схема виглядає і як вона відновлюється.
+
+---
+
+## A. Формат anchor
+
+Це дуже важливо.
+
+Наприклад, якщо раніше anchor був:
+
+```js
+{ nodeId, anchor: "right" }
+```
+
+а тепер став:
+
+```js
+{ type: "node", nodeId, direction: "right" }
+```
+
+або edge-anchor містить `segIndex/t`, а раніше ні — це вже **зміна формату даних**.
+
+### Що робити
+
+Не версіонувати функцію `resolveAnchor` напряму.
+Треба мати:
+
+* `schemaVersion`
+* або `anchorModelVersion`
+
+### Практично
+
+Краще не окремий `anchorModelVersion`, а включити це в загальну `schemaVersion`.
+
+---
+
+## B. `buildEdgePath`
+
+Оце одна з головних функцій, яку треба вважати version-sensitive.
+
+Бо якщо ти зміниш:
+
+* як визначається маршрут
+* як працюють `startOffset/endOffset`
+* як обходяться box-и
+* як працює `resolveDirection`
+
+то стара схема при rebuild піде інакше.
+
+### Як правильно
+
+Не робити:
+
+* `buildEdgePathV1`
+* `buildEdgePathV2`
+* в коді напряму
+
+А зробити registry routing engine-ів:
+
+```js
+const routingRegistry = {
+  "orthogonal-v1": { buildPath, updateAnchors },
+  "orthogonal-v2": { buildPath, updateAnchors },
+};
+```
+
+Тобто версію тримаєш не в імені випадкової функції по всьому коду, а в **ідентифікаторі engine**.
+
+---
+
+## C. `resolveAnchor`
+
+Ця функція теж version-sensitive, якщо змінюється семантика anchor-ів.
+
+Наприклад:
+
+* раніше edge-anchor брався по `x/y`
+* тепер по `segIndex/t`
+* або з’являється новий тип anchor
+
+Тоді стара схема без сумісності може зламатися.
+
+### Як правильно
+
+Не тягнути окремо `resolveAnchorV1`, якщо можна цього уникнути.
+Краще `resolveAnchor` має бути частиною конкретного routing engine або adapter-а формату.
+
+---
+
+## D. `resolveDirection`
+
+На перший погляд дрібниця, але насправді це теж важливо.
+
+Якщо ти зміниш логіку:
+
+* коли edge виходить вправо, а коли вниз
+* як працює `"auto"`
+* як визначати напрямок для edge-anchor
+
+то маршрут може змінитися радикально.
+
+### Висновок
+
+Це теж має жити всередині versioned routing engine.
+
+---
+
+## E. `calculateOrthogonalPath`
+
+Так, теж version-sensitive.
+
+Це ядро геометрії. Якщо змінюється:
+
+* кількість колін
+* правила ортогональності
+* обхід перешкод
+* нормалізація сегментів
+
+то це вже інший routing engine.
+
+---
+
+## F. `updateEdgeAnchors`
+
+Також version-sensitive.
+
+Бо вона залежить від того:
+
+* як інтерпретуються `segIndex/t`
+* що вважати тим самим сегментом
+* як поводитися при rebuild
+
+Якщо зміниш модель anchor-ів, цю частину теж треба вважати прив’язаною до версії engine.
+
+---
+
+# 3. Що краще групувати у версію, а не версіонувати окремо
+
+Ось найкращий підхід для підтримки:
+
+замість версіонувати кожну функцію окремо, об’єднати їх у **routing engine package**.
+
+Наприклад:
+
+```js
+const routingRegistry = {
+  "orthogonal-v1": {
+    resolveAnchor,
+    resolveDirection,
+    buildPath,
+    updateAnchors,
+  },
+
+  "orthogonal-v2": {
+    resolveAnchor,
+    resolveDirection,
+    buildPath,
+    updateAnchors,
+  },
+};
+```
+
+Тоді для конкретного edge або документа ти знаєш:
+
+```js
+edge.routing.engine = "orthogonal-v1"
+```
+
+і все працює через один engine object.
+
+Це набагато легше підтримувати, ніж 20 окремих функцій із суфіксами.
+
+---
+
+# 4. Які саме твої функції віднести до versioned engine
+
+Із того, що ти показував, я б розклав так.
+
+---
+
+## До versioned routing engine:
+
+* `buildEdgePath`
+* `resolveAnchor`
+* `resolveDirection`
+* `updateEdgeAnchors`
+* `calculateOrthogonalPath`
+* `boxFromNode` — якщо зміна padding/box semantics впливає на маршрут
+* `findClosestSegment` — якщо від цього залежить, як створюється edge-anchor
+* `projectPointOnSegment` — тільки якщо міняється модель edge-anchor
+* `mergeCollinear` / `fixDiagonals` — якщо вони впливають на фінальні `points`
+
+---
+
+## Не до versioned engine:
+
+* `handleAnchorClick`
+* `handleEdgeClick`
+* `updateEdgeOffset` як controller handler
+* `handleNodeDragMove`
+* context menu handlers
+* React/Konva render код
+
+Але важливе уточнення:
+
+### `updateEdgeOffset`
+
+як controller-функція — не versioned
+але її внутрішній виклик `rebuildEdge()` уже versioned через engine
+
+Тобто versioning не на handler, а на доменній операції, яку він викликає.
+
+---
+
+# 5. Найкраща одиниця версіонування
+
+Для підтримки проєкту найкраще мати 3 рівні версій.
+
+---
+
+## 1. `schemaVersion`
+
+Версія формату JSON документа.
+
+Змінюється, коли:
+
+* міняється структура edge/node
+* додаються нові поля
+* змінюється формат anchor
+
+Наприклад:
+
+```js
+schemaVersion: 2
+```
+
+---
+
+## 2. `routingEngine`
+
+Версія геометричного рушія.
+
+Наприклад:
+
+```js
+routingEngine: "orthogonal-v1"
+```
+
+або на рівні edge:
+
+```js
+routing: {
+  engine: "orthogonal-v1",
+  params: {...}
+}
+```
+
+---
+
+## 3. `editorVersion`
+
+Чисто сервісна штука, для підтримки і дебагу.
+
+Наприклад:
+
+```js
+meta: {
+  editorVersion: "0.9.3"
+}
+```
+
+Вона не повинна визначати логіку rebuild, але дуже допомагає техпідтримці.
+
+---
+
+# 6. Як це краще зробити технічно
+
+Я б рекомендував таку структуру.
+
+---
+
+## `routingRegistry.js`
+
+```js
+export const routingRegistry = {
+  "orthogonal-v1": orthogonalV1Engine,
+  "orthogonal-v2": orthogonalV2Engine,
+};
+```
+
+---
+
+## `orthogonalV1Engine.js`
+
+```js
+export const orthogonalV1Engine = {
+  id: "orthogonal-v1",
+
+  resolveAnchor(anchor, nodes, edges) {
+    ...
+  },
+
+  resolveDirection(anchor, otherPoint) {
+    ...
+  },
+
+  buildPath(edge, nodes, edges) {
+    ...
+  },
+
+  updateAnchors(edge) {
+    ...
+  },
+};
+```
+
+---
+
+## `orthogonalV2Engine.js`
+
+```js
+export const orthogonalV2Engine = {
+  id: "orthogonal-v2",
+
+  resolveAnchor(anchor, nodes, edges) {
+    ...
+  },
+
+  resolveDirection(anchor, otherPoint) {
+    ...
+  },
+
+  buildPath(edge, nodes, edges) {
+    ...
+  },
+
+  updateAnchors(edge) {
+    ...
+  },
+};
+```
+
+---
+
+## `rebuildEdge.js`
+
+```js
+import { routingRegistry } from "./routingRegistry";
+
+export function rebuildEdge(edge, nodes, edges, documentConfig) {
+  const engineId =
+    edge.routing?.engine ||
+    documentConfig?.routingEngine ||
+    "orthogonal-v2";
+
+  const engine = routingRegistry[engineId];
+
+  if (!engine) {
+    return edge;
+  }
+
+  const points = engine.buildPath(edge, nodes, edges);
+
+  return engine.updateAnchors({
+    ...edge,
+    points,
+  });
+}
+```
+
+Оце дуже зручно для технічної підтримки.
+
+---
+
+# 7. Що зберігати в БД / JSON для підтримки
+
+Для кожної схеми або revision я б радив зберігати мінімум:
+
+```js
+{
+  schemaVersion: 2,
+  routingEngine: "orthogonal-v1",
+  editorVersion: "0.9.3",
+  ...
+}
+```
+
+А для edge:
+
+```js
+{
+  id: "e1",
+  source: {...},
+  target: {...},
+  routing: {
+    engine: "orthogonal-v1",
+    params: {
+      startOffset: 20,
+      endOffset: 20
+    }
+  },
+  geometry: {
+    points: [...],
+    anchors: [...]
+  }
+}
+```
+
+---
+
+# 8. Який компроміс найкращий для підтримки
+
+Щоб не плодити багато коду, я б зробив так:
+
+---
+
+## Версіонуєш тільки те, що реально ламає layout:
+
+* routing engine package
+* schema format
+
+---
+
+## Не версіонуєш:
+
+* UI handlers
+* Konva components
+* selection/context menu
+* toolbar actions
+
+---
+
+## Підтримуєш обмежену кількість engine:
+
+* `orthogonal-v1`
+* `orthogonal-v2`
+
+і все
+
+Не треба 10–20. Зазвичай вистачає:
+
+* поточний
+* один legacy
+* можливо ще один перехідний
+
+---
+
+# 9. Що я б зробив у твоєму проєкті прямо зараз
+
+Ось практичний список.
+
+---
+
+## Треба почати версіонувати:
+
+### 1.
+
+`buildEdgePath`
+але через `routing.engine`, а не через назву функції
+
+### 2.
+
+`resolveAnchor`
+
+### 3.
+
+`resolveDirection`
+
+### 4.
+
+`calculateOrthogonalPath`
+
+### 5.
+
+`updateEdgeAnchors`
+
+### 6.
+
+формат edge-anchor (`segIndex/t/x/y/direction`) через `schemaVersion`
+
+---
+
+## Не треба версіонувати окремо:
+
+### 1.
+
+`handleAnchorClick`
+
+### 2.
+
+`handleEdgeClick`
+
+### 3.
+
+`handleNodeDragMove`
+
+### 4.
+
+`handleEdgeContextMenu`
+
+### 5.
+
+рендер `EdgesLayer`
+
+---
+
+# 10. Як це називати для технічної підтримки
+
+Щоб команді було легко, я б використовував прості назви.
+
+---
+
+## На рівні документа
+
+* `schemaVersion`
+* `routingEngine`
+* `editorVersion`
+
+---
+
+## На рівні коду
+
+* `routingRegistry`
+* `legacyCompatibilityPolicy`
+* `migrateSchemeDocument`
+* `rebuildEdgeUsingEngine`
+
+---
+
+## На рівні support/debug
+
+коли щось зламалось, ти одразу бачиш:
+
+* документ якої версії
+* який routing engine у нього був
+* яким редактором його востаннє зберігали
+
+Це дуже спрощує технічну підтримку.
+
+---
+
+# 11. Найкоротша практична відповідь
+
+Якщо стисло, то **версію потрібно ставити не на controller-обробники, а на routing engine і schema format**.
+
+Саме з твоїх функцій під version-sensitive потрапляють:
+
+* `buildEdgePath`
+* `resolveAnchor`
+* `resolveDirection`
+* `calculateOrthogonalPath`
+* `updateEdgeAnchors`
+
+А такі функції як:
+
+* `handleAnchorClick`
+* `handleEdgeClick`
+* `handleNodeDragMove`
+
+версіонувати не треба — вони просто мають викликати правильний engine залежно від версії документа.
+
+---
+
+# 12. Моя рекомендація
+
+Для підтримки проєкту зроби так:
+
+1. введи `schemaVersion` для документа
+2. введи `routing.engine` для edge або документа
+3. створи `routingRegistry`
+4. перенеси version-sensitive функції в engine-модулі
+5. UI/controller лиши нейтральними
+
+Це дасть тобі контрольовану еволюцію без хаосу з `V1/V2/V3` по всьому коду.
+
+Наступним повідомленням я можу показати тобі **готову структуру папок і файлів для versioned routing engine**, щоб це одразу можна було впровадити в Next.js-проєкт.

@@ -1,0 +1,548 @@
+Так, це добре лягає у твою нову архітектуру.
+
+Тут головна ідея така:
+
+1. `setupLayerZoomPan` має не тільки змінювати `layer`, а ще й оновлювати Zustand-store.
+2. Store має знати, чи canvas зараз у `default view`, чи вже був zoom/pan.
+3. `ToolPalette` читає цей стан і показує кнопку `Скинути zoom` лише коли є відхилення від початкового стану.
+
+Нижче даю готовий варіант по кроках.
+
+---
+
+# 1. Додай стан viewport у `useCanvasStore`
+
+У store треба зберігати:
+
+* `scale`
+* `position`
+* `isViewportDirty` — чи відрізняється canvas від стартового стану
+
+Наприклад так:
+
+```js
+import { create } from "zustand";
+
+export const useCanvasStore = create((set) => ({
+  stageRef: null,
+  layerRef: null,
+  apiRef: null,
+
+  activeTool: null,
+  isPanning: false,
+
+  viewport: {
+    scale: 1,
+    x: 0,
+    y: 0,
+    isDirty: false,
+  },
+
+  setStageRef: (stageRef) => set({ stageRef }),
+  setLayerRef: (layerRef) => set({ layerRef }),
+  setApiRef: (apiRef) => set({ apiRef }),
+
+  setActiveTool: (activeTool) => set({ activeTool }),
+  setIsPanning: (isPanning) => set({ isPanning }),
+
+  setViewport: ({ scale, x, y }) =>
+    set(() => {
+      const EPS = 0.0001;
+      const isDirty =
+        Math.abs(scale - 1) > EPS ||
+        Math.abs(x) > EPS ||
+        Math.abs(y) > EPS;
+
+      return {
+        viewport: {
+          scale,
+          x,
+          y,
+          isDirty,
+        },
+      };
+    }),
+
+  resetViewportState: () =>
+    set({
+      viewport: {
+        scale: 1,
+        x: 0,
+        y: 0,
+        isDirty: false,
+      },
+    }),
+}));
+```
+
+---
+
+# 2. Онови `setupLayerZoomPan`, щоб він писав стан у store
+
+Твоя функція вже майже готова. Треба тільки додати helper `syncViewportState()` і викликати його після zoom/pan/reset.
+
+Ось оновлена версія:
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export function setupLayerZoomPan(
+  stage,
+  layer,
+  {
+    zoomStep = 1.15,
+    minScale = 0.2,
+    maxScale = 6,
+    requireCtrlForWheel = false,
+    panMode = "mmb_or_space",
+  } = {}
+) {
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const container = stage.container();
+
+  const getScale = () => layer.scaleX() || 1;
+
+  function syncViewportState() {
+    useCanvasStore.getState().setViewport({
+      scale: getScale(),
+      x: layer.x(),
+      y: layer.y(),
+    });
+  }
+
+  function zoomToPoint(nextScale, pointOnStage) {
+    const oldScale = getScale();
+    const newScale = clamp(nextScale, minScale, maxScale);
+
+    const p = pointOnStage ?? {
+      x: stage.width() / 2,
+      y: stage.height() / 2,
+    };
+
+    const layerPos = layer.position();
+
+    const worldPoint = {
+      x: (p.x - layerPos.x) / oldScale,
+      y: (p.y - layerPos.y) / oldScale,
+    };
+
+    layer.scale({ x: newScale, y: newScale });
+
+    layer.position({
+      x: p.x - worldPoint.x * newScale,
+      y: p.y - worldPoint.y * newScale,
+    });
+
+    layer.batchDraw();
+    syncViewportState();
+  }
+
+  // ---------- ZOOM ----------
+  function onWheel(e) {
+    e.evt.preventDefault();
+    if (requireCtrlForWheel && !e.evt.ctrlKey) return;
+
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? zoomStep : 1 / zoomStep;
+
+    zoomToPoint(getScale() * factor, pointer);
+  }
+
+  stage.on("wheel", onWheel);
+
+  // ---------- PAN ----------
+  let isPanning = false;
+  let lastClient = null;
+  let spaceDown = false;
+
+  const keyDown = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = true;
+      ev.preventDefault?.();
+      if (!isPanning) container.style.cursor = "grab";
+    }
+  };
+
+  const keyUp = (ev) => {
+    if (ev.code === "Space") {
+      spaceDown = false;
+      if (!isPanning) container.style.cursor = "default";
+    }
+  };
+
+  window.addEventListener("keydown", keyDown, { passive: false });
+  window.addEventListener("keyup", keyUp);
+
+  function canStartPan(evt) {
+    const isMMB = evt.button === 1;
+    const isLMB = evt.button === 0;
+
+    if (panMode === "mmb") return isMMB;
+    if (panMode === "space") return isLMB && spaceDown;
+
+    return isMMB || (isLMB && spaceDown);
+  }
+
+  function onMouseDown(e) {
+    const evt = e.evt;
+
+    if (!canStartPan(evt)) return;
+
+    isPanning = true;
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    useCanvasStore.getState().setIsPanning(true);
+
+    container.style.cursor = "grabbing";
+    evt.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning || !lastClient) return;
+
+    const evt = e.evt;
+
+    const dx = evt.clientX - lastClient.x;
+    const dy = evt.clientY - lastClient.y;
+
+    layer.position({
+      x: layer.x() + dx,
+      y: layer.y() + dy,
+    });
+
+    lastClient = { x: evt.clientX, y: evt.clientY };
+
+    layer.batchDraw();
+    syncViewportState();
+  }
+
+  function stopPan() {
+    if (!isPanning) return;
+
+    isPanning = false;
+    lastClient = null;
+
+    useCanvasStore.getState().setIsPanning(false);
+
+    container.style.cursor = spaceDown ? "grab" : "default";
+    syncViewportState();
+  }
+
+  stage.on("mousedown", onMouseDown);
+  stage.on("mousemove", onMouseMove);
+  stage.on("mouseup", stopPan);
+  stage.on("mouseleave", stopPan);
+
+  // ---------- API ----------
+  function zoomIn() {
+    zoomToPoint(getScale() * zoomStep);
+  }
+
+  function zoomOut() {
+    zoomToPoint(getScale() / zoomStep);
+  }
+
+  function reset() {
+    layer.scale({ x: 1, y: 1 });
+    layer.position({ x: 0, y: 0 });
+    layer.batchDraw();
+
+    useCanvasStore.getState().resetViewportState();
+  }
+
+  function destroy() {
+    stage.off("wheel", onWheel);
+    stage.off("mousedown", onMouseDown);
+    stage.off("mousemove", onMouseMove);
+    stage.off("mouseup", stopPan);
+    stage.off("mouseleave", stopPan);
+
+    window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("keyup", keyUp);
+
+    useCanvasStore.getState().setIsPanning(false);
+    useCanvasStore.getState().resetViewportState();
+    container.style.cursor = "default";
+  }
+
+  syncViewportState();
+
+  return {
+    zoomIn,
+    zoomOut,
+    reset,
+    getScale,
+    setScale: (s) => zoomToPoint(s),
+    destroy,
+  };
+}
+```
+
+---
+
+# 3. Переконайся, що `EditorCanvas` зберігає `apiRef`
+
+Тут важливо, щоб `setupLayerZoomPan(...)` повертав API, а ти записував його у store.
+
+Наприклад:
+
+```js
+"use client";
+
+import { useEffect, useRef } from "react";
+import { Stage, Layer } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { setupLayerZoomPan } from "@/lib/diagram/LayerZoom";
+
+import NodesLayer from "./NodesLayer";
+import EdgesLayer from "./EdgesLayer";
+import SelectionTransformer from "./SelectionTransformer";
+import ToolCursorPreview from "./ToolCursorPreview";
+
+export default function EditorCanvas() {
+  const stageRef = useRef(null);
+  const layerRef = useRef(null);
+
+  const setStageRef = useCanvasStore((s) => s.setStageRef);
+  const setLayerRef = useCanvasStore((s) => s.setLayerRef);
+  const setApiRef = useCanvasStore((s) => s.setApiRef);
+
+  useEffect(() => {
+    setStageRef(stageRef);
+    setLayerRef(layerRef);
+
+    if (!stageRef.current || !layerRef.current) return;
+
+    const api = setupLayerZoomPan(stageRef.current, layerRef.current, {
+      zoomStep: 1.15,
+      minScale: 0.2,
+      maxScale: 6,
+      requireCtrlForWheel: false,
+      panMode: "mmb_or_space",
+    });
+
+    setApiRef(api);
+
+    return () => {
+      api.destroy?.();
+      setApiRef(null);
+    };
+  }, [setStageRef, setLayerRef, setApiRef]);
+
+  return (
+    <Stage ref={stageRef} width={1200} height={800}>
+      <Layer ref={layerRef}>
+        <EdgesLayer />
+        <NodesLayer />
+        <ToolCursorPreview />
+        <SelectionTransformer />
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+# 4. Додай блок у `ToolPalette`
+
+Тепер у `ToolPalette` можна показувати верхній блок з поточним масштабом і кнопкою reset.
+
+Приклад:
+
+```js
+"use client";
+
+import React from "react";
+import {
+  Box,
+  Divider,
+  Typography,
+  Button,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function ToolPalette() {
+  const apiRef = useCanvasStore((s) => s.apiRef);
+  const viewport = useCanvasStore((s) => s.viewport);
+
+  const handleResetZoom = () => {
+    apiRef?.reset?.();
+  };
+
+  return (
+    <Box>
+      {viewport.isDirty && (
+        <>
+          <Box sx={{ p: 1.5 }}>
+            <Typography variant="caption" sx={{ display: "block", mb: 0.5 }}>
+              Налаштування схеми
+            </Typography>
+
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              Zoom: {Math.round(viewport.scale * 100)}%
+            </Typography>
+
+            <Button
+              size="small"
+              variant="outlined"
+              fullWidth
+              onClick={handleResetZoom}
+            >
+              Скинути zoom
+            </Button>
+          </Box>
+
+          <Divider />
+        </>
+      )}
+
+      {/* далі твій існуючий вміст ToolPalette */}
+    </Box>
+  );
+}
+```
+
+---
+
+# 5. Чому краще показувати не тільки zoom, а весь `viewport.isDirty`
+
+Ти написав: показувати кнопку тільки тоді, коли `Zoom` активовано.
+
+Але фактично користувач може:
+
+* не змінити scale,
+* але зрушити canvas через pan.
+
+Тоді візуально стан теж уже “не початковий”, і логічно дати кнопку повернення до старту.
+
+Тому краще не перевіряти тільки `scale !== 1`, а саме:
+
+* `scale !== 1`
+* або `x !== 0`
+* або `y !== 0`
+
+Саме це і робить `isDirty`.
+
+---
+
+# 6. Якщо хочеш саме “скинути вигляд”, краще перейменувати кнопку
+
+Зараз технічно вона робить не лише reset zoom, а:
+
+* reset scale
+* reset position
+
+Тому UX-назва навіть краща така:
+
+* `Скинути вигляд`
+* `Повернути 100%`
+* `Початковий масштаб`
+
+Наприклад:
+
+```js
+<Button
+  size="small"
+  variant="outlined"
+  fullWidth
+  onClick={handleResetZoom}
+>
+  Повернути 100%
+</Button>
+```
+
+або
+
+```js
+<Button
+  size="small"
+  variant="outlined"
+  fullWidth
+  onClick={handleResetZoom}
+>
+  Скинути вигляд
+</Button>
+```
+
+---
+
+# 7. Найкращий варіант блоку в ToolPalette
+
+Я б радив зверху зробити маленький системний блок:
+
+* заголовок: `Вигляд схеми`
+* рядок: `Масштаб: 135%`
+* кнопка: `Скинути вигляд`
+* `Divider`
+
+Тобто не просто одна кнопка, а окремий компактний section. Це добре масштабується, бо потім сюди ж можна додати:
+
+* `Сітка: увімкнена`
+* `Snap: увімкнений`
+* `Режим: editor/viewer`
+* `Координати курсора`
+
+---
+
+# 8. Архітектурно це правильно, бо
+
+У новій архітектурі ролі такі:
+
+* `setupLayerZoomPan` — змінює Konva viewport
+* `Zustand store` — зберігає UI-стан viewport
+* `ToolPalette` — лише читає стан і викликає API
+* `EditorCanvas` — зв’язує stage/layer з zoom-pan API
+
+Тобто тут немає прямої залежності `ToolPalette -> Konva layer`, і це правильно.
+
+---
+
+# 9. Мінімальний набір змін, якщо без зайвого
+
+Якщо коротко, тобі треба зробити всього 4 речі:
+
+1. У store додати:
+
+```js
+viewport
+setViewport()
+resetViewportState()
+```
+
+2. У `setupLayerZoomPan` після кожної зміни viewport викликати:
+
+```js
+syncViewportState()
+```
+
+3. У `reset()`:
+
+```js
+layer.scale({ x: 1, y: 1 });
+layer.position({ x: 0, y: 0 });
+useCanvasStore.getState().resetViewportState();
+```
+
+4. У `ToolPalette`:
+
+```js
+const viewport = useCanvasStore((s) => s.viewport);
+const apiRef = useCanvasStore((s) => s.apiRef);
+
+{viewport.isDirty && (
+  <Button onClick={() => apiRef?.reset?.()}>
+    Скинути вигляд
+  </Button>
+)}
+```
+
+---
+
+Якщо хочеш, я можу одразу зібрати тобі готовий повний код для трьох файлів:
+`useCanvasStore.js`, `LayerZoom.js`, `ToolPalette.jsx`
+у вже узгодженому фінальному вигляді без фрагментів.

@@ -1,0 +1,420 @@
+Так, тут робимо **той самий підхід**: shape тільки малює себе, а anchors живуть у `registry`.
+
+---
+
+# Що прибрати з цього компонента
+
+## 1. Прибрати props для anchor-логіки
+
+Ось це викидаємо:
+
+```js
+showAnchors = true,
+onAnchorClick,
+```
+
+---
+
+## 2. Прибрати обчислення anchor з UI-компонента
+
+Ось це теж більше не потрібно:
+
+```js
+const anchor = useMemo(
+  () => ({
+    id: "anchor-top-rect-center",
+    x: topRect.x + topRect.w / 2,
+    y: topRect.y + topRect.h / 2,
+  }),
+  [topRect],
+);
+
+const anchorRadius = 3.2;
+
+const handleAnchorClick = (e) => {
+  e.cancelBubble = true;
+  onAnchorClick?.({
+    anchorId: anchor.id,
+    x: anchor.x,
+    y: anchor.y,
+  });
+};
+```
+
+---
+
+## 3. Прибрати імпорт `Circle`
+
+Було:
+
+```js
+import { Group, Rect, Line, Shape, Circle } from "react-konva";
+```
+
+Має бути:
+
+```js
+import { Group, Rect, Line, Shape } from "react-konva";
+```
+
+---
+
+## 4. Прибрати JSX-блок anchor
+
+Оцей блок повністю викидаємо:
+
+```jsx
+{showAnchors && (
+  <Circle
+    x={anchor.x}
+    y={anchor.y}
+    radius={anchorRadius}
+    fill="white"
+    stroke={stroke}
+    strokeWidth={Math.max(1, strokeWidth * 0.6)}
+    onMouseDown={(e) => e.cancelBubble = true}
+    onClick={handleAnchorClick}
+  />
+)}
+```
+
+---
+
+# Очищений компонент
+
+Ось готова версія після переробки:
+
+```jsx
+"use client";
+
+import React, { useMemo } from "react";
+import { Group, Rect, Line, Shape } from "react-konva";
+
+/**
+ * MonitorCrossIcon
+ * тільки рендер shape
+ * anchors описуються в registry
+ */
+export default function MonitorCrossIcon({
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 2.5,
+}) {
+  // Оригінальний viewBox: 0 0 65 62
+  const vb = useMemo(() => ({ w: 65, h: 62 }), []);
+
+  // Геометрія верхнього прямокутника
+  const topRect = useMemo(
+    () => ({ x: 10, y: 2, w: 48, h: 18 }),
+    [],
+  );
+
+  return (
+    <Group x={x} y={y} scaleX={scale} scaleY={scale}>
+      {/* monitor outline */}
+      <Rect
+        x={topRect.x}
+        y={topRect.y}
+        width={topRect.w}
+        height={topRect.h}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {/* monitor top bar fill */}
+      <Rect
+        x={topRect.x}
+        y={topRect.y}
+        width={topRect.w}
+        height={8}
+        fill={stroke}
+        strokeEnabled={false}
+      />
+
+      {/* stand */}
+      <Line
+        points={[34, 20, 34, 45]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="square"
+      />
+
+      {/* left triangle */}
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(2, 32);
+          ctx.lineTo(2, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+
+      {/* right triangle */}
+      <Shape
+        sceneFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.moveTo(62, 32);
+          ctx.lineTo(62, 58);
+          ctx.lineTo(34, 45);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        fillEnabled={false}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="miter"
+      />
+
+      {/* diagonals */}
+      <Line
+        points={[2, 58, 62, 32]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+      <Line
+        points={[62, 58, 2, 32]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+    </Group>
+  );
+}
+```
+
+---
+
+# Що додати в `registry`
+
+Тепер anchor описується там.
+
+У тебе тут був anchor:
+
+* `x = topRect.x + topRect.w / 2`
+* `y = topRect.y + topRect.h / 2`
+
+Підставимо числа:
+
+* `x = 10 + 48 / 2 = 34`
+* `y = 2 + 18 / 2 = 11`
+
+---
+
+## Додати запис у registry
+
+```js
+import MonitorCrossIcon from "./MonitorCrossIcon";
+
+export const ELEMENT_REGISTRY = {
+  monitorCrossIcon: {
+    component: MonitorCrossIcon,
+
+    getAnchors: (node) => {
+      const scale = node.data?.scale || 1;
+
+      return [
+        {
+          id: `${node.id}-topRectCenter`,
+          type: "node-anchor",
+          nodeId: node.id,
+          direction: "top",
+          x: 34 * scale,
+          y: 11 * scale,
+        },
+      ];
+    },
+  },
+};
+```
+
+---
+
+# Якщо хочеш anchor не по центру прямокутника, а по верхньому краю
+
+Зараз у тебе anchor був по центру верхнього прямокутника:
+
+```js
+x: 34
+y: 11
+```
+
+А якщо хочеш **top-center edge**, тоді буде:
+
+```js
+x: 34
+y: 2
+```
+
+Тобто так:
+
+```js
+getAnchors: (node) => {
+  const scale = node.data?.scale || 1;
+
+  return [
+    {
+      id: `${node.id}-topRectTopCenter`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "top",
+      x: 34 * scale,
+      y: 2 * scale,
+    },
+  ];
+},
+```
+
+---
+
+# Що саме викинути / що саме додати
+
+## Викинути з компонента
+
+### props:
+
+```js
+showAnchors = true,
+onAnchorClick,
+```
+
+### імпорт:
+
+```js
+Circle
+```
+
+### код:
+
+```js
+const anchor = useMemo(...)
+const anchorRadius = 3.2;
+const handleAnchorClick = ...
+```
+
+### JSX:
+
+```jsx
+{showAnchors && (
+  <Circle ... />
+)}
+```
+
+---
+
+## Додати в registry
+
+```js
+monitorCrossIcon: {
+  component: MonitorCrossIcon,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+
+    return [
+      {
+        id: `${node.id}-topRectCenter`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top",
+        x: 34 * scale,
+        y: 11 * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# Рекомендую ще краще: винести геометрію в model
+
+Щоб не дублювати числа `10`, `48`, `18`, `34`, `11`, можна винести в окремий файл.
+
+## `MonitorCrossIcon.model.js`
+
+```js
+export const MONITOR_CROSS_MODEL = {
+  VIEWBOX_WIDTH: 65,
+  VIEWBOX_HEIGHT: 62,
+
+  TOP_RECT: {
+    x: 10,
+    y: 2,
+    w: 48,
+    h: 18,
+  },
+
+  STAND: {
+    x1: 34,
+    y1: 20,
+    x2: 34,
+    y2: 45,
+  },
+};
+```
+
+Тоді:
+
+## у shape
+
+```js
+import { MONITOR_CROSS_MODEL as M } from "./MonitorCrossIcon.model";
+```
+
+## у registry
+
+```js
+import { MONITOR_CROSS_MODEL as M } from "./MonitorCrossIcon.model";
+
+monitorCrossIcon: {
+  component: MonitorCrossIcon,
+  getAnchors: (node) => {
+    const scale = node.data?.scale || 1;
+
+    return [
+      {
+        id: `${node.id}-topRectCenter`,
+        type: "node-anchor",
+        nodeId: node.id,
+        direction: "top",
+        x: (M.TOP_RECT.x + M.TOP_RECT.w / 2) * scale,
+        y: (M.TOP_RECT.y + M.TOP_RECT.h / 2) * scale,
+      },
+    ];
+  },
+},
+```
+
+---
+
+# Важливий нюанс
+
+Тут у тебе `scale` передається як prop у shape.
+Щоб anchors співпадали, треба щоб `registry.getAnchors(node)` брав **той самий scale**, який реально використовується при рендері shape.
+
+Тобто якщо shape рендериться як:
+
+```jsx
+<Shape node={node} />
+```
+
+то всередині `MonitorCrossIcon` має бути щось типу:
+
+```js
+const scale = node?.data?.scale || 1;
+```
+
+а не окремий prop, який може розійтися з node-data.
+
+Тобто ще чистіший варіант — shape будувати від `node`, а не від окремих `x/y/scale`.
+
+---
+
+Якщо хочеш, я наступним повідомленням можу одразу показати тобі, як привести **обидва компоненти до єдиного формату `({ node })`**, щоб registry і NodesLayer працювали однаково для всіх shape.

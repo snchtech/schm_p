@@ -1,0 +1,1147 @@
+Так, у тебе вже є майже все потрібне, але зараз це ще не зібрано в одну чітку систему.
+
+Зараз у тебе фактично є 4 шари:
+
+1. **UI-шар** — меню, canvas, `EdgesLayer`, node-компоненти.
+2. **Controller-шар** — `canvasController`, де живе поведінка кліків, drag, context menu.
+3. **Store-шар** — `useCanvasStore`, де живуть `nodes`, `edges`, `selection`, `mode`, тимчасові стани.
+4. **Geometry/Routing-шар** — `buildEdgePath`, `resolveAnchor`, `resolveDirection`, `calculateOrthogonalPath`, `findClosestSegment`, `updateEdgeAnchors`.
+
+І головна ідея правильної архітектури така:
+
+* **UI нічого не обчислює**
+* **controller не малює**
+* **store не знає про konva**
+* **geometry не знає про React/Zustand**
+* `EdgesLayer` тільки відображає вже готовий `edge`
+
+---
+
+# 1. Як це працює зараз по ланцюжку
+
+---
+
+## 1. Клік по меню “побудувати зв’язок”
+
+У toolbar або menu ти змінюєш режим, наприклад:
+
+```js
+setMode("add-connector")
+```
+
+Це означає:
+
+* canvas переходить в режим створення зв’язку
+* клік по звичайній лінії або node тепер інтерпретується інакше
+* `EdgesLayer` і `NodesLayer` починають показувати потрібні точки прив’язки
+
+Тобто **режим** — це глобальний перемикач поведінки.
+
+---
+
+## 2. Клік по anchor вузла або лінії
+
+Далі в `NodesLayer` або `EdgesLayer` є обробник:
+
+```js
+canvasController.handleAnchorClick(anchor)
+```
+
+Це найважливіша точка входу для побудови edge.
+
+Логіка така:
+
+### перший клік
+
+* якщо `tempSource === null`
+* ти просто зберігаєш, звідки починається зв’язок
+
+```js
+store.setTempSource(anchor)
+```
+
+### другий клік
+
+* якщо `tempSource` вже є
+* значить користувач вибрав ціль
+* створюється новий `edge`
+
+```js
+const edge = {
+  id: crypto.randomUUID(),
+  source: store.tempSource,
+  target: anchor,
+  data: {
+    routing: { startOffset: 20, endOffset: 20 },
+    anchors: []
+  },
+  points: []
+}
+```
+
+Після цього:
+
+```js
+edge.points = buildEdgePath(edge, store.nodes, store.edges)
+store.addEdge(edge)
+store.setTempSource(null)
+```
+
+Тобто **сам edge не малюється вручну**, а будується як модель даних, а потім уже відображається в `EdgesLayer`.
+
+---
+
+# 2. Що таке `source` і `target`
+
+Оце ключовий момент.
+
+Правильна модель повинна бути універсальною. Не просто:
+
+```js
+source: { nodeId, anchor: "right" }
+```
+
+а повна:
+
+```js
+source: {
+  type: "node",      // або "edge"
+  nodeId: "n1",
+  direction: "right"
+}
+```
+
+або для зв’язку до лінії:
+
+```js
+target: {
+  type: "edge",
+  edgeId: "e1",
+  segIndex: 2,
+  t: 0.4,
+  x: 320,
+  y: 180,
+  direction: "auto"
+}
+```
+
+Це дає тобі одну велику перевагу:
+
+**edge може з’єднуватися:**
+
+* node → node
+* node → edge
+* edge → node
+* edge → edge
+
+Саме це і є вже основа “нормальної системи зв’язків”.
+
+---
+
+# 3. Що робить `buildEdgePath`
+
+Це не просто helper. Це твій **єдиний генератор геометрії edge**.
+
+Він має працювати так:
+
+```js
+buildEdgePath(edge, nodes, edges)
+```
+
+Всередині:
+
+### крок 1 — знайти реальні координати початку і кінця
+
+через:
+
+```js
+resolveAnchor(edge.source, nodes, edges)
+resolveAnchor(edge.target, nodes, edges)
+```
+
+---
+
+## `resolveAnchor`
+
+Вона перетворює логічну прив’язку в фізичну точку.
+
+Наприклад:
+
+### якщо anchor вузла
+
+```js
+{
+  type: "node",
+  nodeId: "n1",
+  direction: "right"
+}
+```
+
+то поверне:
+
+```js
+{ x: 240, y: 100, direction: "right" }
+```
+
+### якщо anchor лінії
+
+```js
+{
+  type: "edge",
+  edgeId: "e1",
+  segIndex: 1,
+  t: 0.5,
+  direction: "auto"
+}
+```
+
+то візьме `edge.points`, знайде сегмент №1 і поверне точку посередині цього сегмента.
+
+Тобто `resolveAnchor` — це міст між моделлю і реальною геометрією.
+
+---
+
+## `resolveDirection`
+
+Після того, як координати є, треба зрозуміти, в який бік “виходити” з точки.
+
+### для node-anchor
+
+напрям уже відомий:
+
+* top
+* bottom
+* left
+* right
+
+### для edge-anchor
+
+напрям часто `"auto"`
+
+Тоді:
+
+```js
+resolveDirection(start, end)
+```
+
+дивиться, де друга точка, і вирішує:
+
+* вправо
+* вліво
+* вгору
+* вниз
+
+Це потрібно routing-алгоритму.
+
+---
+
+## `calculateOrthogonalPath`
+
+Це вже низькорівнева геометрія маршруту.
+
+Вона будує ламану:
+
+* горизонтально/вертикально
+* з урахуванням `startOffset`, `endOffset`
+* з урахуванням box вузлів
+* з урахуванням напряму виходу/входу
+
+На виході отримуєш:
+
+```js
+[x1, y1, x2, y2, x3, y3, ...]
+```
+
+Тобто масив точок для `Line` у Konva.
+
+---
+
+## Повний цикл `buildEdgePath`
+
+Тобто логічно воно працює так:
+
+```js
+edge
+ -> resolveAnchor(source)
+ -> resolveAnchor(target)
+ -> resolveDirection(...)
+ -> calculateOrthogonalPath(...)
+ -> готовий масив points
+```
+
+---
+
+# 4. Що робить `EdgesLayer`
+
+`EdgesLayer` не будує edge. Він тільки **малює те, що вже є в store**.
+
+Він бере:
+
+```js
+const edges = useCanvasStore((s) => s.edges);
+```
+
+і для кожного `edge`:
+
+* малює основну лінію `Line`
+* малює ручки для routing offset
+* малює anchor-и на лінії
+* навішує hover/click/context menu
+
+Тобто `EdgesLayer` — це **renderer + UI events**, а не логіка побудови.
+
+---
+
+# 5. Що таке anchor на лінії
+
+У тебе є:
+
+```js
+edge.data.anchors
+```
+
+Це не початок і не кінець edge.
+
+Це **додаткові точки прив’язки на середині edge**, до яких потім можуть підключатись інші зв’язки.
+
+Приклад:
+
+```js
+{
+  id: "...",
+  type: "edge",
+  edgeId: "e1",
+  segIndex: 2,
+  t: 0.3,
+  x: 300,
+  y: 140,
+  direction: "auto"
+}
+```
+
+Сенс полів:
+
+* `edgeId` — на якій лінії живе ця точка
+* `segIndex` — на якому сегменті лінії
+* `t` — позиція на сегменті від 0 до 1
+* `x`, `y` — поточні координати для відображення
+* `direction: "auto"` — напрямок визначається динамічно
+
+Найважливіше тут:
+**anchor на edge не треба зберігати тільки як `x, y`.**
+Бо якщо routing перерахувався, лінія з’їде, і `x,y` стануть неправильними.
+
+Саме тому правильна база — це:
+
+* `segIndex`
+* `t`
+
+А `x,y` — похідні, які перераховуються.
+
+---
+
+# 6. Як додається anchor на лінію
+
+У тебе це робиться через:
+
+```js
+handleEdgeClick(edgeId, e)
+```
+
+і тільки якщо:
+
+```js
+store.mode === "add-anchor"
+```
+
+Далі:
+
+1. береться pointer миші
+2. знаходиться edge
+3. викликається:
+
+```js
+findClosestSegment(edge.points, pointer.x, pointer.y)
+```
+
+Це повертає:
+
+* найближчий сегмент
+* найближчу точку на ньому
+* параметр `t`
+
+Після цього створюється:
+
+```js
+const newAnchor = {
+  id: crypto.randomUUID(),
+  type: "edge",
+  edgeId,
+  kind: "free",
+  x: closest.x,
+  y: closest.y,
+  segIndex: closest.segIndex,
+  t: closest.t,
+  direction: "auto"
+}
+```
+
+і додається в:
+
+```js
+edge.data.anchors
+```
+
+Тобто клік по edge у режимі `add-anchor` створює нову точку прив’язки на самій лінії.
+
+---
+
+# 7. Як anchor на лінії не “губиться” після перерахунку
+
+Оце дуже важливо.
+
+Коли node рухається або routing змінюється, `edge.points` змінюються.
+Тоді старі `x,y` anchor-а вже не актуальні.
+
+Тому після будь-якого rebuild edge треба робити:
+
+```js
+updateEdgeAnchors(edge)
+```
+
+Вона бере:
+
+* `segIndex`
+* `t`
+
+і на основі нових `points` знову обчислює `x,y`.
+
+Це правильна модель.
+
+Але тут є тонкий момент:
+
+### проблема поточної реалізації
+
+Якщо routing сильно змінився, старий `segIndex` може більше не відповідати “логічно тому самому місцю”.
+
+Наприклад:
+
+* було 4 сегменти
+* стало 6 сегментів
+* старий `segIndex = 2` тепер уже інший відрізок
+
+Тобто поточна система працює добре для помірних змін маршруту, але не для радикальної перебудови.
+
+### для старту цього достатньо
+
+Але в майбутньому краще ввести 2 режими edge-anchor:
+
+* **attached-by-segment** — прив’язка до конкретного сегмента
+* **fixed-point** — фіксована точка
+* або навіть **project-after-rebuild** — після rebuild перепроєктувати точку на найближчий сегмент
+
+---
+
+# 8. Як edge перераховується при русі node
+
+У тебе це робить:
+
+```js
+handleNodeDragMove(id, e)
+```
+
+Логіка така:
+
+1. оновлюється позиція node
+2. беруться всі edges
+3. фільтруються ті, де цей node є `source` або `target`
+4. для кожного такого edge:
+
+```js
+const points = buildEdgePath(edge, nodes, store.edges)
+```
+
+5. далі треба ще викликати:
+
+```js
+const updatedEdge = updateEdgeAnchors({
+  ...edge,
+  points
+})
+```
+
+6. і записати назад у store
+
+Оце і є правильний цикл при drag.
+
+---
+
+# 9. Як зробити “нормальну систему зв’язків”
+
+Ось тут головне.
+
+Тобі треба перестати думати про edge як просто про `points`.
+Edge — це окремий об’єкт із 3 рівнями:
+
+---
+
+## Рівень 1. Семантика зв’язку
+
+Що з чим з’єднано
+
+```js
+{
+  source: { ... },
+  target: { ... }
+}
+```
+
+---
+
+## Рівень 2. Налаштування маршруту
+
+Як поводиться лінія
+
+```js
+data: {
+  routing: {
+    startOffset: 20,
+    endOffset: 20
+  }
+}
+```
+
+---
+
+## Рівень 3. Візуальні похідні
+
+Те, що можна завжди перерахувати
+
+```js
+points: [...]
+data.anchors: [...]
+```
+
+---
+
+## Правильна модель edge
+
+Я би радив таку структуру:
+
+```js
+{
+  id: "e1",
+
+  source: {
+    type: "node",          // node | edge
+    nodeId: "n1",
+    direction: "right"
+  },
+
+  target: {
+    type: "edge",
+    edgeId: "e7",
+    segIndex: 1,
+    t: 0.45,
+    direction: "auto"
+  },
+
+  data: {
+    routing: {
+      startOffset: 20,
+      endOffset: 20
+    },
+
+    anchors: [
+      {
+        id: "a1",
+        type: "edge",
+        edgeId: "e1",
+        segIndex: 2,
+        t: 0.3,
+        x: 300,
+        y: 140,
+        direction: "auto"
+      }
+    ]
+  },
+
+  points: [ ... ]
+}
+```
+
+---
+
+# 10. Як із кліку меню отримати готовий edge
+
+Правильний потік такий:
+
+---
+
+## Варіант A. Класичне створення edge
+
+### крок 1
+
+меню вмикає режим:
+
+```js
+setMode("add-connector")
+```
+
+### крок 2
+
+користувач клікає по source anchor
+викликається:
+
+```js
+handleAnchorClick(anchor)
+```
+
+і зберігається:
+
+```js
+tempSource = anchor
+```
+
+### крок 3
+
+користувач клікає по target anchor
+знову викликається:
+
+```js
+handleAnchorClick(anchor)
+```
+
+### крок 4
+
+controller створює об’єкт edge:
+
+```js
+const edge = createEdge(tempSource, anchor)
+```
+
+### крок 5
+
+controller одразу викликає:
+
+```js
+edge.points = buildEdgePath(edge, nodes, edges)
+```
+
+### крок 6
+
+controller додає edge в store:
+
+```js
+store.addEdge(edge)
+```
+
+### крок 7
+
+`EdgesLayer` автоматично його малює
+
+---
+
+## Бажано зробити helper
+
+Щоб логіка створення edge не жила прямо в handler, винеси фабрику:
+
+```js
+function createEdge(source, target, nodes, edges) {
+  const edge = {
+    id: crypto.randomUUID(),
+    source,
+    target,
+    data: {
+      routing: { startOffset: 20, endOffset: 20 },
+      anchors: []
+    },
+    points: []
+  };
+
+  edge.points = buildEdgePath(edge, nodes, edges);
+  return edge;
+}
+```
+
+Тоді handler буде чистим.
+
+---
+
+# 11. Як зробити anchor на лінії
+
+Є два сценарії.
+
+---
+
+## Сценарій 1. Користувач явно вмикає “додати anchor”
+
+Меню:
+
+```js
+setMode("add-anchor")
+```
+
+Клік по edge:
+
+```js
+handleEdgeClick(edge.id, e)
+```
+
+Всередині:
+
+* знаходимо найближчий сегмент
+* створюємо `edge.data.anchors[]`
+* оновлюємо edge
+
+---
+
+## Сценарій 2. Anchor створюється автоматично
+
+Коли користувач хоче з’єднатися не до node, а до самої лінії.
+
+Тобто в режимі `add-connector` клік по edge може одразу:
+
+* знайти найближчий сегмент
+* створити тимчасовий edge-anchor
+* або навіть зберегти його як справжній anchor
+* і використати як source/target
+
+Це дає draw.io-подібну поведінку.
+
+Для цього тобі бажано розділити:
+
+* `handleEdgeClick` — вибір edge
+* `handleEdgeAnchorCreate` — створення anchor на edge
+* `handleAnchorClick` — вибір будь-якого anchor як source/target
+
+---
+
+# 12. Як видаляти edge і edge-anchor через контекстне меню
+
+Оце краще будувати окремо й чисто.
+
+---
+
+## Для edge
+
+В `EdgesLayer` уже є:
+
+```js
+onContextMenu={(e) => {
+  canvasController.handleEdgeContextMenu(e, edge);
+}}
+```
+
+Тут controller має:
+
+1. `e.evt.preventDefault()`
+2. відкрити custom menu
+3. покласти в store контекст:
+
+```js
+contextMenu: {
+  type: "edge",
+  edgeId: edge.id,
+  x,
+  y
+}
+```
+
+У меню пункт:
+
+```js
+Видалити зв’язок
+```
+
+і action:
+
+```js
+removeEdge(edgeId)
+```
+
+---
+
+## Для anchor на edge
+
+Зараз у тебе в `Circle` для edge-anchor ще нема `onContextMenu`. Треба додати:
+
+```js
+onContextMenu={(e) => {
+  e.cancelBubble = true;
+  canvasController.handleEdgeAnchorContextMenu(e, edge.id, anchor.id);
+}}
+```
+
+А в controller:
+
+```js
+handleEdgeAnchorContextMenu(e, edgeId, anchorId) {
+  e.evt.preventDefault();
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  const store = useCanvasStore.getState();
+  store.setContextMenu({
+    type: "edge-anchor",
+    edgeId,
+    anchorId,
+    x: pointer?.x || 0,
+    y: pointer?.y || 0,
+  });
+}
+```
+
+Тоді пункт меню:
+
+```js
+Видалити точку прив’язки
+```
+
+а action:
+
+```js
+removeEdgeAnchor(edgeId, anchorId)
+```
+
+---
+
+## Store action для видалення anchor
+
+Додай:
+
+```js
+removeEdgeAnchor: (edgeId, anchorId) =>
+  set((s) => ({
+    edges: s.edges.map((e) =>
+      e.id !== edgeId
+        ? e
+        : {
+            ...e,
+            data: {
+              ...e.data,
+              anchors: (e.data?.anchors || []).filter((a) => a.id !== anchorId),
+            },
+          }
+    ),
+  })),
+```
+
+Це дуже важлива action, її в тебе поки фактично бракує.
+
+---
+
+# 13. Чого не вистачає в store прямо зараз
+
+У твоєму шматку store нема кількох речей, які controller вже використовує або повинен використовувати:
+
+* `mode`
+* `tempSource`
+* `hoveredEdgeId`
+* `hoveredEdgeAnchorId`
+* `setEdges`
+* `setMode`
+* `setTempSource`
+* `setHoveredEdgeId`
+* `setHoveredEdgeAnchorId`
+* `contextMenu`
+* `setContextMenu`
+* `removeEdgeAnchor`
+
+Тобто controller і layer вже хочуть працювати як з повноцінним graph-editor store, а сам store поки ще спрощений.
+
+Його треба довести до консистентного стану.
+
+---
+
+# 14. Якою має бути цільова архітектура
+
+Я б рекомендував таку модель.
+
+---
+
+## `EdgesLayer`
+
+Тільки:
+
+* рендерить `Line`, `Rect`, `Circle`
+* прокидає події в controller
+
+Не містить бізнес-логіки.
+
+---
+
+## `canvasController`
+
+Тільки:
+
+* обробляє події
+* читає/пише store
+* викликає geometry helpers
+
+Наприклад:
+
+* `handleAnchorClick`
+* `handleEdgeClick`
+* `handleNodeDragMove`
+* `updateEdgeOffset`
+* `handleEdgeContextMenu`
+* `handleEdgeAnchorContextMenu`
+* `deleteSelectedEdge`
+* `deleteSelectedEdgeAnchor`
+
+---
+
+## `edgeRouting.js`
+
+Тільки:
+
+* `buildEdgePath`
+* `updateEdgeAnchors`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+* `createEdge`
+* `createEdgeAnchorFromPointer`
+
+Оце дуже хороше місце для всієї логіки edge.
+
+---
+
+## `geometry.js`
+
+Тільки чиста математика:
+
+* `projectPointOnSegment`
+* `findClosestSegment`
+* `calculateOrthogonalPath`
+* `mergeCollinear`
+* `fixDiagonals`
+* `collectElbows`
+
+---
+
+# 15. Найкраща практична декомпозиція для тебе зараз
+
+Щоб не ламати все одразу, я б робив так.
+
+---
+
+## Крок 1. Нормалізувати формат anchor
+
+Усюди перейти на одну модель:
+
+```js
+// node anchor
+{
+  id,
+  type: "node",
+  nodeId,
+  direction
+}
+
+// edge anchor
+{
+  id,
+  type: "edge",
+  edgeId,
+  segIndex,
+  t,
+  x,
+  y,
+  direction: "auto"
+}
+```
+
+Без цього далі буде хаос.
+
+---
+
+## Крок 2. Винести edge factory
+
+Окрема функція:
+
+```js
+createEdge(source, target, nodes, edges)
+```
+
+---
+
+## Крок 3. Винести rebuild logic
+
+Окрема функція:
+
+```js
+rebuildEdge(edge, nodes, edges)
+```
+
+Приблизно так:
+
+```js
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+```
+
+Тоді:
+
+* drag node
+* update offset
+* edit anchor
+* reconnect edge
+
+усе буде через один і той самий pipeline.
+
+---
+
+## Крок 4. Додати `removeEdgeAnchor`
+
+Це must-have.
+
+---
+
+## Крок 5. Додати окремий context menu state
+
+Щоб меню працювало не “по місцю”, а через store.
+
+---
+
+## Крок 6. Розділити режими
+
+Чітко:
+
+* `select`
+* `add-connector`
+* `add-edge-anchor`
+
+І не змішувати їх.
+
+---
+
+# 16. Як я бачу правильний pipeline edge у твоєму редакторі
+
+Ось ідеальна схема:
+
+### Створення зв’язку
+
+`toolbar -> mode=add-connector -> click source anchor -> tempSource -> click target anchor -> createEdge -> buildEdgePath -> addEdge`
+
+### Додавання anchor на лінію
+
+`toolbar -> mode=add-edge-anchor -> click edge -> findClosestSegment -> createEdgeAnchor -> update edge.data.anchors`
+
+### Рух вузла
+
+`drag node -> update node position -> rebuild connected edges -> update edge anchors`
+
+### Зміна routing
+
+`drag handle -> update routing.startOffset/endOffset -> rebuild edge -> update edge anchors`
+
+### Видалення edge
+
+`context menu on Line -> removeEdge(edgeId)`
+
+### Видалення edge-anchor
+
+`context menu on anchor Circle -> removeEdgeAnchor(edgeId, anchorId)`
+
+---
+
+# 17. Найважливіший висновок
+
+У тебе вже є не “заготовка”, а **майже готовий engine зв’язків**.
+Але зараз він ще логічно розкиданий:
+
+* частина логіки в controller
+* частина в `EdgesLayer`
+* частина в geometry
+* частина в store поки не описана повністю
+
+Що треба зробити, щоб система стала “нормальною”:
+
+1. **зафіксувати єдиний формат anchor**
+2. **зробити `createEdge()` і `rebuildEdge()` як центральні функції**
+3. **тримати `points` тільки як похідний результат**
+4. **додати повний CRUD для edge-anchor**
+5. **контекстне меню робити через store/context state**
+6. **не дозволяти `EdgesLayer` містити бізнес-логіку**
+
+---
+
+# 18. Що б я рекомендував змінити першочергово
+
+Найкорисніші 4 речі:
+
+### 1.
+
+Доописати store під edge system:
+
+* `mode`
+* `tempSource`
+* `setEdges`
+* `contextMenu`
+* `removeEdgeAnchor`
+
+### 2.
+
+Створити файл, наприклад:
+`lib/edges/edgeModel.js`
+
+і винести туди:
+
+* `createEdge`
+* `createEdgeAnchor`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+
+### 3.
+
+У `handleNodeDragMove` і `updateEdgeOffset` перестати руками складати edge, а використовувати `rebuildEdge`.
+
+### 4.
+
+Додати `onContextMenu` для `edgeAnchors` у `EdgesLayer`.
+
+---
+
+# 19. Якщо коротко, хто за що відповідає
+
+### Меню
+
+вмикає режим
+
+### Anchor click
+
+або ставить `tempSource`, або створює edge
+
+### `buildEdgePath`
+
+будує геометрію маршруту
+
+### `edgeRouting/geometry`
+
+рахують точки
+
+### `EdgesLayer`
+
+малює лінію, ручки, точки прив’язки
+
+### Контекстне меню
+
+видаляє edge або edge-anchor
+
+---
+
+Я можу наступним повідомленням вже дати тобі **готову цільову структуру файлів і коду**, а саме:
+
+* як має виглядати **оновлений store**
+* як має виглядати **`canvasController` для edge**
+* як винести **`createEdge / rebuildEdge / removeEdgeAnchor`**
+* як підключити **контекстне меню для edge і edge-anchor**
+
+і зібрати це в одну робочу схему без legacy.
