@@ -1,0 +1,417 @@
+Ось нормальний, практичний варіант для твоєї панелі `connectors`, щоб:
+
+* можна було увімкнути режим `add-connector`
+* можна було увімкнути режим `add-edge-anchor`
+* коли режим активний — бачити підказку
+* мати кнопку **Скасувати**
+* не дублювати логіку по всьому проєкту
+
+Я дам тобі готовий каркас із 3 частин:
+
+1. що додати в `canvasController`
+2. готовий JSX-блок панелі
+3. підтримка `Esc`
+
+---
+
+# 1. Додай cancel handler у `canvasController`
+
+У `canvasController.js` додай окремий метод для скасування активного режиму.
+
+```js
+export const canvasController = {
+  // ... інші методи
+
+  cancelActiveTool() {
+    const store = useCanvasStore.getState();
+
+    store.setMode("select");
+    store.setTempSource(null);
+    store.setHoveredEdgeAnchorId(null);
+    store.setHoveredEdgeId(null);
+
+    if (store.clearContextMenu) {
+      store.clearContextMenu();
+    }
+  },
+
+  startAddConnector() {
+    const store = useCanvasStore.getState();
+
+    store.setMode("add-connector");
+    store.setTempSource(null);
+    store.setHoveredEdgeAnchorId(null);
+  },
+
+  startAddEdgeAnchor() {
+    const store = useCanvasStore.getState();
+
+    store.setMode("add-edge-anchor");
+    store.setTempSource(null);
+    store.setHoveredEdgeAnchorId(null);
+  },
+};
+```
+
+---
+
+# 2. Готовий блок для `ConnectorsPanel` / `ToolPalette`
+
+Це можна вставити або як окремий компонент, або прямо в секцію connectors.
+
+## `ConnectorsToolSection.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, Button, Stack, Typography, Tooltip } from "@mui/material";
+import LinkIcon from "@mui/icons-material/Link";
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import CloseIcon from "@mui/icons-material/Close";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ConnectorsToolSection() {
+  const mode = useCanvasStore((s) => s.mode);
+  const tempSource = useCanvasStore((s) => s.tempSource);
+
+  const isAddConnector = mode === "add-connector";
+  const isAddEdgeAnchor = mode === "add-edge-anchor";
+  const hasActiveMode = isAddConnector || isAddEdgeAnchor;
+
+  let title = "";
+  let hint = "";
+
+  if (isAddConnector) {
+    title = "Створення звʼязку";
+    hint = tempSource
+      ? "Оберіть кінцеву точку звʼязку"
+      : "Оберіть початкову точку звʼязку";
+  }
+
+  if (isAddEdgeAnchor) {
+    title = "Додавання точки привʼязки";
+    hint = "Клікніть по лінії, щоб додати точку";
+  }
+
+  return (
+    <Box
+      sx={{
+        p: 1.5,
+        borderRadius: 2,
+        border: "1px solid",
+        borderColor: "divider",
+        backgroundColor: "background.paper",
+      }}
+    >
+      <Typography
+        variant="subtitle2"
+        sx={{ mb: 1, fontWeight: 700 }}
+      >
+        Connectors
+      </Typography>
+
+      <Stack direction="row" spacing={1} sx={{ mb: hasActiveMode ? 1.5 : 0 }}>
+        <Tooltip title="Створити звʼязок">
+          <Button
+            variant={isAddConnector ? "contained" : "outlined"}
+            size="small"
+            startIcon={<LinkIcon />}
+            onClick={() => {
+              if (isAddConnector) {
+                canvasController.cancelActiveTool();
+              } else {
+                canvasController.startAddConnector();
+              }
+            }}
+          >
+            Звʼязок
+          </Button>
+        </Tooltip>
+
+        <Tooltip title="Додати точку привʼязки на лінію">
+          <Button
+            variant={isAddEdgeAnchor ? "contained" : "outlined"}
+            size="small"
+            startIcon={<AddCircleOutlineIcon />}
+            onClick={() => {
+              if (isAddEdgeAnchor) {
+                canvasController.cancelActiveTool();
+              } else {
+                canvasController.startAddEdgeAnchor();
+              }
+            }}
+          >
+            Anchor
+          </Button>
+        </Tooltip>
+      </Stack>
+
+      {hasActiveMode && (
+        <Box
+          sx={{
+            p: 1.25,
+            borderRadius: 2,
+            backgroundColor: "action.hover",
+            border: "1px dashed",
+            borderColor: "divider",
+          }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+            {title}
+          </Typography>
+
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mb: 1 }}
+          >
+            {hint}
+          </Typography>
+
+          <Button
+            size="small"
+            color="inherit"
+            startIcon={<CloseIcon />}
+            onClick={() => canvasController.cancelActiveTool()}
+          >
+            Скасувати
+          </Button>
+        </Box>
+      )}
+    </Box>
+  );
+}
+```
+
+---
+
+# 3. Як це працює по UX
+
+Цей варіант хороший тим, що:
+
+## коли режим не активний
+
+користувач бачить 2 кнопки:
+
+* `Зв’язок`
+* `Anchor`
+
+## коли режим активний
+
+додатково показується інформаційний блок:
+
+* що саме зараз активовано
+* що треба зробити далі
+* кнопка `Скасувати`
+
+Це кращий UX, ніж просто маленький хрестик.
+
+---
+
+# 4. Як підключити `Esc`
+
+Дуже раджу додати це в компонент-обгортку редактора, наприклад у `DiagramEditor`, `EditorCanvasWrapper` або там, де живе вся сторінка редактора.
+
+```jsx
+"use client";
+
+import { useEffect } from "react";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function EditorHotkeys() {
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        canvasController.cancelActiveTool();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  return null;
+}
+```
+
+І потім просто підключаєш:
+
+```jsx
+<EditorHotkeys />
+```
+
+---
+
+# 5. Невелике покращення для `handleAnchorClick`
+
+Щоб після створення зв’язку режим завершувався чисто, у тебе має бути щось таке:
+
+```js
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== "add-connector") return;
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor);
+    return;
+  }
+
+  const edge = createEdge(
+    store.tempSource,
+    anchor,
+    store.nodes,
+    store.edges
+  );
+
+  store.addEdge(edge);
+  store.setTempSource(null);
+  store.setMode("select");
+}
+```
+
+---
+
+# 6. Невелике покращення для `handleEdgeClick`
+
+Для anchor mode теж добре одразу повертатись в `select` після успішного створення:
+
+```js
+handleEdgeClick(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  e.cancelBubble = true;
+  store.setSelection({ type: "edge", id: edgeId });
+
+  if (store.mode !== "add-edge-anchor") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const edge = store.edges.find((ed) => ed.id === edgeId);
+  if (!edge) return;
+
+  const newAnchor = createEdgeAnchorFromPointer(edge, pointer.x, pointer.y);
+  if (!newAnchor) return;
+
+  const nextEdges = store.edges.map((ed) =>
+    ed.id !== edgeId
+      ? ed
+      : {
+          ...ed,
+          data: {
+            ...ed.data,
+            anchors: [...(ed.data?.anchors || []), newAnchor],
+          },
+        }
+  );
+
+  store.setEdges(nextEdges);
+  store.setMode("select");
+}
+```
+
+---
+
+# 7. Якщо хочеш ще зручніше
+
+Можеш додати маленький індикатор у статусі:
+
+## для зв’язку
+
+коли `tempSource !== null`, показати:
+
+```jsx
+<Typography variant="caption" color="success.main">
+  Початкова точка вибрана
+</Typography>
+```
+
+Наприклад так:
+
+```jsx
+{isAddConnector && tempSource && (
+  <Typography
+    variant="caption"
+    sx={{ display: "block", mt: 0.5, color: "success.main" }}
+  >
+    Початкова точка вибрана
+  </Typography>
+)}
+```
+
+Це корисно, бо користувач бачить, що перший клік уже зафіксований.
+
+---
+
+# 8. Якщо панель дуже вузька
+
+Тоді можна зробити ще компактніший варіант:
+
+```jsx
+<Stack direction="row" spacing={1}>
+  <IconButton color={isAddConnector ? "primary" : "default"}>
+    <LinkIcon />
+  </IconButton>
+
+  <IconButton color={isAddEdgeAnchor ? "primary" : "default"}>
+    <AddCircleOutlineIcon />
+  </IconButton>
+
+  {hasActiveMode && (
+    <IconButton onClick={() => canvasController.cancelActiveTool()}>
+      <CloseIcon />
+    </IconButton>
+  )}
+</Stack>
+```
+
+Але з UX точки зору попередній варіант із текстом все одно кращий.
+
+---
+
+# 9. Що я рекомендую саме тобі
+
+Для твого редактора я б зараз використовував саме **середній варіант**:
+
+* кнопки `Зв’язок` і `Anchor`
+* нижче невеликий info-block активного режиму
+* кнопка `Скасувати`
+* `Esc` для швидкого виходу
+
+Це:
+
+* просто реалізується
+* легко підтримується
+* зрозуміло користувачу
+* не перевантажує панель
+
+---
+
+# 10. Підсумок
+
+Тобі потрібні 3 речі:
+
+## у controller
+
+* `startAddConnector()`
+* `startAddEdgeAnchor()`
+* `cancelActiveTool()`
+
+## у панелі
+
+* 2 кнопки активації режимів
+* info-block активного режиму
+* кнопка `Скасувати`
+
+## глобально
+
+* `Esc` для відміни
+
+---
+
+Якщо хочеш, наступним повідомленням я можу ще зробити варіант **під твою конкретну існуючу панель ToolPalette / Drawer на Material UI**, щоб це вставилося майже без переробки.

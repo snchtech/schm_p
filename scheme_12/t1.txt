@@ -1,0 +1,705 @@
+Так, проблема зараз не в `EdgesLayer`, а в тому, що `edges.points` у store **не перебудовуються в момент зміни позиції node**.
+`EdgesLayer` лише чесно малює те, що є в `edges.map(...)`.
+
+Тобто правильне мислення таке:
+
+* `EdgesLayer` не має “підписуватись” на `nodes` і сам щось будувати
+* `EdgesLayer` має отримувати **вже готові `edge.points`**
+* коли node рухається, controller або store мають **оновити тільки пов’язані edges**
+
+Це і простіше для підтримки, і правильніше архітектурно.
+
+---
+
+# Що зараз не так
+
+У тебе є `handleNodeDragMove`, але там ще стара логіка:
+
+```js
+const start = getAnchorPoint(edge.source, nodes);
+const end = getAnchorPoint(edge.target, nodes);
+const points = calculateOrthogonalPath(start, end);
+```
+
+А нова архітектура вже пішла в бік:
+
+* `buildEdgePath(edge, nodes, edges)`
+* `resolveAnchor(...)`
+* `resolveDirection(...)`
+* `updateEdgeAnchors(...)`
+
+Тобто зараз у тебе **renderer уже новий**, а **rebuild pipeline при drag ще старий/неповний**.
+
+Через це line не прив’язується до shape.
+
+---
+
+# Як правильно архітектурно
+
+Для підтримуваного редактора з великою кількістю елементів я раджу таку модель:
+
+## `EdgesLayer`
+
+тільки рендерить `edge.points`
+
+## `canvasController`
+
+обробляє drag події та вирішує, які edges треба перебудувати
+
+## `edgeModel / edgeRouting`
+
+містять:
+
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+* `buildEdgePath`
+* `updateEdgeAnchors`
+
+---
+
+# Головне правило оптимізації
+
+Не треба на кожен drag рух робити:
+
+* перебудову **всіх** edges
+* повторний прохід по **всіх** nodes у кількох місцях
+* побудову path прямо в `EdgesLayer`
+
+Треба робити тільки це:
+
+> при русі node перебудувати тільки ті edges, де цей node є source або target
+
+Це вже дає велике прискорення.
+
+---
+
+# Який із двох підходів краще
+
+Ти просиш 2 варіанти:
+
+1. перебудова при `dragmove`
+2. перебудова при `dragend`
+
+Я дам обидва, але рекомендація така:
+
+---
+
+## Варіант A — `dragmove`
+
+### плюси
+
+* зв’язок “живий”
+* UX найкращий
+* користувач бачить реальну геометрію під час перетягування
+
+### мінуси
+
+* якщо сотні елементів і багато зв’язків — навантаження вище
+
+### коли вибирати
+
+* якщо на сторінці зазвичай десятки елементів
+* або якщо в тебе перебудовуються тільки пов’язані edges
+* або якщо важливий UX редактора
+
+---
+
+## Варіант B — `dragend`
+
+### плюси
+
+* значно дешевше
+* майже немає лагів при drag
+* легше тягнути великі схеми
+
+### мінуси
+
+* під час drag лінії не рухаються
+* UX гірший
+
+### коли вибирати
+
+* якщо на canvas реально сотні node і дуже багато edge
+* якщо важливіша швидкодія, ніж “живий” preview
+
+---
+
+## Моя рекомендація
+
+Для великої схеми найкращий компроміс:
+
+### робити так:
+
+* під час `dragmove` — **дешевий preview**
+* на `dragend` — **точний rebuild**
+
+Але якщо ти хочеш два окремі сценарії, то:
+
+* для редактора “як diagram app” — краще `dragmove`
+* для дуже великих схем — краще `dragend`
+
+---
+
+# Найкраще рішення для тебе зараз
+
+Зараз тобі не треба будувати points в `EdgesLayer` від `sourceNode/targetNode` через `useMemo`.
+
+Це виглядає спокусливо, але це погана ідея, бо:
+
+* рендер-компонент починає містити бізнес-логіку
+* кожен рендер `EdgesLayer` перераховуватиме path-и
+* оптимізація ускладнюється
+* складніше дебажити
+
+Краще:
+
+* `nodes` змінились
+* controller перебудував залежні `edges`
+* `edges` оновились у store
+* `EdgesLayer` просто перемалювався
+
+---
+
+# Потрібний тобі базовий pipeline
+
+Треба мати 2 helper-и.
+
+---
+
+## 1. `rebuildEdge`
+
+```js
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+```
+
+---
+
+## 2. `rebuildEdgesForNode`
+
+```js
+export function rebuildEdgesForNode(nodeId, edges, nodes) {
+  return edges.map((edge) => {
+    const touchesNode =
+      (edge.source?.type === "node" && edge.source.nodeId === nodeId) ||
+      (edge.target?.type === "node" && edge.target.nodeId === nodeId);
+
+    if (!touchesNode) return edge;
+
+    return rebuildEdge(edge, nodes, edges);
+  });
+}
+```
+
+---
+
+# Варіант 1. Перебудова на `dragmove`
+
+Це основний “живий” варіант.
+
+---
+
+## Controller
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { rebuildEdgesForNode } from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleNodeDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    // 1. локально формуємо nextNodes
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    // 2. одразу перебудовуємо тільки пов'язані edges
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    // 3. одним батчем оновлюємо store
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  },
+};
+```
+
+---
+
+## Ще краще: одна action для батчу
+
+Щоб не було двох окремих set, краще додати в store:
+
+```js
+setNodeAndEdges: (nodeId, x, y, edges) =>
+  set((s) => ({
+    nodes: s.nodes.map((n) =>
+      n.id === nodeId ? { ...n, position: { x, y } } : n
+    ),
+    edges,
+  })),
+```
+
+Тоді controller:
+
+```js
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+  store.setNodeAndEdges(id, x, y, nextEdges);
+}
+```
+
+Оце вже чистіше і оптимальніше.
+
+---
+
+## Як підключити в node
+
+У node-компоненті:
+
+```js
+<Group
+  draggable
+  onDragMove={(e) => canvasController.handleNodeDragMove(node.id, e)}
+>
+```
+
+---
+
+## Плюс
+
+Це правильний UX: edge “живе” разом із node.
+
+---
+
+## Мінус
+
+На дуже великих схемах може підлагувати.
+
+---
+
+# Як оптимізувати `dragmove`, якщо елементів багато
+
+Є 3 нормальні оптимізації.
+
+---
+
+## 1. Перебудовувати тільки дотичні edges
+
+Це ми вже зробили. Це головне.
+
+---
+
+## 2. Throttle / requestAnimationFrame
+
+Не треба rebuild на кожен мікропіксельний рух.
+Краще обмежити до ~60fps або навіть 30fps.
+
+### Варіант через `requestAnimationFrame`
+
+```js
+let dragFrame = null;
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  if (dragFrame) return;
+
+  dragFrame = requestAnimationFrame(() => {
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    store.setNodeAndEdges(id, x, y, nextEdges);
+    dragFrame = null;
+  });
+}
+```
+
+Але так не можна залишити буквально як є, бо `x,y` треба зберігати актуальні. Краще так:
+
+```js
+let dragFrame = null;
+let pendingDrag = null;
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  pendingDrag = { id, x, y };
+
+  if (dragFrame) return;
+
+  dragFrame = requestAnimationFrame(() => {
+    const { id, x, y } = pendingDrag;
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    store.setNodeAndEdges(id, x, y, nextEdges);
+
+    dragFrame = null;
+    pendingDrag = null;
+  });
+}
+```
+
+Це вже хороший production-підхід.
+
+---
+
+## 3. Окремий preview-layer
+
+Це вже більш просунуто:
+
+* store не оновлюєш на кожен pixel
+* тимчасово рухаєш node в Konva
+* preview-edge будуєш поверх
+* на `dragend` фіксуєш store
+
+Але це вже складніше. Для тебе поки зарано.
+
+---
+
+# Варіант 2. Перебудова тільки на `dragend`
+
+Це дешевший і простіший варіант.
+
+---
+
+## Controller
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { rebuildEdgesForNode } from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleNodeDragEnd(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  },
+};
+```
+
+---
+
+## У node-компоненті
+
+```js
+<Group
+  draggable
+  onDragEnd={(e) => canvasController.handleNodeDragEnd(node.id, e)}
+>
+```
+
+---
+
+## Плюс
+
+Супер дешево.
+
+## Мінус
+
+Під час drag зв’язок виглядає відірваним.
+Для UX редактора це слабко.
+
+---
+
+# Гібридний варіант — найпрактичніший
+
+Це те, що я реально радив би.
+
+---
+
+## На `dragmove`
+
+робити тільки оновлення позиції node без повного rebuild
+або rebuild через throttle/RAF
+
+## На `dragend`
+
+робити точний `rebuildEdgesForNode`
+
+---
+
+## Приклад
+
+```js
+let dragFrame = null;
+let pendingDrag = null;
+
+export const canvasController = {
+  handleNodeDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    pendingDrag = { id, x, y };
+
+    if (dragFrame) return;
+
+    dragFrame = requestAnimationFrame(() => {
+      const { id, x, y } = pendingDrag;
+
+      const nextNodes = store.nodes.map((n) =>
+        n.id === id ? { ...n, position: { x, y } } : n
+      );
+
+      const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+      store.setNodeAndEdges(id, x, y, nextEdges);
+
+      dragFrame = null;
+      pendingDrag = null;
+    });
+  },
+
+  handleNodeDragEnd(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  },
+};
+```
+
+Це вже дуже хороший баланс.
+
+---
+
+# Що треба доробити в store
+
+Щоб не було зайвих подвійних оновлень:
+
+```js
+setNodeAndEdges: (nodeId, x, y, edges) =>
+  set((s) => ({
+    nodes: s.nodes.map((n) =>
+      n.id === nodeId ? { ...n, position: { x, y } } : n
+    ),
+    edges,
+  })),
+```
+
+---
+
+# Що треба доробити в `edgeRouting.js`
+
+Зараз у тебе там ще стара сигнатура:
+
+```js
+buildEdgePath(edge, nodes)
+```
+
+Я б уже перевів на:
+
+```js
+buildEdgePath(edge, nodes, edges)
+```
+
+щоб працювало і для edge-anchor / edge-to-edge в майбутньому.
+
+---
+
+## Краще так
+
+```js
+export function buildEdgePath(edge, nodes, edges) {
+  const start = resolveAnchor(edge.source, nodes, edges);
+  const end = resolveAnchor(edge.target, nodes, edges);
+
+  if (!start || !end) return [];
+
+  const routing = edge.data?.routing || {
+    startOffset: 20,
+    endOffset: 20,
+  };
+
+  const startDir = resolveDirection(start, end);
+  const endDir = resolveDirection(end, start);
+
+  const startBox =
+    edge.source?.type === "node"
+      ? boxFromNode(nodes.find((n) => n.id === edge.source.nodeId))
+      : null;
+
+  const endBox =
+    edge.target?.type === "node"
+      ? boxFromNode(nodes.find((n) => n.id === edge.target.nodeId))
+      : null;
+
+  return calculateOrthogonalPath(
+    { ...start, direction: startDir },
+    { ...end, direction: endDir },
+    routing,
+    startBox,
+    endBox
+  );
+}
+```
+
+---
+
+# Чи треба `EdgesLayer` підписувати на `nodes`
+
+Ні.
+Це я не раджу.
+
+Бо тоді ти почнеш робити щось типу:
+
+```js
+const nodes = useCanvasStore((s) => s.nodes);
+
+const pts = useMemo(() => buildEdgePath(edge, nodes), [edge, nodes]);
+```
+
+І це погано, бо:
+
+* path починає рахуватись у render phase
+* складно контролювати продуктивність
+* важче централізувати бізнес-логіку
+* `EdgesLayer` стає товстим
+
+Правильніше, щоб `EdgesLayer` жив лише від:
+
+```js
+const edges = useCanvasStore((s) => s.edges);
+```
+
+---
+
+# Найкраща порада для сотень елементів
+
+Якщо реально буде багато елементів, роби так:
+
+## обов’язково
+
+* перебудовуй тільки пов’язані edges
+* тримай `points` у store
+* не рахуйте path у `EdgesLayer`
+
+## бажано
+
+* throttle/RAF для `dragmove`
+* повний фінальний rebuild на `dragend`
+
+## не роби зараз
+
+* глобальний rebuild усіх edges
+* реактивний `buildEdgePath` у render-компоненті
+* важкі `useMemo` на всі edges
+
+---
+
+# Моя практична рекомендація
+
+Для твого редактора я б зараз обрав саме це:
+
+## Базовий режим
+
+* `dragmove` → rebuild тільки пов’язані edges через `requestAnimationFrame`
+* `dragend` → фінальний точний rebuild
+
+Це дає:
+
+* хороший UX
+* нормальну продуктивність
+* чисту архітектуру
+
+---
+
+# Що я раджу змінити прямо зараз
+
+1. Додати в store `setNodeAndEdges`
+2. Зробити `rebuildEdge` і `rebuildEdgesForNode`
+3. Оновити `handleNodeDragMove`
+4. Оновити `buildEdgePath(edge, nodes, edges)`
+5. Не чіпати `EdgesLayer` — він у тебе тут майже нормальний
+
+---
+
+# Готові 2 варіанти коду коротко
+
+---
+
+## Варіант 1 — `dragmove`
+
+```js
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+  store.setNodeAndEdges(id, x, y, nextEdges);
+}
+```
+
+### коли брати
+
+Коли важливий UX.
+
+---
+
+## Варіант 2 — `dragend`
+
+```js
+handleNodeDragEnd(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+  store.setNodeAndEdges(id, x, y, nextEdges);
+}
+```
+
+### коли брати
+
+Коли важлива максимальна швидкодія на великих схемах.
+
+---
+
+Якщо хочеш, я наступним повідомленням можу вже **переписати тобі конкретно твій `handleNodeDragMove`, `edgeRouting.js` і потрібний шматок store під твою поточну структуру один в один**.

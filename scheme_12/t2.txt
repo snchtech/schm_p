@@ -1,0 +1,159 @@
+Найкраще — в окремому файлі логіки edge, а не в `EdgesLayer` і не в controller.
+
+Я б створив файл, наприклад:
+
+```js
+/lib/edges/edgeModel.js
+```
+
+або
+
+```js
+/lib/edges/edgeHelpers.js
+```
+
+і саме туди виніс:
+
+* `createEdge`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+* `createEdgeAnchorFromPointer`
+
+Тобто:
+
+### `edgeRouting.js`
+
+залишаєш для **чистої геометрії / routing**
+
+* `buildEdgePath`
+* `updateEdgeAnchors`
+* `resolveAnchor`
+* `resolveDirection`
+
+### `edgeModel.js`
+
+робиш для **операцій над edge як доменними об’єктами**
+
+* `createEdge`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+
+---
+
+## Як я б розклав
+
+### `lib/edges/edgeRouting.js`
+
+```js
+export function buildEdgePath(edge, nodes, edges) {
+  ...
+}
+
+export function updateEdgeAnchors(edge) {
+  ...
+}
+```
+
+### `lib/edges/edgeModel.js`
+
+```js
+import { buildEdgePath, updateEdgeAnchors } from "./edgeRouting";
+
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+
+export function rebuildEdgesForNode(nodeId, edges, nodes) {
+  return edges.map((edge) => {
+    const touchesNode =
+      (edge.source?.type === "node" && edge.source.nodeId === nodeId) ||
+      (edge.target?.type === "node" && edge.target.nodeId === nodeId);
+
+    if (!touchesNode) return edge;
+
+    return rebuildEdge(edge, nodes, edges);
+  });
+}
+```
+
+---
+
+## Чому не в controller
+
+Бо controller має тільки викликати ці функції:
+
+```js
+import { rebuildEdgesForNode } from "@/lib/edges/edgeModel";
+```
+
+і далі:
+
+```js
+const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+```
+
+Якщо ти покладеш `rebuildEdge` прямо в controller, то:
+
+* controller стане занадто “товстим”
+* логіка edge буде розмазана
+* буде важче підтримувати
+* потім буде складніше робити versioning routing engine
+
+---
+
+## Чому не в `EdgesLayer`
+
+Бо `EdgesLayer` — це renderer.
+Він не має приймати рішення, як перебудовувати зв’язки.
+
+---
+
+## Практична відповідь для твого проєкту
+
+Я б зробив таку структуру:
+
+```js
+/lib/edges/
+  anchorUtils.js
+  edgeRouting.js
+  edgeModel.js
+```
+
+де:
+
+### `anchorUtils.js`
+
+* `resolveAnchor`
+* `resolveDirection`
+* `getNodeAnchorPosition`
+
+### `edgeRouting.js`
+
+* `buildEdgePath`
+* `updateEdgeAnchors`
+
+### `edgeModel.js`
+
+* `createEdge`
+* `rebuildEdge`
+* `rebuildEdgesForNode`
+* `createEdgeAnchorFromPointer`
+
+---
+
+## Якщо коротко
+
+`rebuildEdge` і `rebuildEdgesForNode` найкраще створити в:
+
+```js
+/lib/edges/edgeModel.js
+```
+
+бо це не чиста геометрія і не UI, а бізнес-логіка edge.
+
+Якщо хочеш, я одразу покажу тобі **готовий вміст `edgeModel.js` під твою поточну структуру даних**.

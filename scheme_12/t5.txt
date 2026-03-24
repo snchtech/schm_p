@@ -1,0 +1,599 @@
+Так, для цього найкраще підійде **плаваючий mini-FAB блок** у правому нижньому куті, який **не займає постійне місце** на полотні.
+
+Тобто не тримати таблицю і примітки завжди відкритими, а зробити:
+
+* **2 круглі кнопки** справа знизу:
+
+  * таблиця
+  * примітки
+* кожна кнопка працює як **toggle**
+* якщо блок порожній:
+
+  * показуємо кнопку “додати”
+* якщо блок має дані:
+
+  * показуємо сам блок
+* повторний клік по тій самій кнопці:
+
+  * ховає блок
+
+Це якраз відповідає твоїй вимозі: **не заважати малюванню**, але мати швидкий доступ.
+
+---
+
+# Який варіант я раджу
+
+Є 2 хороші підходи.
+
+## Варіант 1 — два окремі FAB toggle
+
+Простий і хороший:
+
+* кнопка таблиці
+* кнопка примітки
+* кожна відкриває свій overlay-блок
+
+Плюси:
+
+* дуже просто
+* швидко реалізувати
+* зрозуміло користувачу
+
+## Варіант 2 — одна головна FAB + 2 дочірні
+
+Трохи красивіше:
+
+* одна кругла кнопка “додатково”
+* по кліку розкриваються:
+
+  * таблиця
+  * примітки
+
+Плюси:
+
+* ще менше місця
+* охайніше
+
+Мінус:
+
+* на 1 клік більше
+
+---
+
+Для тебе я б зараз радив **Варіант 1**, бо він простіший і краще тестується.
+
+---
+
+# Як це побудувати архітектурно
+
+Треба розділити на 3 частини:
+
+1. **store** — зберігає, чи відкрито таблицю і примітки
+2. **FloatingCanvasActions** — кнопки справа знизу
+3. **SheetOverlay** — рендерить блок таблиці і блок приміток лише коли вони відкриті
+
+---
+
+# 1. Додай стани в `useCanvasStore`
+
+```js
+toggleTablePanel
+toggleNotesPanel
+tablePanelOpen
+notesPanelOpen
+```
+
+## приклад
+
+```js
+import { create } from "zustand";
+
+export const useCanvasStore = create((set) => ({
+  tableRows: [],
+  note: "",
+
+  tablePanelOpen: false,
+  notesPanelOpen: false,
+
+  toggleTablePanel: () =>
+    set((state) => ({
+      tablePanelOpen: !state.tablePanelOpen,
+    })),
+
+  toggleNotesPanel: () =>
+    set((state) => ({
+      notesPanelOpen: !state.notesPanelOpen,
+    })),
+
+  setTablePanelOpen: (value) => set({ tablePanelOpen: value }),
+  setNotesPanelOpen: (value) => set({ notesPanelOpen: value }),
+
+  addTableRow: (row) =>
+    set((state) => ({
+      tableRows: [...state.tableRows, row],
+    })),
+
+  updateTableRow: (index, nextRow) =>
+    set((state) => ({
+      tableRows: state.tableRows.map((row, i) => (i === index ? nextRow : row)),
+    })),
+
+  deleteTableRow: (index) =>
+    set((state) => ({
+      tableRows: state.tableRows.filter((_, i) => i !== index),
+    })),
+
+  setNote: (note) => set({ note }),
+}));
+```
+
+---
+
+# 2. Створи плаваючі кнопки
+
+## `FloatingCanvasActions.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Box, Fab, Tooltip } from "@mui/material";
+import TableChartIcon from "@mui/icons-material/TableChart";
+import StickyNote2Icon from "@mui/icons-material/StickyNote2";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function FloatingCanvasActions() {
+  const tablePanelOpen = useCanvasStore((s) => s.tablePanelOpen);
+  const notesPanelOpen = useCanvasStore((s) => s.notesPanelOpen);
+  const toggleTablePanel = useCanvasStore((s) => s.toggleTablePanel);
+  const toggleNotesPanel = useCanvasStore((s) => s.toggleNotesPanel);
+
+  return (
+    <Box
+      sx={{
+        position: "absolute",
+        right: 16,
+        bottom: 16,
+        zIndex: 30,
+        display: "flex",
+        flexDirection: "column",
+        gap: 1.5,
+      }}
+    >
+      <Tooltip title="Таблиця" placement="left">
+        <Fab
+          size="medium"
+          color={tablePanelOpen ? "primary" : "default"}
+          onClick={toggleTablePanel}
+        >
+          <TableChartIcon />
+        </Fab>
+      </Tooltip>
+
+      <Tooltip title="Примітки" placement="left">
+        <Fab
+          size="medium"
+          color={notesPanelOpen ? "primary" : "default"}
+          onClick={toggleNotesPanel}
+        >
+          <StickyNote2Icon />
+        </Fab>
+      </Tooltip>
+    </Box>
+  );
+}
+```
+
+---
+
+# 3. Показувати блоки умовно
+
+## `SheetOverlay.jsx`
+
+```jsx
+"use client";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import SchemeTable from "./SchemeTable";
+import NotesBlock from "./NotesBlock";
+import FloatingCanvasActions from "./FloatingCanvasActions";
+
+export default function SheetOverlay() {
+  const tablePanelOpen = useCanvasStore((s) => s.tablePanelOpen);
+  const notesPanelOpen = useCanvasStore((s) => s.notesPanelOpen);
+
+  return (
+    <>
+      {tablePanelOpen && <SchemeTable />}
+      {notesPanelOpen && <NotesBlock />}
+      <FloatingCanvasActions />
+    </>
+  );
+}
+```
+
+---
+
+# 4. Логіка для таблиці
+
+Ти написав:
+
+> при натисненні на кнопку таблиця показуємо блок таблиці або кнопку додати
+
+Це означає:
+
+* якщо `tableRows.length === 0` → показати компактний блок з кнопкою “Додати рядок”
+* якщо є рядки → показати таблицю
+
+## `SchemeTable.jsx`
+
+```jsx
+"use client";
+
+import React, { useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  IconButton,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteIcon from "@mui/icons-material/Delete";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import AddTableModal from "../modals/AddTableModal";
+
+export default function SchemeTable() {
+  const rows = useCanvasStore((s) => s.tableRows);
+  const addTableRow = useCanvasStore((s) => s.addTableRow);
+  const updateTableRow = useCanvasStore((s) => s.updateTableRow);
+  const deleteTableRow = useCanvasStore((s) => s.deleteTableRow);
+
+  const [openModal, setOpenModal] = useState(false);
+  const [editableIndex, setEditableIndex] = useState(null);
+
+  const editableRow = useMemo(() => {
+    if (editableIndex == null) return null;
+    return rows[editableIndex] || null;
+  }, [editableIndex, rows]);
+
+  const handleSave = (row) => {
+    if (editableIndex == null) addTableRow(row);
+    else updateTableRow(editableIndex, row);
+
+    setEditableIndex(null);
+    setOpenModal(false);
+  };
+
+  return (
+    <Box
+      sx={{
+        position: "absolute",
+        right: 88,
+        bottom: 88,
+        zIndex: 25,
+        width: 520,
+      }}
+    >
+      {rows.length === 0 ? (
+        <Paper sx={{ p: 2 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Таблиця
+          </Typography>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => {
+              setEditableIndex(null);
+              setOpenModal(true);
+            }}
+          >
+            Додати рядок
+          </Button>
+        </Paper>
+      ) : (
+        <TableContainer component={Paper} sx={{ maxHeight: 280 }}>
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>Позиція</TableCell>
+                <TableCell>Позначення</TableCell>
+                <TableCell>Найменування</TableCell>
+                <TableCell>Кількість</TableCell>
+                <TableCell>Примітка</TableCell>
+                <TableCell align="center">Дії</TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {rows.map((row, index) => (
+                <TableRow key={index}>
+                  <TableCell>{row.position}</TableCell>
+                  <TableCell>{row.designation}</TableCell>
+                  <TableCell>{row.name}</TableCell>
+                  <TableCell>{row.quantity}</TableCell>
+                  <TableCell>{row.note}</TableCell>
+                  <TableCell align="center">
+                    <Tooltip title="Редагувати">
+                      <IconButton
+                        onClick={() => {
+                          setEditableIndex(index);
+                          setOpenModal(true);
+                        }}
+                      >
+                        <EditIcon />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Видалити">
+                      <IconButton onClick={() => deleteTableRow(index)}>
+                        <DeleteIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+
+          <Box sx={{ p: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
+            <Button
+              size="small"
+              startIcon={<AddIcon />}
+              onClick={() => {
+                setEditableIndex(null);
+                setOpenModal(true);
+              }}
+            >
+              Додати рядок
+            </Button>
+          </Box>
+        </TableContainer>
+      )}
+
+      <AddTableModal
+        open={openModal}
+        onClose={() => {
+          setOpenModal(false);
+          setEditableIndex(null);
+        }}
+        onAddRow={handleSave}
+        editableRow={editableRow}
+      />
+    </Box>
+  );
+}
+```
+
+---
+
+# 5. Аналогічно для приміток
+
+* якщо `note` порожня → показати кнопку “Додати примітку”
+* якщо є `note` → показати блок примітки
+
+## `NotesBlock.jsx`
+
+```jsx
+"use client";
+
+import React, { useState } from "react";
+import { Box, Button, Paper, Typography } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditNoteModal from "../modals/EditNoteModal";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function NotesBlock() {
+  const note = useCanvasStore((s) => s.note);
+  const tablePanelOpen = useCanvasStore((s) => s.tablePanelOpen);
+  const tableRows = useCanvasStore((s) => s.tableRows);
+
+  const [open, setOpen] = useState(false);
+
+  const bottomOffset = tablePanelOpen
+    ? Math.min(340, 120 + tableRows.length * 24)
+    : 88;
+
+  return (
+    <>
+      <Box
+        sx={{
+          position: "absolute",
+          right: 88,
+          bottom: bottomOffset,
+          zIndex: 24,
+          width: 280,
+        }}
+      >
+        {!note ? (
+          <Paper sx={{ p: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Примітка
+            </Typography>
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={() => setOpen(true)}
+            >
+              Додати примітку
+            </Button>
+          </Paper>
+        ) : (
+          <Paper sx={{ p: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Примітка
+            </Typography>
+            <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+              {note}
+            </Typography>
+
+            <Box sx={{ mt: 1.5 }}>
+              <Button size="small" onClick={() => setOpen(true)}>
+                Редагувати
+              </Button>
+            </Box>
+          </Paper>
+        )}
+      </Box>
+
+      <EditNoteModal open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+```
+
+---
+
+# 6. Додай це в `EditorCanvas`
+
+У тебе зараз:
+
+```jsx
+<Stage ...>
+  <Layer ref={layerRef}>
+    <EdgesLayer />
+    <NodesLayer />
+    <SelectionTransformer />
+  </Layer>
+</Stage>
+
+<ToolCursorPreview />
+```
+
+Просто додай overlay:
+
+```jsx
+<Stage
+  ref={stageRef}
+  width={1000}
+  height={600}
+  onMouseDown={canvasController.handleStageMouseDown}
+  onMouseMove={canvasController.handleStageMouseMove}
+  onMouseEnter={canvasController.handleStageMouseEnter}
+  onMouseLeave={canvasController.handleStageMouseLeave}
+>
+  <Layer ref={layerRef}>
+    <EdgesLayer />
+    <NodesLayer />
+    <SelectionTransformer />
+  </Layer>
+</Stage>
+
+<SheetOverlay />
+<ToolCursorPreview />
+```
+
+і не забудь імпорт:
+
+```jsx
+import SheetOverlay from "../sheet-overlay/SheetOverlay";
+```
+
+---
+
+# Чому це хороший варіант
+
+Тому що:
+
+* **не займає постійний простір**
+* блоки відкриваються лише коли треба
+* кнопки завжди доступні
+* UX дуже схожий на редактори типу diagram / whiteboard
+* не треба тримати праву панель завжди відкритою
+
+---
+
+# Що ще можна покращити
+
+Є ще трохи кращий UX-варіант:
+
+## Автозакриття іншого блоку
+
+Наприклад:
+
+* якщо відкрили таблицю, то примітки автоматично закрились
+* якщо відкрили примітки, таблиця лишилась або закрилась — на твій вибір
+
+Є 2 режими:
+
+### Режим A — незалежні toggle
+
+Можуть бути відкриті обидва блоки.
+
+### Режим B — тільки один блок одночасно
+
+Зручніше, коли місця мало.
+
+Для редактора я б радив **тільки один блок одночасно**, бо так менше перекриття схеми.
+
+---
+
+# Якщо хочеш режим “тільки один блок відкритий”
+
+Тоді в store замість двох boolean краще мати:
+
+```js
+bottomPanel: null | "table" | "notes"
+```
+
+і тоді логіка ще чистіша.
+
+## Наприклад
+
+```js
+bottomPanel: null,
+
+toggleBottomPanel: (panel) =>
+  set((state) => ({
+    bottomPanel: state.bottomPanel === panel ? null : panel,
+  })),
+```
+
+Тоді:
+
+* клік “Таблиця” → відкриває table
+* повторний клік “Таблиця” → закриває
+* клік “Примітки” → закриває table і відкриває notes
+
+Це, чесно, навіть кращий варіант.
+
+---
+
+# Моя рекомендація
+
+Я б для тебе зробив саме так:
+
+* **2 круглі кнопки**
+* **один активний блок одночасно**
+* `bottomPanel: "table" | "notes" | null`
+
+Бо це:
+
+* чистіше в store
+* краще для UX
+* не захаращує канвас
+
+---
+
+# Найкращий підсумковий варіант
+
+Я раджу ось цю модель:
+
+* справа знизу є 2 FAB
+* активний може бути лише один:
+
+  * таблиця
+  * примітки
+* повторний клік по активній кнопці ховає блок
+* блок з’являється як overlay трохи вище кнопок
+
+---
+
+Якщо хочеш, я можу одразу дати тобі **готову реалізацію саме через один `bottomPanel`**, бо вона краща за два boolean і акуратніше лягає у твій редактор.
