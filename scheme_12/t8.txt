@@ -1,0 +1,611 @@
+Так, це вже наступний рівень задачі: у тебе з’явились **залежні edges**.
+
+Проблема тепер не просто в тому, щоб при drag вузла перебудувати edge, який до нього підключений.
+Проблема в тому, що:
+
+* перший edge змінив свої `points`
+* його edge-anchor змінив `x/y`
+* але інші edges, які підключені до цього edge-anchor, теж мають перебудуватись
+* і якщо є ще один рівень вкладеності, це вже стає **графом залежностей**
+
+Тобто тепер треба перейти від логіки:
+
+> “перебудуй edges цього node”
+
+до логіки:
+
+> “перебудуй edges цього node, а потім усі edges, що залежать від оновлених edge-anchor, і так далі каскадом”
+
+Це якраз можна красиво зробити у твоїй архітектурі.
+
+---
+
+# 1. Що саме зараз відбувається
+
+У тебе є така структура:
+
+* `edge A`: фігура1 → фігура2
+* на `edge A` є anchor `a1`
+* `edge B`: `a1` → фігура3
+
+Коли рухаєш фігуру3:
+
+* перебудовується `edge B`
+* все ок
+
+Коли рухаєш фігуру1 або фігуру2:
+
+* перебудовується `edge A`
+* `a1` змінює координати
+* але `edge B` не перебудовується
+* тому він відривається
+
+Це означає, що ти вже правильно оновлюєш **координати anchor-а**, але не запускаєш **rebuild edges, які залежать від цього anchor-а**.
+
+---
+
+# 2. Яка правильна архітектурна модель
+
+Тут треба мислити так:
+
+## є 2 типи причин для rebuild:
+
+### A. змінився node
+
+Потрібно перебудувати edges, які напряму прив’язані до цього node
+
+### B. змінився edge
+
+Потрібно:
+
+* оновити його own anchors
+* потім перебудувати edges, які прив’язані до цьому edge-anchor
+* і далі каскадом
+
+Тобто в тебе тепер має бути не тільки:
+
+```js
+rebuildEdgesForNode(nodeId, ...)
+```
+
+а ще й:
+
+```js
+rebuildDependentEdges(changedEdgeIds, ...)
+```
+
+---
+
+# 3. Правильна ідея: dependency graph
+
+У тебе вже фактично є залежності:
+
+* edge залежить від `source`
+* edge залежить від `target`
+
+А `source/target` можуть бути:
+
+* node
+* edge-anchor
+
+Тобто якщо `source.type === "edge"` або `target.type === "edge"`, цей edge залежить від іншого edge.
+
+Отже, можна побудувати залежності так:
+
+```js
+edge B depends on edge A
+if edgeB.source.edgeId === edgeA.id
+or edgeB.target.edgeId === edgeA.id
+```
+
+---
+
+# 4. Що треба зробити у твоїй структурі
+
+Я б радив винести це в `edgeModel.js` як окремий каскадний rebuild pipeline.
+
+Тобі потрібні 4 функції:
+
+1. `rebuildEdge(edge, nodes, edges)`
+2. `getEdgesConnectedToNode(nodeId, edges)`
+3. `getEdgesDependentOnEdge(edgeId, edges)`
+4. `rebuildCascadeFromNodes(changedNodeIds, nodes, edges)`
+
+---
+
+# 5. Базова функція: знайти залежні edges
+
+Окремий helper:
+
+```js id="f0h9ce"
+export function getEdgesDependentOnEdge(edgeId, edges) {
+  return edges.filter((edge) => {
+    const sourceDepends =
+      edge.source?.type === "edge" && edge.source.edgeId === edgeId;
+
+    const targetDepends =
+      edge.target?.type === "edge" && edge.target.edgeId === edgeId;
+
+    return sourceDepends || targetDepends;
+  });
+}
+```
+
+---
+
+# 6. Знайти edges, що прив’язані до node
+
+```js id="vjlwm1"
+export function getEdgesConnectedToNode(nodeId, edges) {
+  return edges.filter((edge) => {
+    const sourceMatch =
+      edge.source?.type === "node" && edge.source.nodeId === nodeId;
+
+    const targetMatch =
+      edge.target?.type === "node" && edge.target.nodeId === nodeId;
+
+    return sourceMatch || targetMatch;
+  });
+}
+```
+
+---
+
+# 7. Центральна ідея: каскадний rebuild через queue
+
+Це найкращий варіант для твоєї задачі.
+
+## Чому queue, а не просто рекурсія
+
+Бо:
+
+* простіше контролювати цикли
+* простіше дебажити
+* легше оптимізувати
+* можна вести `visited`
+
+---
+
+## Готовий варіант для `edgeModel.js`
+
+```js id="lfoh1j"
+import { buildEdgePath, updateEdgeAnchors } from "@/lib/edges/edgeRouting";
+
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+
+export function getEdgesConnectedToNode(nodeId, edges) {
+  return edges.filter((edge) => {
+    const sourceMatch =
+      edge.source?.type === "node" && edge.source.nodeId === nodeId;
+
+    const targetMatch =
+      edge.target?.type === "node" && edge.target.nodeId === nodeId;
+
+    return sourceMatch || targetMatch;
+  });
+}
+
+export function getEdgesDependentOnEdge(edgeId, edges) {
+  return edges.filter((edge) => {
+    const sourceDepends =
+      edge.source?.type === "edge" && edge.source.edgeId === edgeId;
+
+    const targetDepends =
+      edge.target?.type === "edge" && edge.target.edgeId === edgeId;
+
+    return sourceDepends || targetDepends;
+  });
+}
+
+export function rebuildCascadeFromNodes(changedNodeIds, nodes, edges) {
+  const edgeMap = new Map(edges.map((e) => [e.id, e]));
+  const queue = [];
+  const queued = new Set();
+
+  // 1. стартові edges: напряму прив'язані до змінених nodes
+  for (const nodeId of changedNodeIds) {
+    const connected = getEdgesConnectedToNode(nodeId, edges);
+    for (const edge of connected) {
+      if (!queued.has(edge.id)) {
+        queue.push(edge.id);
+        queued.add(edge.id);
+      }
+    }
+  }
+
+  // 2. каскадний rebuild
+  while (queue.length > 0) {
+    const edgeId = queue.shift();
+    const current = edgeMap.get(edgeId);
+    if (!current) continue;
+
+    const rebuilt = rebuildEdge(current, nodes, Array.from(edgeMap.values()));
+    edgeMap.set(edgeId, rebuilt);
+
+    // 3. після зміни edge треба перебудувати ті, що залежать від нього
+    const dependents = getEdgesDependentOnEdge(edgeId, Array.from(edgeMap.values()));
+
+    for (const depEdge of dependents) {
+      if (!queued.has(depEdge.id)) {
+        queue.push(depEdge.id);
+        queued.add(depEdge.id);
+      }
+    }
+  }
+
+  return Array.from(edgeMap.values());
+}
+```
+
+---
+
+# 8. Важливе уточнення про queue/visited
+
+У цьому варіанті `queued` не дає додати один і той самий edge багато разів.
+
+Але якщо у тебе теоретично можуть бути цикли:
+
+* edge A залежить від edge B
+* edge B залежить від edge A
+
+то це вже майже некоректна модель для редактора.
+
+---
+
+## Рекомендація
+
+Я б узагалі **заборонив циклічні edge-to-edge залежності** на рівні створення connection.
+
+Бо інакше routing стане болючим:
+
+* нескінченні каскади
+* нестабільність
+* складна діагностика
+
+---
+
+# 9. Як це підключити в controller
+
+Тепер node drag має запускати не `rebuildEdgesForNode`, а каскад.
+
+---
+
+## `canvasController.js`
+
+```js id="m13ph3"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { rebuildCascadeFromNodes } from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleNodeDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildCascadeFromNodes([id], nextNodes, store.edges);
+
+    if (store.setNodeAndEdges) {
+      store.setNodeAndEdges(id, x, y, nextEdges);
+    } else {
+      store.updateNodePosition(id, x, y);
+      store.setEdges(nextEdges);
+    }
+  },
+};
+```
+
+Тепер:
+
+* рух node
+* оновлюється primary edge
+* оновлюється edge-anchor
+* далі rebuild усіх edges, що залежать від цього edge
+* якщо є ще один рівень — піде ще далі
+
+---
+
+# 10. Чому це вирішить і другий рівень вкладеності
+
+Ти писав, що зараз у тебе працює тільки один рівень вкладеності.
+
+Це тому, що логіка, швидше за все, робить щось на кшталт:
+
+* rebuild primary edge
+* знайти edges, які залежать від нього
+* rebuild тільки їх
+
+Але далі не йде.
+
+Queue-варіант вище працює так:
+
+* rebuild edge A
+* знайти dependents → edge B
+* rebuild edge B
+* знайти dependents → edge C
+* rebuild edge C
+* ...
+
+Тобто рівень вкладеності вже не важливий.
+
+---
+
+# 11. Оптимізація: не робити `filter` по всіх edges багато разів
+
+Оце важливий момент.
+
+У варіанті вище `getEdgesDependentOnEdge()` щоразу проходить по всьому `edges`.
+Для невеликої кількості це ок, але якщо елементів сотні, краще зробити індекс залежностей.
+
+---
+
+## Кращий підхід: dependency index
+
+```js id="3e9l16"
+export function buildEdgeDependencyIndex(edges) {
+  const index = new Map();
+
+  for (const edge of edges) {
+    const refs = [];
+
+    if (edge.source?.type === "edge") {
+      refs.push(edge.source.edgeId);
+    }
+
+    if (edge.target?.type === "edge") {
+      refs.push(edge.target.edgeId);
+    }
+
+    for (const parentEdgeId of refs) {
+      if (!index.has(parentEdgeId)) {
+        index.set(parentEdgeId, []);
+      }
+      index.get(parentEdgeId).push(edge.id);
+    }
+  }
+
+  return index;
+}
+```
+
+Тоді каскад стає ефективнішим.
+
+---
+
+## Оптимізований `rebuildCascadeFromNodes`
+
+```js id="j9e3m4"
+export function rebuildCascadeFromNodes(changedNodeIds, nodes, edges) {
+  const edgeMap = new Map(edges.map((e) => [e.id, e]));
+  const dependencyIndex = buildEdgeDependencyIndex(edges);
+
+  const queue = [];
+  const visited = new Set();
+
+  for (const nodeId of changedNodeIds) {
+    for (const edge of edges) {
+      const touchesNode =
+        (edge.source?.type === "node" && edge.source.nodeId === nodeId) ||
+        (edge.target?.type === "node" && edge.target.nodeId === nodeId);
+
+      if (touchesNode && !visited.has(edge.id)) {
+        queue.push(edge.id);
+        visited.add(edge.id);
+      }
+    }
+  }
+
+  while (queue.length > 0) {
+    const edgeId = queue.shift();
+    const current = edgeMap.get(edgeId);
+    if (!current) continue;
+
+    const rebuilt = rebuildEdge(current, nodes, Array.from(edgeMap.values()));
+    edgeMap.set(edgeId, rebuilt);
+
+    const dependentIds = dependencyIndex.get(edgeId) || [];
+    for (const depId of dependentIds) {
+      if (!visited.has(depId)) {
+        queue.push(depId);
+        visited.add(depId);
+      }
+    }
+  }
+
+  return Array.from(edgeMap.values());
+}
+```
+
+---
+
+# 12. Що важливо для продуктивності
+
+Якщо елементів сотні, ось головні правила.
+
+---
+
+## 1. Перебудовувати не всі edges
+
+Тільки:
+
+* edges, підключені до зміненого node
+* залежні edges каскадом
+
+---
+
+## 2. Використовувати `Map`
+
+Щоб не шукати edge по `find` кожного разу.
+
+---
+
+## 3. Використовувати dependency index
+
+Щоб не робити постійно `filter` по всьому масиву.
+
+---
+
+## 4. На `dragmove` застосовувати throttle або `requestAnimationFrame`
+
+Інакше каскадний rebuild на великих схемах може бути дорогим.
+
+---
+
+# 13. Практична рекомендація для dragmove
+
+Для великих схем я б зробив так:
+
+## `dragmove`
+
+* rebuild каскадно, але через `requestAnimationFrame`
+
+## `dragend`
+
+* фінальний точний rebuild
+
+---
+
+## Приклад ідеї
+
+```js id="1jw4gi"
+let dragFrame = null;
+let pendingDrag = null;
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  pendingDrag = { id, x, y };
+
+  if (dragFrame) return;
+
+  dragFrame = requestAnimationFrame(() => {
+    const store = useCanvasStore.getState();
+    const { id, x, y } = pendingDrag;
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildCascadeFromNodes([id], nextNodes, store.edges);
+
+    store.setNodeAndEdges(id, x, y, nextEdges);
+
+    dragFrame = null;
+    pendingDrag = null;
+  });
+}
+```
+
+---
+
+# 14. Що я б ще порадив архітектурно
+
+У майбутньому варто додати окрему функцію:
+
+```js id="lxl2id"
+rebuildCascadeFromEdges(changedEdgeIds, nodes, edges)
+```
+
+Бо не тільки node може бути джерелом змін. Наприклад:
+
+* змінився routing offset edge
+* змінився anchor на edge
+* треба перебудувати dependents
+
+Тоді буде дві точки входу:
+
+* `rebuildCascadeFromNodes(...)`
+* `rebuildCascadeFromEdges(...)`
+
+Але зараз можна стартувати з node-based варіанту.
+
+---
+
+# 15. Важливе обмеження
+
+Якщо ти дозволиш складні сценарії типу:
+
+* edge-anchor → edge-anchor
+* edge-anchor → edge-anchor → edge-anchor
+* і ще циклічні залежності
+
+то редактор швидко стане складним у підтримці.
+
+---
+
+## Що я раджу
+
+На рівні UX/бізнес-логіки дозволити:
+
+* node → node
+* node → edge-anchor
+* edge-anchor → node
+* edge-anchor → edge-anchor
+
+Але:
+
+* заборонити цикли
+* обмежити надто глибокі або безглузді зв’язки, якщо це не потрібно для бізнес-логіки
+
+---
+
+# 16. Якщо коротко — що саме треба зробити
+
+Тобі треба перейти від:
+
+```js
+rebuildEdgesForNode(nodeId, ...)
+```
+
+до:
+
+```js
+rebuildCascadeFromNodes([nodeId], nodes, edges)
+```
+
+де функція:
+
+1. знаходить edges, напряму прив’язані до node
+2. rebuild їх
+3. знаходить edges, що залежать від rebuilt edge
+4. rebuild їх
+5. повторює каскадно
+
+Саме це правильно лягає на твою архітектуру:
+
+* store зберігає state
+* controller запускає rebuild
+* `edgeModel.js` керує каскадом
+* `edgeRouting.js` рахує геометрію
+
+---
+
+# 17. Моя рекомендація
+
+Для твого поточного проєкту я б зробив саме так:
+
+* `edgeRouting.js` — залишити чистою геометрією
+* `edgeModel.js` — додати `buildEdgeDependencyIndex`, `rebuildCascadeFromNodes`
+* `canvasController.handleNodeDragMove()` — перевести на каскадний rebuild
+* `dragmove` — через `requestAnimationFrame`
+* `dragend` — фінальний rebuild
+* заборонити циклічні залежності
+
+---
+
+Я можу наступним повідомленням уже дати тобі **готовий файл `edgeModel.js` у фінальному вигляді**, з:
+
+* `rebuildEdge`
+* `buildEdgeDependencyIndex`
+* `rebuildCascadeFromNodes`
+* `rebuildCascadeFromEdges`
+
+щоб ти просто вставив його у проєкт.

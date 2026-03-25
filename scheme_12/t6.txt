@@ -1,0 +1,149 @@
+Так, це виправляється. Причина майже напевно в тому, що твій edge-anchor зараз живе як окремий `Circle` з координатами `anchor.x / anchor.y`, а після перебудови лінії ти оновлюєш `edge.points`, але не оновлюєш координати самого anchor-а, тому він лишається на старому місці. У твоєму коді це якраз має робити `updateEdgeAnchors(edge)`: вона бере `segIndex` і `t` та перераховує `x/y` від нових `points`. Якщо цей крок не проходить у фактичному пайплайні drag/rebuild, anchor стоїть нерухомо. 
+
+Що треба перевірити в першу чергу.
+
+Перше: anchor на лінії має зберігатися не тільки як `x/y`, а обов’язково як:
+
+```js
+{
+  id: crypto.randomUUID(),
+  type: "edge",
+  edgeId: edge.id,
+  segIndex: closest.segIndex,
+  t: closest.t,
+  x: closest.x,
+  y: closest.y,
+  direction: "auto",
+}
+```
+
+Якщо `type`, `segIndex` або `t` відсутні, `updateEdgeAnchors` не зможе його “прив’язати” до нового сегмента.
+
+Друге: будь-який rebuild edge має йти тільки через один центральний pipeline:
+
+```js
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+```
+
+Якщо десь у тебе лишився старий варіант на кшталт:
+
+```js
+return { ...edge, points };
+```
+
+то points оновляться, а anchors ні.
+
+Третє: при drag node ти маєш викликати не стару геометрію напряму, а саме `rebuildEdgesForNode`, яка всередині використовує `rebuildEdge`.
+
+Правильний варіант такий:
+
+```js
+import { rebuildEdgesForNode } from "@/lib/edges/edgeModel";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+  store.setNodeAndEdges(id, x, y, nextEdges);
+}
+```
+
+А сама функція:
+
+```js
+export function rebuildEdgesForNode(nodeId, edges, nodes) {
+  return edges.map((edge) => {
+    const touchesNode =
+      (edge.source?.type === "node" && edge.source.nodeId === nodeId) ||
+      (edge.target?.type === "node" && edge.target.nodeId === nodeId);
+
+    if (!touchesNode) return edge;
+
+    return rebuildEdge(edge, nodes, edges);
+  });
+}
+```
+
+Найчастіша причина саме у тебе зараз, імовірно, одна з двох:
+
+1. У реальному `handleNodeDragMove` ще використовується старий код, де оновлюються тільки `points`.
+2. Створений anchor не має `type: "edge"` або не має `segIndex/t`, тому `updateEdgeAnchors` його пропускає.
+
+Є ще важливий нюанс. Навіть якщо `updateEdgeAnchors` викликається, вона працює тільки тоді, коли сегмент із тим самим `segIndex` після rebuild ще існує і лишається логічно тим самим. Якщо маршрут сильно змінився, старий `segIndex` може вже не відповідати тій самій частині лінії. Для твого поточного етапу цього достатньо, але на майбутнє краще зробити fallback: якщо `segIndex` став невалідним або маршрут сильно перебудувався, перепроєктувати стару точку на найближчий новий сегмент.
+
+Ось покращена версія `updateEdgeAnchors` із fallback:
+
+```js
+import { findClosestSegment } from "@/lib/geometry/diagramGeometry";
+
+export function updateEdgeAnchors(edge) {
+  const pts = edge.points || [];
+
+  const anchors = (edge.data?.anchors || []).map((a) => {
+    if (a.type !== "edge") return a;
+
+    const i = a.segIndex;
+
+    if (i != null && 2 * i + 3 < pts.length) {
+      const x1 = pts[2 * i];
+      const y1 = pts[2 * i + 1];
+      const x2 = pts[2 * i + 2];
+      const y2 = pts[2 * i + 3];
+
+      return {
+        ...a,
+        x: x1 + a.t * (x2 - x1),
+        y: y1 + a.t * (y2 - y1),
+      };
+    }
+
+    // fallback: перепроєктувати стару точку на нову лінію
+    const closest = findClosestSegment(pts, a.x, a.y);
+    if (!closest) return a;
+
+    return {
+      ...a,
+      segIndex: closest.segIndex,
+      t: closest.t,
+      x: closest.x,
+      y: closest.y,
+    };
+  });
+
+  return {
+    ...edge,
+    data: {
+      ...edge.data,
+      anchors,
+    },
+  };
+}
+```
+
+Це вже значно стійкіше.
+
+Що я раджу зробити прямо зараз, без зайвих експериментів:
+
+1. Переконайся, що `createEdgeAnchorFromPointer()` створює anchor саме з `type: "edge"`, `segIndex`, `t`, `x`, `y`.
+2. Переконайся, що `handleNodeDragMove()` не повертає `{ ...edge, points }`, а використовує `rebuildEdge()`.
+3. Переконайся, що `updateEdgeOffset()` теж іде через `rebuildEdge()`.
+4. Додай fallback у `updateEdgeAnchors()`, якщо хочеш, щоб anchor не губився навіть при сильній перебудові маршруту.
+
+Суть коротко:
+**anchor не повинен жити як “абсолютна точка на canvas”; він повинен жити як “точка на сегменті лінії” і після кожного rebuild перераховуватись від нових `points`.** 
+
+Я можу наступним повідомленням зібрати тобі один готовий блок коду для `edgeModel.js + handleNodeDragMove + updateEdgeAnchors`, щоб ти просто вставив у свій проєкт.

@@ -1,0 +1,384 @@
+Так. Нижче даю тобі **готовий комплект**, який закриває саме твою проблему: після перебудови `edge.points` anchor на лінії теж перераховується, бо rebuild тепер завжди проходить через `updateEdgeAnchors()`. У твоєму поточному підході `EdgesLayer` уже малює anchor-и з `edge.data.anchors`, а `updateEdgeAnchors()` якраз і має оновлювати їхні `x/y` від нових `points`; `rebuildEdge()` та `rebuildEdgesForNode()` уже закладені в твою цільову схему, але їх треба реально підключити в drag pipeline.  
+
+---
+
+## 1. `lib/edges/edgeModel.js`
+
+Якщо цього файла ще нема або він не фінальний — зроби так:
+
+```js
+import { findClosestSegment } from "@/lib/geometry/diagramGeometry";
+import { buildEdgePath, updateEdgeAnchors } from "@/lib/edges/edgeRouting";
+
+export function createEdge(source, target, nodes, edges) {
+  let edge = {
+    id: crypto.randomUUID(),
+    source,
+    target,
+    data: {
+      routing: {
+        startOffset: 20,
+        endOffset: 20,
+      },
+      anchors: [],
+    },
+    points: [],
+  };
+
+  edge.points = buildEdgePath(edge, nodes, edges);
+  edge = updateEdgeAnchors(edge);
+
+  return edge;
+}
+
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+
+export function rebuildEdgesForNode(nodeId, edges, nodes) {
+  return edges.map((edge) => {
+    const touchesNode =
+      (edge.source?.type === "node" && edge.source.nodeId === nodeId) ||
+      (edge.target?.type === "node" && edge.target.nodeId === nodeId);
+
+    if (!touchesNode) return edge;
+
+    return rebuildEdge(edge, nodes, edges);
+  });
+}
+
+export function createEdgeAnchorFromPointer(edge, x, y) {
+  const closest = findClosestSegment(edge.points, x, y);
+  if (!closest) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type: "edge",
+    edgeId: edge.id,
+    segIndex: closest.segIndex,
+    t: closest.t,
+    x: closest.x,
+    y: closest.y,
+    direction: "auto",
+  };
+}
+```
+
+Тут головне:
+
+* anchor на edge має `type: "edge"`, `segIndex`, `t`, `x`, `y`
+* `rebuildEdge()` завжди викликає `updateEdgeAnchors()`
+
+Саме це і треба, щоб точка не зависала в старих координатах. У твоїх нотатках цей pipeline уже є, але, схоже, не повністю використовується під час фактичного drag/rebuild. 
+
+---
+
+## 2. `lib/edges/edgeRouting.js`
+
+Ось ключова частина. Якщо в тебе `updateEdgeAnchors()` зараз без fallback — я раджу одразу поставити стійкішу версію.
+
+```js
+import { calculateOrthogonalPath, findClosestSegment } from "@/lib/geometry/diagramGeometry";
+import { boxFromNode } from "@/lib/geometry/boxUtils";
+import { resolveAnchor, resolveDirection } from "@/lib/edges/anchorUtils";
+
+export function buildEdgePath(edge, nodes, edges) {
+  const start = resolveAnchor(edge.source, nodes, edges);
+  const end = resolveAnchor(edge.target, nodes, edges);
+
+  if (!start || !end) return [];
+
+  const dirFrom = resolveDirection(start, end);
+  const dirTo = resolveDirection(end, start);
+
+  const sourceNode =
+    edge.source?.type === "node"
+      ? nodes.find((n) => n.id === edge.source.nodeId)
+      : null;
+
+  const targetNode =
+    edge.target?.type === "node"
+      ? nodes.find((n) => n.id === edge.target.nodeId)
+      : null;
+
+  return calculateOrthogonalPath(
+    { ...start, direction: dirFrom },
+    { ...end, direction: dirTo },
+    edge.data?.routing || { startOffset: 20, endOffset: 20 },
+    sourceNode ? boxFromNode(sourceNode) : null,
+    targetNode ? boxFromNode(targetNode) : null
+  );
+}
+
+export function updateEdgeAnchors(edge) {
+  const pts = edge.points || [];
+
+  const anchors = (edge.data?.anchors || []).map((a) => {
+    if (a.type !== "edge") return a;
+
+    const i = a.segIndex;
+
+    // нормальний сценарій: той самий сегмент ще існує
+    if (i != null && 2 * i + 3 < pts.length) {
+      const x1 = pts[2 * i];
+      const y1 = pts[2 * i + 1];
+      const x2 = pts[2 * i + 2];
+      const y2 = pts[2 * i + 3];
+
+      return {
+        ...a,
+        x: x1 + a.t * (x2 - x1),
+        y: y1 + a.t * (y2 - y1),
+      };
+    }
+
+    // fallback: якщо маршрут сильно змінився — перепроєктувати anchor
+    const closest = findClosestSegment(pts, a.x, a.y);
+    if (!closest) return a;
+
+    return {
+      ...a,
+      segIndex: closest.segIndex,
+      t: closest.t,
+      x: closest.x,
+      y: closest.y,
+    };
+  });
+
+  return {
+    ...edge,
+    data: {
+      ...edge.data,
+      anchors,
+    },
+  };
+}
+```
+
+У твоєму поточному описі `updateEdgeAnchors()` уже є, але базова версія просто бере старий `segIndex` і `t`, без fallback. Це працює, якщо маршрут змінився помірно. Варіант вище стійкіший, коли path перебудувався сильніше. 
+
+---
+
+## 3. `canvasController.js` — оновити drag node
+
+Ось місце, де в тебе зараз найімовірніше і губиться оновлення anchor-а. Треба, щоб drag node йшов через `rebuildEdgesForNode()`.
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  createEdge,
+  rebuildEdge,
+  rebuildEdgesForNode,
+  createEdgeAnchorFromPointer,
+} from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleAnchorClick(anchor) {
+    const store = useCanvasStore.getState();
+
+    if (store.mode !== "add-connector") return;
+
+    if (!store.tempSource) {
+      store.setTempSource(anchor);
+      return;
+    }
+
+    const edge = createEdge(
+      store.tempSource,
+      anchor,
+      store.nodes,
+      store.edges
+    );
+
+    store.addEdge(edge);
+    store.setTempSource(null);
+    store.setMode("select");
+  },
+
+  handleNodeDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildEdgesForNode(id, store.edges, nextNodes);
+
+    if (store.setNodeAndEdges) {
+      store.setNodeAndEdges(id, x, y, nextEdges);
+      return;
+    }
+
+    // fallback, якщо ще нема batched action
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  },
+
+  handleEdgeClick(edgeId, e) {
+    const store = useCanvasStore.getState();
+
+    e.cancelBubble = true;
+    store.setSelection({ type: "edge", id: edgeId });
+
+    if (store.mode !== "add-edge-anchor") return;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const edge = store.edges.find((ed) => ed.id === edgeId);
+    if (!edge) return;
+
+    const newAnchor = createEdgeAnchorFromPointer(
+      edge,
+      pointer.x,
+      pointer.y
+    );
+
+    if (!newAnchor) return;
+
+    const nextEdges = store.edges.map((ed) =>
+      ed.id !== edgeId
+        ? ed
+        : {
+            ...ed,
+            data: {
+              ...ed.data,
+              anchors: [...(ed.data?.anchors || []), newAnchor],
+            },
+          }
+    );
+
+    store.setEdges(nextEdges);
+    store.setMode("select");
+  },
+
+  updateEdgeOffset(edgeId, newOffset, side = "start") {
+    const store = useCanvasStore.getState();
+
+    let nextEdges = store.edges.map((edge) => {
+      if (edge.id !== edgeId) return edge;
+
+      const prevRouting = edge.data?.routing || {
+        startOffset: 20,
+        endOffset: 20,
+      };
+
+      const routing =
+        side === "start"
+          ? { ...prevRouting, startOffset: newOffset }
+          : { ...prevRouting, endOffset: newOffset };
+
+      return {
+        ...edge,
+        data: {
+          ...edge.data,
+          routing,
+        },
+      };
+    });
+
+    nextEdges = nextEdges.map((edge) =>
+      edge.id === edgeId
+        ? rebuildEdge(edge, store.nodes, nextEdges)
+        : edge
+    );
+
+    store.setEdges(nextEdges);
+  },
+};
+```
+
+У твоєму цільовому controller-патерні `handleNodeDragMove()` уже має використовувати `rebuildEdgesForNode()`, а `updateEdgeOffset()` — `rebuildEdge()`. Якщо десь у фактичному коді ще залишився старий шлях із ручним `points = calculateOrthogonalPath(...)`, його треба прибрати, бо він не оновлює anchors. 
+
+---
+
+## 4. Store: batched action для node + edges
+
+Це не обов’язково для фікса, але дуже бажано.
+
+```js
+setNodeAndEdges: (nodeId, x, y, edges) =>
+  set((s) => ({
+    nodes: s.nodes.map((n) =>
+      n.id === nodeId ? { ...n, position: { x, y } } : n
+    ),
+    edges,
+  })),
+```
+
+Так менше шансів на “миготіння” між окремим оновленням node і edges.
+
+---
+
+## 5. Що перевірити прямо зараз
+
+Є 3 швидкі перевірки.
+
+### Перевірка 1
+
+Подивись у devtools, який реально вигляд має anchor після створення на line. Він повинен мати:
+
+```js
+{
+  type: "edge",
+  edgeId: "...",
+  segIndex: 1,
+  t: 0.42,
+  x: ...,
+  y: ...,
+}
+```
+
+### Перевірка 2
+
+Постав `console.log` всередині `updateEdgeAnchors(edge)` і переконайся, що вона реально викликається при drag node.
+
+### Перевірка 3
+
+Постав `console.log(nextEdges.find(e => e.id === targetEdgeId)?.data?.anchors)` після `rebuildEdgesForNode()` — якщо `x/y` не змінюються, значить rebuild іде не через `updateEdgeAnchors()`.
+
+---
+
+## 6. Чому це спрацює
+
+У твоєму `EdgesLayer` anchor-и малюються прямо з:
+
+```js
+const edgeAnchors = edge.data?.anchors || [];
+...
+<Circle x={anchor.x} y={anchor.y} ... />
+```
+
+Тобто `EdgesLayer` уже коректний: він просто показує те, що є в store. Якщо після rebuild у store anchor отримав нові `x/y`, circle автоматично поїде разом із лінією. Проблема не в renderer, а в тому, щоб `edge.data.anchors` реально перераховувались після зміни `edge.points`. Це саме і робить `updateEdgeAnchors()`. 
+
+---
+
+## 7. Найкоротший висновок
+
+Щоб anchor на edge рухався разом із rebuilt line, треба:
+
+* зберігати anchor як `type: "edge" + segIndex + t + x + y`
+* будь-який rebuild edge робити тільки через:
+
+```js
+rebuildEdge(edge, nodes, edges)
+```
+
+* drag node робити через:
+
+```js
+rebuildEdgesForNode(nodeId, edges, nextNodes)
+```
+
+* після зміни routing теж використовувати `rebuildEdge()`
+
+---
+
+Якщо хочеш, наступним повідомленням я можу вже взяти **саме твій поточний `handleNodeDragMove` зі старого варіанта і переписати його 1 в 1 під нову архітектуру, без загальних шаблонів**.

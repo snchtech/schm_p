@@ -1,0 +1,516 @@
+Так. І тут якраз є важливий нюанс, через який попередня “заборона циклів” у спрощеному вигляді може виявитися занадто жорсткою.
+
+## Головна тонкість
+
+Якщо ти **створюєш новий edge**:
+
+* `source = anchor на edge A`
+* `target = anchor на edge B`
+
+то новий edge `N` просто **залежить від** `A` і `B`.
+
+Це **ще не цикл**.
+
+Бо цикл з’являється тільки тоді, коли:
+
+* або ти **редагуєш уже існуючий edge**
+* або потім хтось створює зворотну залежність так, що виходить ланцюг назад
+
+Тобто попереднє правило “якщо між sourceEdge і targetEdge вже є залежність — заборонити” було занадто грубим.
+
+---
+
+# Правильне правило
+
+## Для **нового edge**
+
+Цикл не виникає, якщо він просто залежить від існуючих edges.
+
+Отже:
+
+* `create new edge` — **майже завжди дозволено**
+* крім явно некоректних кейсів, які ти сам хочеш заборонити по UX
+
+## Для **редагування / reconnect існуючого edge**
+
+Ось тут цикл можливий.
+
+Наприклад:
+
+* `B` уже залежить від `A`
+* ти редагуєш `A` і хочеш підвісити його на anchor `B`
+
+Отримаєш:
+
+* `A -> B`
+* `B -> ... -> A`
+
+Це цикл.
+
+---
+
+# Що треба зробити правильно
+
+Треба мати **одну функцію**, яка перевіряє:
+
+> чи можна задати edge такі `source/target`, не створивши цикл
+
+І вона має працювати для двох сценаріїв:
+
+1. **створення нового edge**
+2. **редагування / reconnect existing edge**
+
+---
+
+# Яка модель залежностей правильна
+
+Якщо edge має:
+
+```js
+source.type === "edge"
+```
+
+або
+
+```js
+target.type === "edge"
+```
+
+то цей edge **залежить від** того parent edge.
+
+Наприклад:
+
+* `edge B` підключений до anchor на `edge A`
+* значить `B depends on A`
+
+---
+
+# Правильна production-safe логіка
+
+Треба перевіряти не “чи є зв’язок між sourceEdge і targetEdge”, а ось це:
+
+## Якщо ми редагуємо існуючий edge `candidateEdgeId`
+
+і хочемо зробити його залежним від `parentEdgeId`
+
+то треба перевірити:
+
+> чи не залежить `parentEdgeId` уже транзитивно від `candidateEdgeId`
+
+Якщо залежить — буде цикл.
+
+---
+
+# Готовий варіант
+
+Нижче даю тобі **перероблені функції**, які я рекомендую вставити в `edgeModel.js`.
+
+---
+
+## 1. Збудувати “parents map”
+
+Це зручніше для перевірки циклів.
+
+```js id="h5v7m8"
+export function buildEdgeParentsMap(edges) {
+  const parentsMap = new Map();
+
+  for (const edge of edges) {
+    const parents = [];
+
+    if (edge.source?.type === "edge" && edge.source.edgeId) {
+      parents.push(edge.source.edgeId);
+    }
+
+    if (
+      edge.target?.type === "edge" &&
+      edge.target.edgeId &&
+      edge.target.edgeId !== edge.source?.edgeId
+    ) {
+      parents.push(edge.target.edgeId);
+    }
+
+    parentsMap.set(edge.id, parents);
+  }
+
+  return parentsMap;
+}
+```
+
+---
+
+## 2. Перевірка: чи залежить edge від іншого транзитивно
+
+```js id="umr8md"
+export function dependsOnEdge(startEdgeId, targetEdgeId, parentsMap) {
+  const stack = [startEdgeId];
+  const visited = new Set();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (current === targetEdgeId) {
+      return true;
+    }
+
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const parents = parentsMap.get(current) || [];
+    for (const parentId of parents) {
+      if (!visited.has(parentId)) {
+        stack.push(parentId);
+      }
+    }
+  }
+
+  return false;
+}
+```
+
+---
+
+## 3. Зібрати parent edges із source/target
+
+```js id="12ygv4"
+export function collectParentEdgeIdsFromEndpoints(source, target) {
+  const parentIds = [];
+
+  if (source?.type === "edge" && source.edgeId) {
+    parentIds.push(source.edgeId);
+  }
+
+  if (
+    target?.type === "edge" &&
+    target.edgeId &&
+    target.edgeId !== source?.edgeId
+  ) {
+    parentIds.push(target.edgeId);
+  }
+
+  return parentIds;
+}
+```
+
+---
+
+## 4. Головна функція: production-safe check
+
+```js id="jlwmel"
+export function canAssignConnectionWithoutCycle({
+  candidateEdgeId = null,
+  source,
+  target,
+  edges,
+}) {
+  const parentEdgeIds = collectParentEdgeIdsFromEndpoints(source, target);
+
+  // ===== CREATE NEW EDGE =====
+  // Новий edge ще не має нащадків, тому сам по собі цикл не створює.
+  // Тобто новому edge можна залежати від будь-яких існуючих edges.
+  if (!candidateEdgeId) {
+    return true;
+  }
+
+  // ===== EDIT / RECONNECT EXISTING EDGE =====
+  // Якщо ми редагуємо вже існуючий edge, не можна робити його залежним
+  // від edge, який уже транзитивно залежить від нього.
+  const parentsMap = buildEdgeParentsMap(edges);
+
+  for (const parentEdgeId of parentEdgeIds) {
+    // edge не може залежати від самого себе
+    if (parentEdgeId === candidateEdgeId) {
+      return false;
+    }
+
+    // якщо parent already depends on candidate -> буде цикл
+    const parentDependsOnCandidate = dependsOnEdge(
+      parentEdgeId,
+      candidateEdgeId,
+      parentsMap
+    );
+
+    if (parentDependsOnCandidate) {
+      return false;
+    }
+  }
+
+  return true;
+}
+```
+
+---
+
+# Чому це правильніше
+
+---
+
+## Сценарій 1. Новий edge від anchor A до anchor B
+
+* `A` існує
+* `B` існує
+* створюється новий `N`
+
+`N` залежить від `A` і `B`, але ніхто ще не залежить від `N`.
+
+### Висновок:
+
+Циклу нема.
+`canAssignConnectionWithoutCycle({ candidateEdgeId: null, ... }) === true`
+
+---
+
+## Сценарій 2. Існуючий edge `A` хочуть перепідвісити до `B`
+
+Якщо вже:
+
+* `B -> ... -> A`
+
+і ти хочеш зробити:
+
+* `A -> B`
+
+то буде цикл.
+
+### Висновок:
+
+`canAssignConnectionWithoutCycle({ candidateEdgeId: "A", ... }) === false`
+
+---
+
+# Як це підключити в `handleAnchorClick`
+
+Тут залежить від того, чи це у тебе **створення нового edge**, чи **reconnect existing edge**.
+
+---
+
+## Варіант A. Створення нового edge
+
+Тоді так:
+
+```js id="v3rj05"
+import {
+  createEdge,
+  canAssignConnectionWithoutCycle,
+} from "@/lib/edges/edgeModel";
+
+handleAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.mode !== "add-connector") return;
+
+  if (!store.tempSource) {
+    store.setTempSource(anchor);
+    return;
+  }
+
+  const source = store.tempSource;
+  const target = anchor;
+
+  const ok = canAssignConnectionWithoutCycle({
+    candidateEdgeId: null, // new edge
+    source,
+    target,
+    edges: store.edges,
+  });
+
+  if (!ok) {
+    console.warn("Cycle prevented");
+    store.setTempSource(null);
+    store.setMode("select");
+    return;
+  }
+
+  const edge = createEdge(source, target, store.nodes, store.edges);
+
+  store.addEdge(edge);
+  store.setTempSource(null);
+  store.setMode("select");
+}
+```
+
+### Тут цикл майже завжди не виникатиме
+
+І це нормально.
+
+---
+
+## Варіант B. Reconnect existing edge
+
+Якщо колись будеш робити “перепідключення кінця лінії”, тоді:
+
+```js id="osrolm"
+const ok = canAssignConnectionWithoutCycle({
+  candidateEdgeId: edgeIdBeingEdited,
+  source: nextSource,
+  target: nextTarget,
+  edges: store.edges,
+});
+```
+
+Оце вже реальний сценарій для блокування циклів.
+
+---
+
+# Оновлений шматок для `edgeModel.js`
+
+Щоб було зручно, ось готовий блок, який можна просто додати в твій файл.
+
+```js id="213swe"
+export function buildEdgeParentsMap(edges) {
+  const parentsMap = new Map();
+
+  for (const edge of edges) {
+    const parents = [];
+
+    if (edge.source?.type === "edge" && edge.source.edgeId) {
+      parents.push(edge.source.edgeId);
+    }
+
+    if (
+      edge.target?.type === "edge" &&
+      edge.target.edgeId &&
+      edge.target.edgeId !== edge.source?.edgeId
+    ) {
+      parents.push(edge.target.edgeId);
+    }
+
+    parentsMap.set(edge.id, parents);
+  }
+
+  return parentsMap;
+}
+
+export function dependsOnEdge(startEdgeId, targetEdgeId, parentsMap) {
+  const stack = [startEdgeId];
+  const visited = new Set();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (current === targetEdgeId) {
+      return true;
+    }
+
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const parents = parentsMap.get(current) || [];
+    for (const parentId of parents) {
+      if (!visited.has(parentId)) {
+        stack.push(parentId);
+      }
+    }
+  }
+
+  return false;
+}
+
+export function collectParentEdgeIdsFromEndpoints(source, target) {
+  const parentIds = [];
+
+  if (source?.type === "edge" && source.edgeId) {
+    parentIds.push(source.edgeId);
+  }
+
+  if (
+    target?.type === "edge" &&
+    target.edgeId &&
+    target.edgeId !== source?.edgeId
+  ) {
+    parentIds.push(target.edgeId);
+  }
+
+  return parentIds;
+}
+
+export function canAssignConnectionWithoutCycle({
+  candidateEdgeId = null,
+  source,
+  target,
+  edges,
+}) {
+  const parentEdgeIds = collectParentEdgeIdsFromEndpoints(source, target);
+
+  // create new edge -> cycle не виникає
+  if (!candidateEdgeId) {
+    return true;
+  }
+
+  const parentsMap = buildEdgeParentsMap(edges);
+
+  for (const parentEdgeId of parentEdgeIds) {
+    if (parentEdgeId === candidateEdgeId) {
+      return false;
+    }
+
+    const parentDependsOnCandidate = dependsOnEdge(
+      parentEdgeId,
+      candidateEdgeId,
+      parentsMap
+    );
+
+    if (parentDependsOnCandidate) {
+      return false;
+    }
+  }
+
+  return true;
+}
+```
+
+---
+
+# Дуже важлива практична порада
+
+Якщо у тебе зараз **нема reconnect existing edge**, а є лише **create new edge**, то:
+
+## суворо кажучи
+
+перевірка циклів при створенні нового edge не дуже потрібна
+
+Бо новий edge не створює цикл сам по собі.
+
+## Але
+
+я все одно раджу:
+
+* залишити цю функцію вже зараз
+* бо вона стане дуже потрібною, щойно ти додаси reconnect / edit source-target
+
+---
+
+# Якщо хочеш обмежити ще жорсткіше
+
+Ти можеш бізнес-правилом сказати:
+
+> не дозволяти edge-anchor → edge-anchor, якщо обидва anchors належать edges, що вже перебувають в одному ланцюжку залежностей
+
+Тобто навіть якщо формально цикл ще не виникає, ти можеш UX-рівнем заборонити надто складні конструкції.
+
+Але це вже не про цикл, а про **обмеження складності моделі**.
+
+---
+
+# Моя коротка рекомендація
+
+Ось що я раджу ввести як фінальне правило:
+
+## 1.
+
+Для **нового edge** — дозволяти створення, не блокуючи просто через факт edge-to-edge.
+
+## 2.
+
+Для **редагування існуючого edge** — обов’язково перевіряти:
+
+* self-dependency
+* transitive cycle
+
+## 3.
+
+Залишити `canAssignConnectionWithoutCycle()` у `edgeModel.js` як єдину точку правди.
+
+---
+
+Якщо хочеш, я можу наступним повідомленням ще дати тобі **фінальну версію всього `edgeModel.js` одним блоком**, уже без фрагментів, щоб ти просто замінив файл повністю.

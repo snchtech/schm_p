@@ -1,0 +1,680 @@
+Добре. Нижче даю тобі **готовий `edgeModel.js`**, який:
+
+* перебудовує edge
+* підтримує каскадний rebuild
+* підтримує будь-яку глибину вкладеності
+* **забороняє циклічні залежності**
+* нормально лягає на твою архітектуру:
+
+  * `store`
+  * `canvasController`
+  * `edgeRouting.js`
+
+Я ще поясню, де саме перевіряти цикл під час створення нового connection.
+
+---
+
+# 1. Ідея
+
+У тебе тепер є залежності типу:
+
+* `edge A` залежить від node1/node2
+* `edge B` залежить від `edge A`
+* `edge C` залежить від `edge B`
+
+Коли змінюється `edge A`, треба перебудувати:
+
+* `A`
+* потім `B`
+* потім `C`
+
+Для цього ми будуємо **dependency index**:
+
+```js id="j0v7pk"
+parentEdgeId -> [dependentEdgeId1, dependentEdgeId2, ...]
+```
+
+І обходимо залежності через queue.
+
+---
+
+# 2. Готовий `lib/edges/edgeModel.js`
+
+```js id="45yui9"
+import { findClosestSegment } from "@/lib/geometry/diagramGeometry";
+import { buildEdgePath, updateEdgeAnchors } from "@/lib/edges/edgeRouting";
+
+/**
+ * Створення нового edge
+ */
+export function createEdge(source, target, nodes, edges) {
+  let edge = {
+    id: crypto.randomUUID(),
+    source,
+    target,
+    data: {
+      routing: {
+        startOffset: 20,
+        endOffset: 20,
+      },
+      anchors: [],
+    },
+    points: [],
+  };
+
+  edge.points = buildEdgePath(edge, nodes, edges);
+  edge = updateEdgeAnchors(edge);
+
+  return edge;
+}
+
+/**
+ * Перебудова одного edge:
+ * 1. новий path
+ * 2. оновлення координат edge-anchor
+ */
+export function rebuildEdge(edge, nodes, edges) {
+  const points = buildEdgePath(edge, nodes, edges);
+
+  return updateEdgeAnchors({
+    ...edge,
+    points,
+  });
+}
+
+/**
+ * Створення anchor на edge по кліку миші
+ */
+export function createEdgeAnchorFromPointer(edge, x, y) {
+  const closest = findClosestSegment(edge.points, x, y);
+  if (!closest) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    type: "edge",
+    edgeId: edge.id,
+    segIndex: closest.segIndex,
+    t: closest.t,
+    x: closest.x,
+    y: closest.y,
+    direction: "auto",
+  };
+}
+
+/**
+ * Які edges напряму підключені до node
+ */
+export function getEdgesConnectedToNode(nodeId, edges) {
+  return edges.filter((edge) => {
+    const sourceMatch =
+      edge.source?.type === "node" && edge.source.nodeId === nodeId;
+
+    const targetMatch =
+      edge.target?.type === "node" && edge.target.nodeId === nodeId;
+
+    return sourceMatch || targetMatch;
+  });
+}
+
+/**
+ * Побудова індексу залежностей:
+ * parentEdgeId -> [dependentEdgeId...]
+ *
+ * Якщо edge B має source.type === "edge" і source.edgeId === A,
+ * то B залежить від A.
+ */
+export function buildEdgeDependencyIndex(edges) {
+  const index = new Map();
+
+  for (const edge of edges) {
+    const parents = [];
+
+    if (edge.source?.type === "edge" && edge.source.edgeId) {
+      parents.push(edge.source.edgeId);
+    }
+
+    if (
+      edge.target?.type === "edge" &&
+      edge.target.edgeId &&
+      edge.target.edgeId !== edge.source?.edgeId
+    ) {
+      parents.push(edge.target.edgeId);
+    }
+
+    for (const parentEdgeId of parents) {
+      if (!index.has(parentEdgeId)) {
+        index.set(parentEdgeId, []);
+      }
+      index.get(parentEdgeId).push(edge.id);
+    }
+  }
+
+  return index;
+}
+
+/**
+ * Каскадна перебудова від змінених node.
+ *
+ * Алгоритм:
+ * 1. знаходимо edges, що підключені до змінених node
+ * 2. перебудовуємо їх
+ * 3. знаходимо dependent edges
+ * 4. перебудовуємо їх
+ * 5. і так далі
+ */
+export function rebuildCascadeFromNodes(changedNodeIds, nodes, edges) {
+  const edgeMap = new Map(edges.map((e) => [e.id, e]));
+  const dependencyIndex = buildEdgeDependencyIndex(edges);
+
+  const queue = [];
+  const visited = new Set();
+
+  for (const nodeId of changedNodeIds) {
+    const connected = getEdgesConnectedToNode(nodeId, edges);
+
+    for (const edge of connected) {
+      if (!visited.has(edge.id)) {
+        queue.push(edge.id);
+        visited.add(edge.id);
+      }
+    }
+  }
+
+  while (queue.length > 0) {
+    const edgeId = queue.shift();
+    const current = edgeMap.get(edgeId);
+    if (!current) continue;
+
+    const rebuilt = rebuildEdge(current, nodes, Array.from(edgeMap.values()));
+    edgeMap.set(edgeId, rebuilt);
+
+    const dependentIds = dependencyIndex.get(edgeId) || [];
+    for (const depId of dependentIds) {
+      if (!visited.has(depId)) {
+        queue.push(depId);
+        visited.add(depId);
+      }
+    }
+  }
+
+  return Array.from(edgeMap.values());
+}
+
+/**
+ * Каскадна перебудова від already-changed edges.
+ * Корисно коли змінився routing offset або edge-anchor.
+ */
+export function rebuildCascadeFromEdges(changedEdgeIds, nodes, edges) {
+  const edgeMap = new Map(edges.map((e) => [e.id, e]));
+  const dependencyIndex = buildEdgeDependencyIndex(edges);
+
+  const queue = [];
+  const visited = new Set();
+
+  for (const edgeId of changedEdgeIds) {
+    if (!visited.has(edgeId)) {
+      queue.push(edgeId);
+      visited.add(edgeId);
+    }
+  }
+
+  while (queue.length > 0) {
+    const edgeId = queue.shift();
+    const current = edgeMap.get(edgeId);
+    if (!current) continue;
+
+    const rebuilt = rebuildEdge(current, nodes, Array.from(edgeMap.values()));
+    edgeMap.set(edgeId, rebuilt);
+
+    const dependentIds = dependencyIndex.get(edgeId) || [];
+    for (const depId of dependentIds) {
+      if (!visited.has(depId)) {
+        queue.push(depId);
+        visited.add(depId);
+      }
+    }
+  }
+
+  return Array.from(edgeMap.values());
+}
+
+/**
+ * Допоміжна: чи depends edgeId на potentialAncestorId
+ * через ланцюжок edge -> edge -> edge ...
+ *
+ * Це потрібно, щоб ЗАБОРОНИТИ цикли при створенні нового connection.
+ */
+export function doesEdgeDependOn(
+  edgeId,
+  potentialAncestorId,
+  dependencyIndex
+) {
+  const stack = [potentialAncestorId];
+  const visited = new Set();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (current === edgeId) {
+      return true;
+    }
+
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const deps = dependencyIndex.get(current) || [];
+    for (const depId of deps) {
+      if (!visited.has(depId)) {
+        stack.push(depId);
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Перевірка: чи можна створити connection source -> target
+ * без утворення циклу.
+ *
+ * Цикл можливий тільки якщо ми підключаємо edge до іншого edge.
+ */
+export function canCreateConnectionWithoutCycle(source, target, edges) {
+  const sourceEdgeId = source?.type === "edge" ? source.edgeId : null;
+  const targetEdgeId = target?.type === "edge" ? target.edgeId : null;
+
+  // Якщо нема edge-to-edge, циклу по edge dependency тут не буде
+  if (!sourceEdgeId || !targetEdgeId) {
+    return true;
+  }
+
+  // Той самий edge в самого себе
+  if (sourceEdgeId === targetEdgeId) {
+    return false;
+  }
+
+  const dependencyIndex = buildEdgeDependencyIndex(edges);
+
+  /**
+   * Ми хочемо створити нову залежність:
+   * targetEdge -> sourceEdge або sourceEdge -> targetEdge?
+   *
+   * В нашій моделі edge, який використовує чужий edge-anchor,
+   * ЗАЛЕЖИТЬ від того edge, до якого він підключений.
+   *
+   * Але тут ще нема нового edge, тож перевірка проста:
+   * якщо targetEdge уже залежить від sourceEdge,
+   * і ми створимо новий edge, який зробить sourceEdge залежним від targetEdge,
+   * то отримаємо цикл.
+   *
+   * Для безпечного правила:
+   * забороняємо створення edge-to-edge, якщо між цими двома edges
+   * уже існує dependency в будь-який бік.
+   */
+
+  const sourceDependsOnTarget = doesEdgeDependOn(
+    sourceEdgeId,
+    targetEdgeId,
+    dependencyIndex
+  );
+
+  const targetDependsOnSource = doesEdgeDependOn(
+    targetEdgeId,
+    sourceEdgeId,
+    dependencyIndex
+  );
+
+  if (sourceDependsOnTarget || targetDependsOnSource) {
+    return false;
+  }
+
+  return true;
+}
+```
+
+---
+
+# 3. Як підключити це в `canvasController`
+
+Тепер є 2 важливих місця:
+
+1. drag node
+2. створення нового connection
+
+---
+
+## 3.1. `handleNodeDragMove`
+
+Тепер замість локального rebuild одного рівня — використовуємо каскад:
+
+```js id="62yq1m"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  createEdge,
+  createEdgeAnchorFromPointer,
+  rebuildCascadeFromNodes,
+  rebuildCascadeFromEdges,
+  canCreateConnectionWithoutCycle,
+} from "@/lib/edges/edgeModel";
+
+export const canvasController = {
+  handleNodeDragMove(id, e) {
+    const { x, y } = e.target.position();
+    const store = useCanvasStore.getState();
+
+    const nextNodes = store.nodes.map((n) =>
+      n.id === id ? { ...n, position: { x, y } } : n
+    );
+
+    const nextEdges = rebuildCascadeFromNodes([id], nextNodes, store.edges);
+
+    if (store.setNodeAndEdges) {
+      store.setNodeAndEdges(id, x, y, nextEdges);
+    } else {
+      store.updateNodePosition(id, x, y);
+      store.setEdges(nextEdges);
+    }
+  },
+```
+
+---
+
+## 3.2. `handleAnchorClick` з перевіркою циклів
+
+Оце дуже важливо. Тут ми одразу блокуємо цикл.
+
+```js id="0xzs6t"
+  handleAnchorClick(anchor) {
+    const store = useCanvasStore.getState();
+
+    if (store.mode !== "add-connector") return;
+
+    if (!store.tempSource) {
+      store.setTempSource(anchor);
+      return;
+    }
+
+    const source = store.tempSource;
+    const target = anchor;
+
+    const sameAnchor =
+      source.type === target.type &&
+      source.nodeId === target.nodeId &&
+      source.edgeId === target.edgeId &&
+      source.direction === target.direction &&
+      source.segIndex === target.segIndex &&
+      source.t === target.t;
+
+    if (sameAnchor) {
+      store.setTempSource(null);
+      return;
+    }
+
+    // Заборона циклічних залежностей
+    const ok = canCreateConnectionWithoutCycle(source, target, store.edges);
+    if (!ok) {
+      console.warn("Cycle prevented: edge-to-edge cyclic dependency is not allowed");
+      store.setTempSource(null);
+      store.setMode("select");
+      return;
+    }
+
+    const edge = createEdge(source, target, store.nodes, store.edges);
+
+    store.addEdge(edge);
+    store.setTempSource(null);
+    store.setMode("select");
+  },
+```
+
+---
+
+## 3.3. Якщо змінюєш offset або routing у самого edge
+
+Треба теж запускати каскад від edge:
+
+```js id="kq2u9t"
+  updateEdgeOffset(edgeId, newOffset, side = "start") {
+    const store = useCanvasStore.getState();
+
+    let nextEdges = store.edges.map((edge) => {
+      if (edge.id !== edgeId) return edge;
+
+      const prevRouting = edge.data?.routing || {
+        startOffset: 20,
+        endOffset: 20,
+      };
+
+      const routing =
+        side === "start"
+          ? { ...prevRouting, startOffset: newOffset }
+          : { ...prevRouting, endOffset: newOffset };
+
+      return {
+        ...edge,
+        data: {
+          ...edge.data,
+          routing,
+        },
+      };
+    });
+
+    nextEdges = rebuildCascadeFromEdges([edgeId], store.nodes, nextEdges);
+    store.setEdges(nextEdges);
+  },
+};
+```
+
+---
+
+# 4. Дуже важливо: обмеження для циклів
+
+Ти сказав, що заборона циклів — обов’язкова. Я згоден.
+
+Але тут важливий архітектурний момент:
+потрібно чітко вирішити, **що саме вважати циклом**.
+
+---
+
+## Практичне правило, яке я рекомендую
+
+Вважати циклом будь-яку ситуацію, коли:
+
+* новий edge створює dependency між двома edges,
+* а між ними вже існує dependency в будь-який бік.
+
+Тобто:
+
+* A → B існує
+* користувач пробує створити B → A
+* забороняємо
+
+І навіть:
+
+* A → B → C існує
+* користувач пробує C → A
+* забороняємо
+
+Оце саме і робить `canCreateConnectionWithoutCycle()`.
+
+---
+
+# 5. Що з глибиною вкладеності
+
+Оцей новий pipeline вже працює не “на один рівень”, а на довільну глибину.
+
+Тобто сценарій:
+
+* edge A
+* на ньому anchor
+* edge B від цього anchor
+* на B ще anchor
+* edge C від нього
+* на C ще anchor
+* edge D ...
+
+буде працювати коректно, якщо:
+
+* нема циклу
+* кожен edge-anchor має нормальні `segIndex/t`
+* rebuild іде тільки через каскад
+
+---
+
+# 6. Оптимізація: де тут вузькі місця
+
+Ти окремо просив про оптимізацію, якщо перебирати циклом.
+
+Найважливіше тут:
+
+---
+
+## 1. `buildEdgeDependencyIndex(edges)`
+
+Це добре, бо ми будуємо індекс один раз на rebuild-прохід, а не робимо `filter` по всіх edges на кожному кроці.
+
+---
+
+## 2. `edgeMap`
+
+Також добре, бо не шукаємо edge через `find()` кожного разу.
+
+---
+
+## 3. Queue + Set
+
+Це теж оптимально:
+
+* `queue` для обходу
+* `visited` щоб не rebuild-ити один edge багато разів
+
+---
+
+## 4. Не rebuild-ити всі edges
+
+Ми перебудовуємо тільки:
+
+* стартові edges від node
+* і їхніх dependents
+
+Це головна оптимізація.
+
+---
+
+# 7. Що ще можна оптимізувати далі
+
+Якщо схема стане дуже великою, можна зробити ще краще:
+
+---
+
+## Варіант A. Тримати dependency index у store
+
+Зараз ми будуємо його кожного разу.
+Для старту це ок.
+
+Потім можна:
+
+* при `addEdge/removeEdge` оновлювати dependency index
+* зберігати в store
+
+Але це вже ускладнює consistency, тому я б поки не поспішав.
+
+---
+
+## Варіант B. `requestAnimationFrame` для dragmove
+
+Якщо drag лагатиме, роби rebuild каскаду не на кожен mousemove, а через RAF.
+
+---
+
+## Варіант C. dragend-only для huge diagrams
+
+Для дуже великих схем можна мати режим:
+
+* під час drag — preview
+* на dragend — повний cascade rebuild
+
+---
+
+# 8. Дуже важлива практична рекомендація
+
+Я б ще радив на рівні UX заборонити надто “екзотичні” сценарії, якщо вони не потрібні бізнесово.
+
+Наприклад, якщо тобі реально не треба:
+
+* edge-anchor → edge-anchor → edge-anchor → edge-anchor
+
+то краще обмежити глибину або сценарії.
+
+Бо навіть якщо технічно це можна підтримати, підтримка UX і дебаг сильно ускладнюються.
+
+---
+
+# 9. Що перевірити після вставки коду
+
+Після того як вставиш цей `edgeModel.js`, перевір такі кейси:
+
+### кейс 1
+
+node → node
+рух будь-якого node
+
+### кейс 2
+
+node → edge-anchor
+рух node, до якого прив’язаний базовий edge
+
+### кейс 3
+
+edge-anchor → node
+рух node базового edge
+
+### кейс 4
+
+edge-anchor → edge-anchor
+рух будь-якого node у parent chain
+
+### кейс 5
+
+спроба створити цикл
+має бути blocked
+
+---
+
+# 10. Якщо коротко
+
+Тобі треба було перейти від:
+
+```js id="n6e7d9"
+rebuildEdgesForNode(...)
+```
+
+до:
+
+```js id="7ocqtx"
+rebuildCascadeFromNodes(...)
+rebuildCascadeFromEdges(...)
+```
+
+І обов’язково перевіряти cycle ще до `createEdge(...)`.
+
+---
+
+# 11. Моя рекомендація по інтеграції
+
+Порядок такий:
+
+1. вставити `edgeModel.js`
+2. оновити `handleNodeDragMove`
+3. оновити `handleAnchorClick`
+4. оновити `updateEdgeOffset`
+5. перевірити, що всі edge-anchor мають:
+
+   * `type: "edge"`
+   * `edgeId`
+   * `segIndex`
+   * `t`
+
+---
+
+Якщо хочеш, наступним повідомленням я можу ще зробити **спрощену, “production-safe” версію `canCreateConnectionWithoutCycle()` саме під твою модель `source/target`**, бо там є один тонкий момент: як саме трактувати напрямок залежності між newly created edge і parent edge.
