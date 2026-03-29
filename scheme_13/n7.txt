@@ -1,0 +1,450 @@
+Добре. Нижче даю тобі **MVP `ConnectorsLayer.jsx`**, який:
+
+* рендерить тільки нові connector-и
+* не чіпає старий `EdgesLayer`
+* показує `Line`
+* показує start/end handles тільки коли connector вибраний
+* готовий до подальших кроків:
+
+  * drag start/end
+  * segment handles
+  * attach/detach
+  * context menu
+
+Я зроблю його сумісним із твоєю поточною моделлю:
+
+* `edges` у store
+* `selection`
+* `canvasController`
+* `react-konva`
+
+---
+
+# 1. Що цей шар робить
+
+Поки що він:
+
+1. бере всі `edges`
+2. фільтрує тільки:
+
+```js id="xie6q0"
+edge.kind === "connector"
+```
+
+3. малює їх як:
+
+```jsx id="j6oom9"
+<Line points={connector.geometry.points} />
+```
+
+4. якщо connector selected:
+
+* показує круглу ручку на start
+* показує круглу ручку на end
+
+Поки без segment handles — це буде наступний крок.
+
+---
+
+# 2. `ConnectorsLayer.jsx`
+
+```jsx id="po4o6r"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : connector.style?.stroke || "black"}
+              strokeWidth={
+                isSelected
+                  ? Math.max((connector.style?.strokeWidth || 2) + 1, 3)
+                  : connector.style?.strokeWidth || 2
+              }
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                if (canvasController.handleConnectorContextMenu) {
+                  canvasController.handleConnectorContextMenu(e, connector);
+                }
+              }}
+            />
+
+            {isSelected && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    if (canvasController.handleConnectorStartDragMove) {
+                      canvasController.handleConnectorStartDragMove(
+                        connector.id,
+                        e
+                      );
+                    }
+                  }}
+                  onDragEnd={(e) => {
+                    if (canvasController.handleConnectorStartDragEnd) {
+                      canvasController.handleConnectorStartDragEnd(
+                        connector.id,
+                        e
+                      );
+                    }
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    if (canvasController.handleConnectorEndDragMove) {
+                      canvasController.handleConnectorEndDragMove(
+                        connector.id,
+                        e
+                      );
+                    }
+                  }}
+                  onDragEnd={(e) => {
+                    if (canvasController.handleConnectorEndDragEnd) {
+                      canvasController.handleConnectorEndDragEnd(
+                        connector.id,
+                        e
+                      );
+                    }
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 3. Що ще треба додати в `canvasController`
+
+Щоб цей layer уже мав зміст, треба мінімально додати 4 методи:
+
+* `handleConnectorStartDragMove`
+* `handleConnectorStartDragEnd`
+* `handleConnectorEndDragMove`
+* `handleConnectorEndDragEnd`
+
+---
+
+## Базова версія для MVP
+
+```js id="x5zkdj"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  updateConnectorStart,
+  updateConnectorEnd,
+  detachConnectorStart,
+  detachConnectorEnd,
+} from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+export const canvasController = {
+  // ... старі методи
+
+  handleConnectorStartDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorStart(connector);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    if (store.replaceEdge) {
+      store.replaceEdge(edgeId, next);
+    }
+  },
+
+  handleConnectorStartDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorStart(connector);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    if (store.replaceEdge) {
+      store.replaceEdge(edgeId, next);
+    }
+  },
+
+  handleConnectorEndDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorEnd(connector);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    if (store.replaceEdge) {
+      store.replaceEdge(edgeId, next);
+    }
+  },
+
+  handleConnectorEndDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorEnd(connector);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    if (store.replaceEdge) {
+      store.replaceEdge(edgeId, next);
+    }
+  },
+};
+```
+
+---
+
+# 4. Що треба додати в store
+
+Якщо ще нема `replaceEdge`, додай:
+
+```js id="l56w6u"
+replaceEdge: (id, nextEdge) =>
+  set((s) => ({
+    edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+  })),
+```
+
+Це дуже зручно саме для connector-ів.
+
+---
+
+# 5. Як це вбудувати в canvas
+
+Поки старий `EdgesLayer` не чіпаємо. Просто поруч додаєш новий layer:
+
+```jsx id="d0q3ym"
+<EdgesLayer />
+<ConnectorsLayer />
+```
+
+Або навпаки, залежно від того, що має бути поверх.
+Зазвичай connector-и краще малювати в тому ж шарі, що й лінії, але поки окремим компонентом це навіть зручніше.
+
+---
+
+# 6. Як створити тестовий connector
+
+Щоб перевірити MVP, можна прямо тимчасово створити connector з кнопки.
+
+Наприклад у controller:
+
+```js id="dfozwm"
+import { createConnector } from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+createTestConnector() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    connectorType: "orthogonal-elbow",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 360,
+      y: 220,
+      attached: { type: "none" },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+  store.addEdge(connector);
+},
+```
+
+І тимчасова кнопка:
+
+```jsx id="hkajjp"
+<Button onClick={() => canvasController.createTestConnector()}>
+  Додати test connector
+</Button>
+```
+
+---
+
+# 7. Що ти отримаєш уже після цього
+
+Після цих кроків у тебе буде:
+
+* новий connector як окремий об’єкт у `edges`
+* він буде рендеритись окремо
+* при selection показуватимуться start/end handles
+* start/end можна буде тягнути
+* geometry буде перебудовуватись
+
+Тобто це вже реальний старт нової концепції.
+
+---
+
+# 8. Чого тут поки нема
+
+Це свідомо MVP. Тут поки нема:
+
+* attach до node
+* green highlight при наведенні на node
+* segment handles у центрі відрізків
+* add/remove waypoint
+* context menu “додати точку шляху”
+* delete waypoint
+* delete connector
+
+Але архітектура вже під це підготовлена.
+
+---
+
+# 9. Що логічно робити наступним кроком
+
+Найкращий наступний крок після цього:
+
+## Додати segment handles
+
+Тобто:
+
+* для `orthogonal-elbow`
+* по центру кожного сегмента показати синій квадрат
+* drag по осі:
+
+  * horizontal → тільки по `y`
+  * vertical → тільки по `x`
+
+Саме це дасть тобі першу реально draw.io-подібну поведінку.
+
+---
+
+# 10. Маленька рекомендація
+
+У `ConnectorsLayer` я б ще додав фільтрацію selection трохи точніше, якщо в майбутньому буде окремий тип selection:
+
+```js id="0valmx"
+selection?.type === "edge" && selection?.id === connector.id
+```
+
+У тебе це вже використовується — і це добре.
+
+---
+
+# 11. Підсумок
+
+Оцей `ConnectorsLayer.jsx` — хороший MVP, бо він:
+
+* не чіпає legacy систему
+* запускає нову систему connector-ів
+* вже дає базову інтерактивність
+* лягає на `store + controller + react-konva`
+
+---
+
+Наступним кроком я б радив одразу зробити **segment handles для `orthogonal-elbow`**, бо це вже дасть тобі саме той UX, який ти описував як draw.io-подібний.

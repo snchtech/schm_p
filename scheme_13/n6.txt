@@ -1,0 +1,666 @@
+Добре. Тоді даю тобі **MVP основу** для нової системи connector-ів, не чіпаючи старі `edgeLayer`, `edgeRouting` і legacy-логіку.
+
+Це буде перший робочий шар, з якого можна стартувати:
+
+* новий `kind: "connector"`
+* два типи:
+
+  * `orthogonal-straight`
+  * `orthogonal-elbow`
+* окремі helper-и
+* rebuild geometry
+* мінімальна інтеграція в store/controller
+* база для подальших:
+
+  * drag start/end
+  * segment handles
+  * add/remove waypoint
+  * attach/detach
+
+---
+
+# 1. Структура файлів
+
+Я раджу одразу зробити так:
+
+```txt
+/lib/connectors/
+  connectorModel.js
+  connectorGeometry.js
+  connectorEditing.js
+```
+
+На старті реально потрібні перші два. `connectorEditing.js` поки буде під майбутнє.
+
+---
+
+# 2. `lib/connectors/connectorModel.js`
+
+Тут створення connector-а і прості операції над ним.
+
+```js id="rjg7dc"
+export function createConnector({
+  connectorType = "orthogonal-straight",
+  start,
+  end,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+    connectorType, // orthogonal-straight | orthogonal-elbow
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" }, // node | none
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      // користувацькі точки шляху
+      waypoints: [],
+    },
+
+    geometry: {
+      // фінальні точки для Konva Line
+      points: [],
+    },
+
+    style: {
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  };
+}
+
+export function updateConnectorStart(connector, patch) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      ...patch,
+    },
+  };
+}
+
+export function updateConnectorEnd(connector, patch) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      ...patch,
+    },
+  };
+}
+
+export function attachConnectorStart(connector, attachment) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: attachment,
+    },
+  };
+}
+
+export function attachConnectorEnd(connector, attachment) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: attachment,
+    },
+  };
+}
+
+export function detachConnectorStart(connector) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function detachConnectorEnd(connector) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+---
+
+# 3. `lib/connectors/connectorGeometry.js`
+
+Тут уся геометрія.
+
+```js id="2izn6c"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getNodeAnchorPosition(node, anchor = "right") {
+  if (!node) return null;
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  switch (anchor) {
+    case "top":
+      return { x: x + width / 2, y };
+    case "bottom":
+      return { x: x + width / 2, y: y + height };
+    case "left":
+      return { x, y: y + height / 2 };
+    case "right":
+    default:
+      return { x: x + width, y: y + height / 2 };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+
+    if (pos) return pos;
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+
+/**
+ * Пряма ортогональна:
+ * - якщо точки лежать на одній осі -> справді одна пряма
+ * - інакше fallback у просту L-форму
+ */
+export function buildOrthogonalStraightPoints(start, end) {
+  if (same(start.x, end.x) || same(start.y, end.y)) {
+    return [start.x, start.y, end.x, end.y];
+  }
+
+  // fallback: одна сходинка
+  return [start.x, start.y, end.x, start.y, end.x, end.y];
+}
+
+/**
+ * Ломана ортогональна:
+ * - без waypoint -> базова L-форма
+ * - з waypoint -> йдемо ортогонально через waypoints
+ */
+export function buildOrthogonalElbowPoints(start, end, waypoints = []) {
+  const points = [start.x, start.y];
+
+  if (!waypoints.length) {
+    points.push(end.x, start.y, end.x, end.y);
+    return normalizePoints(points);
+  }
+
+  let current = { ...start };
+
+  for (const wp of waypoints) {
+    if (!same(current.x, wp.x)) {
+      points.push(wp.x, current.y);
+      current = { x: wp.x, y: current.y };
+    }
+
+    if (!same(current.y, wp.y)) {
+      points.push(current.x, wp.y);
+      current = { x: current.x, y: wp.y };
+    }
+  }
+
+  if (!same(current.x, end.x)) {
+    points.push(end.x, current.y);
+    current = { x: end.x, y: current.y };
+  }
+
+  if (!same(current.y, end.y)) {
+    points.push(current.x, end.y);
+  }
+
+  return normalizePoints(points);
+}
+
+/**
+ * Прибрати дублікати сусідніх точок і зайві колінеарні точки
+ */
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  // 1. прибрати однакові сусідні точки
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  // 2. прибрати зайві колінеарні точки
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) {
+      continue;
+    }
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+  const waypoints = connector.route?.waypoints || [];
+
+  switch (connector.connectorType) {
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, waypoints);
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+---
+
+# 4. `lib/connectors/connectorEditing.js`
+
+Це вже під наступний крок, але основу краще мати.
+
+```js id="14nndu"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    let orientation = "diagonal";
+    if (same(y1, y2)) orientation = "horizontal";
+    if (same(x1, x2)) orientation = "vertical";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+
+export function getConnectorSegmentHandles(connector) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const i = segmentIndex * 2;
+
+  if (i + 3 >= points.length) return null;
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  return {
+    id: crypto.randomUUID(),
+    x: (x1 + x2) / 2,
+    y: (y1 + y2) / 2,
+  };
+}
+```
+
+---
+
+# 5. Як це додати в store
+
+Нових складних структур поки не треба. Тобі достатньо існуючих action-ів для `edges`, але бажано додати окрему action для оновлення edge як цілого.
+
+```js id="3563az"
+addEdge: (edge) =>
+  set((s) => ({
+    edges: [...s.edges, edge],
+  })),
+
+updateEdge: (id, patch) =>
+  set((s) => ({
+    edges: s.edges.map((e) =>
+      e.id === id ? { ...e, ...patch } : e
+    ),
+  })),
+
+replaceEdge: (id, nextEdge) =>
+  set((s) => ({
+    edges: s.edges.map((e) =>
+      e.id === id ? nextEdge : e
+    ),
+  })),
+```
+
+`replaceEdge` для connector-ів зручніша, ніж patch, бо ти часто будеш повертати повністю rebuilt object.
+
+---
+
+# 6. MVP controller helper-и
+
+Для першого кроку вистачить таких двох речей:
+
+---
+
+## 6.1. Створити connector
+
+```js id="p7mzq3"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createConnector } from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+export const canvasController = {
+  createConnectorOnCanvas(type, startPoint, endPoint) {
+    const store = useCanvasStore.getState();
+
+    let connector = createConnector({
+      connectorType: type,
+      start: {
+        x: startPoint.x,
+        y: startPoint.y,
+        attached: { type: "none" },
+      },
+      end: {
+        x: endPoint.x,
+        y: endPoint.y,
+        attached: { type: "none" },
+      },
+    });
+
+    connector = rebuildConnectorGeometry(connector, store.nodes);
+
+    store.addEdge(connector);
+    store.setSelection?.({ type: "edge", id: connector.id });
+  },
+};
+```
+
+---
+
+## 6.2. Перебудувати один connector
+
+```js id="00vo0j"
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+rebuildConnector(edgeId) {
+  const store = useCanvasStore.getState();
+  const edge = store.edges.find((e) => e.id === edgeId);
+
+  if (!edge || edge.kind !== "connector") return;
+
+  const nextEdge = rebuildConnectorGeometry(edge, store.nodes);
+  store.replaceEdge(edgeId, nextEdge);
+},
+```
+
+---
+
+# 7. Як буде виглядати connector у `edges`
+
+Приклад об’єкта після створення:
+
+```js id="nwbo0l"
+{
+  id: "edge_123",
+  kind: "connector",
+  connectorType: "orthogonal-elbow",
+
+  start: {
+    x: 100,
+    y: 100,
+    attached: { type: "none" }
+  },
+
+  end: {
+    x: 300,
+    y: 180,
+    attached: { type: "none" }
+  },
+
+  route: {
+    waypoints: []
+  },
+
+  geometry: {
+    points: [100, 100, 300, 100, 300, 180]
+  },
+
+  style: {
+    stroke: "black",
+    strokeWidth: 2
+  }
+}
+```
+
+---
+
+# 8. Як це потім рендерити
+
+Ти поки просив старе не чіпати, але логіка буде така:
+
+* старий layer ігнорує `kind: "connector"`
+* новий `ConnectorsLayer` бере:
+
+```js id="1k0we8"
+const connectors = edges.filter((e) => e.kind === "connector");
+```
+
+і малює:
+
+```jsx id="qpxyjg"
+<Line points={connector.geometry.points} ... />
+```
+
+Потім уже додаєш:
+
+* endpoint handles
+* segment handles
+* waypoint handles
+
+---
+
+# 9. Що це вже дає тобі практично
+
+Навіть без segment drag ця модель уже дає:
+
+* connector як окремий об’єкт на canvas
+* він може існувати без attach
+* можна в майбутньому прив’язати до node
+* можна видалити object і не втратити connector
+* можна пізніше додати reattach
+
+Саме це ти й хотів як головну зміну концепції.
+
+---
+
+# 10. Що я раджу робити наступним кроком
+
+Ось правильний порядок.
+
+## Крок 1
+
+Впровадити ці 3 файли.
+
+## Крок 2
+
+Зробити простий `ConnectorsLayer`, який рендерить тільки:
+
+* `kind === "connector"`
+* `Line`
+
+## Крок 3
+
+Зробити створення connector на canvas:
+
+* кнопка “додати straight”
+* кнопка “додати elbow”
+* створюєш об’єкт з дефолтними `start/end`
+
+## Крок 4
+
+Зробити drag start/end endpoint handles
+
+Після цього вже буде відчуття, що нова система “пішла”.
+
+---
+
+# 11. Важлива порада по straight line
+
+Тут є одна UX-особливість.
+
+Ти назвав перший тип:
+
+> пряма ортогональна без зломів
+
+Геометрично це можливо тільки коли:
+
+* `start.x === end.x`
+  або
+* `start.y === end.y`
+
+Якщо точки не на одній осі, треба вирішити policy:
+
+### Варіант A
+
+автоматично перетворювати в L
+
+### Варіант B
+
+не дозволяти таке положення для strict straight
+
+### Варіант C
+
+як у багатьох редакторах — “straight” це просто прямий сегмент, не обов’язково ортогональний
+
+Для твого кейсу я бачу 2 хороші варіанти:
+
+* або в MVP лишити fallback у L
+* або перейменувати тип пізніше
+
+Поки я лишив fallback у L, щоб усе не падало.
+
+---
+
+# 12. Найкоротший підсумок
+
+Оцей MVP дає тобі:
+
+* нову модель connector-а
+* без ломання старої логіки
+* зберігає `nodes / edges`
+* дає базу для draw.io-style системи
+
+---
+
+Наступним кроком логічно вже зробити **простий `ConnectorsLayer.jsx`**, який:
+
+* рендерить тільки нові connector-и
+* показує `Line`
+* показує start/end handles тільки при selection
+
+Я можу одразу написати тобі саме цей `ConnectorsLayer.jsx` як MVP.

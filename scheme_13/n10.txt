@@ -1,0 +1,688 @@
+Добре. Нижче даю тобі **цільний варіант** для нового connector workflow:
+
+* `ConnectorsLayer.jsx`
+* потрібні методи для `canvasController`
+* які поля додати в store
+* як це працює разом
+
+Я зберігаю все в твоєму стилі:
+
+* `nodes`
+* `edges`
+* `selection`
+* центральний `canvasController`
+* `react-konva`
+
+І не чіпаю старий `EdgesLayer`.
+
+---
+
+# 1. Що додати в store
+
+У `useCanvasStore.js` додай preview state для attach.
+
+```js id="ndmzwy"
+connectorAttachPreview: null,
+// {
+//   edgeId,
+//   end: "start" | "end",
+//   target: {
+//     type: "node",
+//     nodeId,
+//     anchor,
+//     x,
+//     y
+//   }
+// }
+
+setConnectorAttachPreview: (connectorAttachPreview) =>
+  set({ connectorAttachPreview }),
+
+clearConnectorAttachPreview: () =>
+  set({ connectorAttachPreview: null }),
+
+replaceEdge: (id, nextEdge) =>
+  set((s) => ({
+    edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+  })),
+```
+
+---
+
+# 2. `lib/connectors/connectorAttach.js`
+
+Окремий helper для пошуку точки приєднання до node.
+
+```js id="f5dyuv"
+function distance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+export function getNodeAnchorPoints(node) {
+  if (!node) return [];
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  return [
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "top",
+      x: x + width / 2,
+      y,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "left",
+      x,
+      y: y + height / 2,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+  ];
+}
+
+export function findClosestNodeAnchor(nodes, point, maxDistance = 24) {
+  let best = null;
+  let bestDist = Infinity;
+
+  for (const node of nodes) {
+    const anchors = getNodeAnchorPoints(node);
+
+    for (const anchor of anchors) {
+      const d = distance(point, anchor);
+
+      if (d < bestDist) {
+        bestDist = d;
+        best = anchor;
+      }
+    }
+  }
+
+  if (!best || bestDist > maxDistance) {
+    return null;
+  }
+
+  return best;
+}
+```
+
+---
+
+# 3. `canvasController.js`
+
+Ось готовий блок для connector attach/detach.
+
+Тут використовується:
+
+* `connectorModel.js`
+* `connectorGeometry.js`
+* `connectorAttach.js`
+
+---
+
+## Імпорти
+
+```js id="vrrxro"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  updateConnectorStart,
+  updateConnectorEnd,
+  attachConnectorStart,
+  attachConnectorEnd,
+  detachConnectorStart,
+  detachConnectorEnd,
+} from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { moveElbowSegmentHandle } from "@/lib/connectors/connectorEditing";
+import { findClosestNodeAnchor } from "@/lib/connectors/connectorAttach";
+```
+
+---
+
+## Методи controller
+
+```js id="qv9qjc"
+export const canvasController = {
+  // ===== CONNECTOR START =====
+  handleConnectorStartDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const hoverTarget = findClosestNodeAnchor(store.nodes, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    if (hoverTarget) {
+      store.setConnectorAttachPreview?.({
+        edgeId,
+        end: "start",
+        target: hoverTarget,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    let next = detachConnectorStart(connector);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorStartDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const attachTarget =
+      store.connectorAttachPreview?.edgeId === edgeId &&
+      store.connectorAttachPreview?.end === "start"
+        ? store.connectorAttachPreview.target
+        : findClosestNodeAnchor(store.nodes, { x: pos.x, y: pos.y });
+
+    let next = connector;
+
+    if (attachTarget) {
+      next = attachConnectorStart(next, {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.anchor,
+      });
+
+      next = updateConnectorStart(next, {
+        x: attachTarget.x,
+        y: attachTarget.y,
+      });
+    } else {
+      next = detachConnectorStart(next);
+
+      next = updateConnectorStart(next, {
+        x: pos.x,
+        y: pos.y,
+      });
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+    store.clearConnectorAttachPreview?.();
+  },
+
+  // ===== CONNECTOR END =====
+  handleConnectorEndDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const hoverTarget = findClosestNodeAnchor(store.nodes, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    if (hoverTarget) {
+      store.setConnectorAttachPreview?.({
+        edgeId,
+        end: "end",
+        target: hoverTarget,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    let next = detachConnectorEnd(connector);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorEndDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const attachTarget =
+      store.connectorAttachPreview?.edgeId === edgeId &&
+      store.connectorAttachPreview?.end === "end"
+        ? store.connectorAttachPreview.target
+        : findClosestNodeAnchor(store.nodes, { x: pos.x, y: pos.y });
+
+    let next = connector;
+
+    if (attachTarget) {
+      next = attachConnectorEnd(next, {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.anchor,
+      });
+
+      next = updateConnectorEnd(next, {
+        x: attachTarget.x,
+        y: attachTarget.y,
+      });
+    } else {
+      next = detachConnectorEnd(next);
+
+      next = updateConnectorEnd(next, {
+        x: pos.x,
+        y: pos.y,
+      });
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+    store.clearConnectorAttachPreview?.();
+  },
+
+  // ===== SEGMENT HANDLE =====
+  handleConnectorSegmentDragMove(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.connectorType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragEnd(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.connectorType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  // ===== REBUILD CONNECTORS WHEN NODE MOVES =====
+  rebuildConnectorsForNode(nodeId, nodes, edges) {
+    return edges.map((edge) => {
+      if (edge.kind !== "connector") return edge;
+
+      const touchesStart =
+        edge.start?.attached?.type === "node" &&
+        edge.start.attached.nodeId === nodeId;
+
+      const touchesEnd =
+        edge.end?.attached?.type === "node" &&
+        edge.end.attached.nodeId === nodeId;
+
+      if (!touchesStart && !touchesEnd) return edge;
+
+      return rebuildConnectorGeometry(edge, nodes);
+    });
+  },
+};
+```
+
+---
+
+# 4. `ConnectorsLayer.jsx`
+
+Ось готовий шар з:
+
+* лінією
+* start/end handles
+* segment handles
+* зеленим preview attach target
+
+```jsx id="uo60oh"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorEditing";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+  const connectorAttachPreview = useCanvasStore(
+    (s) => s.connectorAttachPreview
+  );
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const segmentHandles = isSelected
+          ? getConnectorSegmentHandles(connector)
+          : [];
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : connector.style?.stroke || "black"}
+              strokeWidth={
+                isSelected
+                  ? Math.max((connector.style?.strokeWidth || 2) + 1, 3)
+                  : connector.style?.strokeWidth || 2
+              }
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+            />
+
+            {isSelected && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                {segmentHandles.map((handle) => (
+                  <Rect
+                    key={handle.id}
+                    x={handle.x - 5}
+                    y={handle.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="black"
+                    strokeWidth={1}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      handle.orientation === "horizontal"
+                        ? { x: handle.x - 5, y: pos.y }
+                        : { x: pos.x, y: handle.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorSegmentDragMove?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorSegmentDragEnd?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onMouseEnter={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor =
+                          handle.orientation === "horizontal"
+                            ? "ns-resize"
+                            : "ew-resize";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor = "default";
+                      }
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+
+      {connectorAttachPreview?.target && (
+        <Circle
+          x={connectorAttachPreview.target.x}
+          y={connectorAttachPreview.target.y}
+          radius={8}
+          fill="rgba(39, 174, 96, 0.25)"
+          stroke="#27AE60"
+          strokeWidth={2}
+          listening={false}
+        />
+      )}
+    </>
+  );
+}
+```
+
+---
+
+# 5. Якщо node рухається — connector має їхати за ним
+
+У тебе вже є `handleNodeDragMove`.
+Туди треба додати rebuild нових connector-ів.
+
+Ось шаблон, як це вбудувати.
+
+```js id="j9v0kp"
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  let nextEdges = [...store.edges];
+
+  // 1. тут лишаєш свою поточну legacy-логіку для старих edge
+  // nextEdges = ... твій existing rebuild для legacy edges
+
+  // 2. додаємо rebuild нових connector-ів
+  nextEdges = canvasController.rebuildConnectorsForNode(
+    id,
+    nextNodes,
+    nextEdges
+  );
+
+  if (store.setNodeAndEdges) {
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  } else {
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  }
+}
+```
+
+---
+
+# 6. Що ти отримаєш після цього
+
+Після цих змін у тебе буде:
+
+* можна тягнути start/end connector-а
+* endpoint можна кидати на node
+* буде зелений preview при можливому attach
+* якщо кинув біля anchor node — endpoint attached
+* якщо node потім рухається — connector перебудовується разом із ним
+* якщо кинув у пусте місце — endpoint detached
+
+Це вже **нормальний draw.io-style attach/detach workflow**.
+
+---
+
+# 7. Важливе UX-рішення
+
+Зараз attach робиться до **найближчого anchor node**. Це добре для старту.
+
+Потім можна покращити:
+
+* підсвічувати не тільки точку, а й весь node
+* показувати всі 4 anchors node при drag endpoint
+* давати attach priority для hovered node
+
+Але для MVP поточний варіант уже достатньо хороший.
+
+---
+
+# 8. Що логічно робити далі
+
+Після цього є два найсильніші наступні кроки:
+
+### варіант 1
+
+`context menu -> Додати точку шляху / Прибрати точку шляху`
+
+### варіант 2
+
+показувати anchors об’єкта при drag endpoint, а не тільки зелений preview кружок
+
+Для UX я б радив наступним кроком саме **показати attach-target-и node**.
+
+---
+
+# 9. Якщо коротко
+
+Зараз тобі треба:
+
+1. додати `connectorAttachPreview` у store
+2. створити `connectorAttach.js`
+3. вставити методи в `canvasController`
+4. оновити `ConnectorsLayer.jsx`
+5. додати rebuild connector-ів у `handleNodeDragMove`
+
+---
+
+Якщо хочеш, наступним повідомленням я можу зробити ще практичніше:
+**дати тобі готовий приклад, як показувати 4 anchor-точки об’єкта під час drag endpoint, а не тільки один зелений preview**.

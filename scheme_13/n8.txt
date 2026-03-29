@@ -1,0 +1,730 @@
+Добре. Тоді наступний крок — **segment handles** для `orthogonal-elbow`.
+
+Це саме ті сині квадратні точки по центру сегментів, які:
+
+* показуються тільки коли connector вибраний
+* для горизонтального сегмента рухаються тільки по `y`
+* для вертикального — тільки по `x`
+* змінюють форму лінії
+* не чіпають поки старий `EdgesLayer`
+
+Нижче даю тобі **MVP реалізацію**, яка лягає на той каркас, що ми вже зробили.
+
+---
+
+# 1. Важлива архітектурна думка
+
+Для першого робочого варіанту я раджу таку модель:
+
+* `geometry.points` — це фінальна polyline
+* `route.waypoints` — поки що керуючі точки
+* **segment handle drag** буде змінювати nearest/internal waypoint
+* якщо waypoint ще нема — будемо створювати базовий waypoint
+
+Але щоб не ускладнювати зараз модель занадто сильно, для MVP можна зробити простіше:
+
+## Для `orthogonal-elbow`
+
+вважати, що:
+
+* якщо `waypoints.length === 0`, то лінія має один базовий “злам”
+* segment handle drag створює/оновлює waypoint
+* далі geometry перебудовується
+
+Тобто ми не редагуємо напряму `geometry.points`, а редагуємо `route.waypoints`.
+
+Це правильний напрям.
+
+---
+
+# 2. Оновлюємо `connectorGeometry.js`
+
+Тут треба трохи покращити логіку для elbow, щоб вона нормально працювала з waypoint.
+
+Ось оновлений варіант для `orthogonal-elbow`, який я раджу.
+
+```js id="4e0b1p"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getNodeAnchorPosition(node, anchor = "right") {
+  if (!node) return null;
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  switch (anchor) {
+    case "top":
+      return { x: x + width / 2, y };
+    case "bottom":
+      return { x: x + width / 2, y: y + height };
+    case "left":
+      return { x, y: y + height / 2 };
+    case "right":
+    default:
+      return { x: x + width, y: y + height / 2 };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+    if (pos) return pos;
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) continue;
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+export function buildOrthogonalStraightPoints(start, end) {
+  if (same(start.x, end.x) || same(start.y, end.y)) {
+    return [start.x, start.y, end.x, end.y];
+  }
+
+  return [start.x, start.y, end.x, start.y, end.x, end.y];
+}
+
+/**
+ * orthogonal-elbow:
+ * - 0 waypoint -> одна L-форма
+ * - 1+ waypoint -> йдемо сходинками через них
+ */
+export function buildOrthogonalElbowPoints(start, end, waypoints = []) {
+  const points = [start.x, start.y];
+
+  if (!waypoints.length) {
+    points.push(end.x, start.y, end.x, end.y);
+    return normalizePoints(points);
+  }
+
+  let current = { ...start };
+
+  for (const wp of waypoints) {
+    if (!same(current.x, wp.x)) {
+      points.push(wp.x, current.y);
+      current = { x: wp.x, y: current.y };
+    }
+
+    if (!same(current.y, wp.y)) {
+      points.push(current.x, wp.y);
+      current = { x: current.x, y: wp.y };
+    }
+  }
+
+  if (!same(current.x, end.x)) {
+    points.push(end.x, current.y);
+    current = { x: end.x, y: current.y };
+  }
+
+  if (!same(current.y, end.y)) {
+    points.push(current.x, end.y);
+  }
+
+  return normalizePoints(points);
+}
+
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+  const waypoints = connector.route?.waypoints || [];
+
+  switch (connector.connectorType) {
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, waypoints);
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+---
+
+# 3. Оновлюємо `connectorEditing.js`
+
+Тепер тут додамо:
+
+* segment handles
+* helper для зміни shape через handle drag
+
+```js id="wmf970"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    let orientation = "diagonal";
+    if (same(y1, y2)) orientation = "horizontal";
+    if (same(x1, x2)) orientation = "vertical";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+
+export function getConnectorSegmentHandles(connector) {
+  if (connector.connectorType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+
+/**
+ * MVP:
+ * - якщо waypoint ще нема -> створюємо 1 waypoint
+ * - якщо waypoint є -> рухаємо перший waypoint
+ *
+ * Це простий старт.
+ * Потім можна зробити точне зіставлення handle -> nearest waypoint.
+ */
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  if (!waypoints.length) {
+    waypoints.push({
+      id: crypto.randomUUID(),
+      x: handle.x,
+      y: handle.y,
+    });
+  }
+
+  const wp = waypoints[0];
+
+  if (handle.orientation === "horizontal") {
+    wp.y = pos.y;
+  } else if (handle.orientation === "vertical") {
+    wp.x = pos.x;
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints,
+    },
+  };
+}
+
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const i = segmentIndex * 2;
+
+  if (i + 3 >= points.length) return null;
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  return {
+    id: crypto.randomUUID(),
+    x: (x1 + x2) / 2,
+    y: (y1 + y2) / 2,
+  };
+}
+```
+
+---
+
+# 4. Оновлюємо `ConnectorsLayer.jsx`
+
+Тепер додаємо квадратні handles по центру сегментів.
+
+```jsx id="9w5qv5"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorEditing";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const segmentHandles = isSelected
+          ? getConnectorSegmentHandles(connector)
+          : [];
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : connector.style?.stroke || "black"}
+              strokeWidth={
+                isSelected
+                  ? Math.max((connector.style?.strokeWidth || 2) + 1, 3)
+                  : connector.style?.strokeWidth || 2
+              }
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                if (canvasController.handleConnectorContextMenu) {
+                  canvasController.handleConnectorContextMenu(e, connector);
+                }
+              }}
+            />
+
+            {isSelected && (
+              <>
+                {/* start handle */}
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                {/* end handle */}
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                {/* segment handles */}
+                {segmentHandles.map((handle) => (
+                  <Rect
+                    key={handle.id}
+                    x={handle.x - 5}
+                    y={handle.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="black"
+                    strokeWidth={1}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      handle.orientation === "horizontal"
+                        ? { x: handle.x - 5, y: pos.y }
+                        : { x: pos.x, y: handle.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorSegmentDragMove?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorSegmentDragEnd?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onMouseEnter={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor =
+                          handle.orientation === "horizontal"
+                            ? "ns-resize"
+                            : "ew-resize";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor = "default";
+                      }
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 5. Оновлюємо `canvasController.js`
+
+Додаємо логіку segment handle drag.
+
+```js id="319ja8"
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  updateConnectorStart,
+  updateConnectorEnd,
+  detachConnectorStart,
+  detachConnectorEnd,
+} from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { moveElbowSegmentHandle } from "@/lib/connectors/connectorEditing";
+
+export const canvasController = {
+  // ... існуючі методи
+
+  handleConnectorStartDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorStart(connector);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorStartDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorStart(connector);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorEndDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorEnd(connector);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorEndDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    let next = detachConnectorEnd(connector);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragMove(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.connectorType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragEnd(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.connectorType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+};
+```
+
+---
+
+# 6. Що цей MVP вже дає
+
+Після цього в тебе вже буде:
+
+* новий `orthogonal-elbow`
+* вибір connector-а
+* start/end handles
+* **segment handles по центру сегментів**
+* drag handle:
+
+  * горизонтальний сегмент → рух по `y`
+  * вертикальний → по `x`
+
+Тобто це вже перша реально draw.io-подібна поведінка.
+
+---
+
+# 7. Обмеження цього MVP
+
+Тут важливо чесно сказати: це **перший робочий варіант**, а не фінальна модель.
+
+### Поточне спрощення:
+
+`moveElbowSegmentHandle()` зараз працює через **перший waypoint**.
+
+Тобто:
+
+* для однієї базової ломаної — ок
+* для багатьох waypoint — ще неідеально
+
+Але для MVP це правильно, бо:
+
+* ти побачиш UX
+* перевіриш, чи тобі заходить нова концепція
+* не загрузнеш у складну математику одразу
+
+---
+
+# 8. Що логічно робити далі
+
+Після цього найправильніший наступний крок:
+
+## `"Додати точку шляху"`
+
+через context menu на сегменті
+
+Тобто:
+
+* клік правою кнопкою по connector
+* визначити сегмент
+* вставити waypoint
+* rebuild geometry
+* з’явиться додатковий handle
+
+Після цього система вже дуже помітно наблизиться до draw.io.
+
+---
+
+# 9. Маленька рекомендація
+
+Щоб не було шуму на canvas, segment handles треба показувати тільки коли:
+
+* `selection.type === "edge"`
+* `selection.id === connector.id`
+
+У коді вище це вже є.
+
+---
+
+# 10. Підсумок
+
+Оцей крок дає тобі:
+
+* новий connector system MVP
+* базову ломану
+* керування сегментом
+* готову основу для “додати точку шляху”
+
+---
+
+Якщо хочеш, наступним повідомленням я вже дам тобі **наступний крок: context menu → “Додати точку шляху” / “Прибрати точку шляху” для нового connector-а**.

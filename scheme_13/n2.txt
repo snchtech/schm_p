@@ -1,0 +1,207 @@
+Так, тепер картина вже майже повна: **ставити 200 ID як текстовий фільтр Interactive Report через API — погана точка для APEX 24.x**. `APEX_UTIL.IR_FILTER` у нових версіях уже позначений як deprecated, Oracle радить використовувати `APEX_IR`, а сам фільтр все одно зберігається у внутрішніх налаштуваннях звіту. Саме тому ви впираєтесь у службове поле `CONDITION_SQL` з межею 4000 символів. ([docs.oracle.com][1])
+
+І ще важливий момент: офіційний API для `IR_FILTER`/`ADD_FILTER` приймає **колонку + оператор + значення**, а не довільний шматок SQL. Тобто APEX не просто “бере ваш 1300-символьний список”, а будує внутрішню умову звіту, і саме вона може роздуватися дуже сильно. `APEX_UTIL.IR_FILTER` ще й прямо позначений як “not recommended / deprecated”. ([docs.oracle.com][1])
+
+### Що робити правильно
+
+Тут найкраще рішення: **не записувати великий список ID у фільтр IR взагалі**.
+
+Замість цього:
+
+* збережіть список ID в item / collection / GTT;
+* а сам Interactive Report нехай фільтрується **у SQL джерелі звіту** через `split`.
+
+Тобто не так:
+
+```plsql
+apex_util.ir_filter(
+  ...
+  p_condition => 'order_id in (' || list || ')'
+);
+```
+
+а так, щоб сам SQL звіту читав значення з item.
+
+---
+
+## Варіант 1. Зберегти CSV у page item і фільтрувати в SQL звіту
+
+Наприклад, на page 0 або на сторінці звіту записуєте:
+
+```plsql
+:P0_ORDER_IDS := list;
+```
+
+Далі в SQL Interactive Report:
+
+```sql
+select *
+from orders o
+where :P0_ORDER_IDS is null
+   or o.order_id in (
+        select to_number(column_value)
+        from apex_string.split(:P0_ORDER_IDS, ',')
+   )
+```
+
+Це набагато стабільніше, бо:
+
+* APEX не створює гігантський `worksheet condition`;
+* список зберігається як значення item;
+* фільтрація відбувається в SQL.
+
+### Якщо можливі пробіли
+
+```sql
+select *
+from orders o
+where :P0_ORDER_IDS is null
+   or o.order_id in (
+        select to_number(trim(column_value))
+        from apex_string.split(:P0_ORDER_IDS, ',')
+   )
+```
+
+---
+
+## Варіант 2. Якщо список дуже великий — краще collection
+
+Якщо далі таких ID стане не 200, а 1000+, краще взагалі не тримати CSV.
+
+### Запис у collection
+
+```plsql
+apex_collection.create_or_truncate_collection('ORDER_IDS');
+
+for r in (
+    select order_id
+    from ...
+) loop
+    apex_collection.add_member(
+        p_collection_name => 'ORDER_IDS',
+        p_c001            => r.order_id
+    );
+end loop;
+```
+
+### SQL звіту
+
+```sql
+select *
+from orders o
+where exists (
+    select 1
+    from apex_collections c
+    where c.collection_name = 'ORDER_IDS'
+      and to_number(c.c001) = o.order_id
+)
+```
+
+Це вже взагалі не залежить від довжини рядка.
+
+---
+
+## Варіант 3. Global Temporary Table
+
+Якщо логіка між додатками складна або є серверні процеси, можна використовувати GTT:
+
+```sql
+create global temporary table temp_order_ids (
+    order_id number
+) on commit delete rows;
+```
+
+Потім:
+
+```plsql
+insert into temp_order_ids(order_id)
+select ...
+```
+
+І в IR:
+
+```sql
+select *
+from orders o
+where exists (
+    select 1
+    from temp_order_ids t
+    where t.order_id = o.order_id
+)
+```
+
+---
+
+## Чому я не раджу лишатись на `ir_filter`
+
+Бо навіть якщо ви перепишете на `APEX_IR.ADD_FILTER`, логіка лишається та сама: фільтр зберігається як налаштування Interactive Report. Це нормальний шлях для простих умов типу `DEPTNO = 30`, але не для довгих динамічних `IN (...)` списків. Oracle і в старій, і в новій документації описує `ADD_FILTER` саме як API для стандартних IR-фільтрів, а не як контейнер для великих шматків SQL. ([docs.oracle.com][1])
+
+---
+
+## Що б я радив вам зараз
+
+Для вашого випадку найпростіший і найнадійніший шлях:
+
+1. На page 0 або в process сформувати `list`.
+2. Записати його в item, наприклад `P0_ORDER_IDS`.
+3. Прибрати `apex_util.ir_filter(...)`.
+4. У SQL Interactive Report додати умову через `apex_string.split`.
+
+Ось готовий шаблон:
+
+### Процес
+
+```plsql
+declare
+    l_list varchar2(32767);
+begin
+    select listagg(order_id, ',') within group (order by order_id)
+      into l_list
+      from ...;
+
+    :P0_ORDER_IDS := l_list;
+end;
+```
+
+### SQL звіту
+
+```sql
+select o.*
+from orders o
+where :P0_ORDER_IDS is null
+   or o.order_id in (
+        select to_number(trim(column_value))
+        from apex_string.split(:P0_ORDER_IDS, ',')
+   )
+```
+
+---
+
+## Якщо треба швидко перевірити, що реально в item
+
+Навіть якщо це інший додаток, можна тимчасово зробити на сторінці звіту display-only item або region з таким SQL:
+
+```sql
+select length(:P0_ORDER_IDS) as len,
+       substr(:P0_ORDER_IDS, 1, 4000) as preview
+from dual
+```
+
+або в PL/SQL process:
+
+```plsql
+apex_debug.message('P0_ORDER_IDS length=%s', length(:P0_ORDER_IDS));
+```
+
+Але чесно: навіть без цього вже видно, що проблема саме в механізмі IR filter, а не в числах як таких.
+
+### Підсумок
+
+У вас не проблема з Oracle 21 як БД.
+У вас проблема з тим, що **APEX Interactive Report filter не підходить для великих `IN (...)` списків**. У новому середовищі це стало проявлятися жорсткіше через внутрішній запис у `WWV_FLOW_WORKSHEET_CONDITIONS.CONDITION_SQL`. ([docs.oracle.com][1])
+
+Найкраще рішення: **перенести фільтрацію зі збереженого IR filter у SQL джерело звіту** через `apex_string.split`, collection або GTT.
+
+Можу одразу переписати ваш поточний фрагмент під APEX так, щоб він працював через `P0_ORDER_IDS` без `ir_filter`.
+
+[1]: https://docs.oracle.com/en/database/oracle/apex/24.1/aeapi/IR_FILTER-Procedure-DEPRECATED.html "IR_FILTER Procedure (Deprecated)"

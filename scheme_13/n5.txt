@@ -1,0 +1,669 @@
+Добре. Нижче дам тобі **конкретну основу для нової connector-системи**, яка:
+
+* не ламає стару логіку
+* лишає `nodes / edges`
+* дозволяє мати нові типи ліній
+* підходить під draw.io-подібний UX
+* дає базу для:
+
+  * endpoint drag
+  * segment handles
+  * add/remove waypoint
+  * attach/detach до node
+
+---
+
+# 1. Як я пропоную це вбудувати в поточну модель
+
+Не заводити окремий `connectors` масив.
+Краще лишити:
+
+```js id="n2hy64"
+nodes: []
+edges: []
+```
+
+Але в `edges` тепер будуть різні типи:
+
+```js id="v5j66m"
+{
+  id: "e1",
+  kind: "legacy-auto",
+  ...
+}
+
+{
+  id: "e2",
+  kind: "connector",
+  connectorType: "orthogonal-straight",
+  ...
+}
+
+{
+  id: "e3",
+  kind: "connector",
+  connectorType: "orthogonal-elbow",
+  ...
+}
+```
+
+Це найкращий варіант, бо:
+
+* store не ламається
+* selection не ламається
+* context menu не ламається
+* далі можна зробити окремий `ConnectorsLayer`
+
+---
+
+# 2. Модель нового connector
+
+Ось базовий формат, який я раджу.
+
+```js id="o35jkh"
+{
+  id: "edge_1",
+  kind: "connector",
+  connectorType: "orthogonal-straight", // або orthogonal-elbow
+
+  start: {
+    x: 100,
+    y: 100,
+    attached: {
+      type: "node", // node | none
+      nodeId: "node_1",
+      anchor: "right", // top | bottom | left | right
+    },
+  },
+
+  end: {
+    x: 300,
+    y: 100,
+    attached: {
+      type: "none",
+    },
+  },
+
+  route: {
+    waypoints: [
+      // точки шляху, які додає користувач через "Додати точку шляху"
+    ],
+  },
+
+  geometry: {
+    points: [100, 100, 300, 100],
+  },
+
+  style: {
+    stroke: "black",
+    strokeWidth: 2,
+  },
+}
+```
+
+---
+
+# 3. Чому така модель правильна
+
+## `start` і `end`
+
+Це endpoints лінії.
+
+Вони:
+
+* можуть бути прив’язані до node
+* можуть бути вільними
+
+Тобто ти зможеш:
+
+* видалити об’єкт
+* лишити connector на canvas
+* потім прив’язати його до іншого об’єкта
+
+Саме це тобі і потрібно.
+
+---
+
+## `route.waypoints`
+
+Це **не всі точки polyline**, а тільки користувацькі точки шляху.
+
+Тобто:
+
+* спочатку `[]`
+* потім після “Додати точку шляху” з’являється waypoint
+* build function із `start/end + waypoints` будує фінальний масив `geometry.points`
+
+---
+
+## `geometry.points`
+
+Це вже похідне.
+
+Його:
+
+* рахуєш helper-ом
+* рендериш у `Line`
+
+---
+
+# 4. Які helper-и я раджу створити
+
+Нова папка:
+
+```js id="r0h0yx"
+/lib/connectors/
+  connectorModel.js
+  connectorGeometry.js
+  connectorEditing.js
+```
+
+---
+
+# 5. `connectorModel.js`
+
+Тут живе модель connector.
+
+```js id="q9m2l1"
+export function createConnector({
+  connectorType = "orthogonal-straight",
+  start,
+  end,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+    connectorType,
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      waypoints: [],
+    },
+
+    geometry: {
+      points: [],
+    },
+
+    style: {
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  };
+}
+
+export function attachConnectorStart(connector, attachment) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: attachment,
+    },
+  };
+}
+
+export function attachConnectorEnd(connector, attachment) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: attachment,
+    },
+  };
+}
+
+export function detachConnectorStart(connector) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function detachConnectorEnd(connector) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function addWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+---
+
+# 6. `connectorGeometry.js`
+
+Це найважливіший файл для старту.
+
+---
+
+## 6.1. Helper для node attachment
+
+```js id="vdyqkp"
+export function getNodeAnchorPosition(node, anchor) {
+  if (!node) return null;
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  switch (anchor) {
+    case "top":
+      return { x: x + width / 2, y };
+    case "bottom":
+      return { x: x + width / 2, y: y + height };
+    case "left":
+      return { x, y: y + height / 2 };
+    case "right":
+    default:
+      return { x: x + width, y: y + height / 2 };
+  }
+}
+```
+
+---
+
+## 6.2. Endpoint resolution
+
+```js id="q0zyyq"
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+    if (pos) return pos;
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+```
+
+---
+
+## 6.3. Пряма ортогональна лінія
+
+Тут я беру простий варіант: один горизонтальний або вертикальний сегмент, якщо можливо. Якщо ні — робимо просту L-форму.
+Але ти казав “пряма ортогональна без зломів” — строго без зломів це можливо тільки коли точки на одній осі. Тому я раджу трактувати так:
+
+* якщо осі збігаються → одна пряма
+* якщо ні → для straight-type або заборонити такий старт, або дати просту L-форму
+  Для практики я б поки робив один прямий сегмент тільки якщо можливо.
+
+```js id="34077i"
+export function buildOrthogonalStraightPoints(start, end) {
+  if (start.x === end.x || start.y === end.y) {
+    return [start.x, start.y, end.x, end.y];
+  }
+
+  // fallback: тимчасово проста L-форма
+  return [start.x, start.y, end.x, start.y, end.x, end.y];
+}
+```
+
+---
+
+## 6.4. Базова ломана
+
+Для старту без waypoint — робимо просту L-форму.
+
+З waypoint — кожен waypoint розглядаємо як контрольну точку і будуємо ортогональний маршрут сходинками.
+
+```js id="1vq4qb"
+export function buildOrthogonalElbowPoints(start, end, waypoints = []) {
+  const points = [start.x, start.y];
+
+  if (!waypoints.length) {
+    points.push(end.x, start.y, end.x, end.y);
+    return points;
+  }
+
+  let current = { ...start };
+
+  for (const wp of waypoints) {
+    // йдемо ортогонально до waypoint
+    if (current.x !== wp.x) {
+      points.push(wp.x, current.y);
+      current = { x: wp.x, y: current.y };
+    }
+
+    if (current.y !== wp.y) {
+      points.push(current.x, wp.y);
+      current = { x: current.x, y: wp.y };
+    }
+  }
+
+  if (current.x !== end.x) {
+    points.push(end.x, current.y);
+    current = { x: end.x, y: current.y };
+  }
+
+  if (current.y !== end.y) {
+    points.push(current.x, end.y);
+  }
+
+  return points;
+}
+```
+
+---
+
+## 6.5. Головна build function
+
+```js id="yh3mtn"
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+  const waypoints = connector.route?.waypoints || [];
+
+  if (connector.connectorType === "orthogonal-straight") {
+    return buildOrthogonalStraightPoints(start, end);
+  }
+
+  if (connector.connectorType === "orthogonal-elbow") {
+    return buildOrthogonalElbowPoints(start, end, waypoints);
+  }
+
+  return [start.x, start.y, end.x, end.y];
+}
+```
+
+---
+
+## 6.6. Перебудова geometry
+
+```js id="pcdf5r"
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+---
+
+# 7. `connectorEditing.js`
+
+Тут поки дам основу саме для сегментних handle-ів.
+
+---
+
+## 7.1. Отримати сегменти
+
+```js id="g5f4vj"
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    const orientation =
+      y1 === y2 ? "horizontal" : x1 === x2 ? "vertical" : "diagonal";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+```
+
+---
+
+## 7.2. Handle по центру сегмента
+
+```js id="6vfm3a"
+export function getSegmentHandles(connector) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter((seg) => seg.orientation === "horizontal" || seg.orientation === "vertical")
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+```
+
+---
+
+## 7.3. Додати waypoint у сегмент
+
+Початково через context menu можна вставляти waypoint у центр вибраного сегмента:
+
+```js id="gqq97g"
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const i = segmentIndex * 2;
+
+  if (i + 3 >= points.length) return null;
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  return {
+    id: crypto.randomUUID(),
+    x: (x1 + x2) / 2,
+    y: (y1 + y2) / 2,
+  };
+}
+```
+
+---
+
+# 8. Як це жити буде зі store
+
+У store достатньо мати звичайний `edges`.
+
+Наприклад action:
+
+```js id="87f5rb"
+addEdge: (edge) =>
+  set((s) => ({
+    edges: [...s.edges, edge],
+  })),
+
+updateEdge: (id, patch) =>
+  set((s) => ({
+    edges: s.edges.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+  })),
+```
+
+Для нових connector-ів цього достатньо.
+
+---
+
+# 9. Які action/controller helper-и будуть потрібні
+
+Я б на рівні controller вже зараз планував такі:
+
+* `startCreateConnector(type)`
+* `createConnectorOnCanvas(startPoint)`
+* `moveConnectorStart(edgeId, pos)`
+* `moveConnectorEnd(edgeId, pos)`
+* `attachConnectorStartToNode(edgeId, nodeId, anchor)`
+* `attachConnectorEndToNode(edgeId, nodeId, anchor)`
+* `addConnectorWaypoint(edgeId, segmentIndex)`
+* `removeConnectorWaypoint(edgeId, waypointId)`
+* `rebuildConnector(edgeId)`
+
+---
+
+# 10. Найкращий перший сценарій реалізації
+
+Я б робив так.
+
+---
+
+## Етап 1
+
+Створення connector як окремого об’єкта на canvas:
+
+* start/end вільні точки
+* connectorType: `orthogonal-straight`
+* geometry rebuild
+
+---
+
+## Етап 2
+
+Endpoint drag:
+
+* можна тягнути start/end
+* points перебудовуються
+
+---
+
+## Етап 3
+
+Attach to node:
+
+* endpoint при drag “прилипає” до node anchor
+* зелений highlight
+
+---
+
+## Етап 4
+
+`orthogonal-elbow`
+
+* базова ломана
+* segment handles по центру
+
+---
+
+## Етап 5
+
+Context menu:
+
+* “Додати точку шляху”
+* “Прибрати точку шляху”
+
+---
+
+# 11. Дуже важлива UX-порада
+
+Ти описав draw.io-поведінку, і це правильно. Але щоб не перевантажити користувача, я б одразу ввів правило:
+
+## handles показуються тільки коли:
+
+* edge selected
+
+І тоді:
+
+* endpoint handles
+* segment handles
+* waypoint handles
+
+усі показуються лише у фокусі.
+
+Це критично і для UX, і для продуктивності.
+
+---
+
+# 12. Чого я б не робив зараз
+
+Я б не намагався:
+
+* відразу прив’язати нові connector-и до старого `edgeRouting`
+* одразу підтримати всі можливі складні маршрути
+* одразу моделювати draw.io на 100%
+
+Зараз найкраще:
+
+* зробити **мінімально життєздатну нову connector-систему**
+* окремо від старої
+
+---
+
+# 13. Що я раджу прямо зараз як наступний крок
+
+Ось реальний good next step:
+
+## Реалізувати перший MVP:
+
+* `createConnector()`
+* `buildConnectorPoints()`
+* `rebuildConnectorGeometry()`
+* `orthogonal-straight`
+* `orthogonal-elbow`
+* endpoint drag
+
+Цього вже вистачить, щоб перевірити, чи тобі заходить нова концепція.
+
+---
+
+# 14. Підсумок
+
+Так, це правильно робити через:
+
+* той самий `edges`
+* новий тип `kind: "connector"`
+* окремі helper-и
+* окремий rendering layer пізніше
+
+І так, **Next.js + react-konva** для цього підходить.
+
+---
+
+Якщо хочеш, наступним повідомленням я можу вже дати тобі **готовий MVP-код для `createConnector`, `buildConnectorPoints`, `rebuildConnectorGeometry` і приклад одного connector-об’єкта**, щоб ти відразу почав із першого типу нової лінії.
