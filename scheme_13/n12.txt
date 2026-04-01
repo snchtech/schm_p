@@ -1,0 +1,730 @@
+Добре. Тоді робимо наступний крок: **`context menu -> Додати точку шляху / Прибрати точку шляху`** для нових connector-ів.
+
+Це вже дасть тобі базову draw.io-подібну поведінку:
+
+* правий клік по connector
+* пункт **“Додати точку шляху”**
+* waypoint додається на вибраний сегмент
+* лінія перебудовується
+* waypoint потім можна буде рухати / видаляти
+
+Я дам тобі це так, щоб лягло на твою поточну архітектуру:
+
+* `store`
+* `canvasController`
+* `ConnectorsLayer`
+* `connectorModel / connectorGeometry / connectorEditing`
+
+---
+
+# 1. Що саме треба зробити
+
+Нам потрібні 4 речі:
+
+1. зрозуміти, **по якому сегменту** користувач клікнув правою кнопкою
+2. відкрити **context menu**
+3. по натисканню “Додати точку шляху” вставити waypoint
+4. по натисканню “Прибрати точку шляху” видалити waypoint
+
+---
+
+# 2. Додай state для context menu в store
+
+Якщо загальний `contextMenu` у тебе вже є — можна використати його.
+Якщо ні, я раджу такий формат:
+
+```js id="pf7q0u"
+contextMenu: null,
+// {
+//   type: "connector" | "connector-waypoint",
+//   edgeId,
+//   segmentIndex?,
+//   waypointId?,
+//   x,
+//   y
+// }
+
+setContextMenu: (contextMenu) => set({ contextMenu }),
+clearContextMenu: () => set({ contextMenu: null }),
+```
+
+---
+
+# 3. Додаємо helper-и в `connectorEditing.js`
+
+Потрібно:
+
+* знайти найближчий сегмент до точки кліку
+* створити waypoint у середині цього сегмента
+
+Онови `connectorEditing.js` так.
+
+```js id="cbs8qv"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    let orientation = "diagonal";
+    if (same(y1, y2)) orientation = "horizontal";
+    if (same(x1, x2)) orientation = "vertical";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+
+export function getConnectorSegmentHandles(connector) {
+  if (connector.connectorType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+
+function projectPointOnSegment(px, py, seg) {
+  const { x1, y1, x2, y2, orientation } = seg;
+
+  if (orientation === "horizontal") {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const x = Math.max(minX, Math.min(maxX, px));
+    const y = y1;
+    const dx = px - x;
+    const dy = py - y;
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  if (orientation === "vertical") {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+    const x = x1;
+    const y = Math.max(minY, Math.min(maxY, py));
+    const dx = px - x;
+    const dy = py - y;
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  // fallback для safety
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const dx = px - mx;
+  const dy = py - my;
+
+  return {
+    x: mx,
+    y: my,
+    distance: Math.sqrt(dx * dx + dy * dy),
+  };
+}
+
+export function findClosestConnectorSegment(connector, point) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  let best = null;
+  let bestDistance = Infinity;
+
+  for (const seg of segments) {
+    if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+      continue;
+    }
+
+    const projected = projectPointOnSegment(point.x, point.y, seg);
+
+    if (projected.distance < bestDistance) {
+      bestDistance = projected.distance;
+      best = {
+        segmentIndex: seg.index,
+        orientation: seg.orientation,
+        x: projected.x,
+        y: projected.y,
+      };
+    }
+  }
+
+  return best;
+}
+
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const i = segmentIndex * 2;
+
+  if (i + 3 >= points.length) return null;
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  return {
+    id: crypto.randomUUID(),
+    x: (x1 + x2) / 2,
+    y: (y1 + y2) / 2,
+  };
+}
+
+/**
+ * MVP:
+ * - якщо waypoint ще нема -> створюємо 1 waypoint
+ * - якщо waypoint є -> рухаємо перший waypoint
+ */
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  if (!waypoints.length) {
+    waypoints.push({
+      id: crypto.randomUUID(),
+      x: handle.x,
+      y: handle.y,
+    });
+  }
+
+  const wp = waypoints[0];
+
+  if (handle.orientation === "horizontal") {
+    wp.y = pos.y;
+  } else if (handle.orientation === "vertical") {
+    wp.x = pos.x;
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints,
+    },
+  };
+}
+```
+
+---
+
+# 4. `connectorModel.js` вже має add/remove waypoint
+
+Якщо ти вставляв попередній варіант, у тебе вже є:
+
+```js id="qvu8w9"
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+Якщо нема — додай.
+
+---
+
+# 5. Оновлюємо `canvasController.js`
+
+Тут треба:
+
+* відкрити context menu на connector
+* додати waypoint
+* видалити waypoint
+
+---
+
+## Імпорти
+
+```js id="i3jpbv"
+import {
+  addConnectorWaypoint,
+  removeConnectorWaypoint,
+} from "@/lib/connectors/connectorModel";
+import {
+  findClosestConnectorSegment,
+  createWaypointAtSegment,
+} from "@/lib/connectors/connectorEditing";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+```
+
+---
+
+## Методи для context menu
+
+```js id="3jv4j6"
+handleConnectorContextMenu(e, connector) {
+  e.evt.preventDefault();
+  e.cancelBubble = true;
+
+  const store = useCanvasStore.getState();
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  if (!pointer) return;
+
+  const closest = findClosestConnectorSegment(connector, {
+    x: pointer.x,
+    y: pointer.y,
+  });
+
+  store.setSelection?.({ type: "edge", id: connector.id });
+
+  store.setContextMenu?.({
+    type: "connector",
+    edgeId: connector.id,
+    segmentIndex: closest?.segmentIndex ?? null,
+    x: pointer.x,
+    y: pointer.y,
+  });
+},
+
+handleConnectorWaypointContextMenu(e, connector, waypoint) {
+  e.evt.preventDefault();
+  e.cancelBubble = true;
+
+  const store = useCanvasStore.getState();
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  if (!pointer) return;
+
+  store.setSelection?.({ type: "edge", id: connector.id });
+
+  store.setContextMenu?.({
+    type: "connector-waypoint",
+    edgeId: connector.id,
+    waypointId: waypoint.id,
+    x: pointer.x,
+    y: pointer.y,
+  });
+},
+```
+
+---
+
+## Додати waypoint
+
+```js id="t8p0sx"
+addConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.connectorType !== "orthogonal-elbow") return;
+  if (menu.segmentIndex == null) return;
+
+  const waypoint = createWaypointAtSegment(connector, menu.segmentIndex);
+  if (!waypoint) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  let next = addConnectorWaypoint(connector, waypoint);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+},
+```
+
+---
+
+## Видалити waypoint
+
+```js id="txw33z"
+removeConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector-waypoint") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.connectorType !== "orthogonal-elbow") return;
+
+  let next = removeConnectorWaypoint(connector, menu.waypointId);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+},
+```
+
+---
+
+# 6. Додаємо waypoint render у `ConnectorsLayer.jsx`
+
+Тепер, коли connector selected, показуємо ще й самі waypoint-и.
+
+Вони:
+
+* показуються тільки у вибраного connector-а
+* правий клік по waypoint -> “Прибрати точку шляху”
+
+Онови `ConnectorsLayer.jsx` так.
+
+```jsx id="o3fe98"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorEditing";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const segmentHandles = isSelected
+          ? getConnectorSegmentHandles(connector)
+          : [];
+
+        const waypoints = isSelected
+          ? connector.route?.waypoints || []
+          : [];
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : connector.style?.stroke || "black"}
+              strokeWidth={
+                isSelected
+                  ? Math.max((connector.style?.strokeWidth || 2) + 1, 3)
+                  : connector.style?.strokeWidth || 2
+              }
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+            />
+
+            {isSelected && (
+              <>
+                {/* start */}
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                />
+
+                {/* end */}
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                />
+
+                {/* segment handles */}
+                {segmentHandles.map((handle) => (
+                  <Rect
+                    key={handle.id}
+                    x={handle.x - 5}
+                    y={handle.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="black"
+                    strokeWidth={1}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      handle.orientation === "horizontal"
+                        ? { x: handle.x - 5, y: pos.y }
+                        : { x: pos.x, y: handle.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorSegmentDragMove?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorSegmentDragEnd?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                  />
+                ))}
+
+                {/* waypoints */}
+                {waypoints.map((wp) => (
+                  <Circle
+                    key={wp.id}
+                    x={wp.x}
+                    y={wp.y}
+                    radius={5}
+                    fill="#F2C94C"
+                    stroke="black"
+                    strokeWidth={1}
+                    onContextMenu={(e) => {
+                      canvasController.handleConnectorWaypointContextMenu?.(
+                        e,
+                        connector,
+                        wp
+                      );
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 7. Компонент меню `CanvasContextMenu.jsx`
+
+Якщо в тебе вже є загальний menu-компонент — просто додай 2 пункти.
+Якщо ні, ось готовий мінімальний варіант.
+
+```jsx id="kjwmln"
+"use client";
+
+import React from "react";
+import { Menu, MenuItem } from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  return (
+    <Menu
+      open={!!contextMenu}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "connector" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.addConnectorWaypointFromContextMenu?.();
+          }}
+        >
+          Додати точку шляху
+        </MenuItem>
+      )}
+
+      {contextMenu?.type === "connector-waypoint" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.removeConnectorWaypointFromContextMenu?.();
+          }}
+        >
+          Прибрати точку шляху
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+```
+
+---
+
+# 8. Як це вставити в редактор
+
+У твоєму editor wrapper:
+
+```jsx id="jer8uj"
+<ConnectorsLayer />
+<NodesAnchorPreviewLayer />
+<CanvasContextMenu />
+```
+
+---
+
+# 9. Що це дає вже зараз
+
+Після цього ти отримаєш:
+
+* правий клік по connector
+* пункт **“Додати точку шляху”**
+* waypoint додається
+* лінія перебудовується
+* waypoint видно на selected connector
+* правий клік по waypoint
+* пункт **“Прибрати точку шляху”**
+
+Тобто базова логіка “зламати лінію ще на одну сходинку” вже буде.
+
+---
+
+# 10. Важливе чесне уточнення
+
+У поточному MVP:
+
+* `moveElbowSegmentHandle()` поки працює через перший waypoint
+* тобто при багатьох waypoint логіка ще не ідеальна
+* але **додавання/видалення waypoint** уже буде працювати як корисний перший крок
+
+Наступним етапом треба буде зробити:
+
+* коректне зіставлення конкретного segment handle до конкретного waypoint
+* drag самих waypoint-ів
+* rebuild із кількома точками шляху вже без спрощень
+
+---
+
+# 11. Що я б радив далі після цього
+
+Після waypoint context menu найлогічніший наступний крок:
+
+## або
+
+зробити **drag самих waypoint-ів**
+
+## або
+
+зробити **delete connector повністю**
+
+На мою думку, далі краще піти в **drag waypoint-ів**, бо це сильніше наблизить UX до draw.io.
+
+---
+
+# 12. Коротко
+
+Зараз ми додали:
+
+* context menu на connector
+* “Додати точку шляху”
+* waypoint render
+* context menu на waypoint
+* “Прибрати точку шляху”
+
+Це вже справжній наступний крок після attach/detach.
+
+---
+
+Якщо хочеш, наступним повідомленням я можу дати тобі **наступний етап: перетягування самих waypoint-ів мишкою**, щоб вони ставали повноцінними точками керування маршрутом.

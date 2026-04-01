@@ -1,0 +1,433 @@
+Так, саме так і треба зробити.
+
+І тут важливий момент:
+**перетягуємо не waypoint “в будь-який бік”, а керуємо ним по осі залежно від типу сегмента**:
+
+* якщо керуюча точка відповідає **горизонтальному сегменту** → рух тільки **вгору/вниз**
+* якщо відповідає **вертикальному сегменту** → рух тільки **вліво/вправо**
+
+Це дуже правильний UX для ортогональних ліній.
+
+Але тут є ще одна архітектурна деталь:
+
+## Не кожен waypoint треба сприймати як “вільну точку”
+
+Краще трактувати waypoint як **керуючу точку з орієнтацією**.
+
+Тобто waypoint має знати:
+
+* яка в нього вісь керування
+* як його можна тягнути
+
+---
+
+# 1. Що треба змінити в моделі waypoint
+
+Зараз waypoint у тебе, ймовірно, такий:
+
+```js id="f6ttfn"
+{
+  id,
+  x,
+  y
+}
+```
+
+Я раджу додати поле:
+
+```js id="gkdl7g"
+axis: "x" | "y"
+```
+
+де:
+
+* `axis: "y"` → waypoint можна рухати тільки по `y`
+  (це для горизонтального сегмента)
+* `axis: "x"` → waypoint можна рухати тільки по `x`
+  (це для вертикального сегмента)
+
+---
+
+## Новий формат waypoint
+
+```js id="fs4m3w"
+{
+  id: crypto.randomUUID(),
+  x: 220,
+  y: 140,
+  axis: "y"
+}
+```
+
+---
+
+# 2. Як визначати axis при “Додати точку шляху”
+
+Коли додаєш waypoint на сегмент, треба брати `orientation` сегмента і на її основі записувати `axis`.
+
+### правило:
+
+* `horizontal` сегмент → waypoint.axis = `"y"`
+* `vertical` сегмент → waypoint.axis = `"x"`
+
+---
+
+## Онови `createWaypointAtSegment` у `connectorEditing.js`
+
+Замість старої версії зроби так:
+
+```js id="f3zk4b"
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+```
+
+---
+
+# 3. Як тягнути waypoint правильно
+
+Тепер waypoint буде draggable, але з `dragBoundFunc`, яка обмежує рух.
+
+---
+
+## правило
+
+* `axis === "y"` → `x` зафіксований, міняється тільки `y`
+* `axis === "x"` → `y` зафіксований, міняється тільки `x`
+
+---
+
+# 4. Додаємо helper для руху waypoint
+
+У `connectorEditing.js` додай функцію:
+
+```js id="548g8x"
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return {
+        ...wp,
+        y: pos.y,
+      };
+    }
+
+    if (wp.axis === "x") {
+      return {
+        ...wp,
+        x: pos.x,
+      };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+```
+
+---
+
+# 5. Оновлюємо `canvasController.js`
+
+Додаємо 2 нові методи:
+
+* `handleConnectorWaypointDragMove`
+* `handleConnectorWaypointDragEnd`
+
+---
+
+## Імпорти
+
+Додай:
+
+```js id="54yd5y"
+import { moveConnectorWaypoint } from "@/lib/connectors/connectorEditing";
+```
+
+---
+
+## Методи
+
+```js id="bq6gxb"
+handleConnectorWaypointDragMove(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.connectorType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x,
+    y: pos.y,
+  };
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+},
+
+handleConnectorWaypointDragEnd(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.connectorType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x,
+    y: pos.y,
+  };
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+},
+```
+
+---
+
+# 6. Оновлюємо `ConnectorsLayer.jsx`
+
+Тепер waypoint-и треба зробити draggable.
+
+Ось як замінити рендер waypoint-ів.
+
+---
+
+## Було
+
+```jsx id="0gd2a3"
+{waypoints.map((wp) => (
+  <Circle
+    key={wp.id}
+    x={wp.x}
+    y={wp.y}
+    radius={5}
+    fill="#F2C94C"
+    stroke="black"
+    strokeWidth={1}
+    onContextMenu={(e) => {
+      canvasController.handleConnectorWaypointContextMenu?.(
+        e,
+        connector,
+        wp
+      );
+    }}
+  />
+))}
+```
+
+---
+
+## Стало
+
+```jsx id="q5hdz9"
+{waypoints.map((wp) => (
+  <Circle
+    key={wp.id}
+    x={wp.x}
+    y={wp.y}
+    radius={5}
+    fill="#F2C94C"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      wp.axis === "y"
+        ? { x: wp.x, y: pos.y }
+        : { x: pos.x, y: wp.y }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorWaypointDragMove?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorWaypointDragEnd?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          wp.axis === "y" ? "ns-resize" : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+    onContextMenu={(e) => {
+      canvasController.handleConnectorWaypointContextMenu?.(
+        e,
+        connector,
+        wp
+      );
+    }}
+  />
+))}
+```
+
+---
+
+# 7. Чому це працює правильно
+
+Бо тепер логіка така:
+
+## якщо waypoint був доданий на горизонтальному сегменті
+
+то він має:
+
+```js id="pd56a5"
+axis: "y"
+```
+
+І значить:
+
+* рухаємо тільки по `y`
+* x фіксований
+
+## якщо waypoint був доданий на вертикальному сегменті
+
+то він має:
+
+```js id="js1shz"
+axis: "x"
+```
+
+І значить:
+
+* рухаємо тільки по `x`
+* y фіксований
+
+Це саме те, що ти й хотів.
+
+---
+
+# 8. Що важливо врахувати
+
+Є один тонкий момент.
+
+Коли ти тягнеш waypoint і він змінює маршрут, **орієнтація сегментів може змінюватися**.
+Але `axis` у waypoint ми не міняємо автоматично. І це добре для старту, бо:
+
+* waypoint зберігає свою роль
+* поведінка стабільна
+* UX передбачуваний
+
+Тобто:
+
+* якщо точку додали як “вертикально керовану” — вона лишається вертикально керованою
+* якщо як “горизонтально керовану” — лишається такою
+
+Це хороший практичний підхід.
+
+---
+
+# 9. Що я б ще порадив додати
+
+Щоб користувач краще розумів, що waypoint можна тягнути, можна трохи змінити стилі:
+
+### Наприклад:
+
+* waypoint `radius={6}`
+* hover → трохи більший або яскравіший
+* selected connector → waypoint visible
+* unselected → hidden
+
+Це в тебе вже майже так і є.
+
+---
+
+# 10. Якщо хочеш ще краще UX
+
+Замість `Circle` для waypoint можна зробити `Rect`, як у draw.io, але поки `Circle` теж ок.
+
+Якщо захочеш ближче до draw.io:
+
+* waypoint → маленький ромб або квадрат
+* segment handle → синій квадрат
+* endpoints → круглі ручки
+
+Це буде дуже добре візуально.
+
+---
+
+# 11. Повний мінімальний набір змін
+
+Щоб це запрацювало, треба:
+
+## у `connectorEditing.js`
+
+* оновити `createWaypointAtSegment`
+* додати `moveConnectorWaypoint`
+
+## у `canvasController.js`
+
+* додати `handleConnectorWaypointDragMove`
+* додати `handleConnectorWaypointDragEnd`
+
+## у `ConnectorsLayer.jsx`
+
+* зробити waypoint `draggable`
+* додати `dragBoundFunc`
+* додати обробники drag
+
+---
+
+# 12. Короткий підсумок
+
+Так, waypoint-и треба тягнути саме так:
+
+* **горизонтальні — вверх/вниз**
+* **вертикальні — вліво/вправо**
+
+І найчистіше це реалізується через поле:
+
+```js id="5iggd0"
+axis: "x" | "y"
+```
+
+у waypoint + `dragBoundFunc`.
+
+---
+
+Наступним логічним кроком після цього буде або:
+
+* зробити **видалення всього connector-а**
+* або зробити **перемикання типу straight/elbow**
+* або покращити **зв’язок segment handle ↔ конкретний waypoint**
+
+Найкорисніше далі — **видалення всього connector-а через context menu**.

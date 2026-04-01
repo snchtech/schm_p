@@ -1,0 +1,328 @@
+Так, це треба додати обов’язково.
+І тут краще не вигадувати окрему складну логіку, а просто розширити той `context menu`, який ти вже зробив для:
+
+* `connector`
+* `connector-waypoint`
+
+додавши ще дію:
+
+* **Видалити connector**
+
+Це найчистіший варіант.
+
+---
+
+# Як правильно по архітектурі
+
+У тебе вже є правильна схема:
+
+* `ConnectorsLayer` ловить `onContextMenu`
+* `canvasController` записує `contextMenu` у store
+* окремий `CanvasContextMenu` показує меню
+* action викликається через `canvasController`
+
+Для видалення всього connector-а треба:
+
+1. при right click по connector записувати в `contextMenu`:
+
+```js id="3m2gcs"
+{
+  type: "connector",
+  edgeId,
+  segmentIndex,
+  x,
+  y
+}
+```
+
+2. у меню для `type === "connector"` додати пункт:
+
+* `Видалити лінію`
+
+3. у controller зробити метод:
+
+* `deleteConnectorFromContextMenu()`
+
+4. у store використати звичайний `removeEdge(edgeId)`
+
+---
+
+# 1. Переконайся, що в store є `removeEdge`
+
+У тебе щось подібне вже мало бути, але якщо треба, ось нормальний варіант:
+
+```js id="pwavj2"
+removeEdge: (id) =>
+  set((s) => ({
+    edges: s.edges.filter((e) => e.id !== id),
+    selection:
+      s.selection?.type === "edge" && s.selection?.id === id
+        ? null
+        : s.selection,
+    contextMenu:
+      s.contextMenu?.edgeId === id ? null : s.contextMenu,
+  })),
+```
+
+Це добре тим, що:
+
+* видаляє connector з `edges`
+* якщо він був selected — selection скидається
+* якщо було відкрито контекстне меню цього edge — воно теж очищається
+
+---
+
+# 2. Додай метод у `canvasController.js`
+
+Ось готовий метод:
+
+```js id="nimv3j"
+deleteConnectorFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+  if (!menu.edgeId) return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  store.removeEdge?.(menu.edgeId);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+# 3. Онови `CanvasContextMenu.jsx`
+
+Зараз у тебе для `type === "connector"` вже є:
+
+* `Додати точку шляху`
+
+Тепер просто додай ще один пункт:
+
+```jsx id="vp5osq"
+"use client";
+
+import React from "react";
+import { Menu, MenuItem, Divider } from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  return (
+    <Menu
+      open={!!contextMenu}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "connector" && (
+        <>
+          <MenuItem
+            onClick={() => {
+              canvasController.addConnectorWaypointFromContextMenu?.();
+            }}
+          >
+            Додати точку шляху
+          </MenuItem>
+
+          <Divider />
+
+          <MenuItem
+            onClick={() => {
+              canvasController.deleteConnectorFromContextMenu?.();
+            }}
+          >
+            Видалити лінію
+          </MenuItem>
+        </>
+      )}
+
+      {contextMenu?.type === "connector-waypoint" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.removeConnectorWaypointFromContextMenu?.();
+          }}
+        >
+          Прибрати точку шляху
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+```
+
+---
+
+# 4. `ConnectorsLayer.jsx` змінювати майже не треба
+
+У тебе вже є:
+
+```jsx id="97xj16"
+onContextMenu={(e) => {
+  canvasController.handleConnectorContextMenu?.(e, connector);
+}}
+```
+
+Цього достатньо.
+
+Тобто right click по лінії вже відкриває `contextMenu` типу `"connector"`.
+
+---
+
+# 5. Що відбудеться після цього
+
+Поведінка буде така:
+
+## right click по connector
+
+відкривається меню:
+
+* Додати точку шляху
+* Видалити лінію
+
+## click по “Видалити лінію”
+
+* connector видаляється з `edges`
+* selection очищується
+* menu закривається
+
+Це саме та поведінка, яку очікує користувач.
+
+---
+
+# 6. Невелика UX-порада
+
+Я б радив назву пункту меню зробити одну з таких:
+
+* **Видалити лінію**
+* **Видалити connector**
+* **Видалити зв’язок**
+
+Для твоєї поточної термінології найкраще, мабуть:
+
+**Видалити лінію**
+
+бо це більш візуально зрозуміло.
+
+---
+
+# 7. Якщо хочеш трохи акуратніше
+
+Можна зробити перевірку, щоб пункт `Додати точку шляху` показувався тільки для:
+
+```js id="rjtlv0"
+connector.connectorType === "orthogonal-elbow"
+```
+
+А для `orthogonal-straight`:
+
+* або не показувати
+* або показувати і при натисканні автоматично переводити в elbow
+
+Але це вже окреме UX-рішення.
+Для старту можна залишити як є.
+
+---
+
+# 8. Якщо коротко
+
+Щоб додати видалення всього connector-а через context menu, треба:
+
+## у controller:
+
+```js id="d1w3e3"
+deleteConnectorFromContextMenu()
+```
+
+## у menu:
+
+додати пункт:
+
+```js id="uk4i36"
+Видалити лінію
+```
+
+## у store:
+
+переконатися, що є:
+
+```js id="c28e0w"
+removeEdge(id)
+```
+
+---
+
+# 9. Готовий мінімальний шматок
+
+Ось прямо наймінімальніший комплект.
+
+---
+
+## controller
+
+```js id="29frqs"
+deleteConnectorFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+  if (!menu.edgeId) return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  store.removeEdge?.(menu.edgeId);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+## menu
+
+```jsx id="0fhp66"
+{contextMenu?.type === "connector" && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController.addConnectorWaypointFromContextMenu?.();
+      }}
+    >
+      Додати точку шляху
+    </MenuItem>
+
+    <Divider />
+
+    <MenuItem
+      onClick={() => {
+        canvasController.deleteConnectorFromContextMenu?.();
+      }}
+    >
+      Видалити лінію
+    </MenuItem>
+  </>
+)}
+```
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі ще **видалення connector-а через клавішу Delete / Backspace для selected edge**, бо це теж дуже корисно в редакторі.

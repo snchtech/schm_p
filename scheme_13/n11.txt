@@ -1,0 +1,559 @@
+Добре. Тоді логічне продовження — **показувати 4 точки приєднання об’єкта під час drag endpoint**.
+
+Це вже ближче до draw.io UX, ніж один зелений preview-кружок, бо користувач бачить:
+
+* до якого об’єкта можна приєднатись
+* які саме є точки приєднання
+* яка з них зараз буде обрана
+
+Я дам тобі робочий напрям так, щоб він ліг на твою поточну структуру:
+
+* `store`
+* `canvasController`
+* `ConnectorsLayer`
+* окремий `NodesAnchorPreviewLayer`
+
+---
+
+# 1. Що міняємо концептуально
+
+Зараз у тебе preview такий:
+
+* під час drag endpoint шукається найближчий anchor node
+* у store кладеться один `connectorAttachPreview.target`
+* у `ConnectorsLayer` малюється один зелений кружок
+
+Я пропоную перейти на трохи кращу модель:
+
+## Під час drag endpoint:
+
+1. знаходимо **найближчий node**
+2. показуємо **всі 4 anchor точки цього node**
+3. окремо підсвічуємо **одну активну точку**, яка буде обрана при drop
+
+Це дає кращий UX.
+
+---
+
+# 2. Який state додати в store
+
+Замість одного `target` краще тримати структуру:
+
+```js
+connectorAttachPreview: null,
+// {
+//   edgeId,
+//   end: "start" | "end",
+//   nodeId,
+//   anchors: [
+//     { type: "node", nodeId, anchor: "top", x, y },
+//     { type: "node", nodeId, anchor: "bottom", x, y },
+//     { type: "node", nodeId, anchor: "left", x, y },
+//     { type: "node", nodeId, anchor: "right", x, y },
+//   ],
+//   activeAnchor: { type: "node", nodeId, anchor, x, y }
+// }
+```
+
+Тобто:
+
+* `anchors` — усі видимі точки на node
+* `activeAnchor` — конкретна точка, яка зараз вибрана
+
+---
+
+## Що додати в `useCanvasStore.js`
+
+```js id="71s9r4"
+connectorAttachPreview: null,
+
+setConnectorAttachPreview: (connectorAttachPreview) =>
+  set({ connectorAttachPreview }),
+
+clearConnectorAttachPreview: () =>
+  set({ connectorAttachPreview: null }),
+```
+
+Якщо це в тебе вже є — просто розширюєш формат.
+
+---
+
+# 3. Оновлюємо `connectorAttach.js`
+
+Там зараз є `findClosestNodeAnchor()`.
+Я б додав ще 2 helper-и:
+
+* `findClosestNodeByPoint`
+* `findClosestAnchorFromList`
+
+---
+
+## Оновлений `lib/connectors/connectorAttach.js`
+
+```js id="wawf2k"
+function distance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+export function getNodeAnchorPoints(node) {
+  if (!node) return [];
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  return [
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "top",
+      x: x + width / 2,
+      y,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "left",
+      x,
+      y: y + height / 2,
+    },
+    {
+      type: "node",
+      nodeId: node.id,
+      anchor: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+  ];
+}
+
+export function findClosestNodeByPoint(nodes, point, maxDistance = 40) {
+  let bestNode = null;
+  let bestDist = Infinity;
+
+  for (const node of nodes) {
+    const width = node.data?.width || 0;
+    const height = node.data?.height || 0;
+
+    const center = {
+      x: node.position.x + width / 2,
+      y: node.position.y + height / 2,
+    };
+
+    const d = distance(point, center);
+
+    if (d < bestDist) {
+      bestDist = d;
+      bestNode = node;
+    }
+  }
+
+  if (!bestNode || bestDist > maxDistance) {
+    return null;
+  }
+
+  return bestNode;
+}
+
+export function findClosestAnchorFromList(anchors, point, maxDistance = 28) {
+  let best = null;
+  let bestDist = Infinity;
+
+  for (const anchor of anchors) {
+    const d = distance(point, anchor);
+
+    if (d < bestDist) {
+      bestDist = d;
+      best = anchor;
+    }
+  }
+
+  if (!best || bestDist > maxDistance) {
+    return null;
+  }
+
+  return best;
+}
+
+/**
+ * Новий helper для drag endpoint:
+ * 1. шукає найближчий node
+ * 2. бере всі його anchor points
+ * 3. визначає activeAnchor
+ */
+export function getConnectorAttachPreview(nodes, point) {
+  const node = findClosestNodeByPoint(nodes, point);
+  if (!node) return null;
+
+  const anchors = getNodeAnchorPoints(node);
+  const activeAnchor = findClosestAnchorFromList(anchors, point);
+
+  return {
+    nodeId: node.id,
+    anchors,
+    activeAnchor,
+  };
+}
+```
+
+---
+
+# 4. Оновлюємо controller
+
+Тепер при `dragmove` endpoint ми не просто шукаємо один target, а будуємо preview для node.
+
+---
+
+## Імпорт
+
+```js id="1mwv50"
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+```
+
+---
+
+## `handleConnectorStartDragMove`
+
+```js id="g0ooaj"
+handleConnectorStartDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "start",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  let next = detachConnectorStart(connector);
+  next = updateConnectorStart(next, {
+    x: pos.x,
+    y: pos.y,
+  });
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## `handleConnectorStartDragEnd`
+
+```js id="pr7vih"
+handleConnectorStartDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "start"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  let next = connector;
+
+  if (attachTarget) {
+    next = attachConnectorStart(next, {
+      type: "node",
+      nodeId: attachTarget.nodeId,
+      anchor: attachTarget.anchor,
+    });
+
+    next = updateConnectorStart(next, {
+      x: attachTarget.x,
+      y: attachTarget.y,
+    });
+  } else {
+    next = detachConnectorStart(next);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+}
+```
+
+---
+
+## `handleConnectorEndDragMove`
+
+```js id="wxw6j9"
+handleConnectorEndDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "end",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  let next = detachConnectorEnd(connector);
+  next = updateConnectorEnd(next, {
+    x: pos.x,
+    y: pos.y,
+  });
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## `handleConnectorEndDragEnd`
+
+```js id="huczqa"
+handleConnectorEndDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "end"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  let next = connector;
+
+  if (attachTarget) {
+    next = attachConnectorEnd(next, {
+      type: "node",
+      nodeId: attachTarget.nodeId,
+      anchor: attachTarget.anchor,
+    });
+
+    next = updateConnectorEnd(next, {
+      x: attachTarget.x,
+      y: attachTarget.y,
+    });
+  } else {
+    next = detachConnectorEnd(next);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+}
+```
+
+---
+
+# 5. Новий preview-layer для node anchors
+
+Оце я дуже раджу винести в окремий компонент, а не пхати в `ConnectorsLayer`.
+
+Новий файл:
+
+```txt id="fy1i7w"
+/components/editor/NodesAnchorPreviewLayer.jsx
+```
+
+---
+
+## `NodesAnchorPreviewLayer.jsx`
+
+```jsx id="d4a1q4"
+"use client";
+
+import React from "react";
+import { Circle, Group } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function NodesAnchorPreviewLayer() {
+  const preview = useCanvasStore((s) => s.connectorAttachPreview);
+
+  if (!preview || !preview.anchors?.length) return null;
+
+  const activeKey = preview.activeAnchor
+    ? `${preview.activeAnchor.nodeId}:${preview.activeAnchor.anchor}`
+    : null;
+
+  return (
+    <Group listening={false}>
+      {preview.anchors.map((anchor) => {
+        const key = `${anchor.nodeId}:${anchor.anchor}`;
+        const isActive = key === activeKey;
+
+        return (
+          <Circle
+            key={key}
+            x={anchor.x}
+            y={anchor.y}
+            radius={isActive ? 8 : 6}
+            fill={isActive ? "rgba(39, 174, 96, 0.30)" : "rgba(47, 128, 237, 0.20)"}
+            stroke={isActive ? "#27AE60" : "#2F80ED"}
+            strokeWidth={isActive ? 2.5 : 1.5}
+          />
+        );
+      })}
+    </Group>
+  );
+}
+```
+
+---
+
+# 6. `ConnectorsLayer.jsx` тепер можна спростити
+
+Оскільки preview node anchor-ів уже винесено окремо, із `ConnectorsLayer` можна прибрати зелений preview-circle.
+
+Тобто:
+
+* `ConnectorsLayer` малює connector-и і їхні handles
+* `NodesAnchorPreviewLayer` малює точки прив’язки об’єкта
+
+---
+
+# 7. Як вставити в canvas
+
+У тебе в stage/layer-послідовності стане приблизно так:
+
+```jsx id="hy39f1"
+<EdgesLayer />
+<ConnectorsLayer />
+<NodesAnchorPreviewLayer />
+```
+
+Або, якщо треба, `NodesAnchorPreviewLayer` можна винести ще вище, щоб preview точно було поверх.
+
+---
+
+# 8. Щоб connector рухався разом із node
+
+Цю частину лишаємо з попереднього кроку.
+У `handleNodeDragMove` або `handleNodeDragEnd` треба перебудовувати connector-и, у яких:
+
+* `start.attached.type === "node"` і `nodeId === movedNodeId`
+* або `end.attached.type === "node"` і `nodeId === movedNodeId`
+
+Ось helper:
+
+```js id="1wjlwm"
+rebuildConnectorsForNode(nodeId, nodes, edges) {
+  return edges.map((edge) => {
+    if (edge.kind !== "connector") return edge;
+
+    const touchesStart =
+      edge.start?.attached?.type === "node" &&
+      edge.start.attached.nodeId === nodeId;
+
+    const touchesEnd =
+      edge.end?.attached?.type === "node" &&
+      edge.end.attached.nodeId === nodeId;
+
+    if (!touchesStart && !touchesEnd) return edge;
+
+    return rebuildConnectorGeometry(edge, nodes);
+  });
+}
+```
+
+---
+
+# 9. UX результат після цього
+
+Після цих змін поведінка буде така:
+
+## коли тягнеш endpoint connector-а:
+
+* якщо поряд є node, у нього з’являються 4 точки прив’язки
+* одна з них підсвічується зеленим як активна
+* при `drop` endpoint прилипає до цієї точки
+
+## якщо поряд нема node:
+
+* preview зникає
+* endpoint лишається вільним
+
+Це вже дуже хороший UX для редактора.
+
+---
+
+# 10. Що я б радив далі
+
+Після цього наступний сильний крок — один із двох:
+
+### варіант A
+
+підсвічувати ще й **рамку node**, не тільки 4 anchor точки
+
+### варіант B
+
+зробити **context menu → Додати точку шляху / Прибрати точку шляху**
+
+На мою думку, по логіці редактора далі краще йти в **waypoints**, бо attach до node після цього вже стає достатньо зручним.
+
+---
+
+# 11. Коротко
+
+Зараз ми зробили правильний наступний рівень:
+
+* endpoint connector-а можна тягнути
+* під час drag показуються всі 4 anchor точки node
+* одна активна точка підсвічена
+* drop = attach
+* move node = rebuild connector
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі **реалізацію “Додати точку шляху” через context menu для нового connector-а**, щоб уже почати ламати лінію сходинками так, як ти описував.
