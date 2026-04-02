@@ -1,0 +1,326 @@
+Ось **цільний оновлений блок 4 методів для `canvasController.js`**, щоб зробити **reattach connector-а без втрати форми**.
+
+Головний принцип тут такий:
+
+* ми **не чіпаємо `route`**
+* не скидаємо:
+
+  * `route.baseOffset`
+  * `route.waypoints`
+* міняємо тільки:
+
+  * `start` або `end`
+  * `attached`
+  * `x/y`
+* потім робимо `rebuildConnectorGeometry(next, store.nodes)`
+
+---
+
+## Готовий блок для `canvasController.js`
+
+```js id="f9qkyr"
+handleConnectorStartDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "start",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  // ===== НЕ чіпаємо route =====
+  let next = {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: pos.x,
+      y: pos.y,
+      attached: { type: "none" },
+    },
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || [])],
+    },
+  };
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+},
+
+handleConnectorStartDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "start"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  // ===== НЕ чіпаємо route =====
+  let next = {
+    ...connector,
+    start: {
+      ...connector.start,
+    },
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || [])],
+    },
+  };
+
+  if (attachTarget) {
+    next.start = {
+      ...next.start,
+      x: attachTarget.x,
+      y: attachTarget.y,
+      attached: {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.direction,
+      },
+    };
+  } else {
+    next.start = {
+      ...next.start,
+      x: pos.x,
+      y: pos.y,
+      attached: { type: "none" },
+    };
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+},
+
+handleConnectorEndDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "end",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  // ===== НЕ чіпаємо route =====
+  let next = {
+    ...connector,
+    end: {
+      ...connector.end,
+      x: pos.x,
+      y: pos.y,
+      attached: { type: "none" },
+    },
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || [])],
+    },
+  };
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+},
+
+handleConnectorEndDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "end"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  // ===== НЕ чіпаємо route =====
+  let next = {
+    ...connector,
+    end: {
+      ...connector.end,
+    },
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || [])],
+    },
+  };
+
+  if (attachTarget) {
+    next.end = {
+      ...next.end,
+      x: attachTarget.x,
+      y: attachTarget.y,
+      attached: {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.direction,
+      },
+    };
+  } else {
+    next.end = {
+      ...next.end,
+      x: pos.x,
+      y: pos.y,
+      attached: { type: "none" },
+    };
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+},
+```
+
+---
+
+# Що тут важливе
+
+## 1. `route` не скидається
+
+Оце головне:
+
+```js id="6zehxh"
+route: {
+  ...connector.route,
+  waypoints: [...(connector.route?.waypoints || [])],
+}
+```
+
+Тобто:
+
+* `baseOffset` зберігається
+* `waypoints` зберігаються
+* форма лишається
+
+---
+
+## 2. На `dragmove` endpoint тимчасово detached
+
+Це правильно для UX.
+
+Користувач тягне endpoint — значить він може:
+
+* відірвати його від старого node
+* приєднати до нового
+* або лишити вільним
+
+---
+
+## 3. На `dragend` або attach, або detached
+
+* якщо є `activeAnchor` → attach
+* якщо нема → лишається `type: "none"`
+
+---
+
+# Дуже важлива перевірка
+
+Щоб це реально дало “reattach без втрати форми”, у тебе **`rebuildConnectorGeometry()` не повинна скидати `route`**.
+
+Тобто вона має бути такою:
+
+```js id="bmab33"
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+А не створювати новий connector object із дефолтним `route`.
+
+---
+
+# Якщо після цього форма все одно губиться
+
+Тоді проблема майже точно в одному з двох місць:
+
+## 1. `buildOrthogonalElbowPoints()`
+
+може ігнорувати `route.baseOffset` або `route.waypoints`
+
+## 2. десь у controller/store
+
+ти випадково створюєш новий connector через `createConnector(...)` замість оновлення існуючого
+
+---
+
+# Що ще я б порадив
+
+Після вставки цього коду перевір окремо 3 сценарії:
+
+### Сценарій 1
+
+connector без waypoints, але зі зміщеним базовим сегментом
+→ reattach start
+
+### Сценарій 2
+
+connector з user waypoint
+→ reattach end
+
+### Сценарій 3
+
+reattach на інший node, потім знову в пустоту
+→ форма має лишитися
+
+---
+
+# Коротко
+
+Оце і є “гарний reattach” у твоїй поточній архітектурі:
+
+* не чіпаємо `route`
+* міняємо тільки endpoint
+* rebuild geometry
+* форма зберігається
+
+---
+
+Якщо хочеш, наступним кроком я можу допомогти тобі ще в одній важливій речі:
+**коли node рухається після reattach, connector теж має оновлюватись, але знову ж без втрати форми** — тобто перевірити й допиляти `rebuildConnectorsForNode()` під цей самий принцип.

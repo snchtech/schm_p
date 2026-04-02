@@ -1,0 +1,620 @@
+Добре. Дам тобі **готовий стандартизований варіант** під твою registry-модель, щоб:
+
+* anchor-и бралися **тільки з `ELEMENT_REGISTRY`**
+* preview точки малювалися **над фігурою**, а не на її межі
+* при наближенні до фігури показувалися **всі її anchor точки**
+* одна активна точка підсвічувалась окремо
+* усе це було узгоджено з твоєю поточною архітектурою
+
+---
+
+# 1. Головна ідея
+
+Треба розділити:
+
+## логічні anchor-и
+
+їх повертає registry:
+
+```js id="rvk4ob"
+entry.getAnchors(node)
+```
+
+Вони мають бути в **реальних координатах прив’язки** до фігури.
+
+## preview anchor-и
+
+їх малюємо через helper із **зовнішнім offset**, щоб вони були над shape.
+
+---
+
+# 2. Бажаний стандарт для `getAnchors(node)`
+
+Усі shape в registry бажано привести до одного формату:
+
+```js id="vqq5x5"
+{
+  id: `${node.id}-right`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "right",
+  x: ...,
+  y: ...,
+}
+```
+
+Мінімально обов’язкові поля:
+
+* `id`
+* `type`
+* `nodeId`
+* `direction`
+* `x`
+* `y`
+
+Тобто навіть якщо зараз у частини shape `type` не заданий, краще або додати його, або нормалізувати в helper.
+
+---
+
+# 3. Новий файл `lib/connectors/connectorAttach.js`
+
+Оце буде твоя єдина точка входу для:
+
+* отримання anchor-ів із registry
+* пошуку найближчого node
+* побудови attach preview
+* зміщення preview точок назовні
+
+```js id="rgcwyh"
+import { ELEMENT_REGISTRY } from "@/lib/registry";
+
+function distance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Єдине джерело правди для anchor-ів вузла:
+ * беремо їх тільки з registry
+ */
+export function getAnchorsForNode(node) {
+  if (!node || !node.type) return [];
+
+  const entry = ELEMENT_REGISTRY[node.type];
+  if (!entry || typeof entry.getAnchors !== "function") {
+    return [];
+  }
+
+  const anchors = entry.getAnchors(node) || [];
+
+  return anchors.map((anchor) => ({
+    ...anchor,
+    type: anchor.type || "node-anchor",
+    nodeId: anchor.nodeId || node.id,
+  }));
+}
+
+/**
+ * Пошук найближчого node по центру bbox
+ */
+export function findClosestNodeByPoint(nodes, point, maxDistance = 48) {
+  let bestNode = null;
+  let bestDist = Infinity;
+
+  for (const node of nodes) {
+    const width = node.data?.width || 0;
+    const height = node.data?.height || 0;
+
+    const center = {
+      x: (node.position?.x || 0) + width / 2,
+      y: (node.position?.y || 0) + height / 2,
+    };
+
+    const d = distance(point, center);
+
+    if (d < bestDist) {
+      bestDist = d;
+      bestNode = node;
+    }
+  }
+
+  if (!bestNode || bestDist > maxDistance) {
+    return null;
+  }
+
+  return bestNode;
+}
+
+/**
+ * Найближчий anchor серед конкретного списку anchors
+ */
+export function findClosestAnchorFromList(anchors, point, maxDistance = 32) {
+  let best = null;
+  let bestDist = Infinity;
+
+  for (const anchor of anchors) {
+    const d = distance(point, anchor);
+
+    if (d < bestDist) {
+      bestDist = d;
+      best = anchor;
+    }
+  }
+
+  if (!best || bestDist > maxDistance) {
+    return null;
+  }
+
+  return best;
+}
+
+/**
+ * Preview attach:
+ * - знайшли найближчий node
+ * - взяли всі його anchors із registry
+ * - визначили active anchor
+ */
+export function getConnectorAttachPreview(nodes, point) {
+  const node = findClosestNodeByPoint(nodes, point);
+  if (!node) return null;
+
+  const anchors = getAnchorsForNode(node);
+  if (!anchors.length) return null;
+
+  const activeAnchor = findClosestAnchorFromList(anchors, point);
+
+  return {
+    nodeId: node.id,
+    anchors,
+    activeAnchor,
+  };
+}
+
+/**
+ * Для preview малюємо anchor трохи назовні від shape,
+ * щоб кружок не залазив під фігуру.
+ */
+export function getPreviewAnchorPosition(anchor, offset = 8) {
+  switch (anchor.direction) {
+    case "top":
+      return {
+        x: anchor.x,
+        y: anchor.y - offset,
+      };
+
+    case "bottom":
+      return {
+        x: anchor.x,
+        y: anchor.y + offset,
+      };
+
+    case "left":
+      return {
+        x: anchor.x - offset,
+        y: anchor.y,
+      };
+
+    case "right":
+      return {
+        x: anchor.x + offset,
+        y: anchor.y,
+      };
+
+    default:
+      return {
+        x: anchor.x,
+        y: anchor.y,
+      };
+  }
+}
+```
+
+---
+
+# 4. Новий `NodesAnchorPreviewLayer.jsx`
+
+Окремий layer для preview anchor-ів.
+
+Він:
+
+* бере `connectorAttachPreview` зі store
+* малює **всі** anchor точки найближчого node
+* активну виділяє сильніше
+* рендерить точки **зі зміщенням назовні**
+
+```jsx id="v0s8e1"
+"use client";
+
+import React from "react";
+import { Group, Circle } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { getPreviewAnchorPosition } from "@/lib/connectors/connectorAttach";
+
+export default function NodesAnchorPreviewLayer() {
+  const preview = useCanvasStore((s) => s.connectorAttachPreview);
+
+  if (!preview || !preview.anchors?.length) {
+    return null;
+  }
+
+  const activeId = preview.activeAnchor?.id || null;
+
+  return (
+    <Group listening={false}>
+      {preview.anchors.map((anchor) => {
+        const isActive = anchor.id === activeId;
+        const p = getPreviewAnchorPosition(anchor, 8);
+
+        return (
+          <Circle
+            key={anchor.id}
+            x={p.x}
+            y={p.y}
+            radius={isActive ? 8 : 6}
+            fill={
+              isActive
+                ? "rgba(39, 174, 96, 0.30)"
+                : "rgba(47, 128, 237, 0.20)"
+            }
+            stroke={isActive ? "#27AE60" : "#2F80ED"}
+            strokeWidth={isActive ? 2.5 : 1.5}
+          />
+        );
+      })}
+    </Group>
+  );
+}
+```
+
+---
+
+# 5. Оновлення `canvasController` для attach preview
+
+Якщо ти вже використовував `getConnectorAttachPreview()`, просто заміни імпорт і дані під новий формат із registry.
+
+## Імпорт:
+
+```js id="z5k90r"
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+```
+
+---
+
+## `handleConnectorStartDragMove`
+
+```js id="5swjlwm"
+handleConnectorStartDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "start",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  let next = detachConnectorStart(connector);
+  next = updateConnectorStart(next, {
+    x: pos.x,
+    y: pos.y,
+  });
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## `handleConnectorStartDragEnd`
+
+```js id="xjew6s"
+handleConnectorStartDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "start"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  let next = connector;
+
+  if (attachTarget) {
+    next = attachConnectorStart(next, {
+      type: "node",
+      nodeId: attachTarget.nodeId,
+      anchor: attachTarget.direction,
+    });
+
+    next = updateConnectorStart(next, {
+      x: attachTarget.x,
+      y: attachTarget.y,
+    });
+  } else {
+    next = detachConnectorStart(next);
+    next = updateConnectorStart(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+}
+```
+
+---
+
+## `handleConnectorEndDragMove`
+
+```js id="a8qi5e"
+handleConnectorEndDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview = getConnectorAttachPreview(store.nodes, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  if (preview) {
+    store.setConnectorAttachPreview?.({
+      edgeId,
+      end: "end",
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  let next = detachConnectorEnd(connector);
+  next = updateConnectorEnd(next, {
+    x: pos.x,
+    y: pos.y,
+  });
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## `handleConnectorEndDragEnd`
+
+```js id="v40xpg"
+handleConnectorEndDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  const preview =
+    store.connectorAttachPreview?.edgeId === edgeId &&
+    store.connectorAttachPreview?.end === "end"
+      ? store.connectorAttachPreview
+      : null;
+
+  const attachTarget = preview?.activeAnchor || null;
+
+  let next = connector;
+
+  if (attachTarget) {
+    next = attachConnectorEnd(next, {
+      type: "node",
+      nodeId: attachTarget.nodeId,
+      anchor: attachTarget.direction,
+    });
+
+    next = updateConnectorEnd(next, {
+      x: attachTarget.x,
+      y: attachTarget.y,
+    });
+  } else {
+    next = detachConnectorEnd(next);
+    next = updateConnectorEnd(next, {
+      x: pos.x,
+      y: pos.y,
+    });
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorAttachPreview?.();
+}
+```
+
+---
+
+# 6. Layer order — дуже важливо
+
+Щоб preview точки були **над фігурами**, а не під ними, `NodesAnchorPreviewLayer` треба рендерити **після** layer/components із фігурами.
+
+Наприклад:
+
+```jsx id="ywy2z4"
+<EdgesLayer />
+<ConnectorsLayer />
+<NodesLayer />
+<NodesAnchorPreviewLayer />
+```
+
+Або якщо у тебе фігури і лінії в одному Layer, просто:
+
+* shapes
+* потім preview anchor-и
+
+Головне правило:
+**preview anchor-и мають рендеритися пізніше, ніж shapes.**
+
+---
+
+# 7. Як стандартизувати registry ще краще
+
+Твоє поточне `getAnchors(node)` уже працює, але я б радив винести helper-и для типових shape.
+
+---
+
+## Приклад для прямокутника
+
+```js id="ip7dua"
+export function createRectAnchors(node) {
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+  const { x = 0, y = 0 } = node.position || {};
+
+  return [
+    {
+      id: `${node.id}-top`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "top",
+      x: x + width / 2,
+      y,
+    },
+    {
+      id: `${node.id}-right`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+    {
+      id: `${node.id}-bottom`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      id: `${node.id}-left`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "left",
+      x,
+      y: y + height / 2,
+    },
+  ];
+}
+```
+
+Тоді в registry:
+
+```js id="zugvjlwm"
+import { createRectAnchors } from "@/lib/anchors/shapeAnchors";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    component: RectShape,
+    getAnchors: createRectAnchors,
+  },
+};
+```
+
+---
+
+## Для складніших shape
+
+Окремі helper-и:
+
+* `createArrowAnchors(node)`
+* `createTriangleAnchors(node)`
+* `createMonitorAnchors(node)`
+
+Але контракт однаковий.
+
+Це сильно спростить підтримку.
+
+---
+
+# 8. Практична порада по `scale`
+
+На твоїх фото видно, що в деяких shape ти враховуєш `scale`, а в деяких — ні.
+
+Це треба уніфікувати.
+
+Я б радив правило:
+
+* `getAnchors(node)` завжди сам обробляє `width/height/scale`
+* зовнішній код ніколи не думає про це
+* registry повертає вже фінальні координати
+
+Тобто:
+
+* вся математика прив’язки живе тільки в shape-anchor helper-ах
+
+Це правильно.
+
+---
+
+# 9. Що вийде після цього
+
+Після цього ти отримаєш:
+
+* під час drag endpoint знаходиться найближчий node
+* у node показуються **всі anchor точки**
+* вони рендеряться **над shape**
+* одна активна підсвічена зеленим
+* attach відбувається саме до активної anchor точки
+* attach логіка бере координати тільки з registry
+
+Це вже дуже хороший, чистий і підтримуваний підхід.
+
+---
+
+# 10. Що я б радив зробити далі
+
+Після цього наступний логічний крок:
+
+### або
+
+підсвічувати ще й **контур самого node**
+
+### або
+
+уніфікувати `getAnchors(node)` у registry через helper-и для типових фігур
+
+Я б радив другим кроком саме **уніфікацію registry helper-ів**, бо це зменшить хаос у shape-файлах.
+
+---
+
+Якщо хочеш, я наступним повідомленням можу дати тобі ще **готовий файл `shapeAnchors.js`** з helper-ами типу:
+
+* `createRectAnchors`
+* `createTopRightAnchors`
+* `createLeftRightAnchors`
+
+щоб ти швидше стандартизував registry.

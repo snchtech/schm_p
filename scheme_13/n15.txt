@@ -1,0 +1,513 @@
+Так, причина в тебе вже майже знайдена.
+
+## Чому зараз так відбувається
+
+У твоєму поточному MVP `moveElbowSegmentHandle()` робить це:
+
+```js id="1r410r"
+if (!waypoints.length) {
+  waypoints.push({
+    id: crypto.randomUUID(),
+    x: handle.x,
+    y: handle.y,
+  });
+}
+```
+
+Тобто **будь-який drag синього квадратного handle** автоматично створює `waypoint`.
+Через це початковий segment-handle поводиться як “Додати точку шляху”.
+
+А ти хочеш інше:
+
+* **початкові сині квадратики** = тимчасові **segment handles**
+
+  * вони не створюють `waypoint`
+  * вони просто зміщують базовий сегмент
+* **точки, додані через “Додати точку шляху”** = справжні **waypoints**
+
+  * саме вони створюють додаткове кероване коліно
+  * і саме їх можна видаляти як path point
+
+---
+
+# Важлива геометрична правда
+
+Є один нюанс: якщо у тебе стартово ламана типу `L`:
+
+```text id="vdq26e"
+start -> corner -> end
+```
+
+і ти тягнеш **середину горизонтального сегмента** вверх/вниз, то з точки зору геометрії лінія майже неминуче стане:
+
+```text id="42zwl4"
+start
+  |
+  └─── shifted horizontal ───
+                           |
+                          end
+```
+
+Тобто **візуально з’являться ще два коліна**.
+
+Але це не означає, що ти створив **user waypoint**.
+
+Оце ключова різниця:
+
+* **segment handle drag** може змінити форму polyline
+* але не повинен створювати **persistent `route.waypoints[]`**
+
+Тому рішення таке:
+
+---
+
+# Правильне рішення
+
+Треба розділити 2 різні речі:
+
+## 1. Базове керування сегментом
+
+через щось типу:
+
+```js id="yjlwmg"
+route.baseOffset
+```
+
+або
+
+```js id="5phprf"
+route.baseLayout
+route.baseShift
+```
+
+Це для початкових синіх квадратиків.
+
+---
+
+## 2. Користувацькі точки шляху
+
+через:
+
+```js id="qbatge"
+route.waypoints[]
+```
+
+Це для “Додати точку шляху”.
+
+---
+
+# Як я раджу виправити мінімально і правильно
+
+Зараз не чіпаємо всю систему, а просто робимо:
+
+1. додаємо в connector `route.baseOffset`
+2. переписуємо `buildOrthogonalElbowPoints()`
+3. переписуємо `moveElbowSegmentHandle()`
+4. segment handles показуємо тільки коли `waypoints.length === 0`
+5. waypoint-и тягнемо окремо, як ти вже зробив
+
+---
+
+# 1. Онови `createConnector()` у `connectorModel.js`
+
+Додай в `route` поле `baseOffset`.
+
+```js id="tk2ncc"
+export function createConnector({
+  connectorType = "orthogonal-straight",
+  start,
+  end,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+    connectorType,
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      waypoints: [],
+      // для базового segment-handle drag
+      // axis: "x" | "y"
+      // value: number
+      baseOffset: null,
+    },
+
+    geometry: {
+      points: [],
+    },
+
+    style: {
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  };
+}
+```
+
+---
+
+# 2. Онови `buildOrthogonalElbowPoints()` у `connectorGeometry.js`
+
+Ось головна зміна.
+
+```js id="zjffmf"
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const waypoints = route?.waypoints || [];
+  const baseOffset = route?.baseOffset || null;
+
+  // ===== 1. якщо є user waypoints -> будуємо через них
+  if (waypoints.length) {
+    const points = [start.x, start.y];
+    let current = { ...start };
+
+    for (const wp of waypoints) {
+      if (!same(current.x, wp.x)) {
+        points.push(wp.x, current.y);
+        current = { x: wp.x, y: current.y };
+      }
+
+      if (!same(current.y, wp.y)) {
+        points.push(current.x, wp.y);
+        current = { x: current.x, y: wp.y };
+      }
+    }
+
+    if (!same(current.x, end.x)) {
+      points.push(end.x, current.y);
+      current = { x: end.x, y: current.y };
+    }
+
+    if (!same(current.y, end.y)) {
+      points.push(current.x, end.y);
+    }
+
+    return normalizePoints(points);
+  }
+
+  // ===== 2. якщо waypoint ще нема, але є baseOffset
+  // це НЕ path point, це лише зміщення базового сегмента
+  if (baseOffset?.axis === "y") {
+    return normalizePoints([
+      start.x, start.y,
+      start.x, baseOffset.value,
+      end.x, baseOffset.value,
+      end.x, end.y,
+    ]);
+  }
+
+  if (baseOffset?.axis === "x") {
+    return normalizePoints([
+      start.x, start.y,
+      baseOffset.value, start.y,
+      baseOffset.value, end.y,
+      end.x, end.y,
+    ]);
+  }
+
+  // ===== 3. дефолтний elbow
+  return normalizePoints([
+    start.x, start.y,
+    end.x, start.y,
+    end.x, end.y,
+  ]);
+}
+```
+
+---
+
+## І не забудь оновити виклик у `buildConnectorPoints()`
+
+Було:
+
+```js id="d8dw2b"
+return buildOrthogonalElbowPoints(start, end, waypoints);
+```
+
+Треба:
+
+```js id="htk5am"
+return buildOrthogonalElbowPoints(start, end, connector.route || {});
+```
+
+Повний шматок:
+
+```js id="dxwdso"
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+
+  switch (connector.connectorType) {
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, connector.route || {});
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+```
+
+---
+
+# 3. Перепиши `moveElbowSegmentHandle()` у `connectorEditing.js`
+
+Ось найважливіша зміна:
+**segment handle більше не створює waypoint.**
+
+```js id="4aq7ct"
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const route = {
+    ...(connector.route || {}),
+  };
+
+  // Якщо вже є user waypoints — ці ручки більше не керують базовим сегментом
+  // Для MVP просто не чіпаємо їх тут.
+  if ((route.waypoints || []).length > 0) {
+    return connector;
+  }
+
+  if (handle.orientation === "horizontal") {
+    route.baseOffset = {
+      axis: "y",
+      value: pos.y,
+    };
+  } else if (handle.orientation === "vertical") {
+    route.baseOffset = {
+      axis: "x",
+      value: pos.x,
+    };
+  }
+
+  return {
+    ...connector,
+    route,
+  };
+}
+```
+
+---
+
+# 4. Онови `createWaypointAtSegment()` у `connectorEditing.js`
+
+Щоб user waypoint був окремою сутністю з axis.
+
+```js id="5z3n15"
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+```
+
+---
+
+# 5. У `ConnectorsLayer.jsx` segment handles показуй тільки без user waypoint-ів
+
+Оце дуже важливо.
+
+Зараз у тебе, скоріш за все:
+
+```js id="pnqhl4"
+const segmentHandles = isSelected
+  ? getConnectorSegmentHandles(connector)
+  : [];
+```
+
+Треба зробити так:
+
+```js id="dfarcn"
+const waypoints = connector.route?.waypoints || [];
+
+const segmentHandles =
+  isSelected && connector.connectorType === "orthogonal-elbow" && waypoints.length === 0
+    ? getConnectorSegmentHandles(connector)
+    : [];
+```
+
+Тобто:
+
+* **до додавання path point** показуємо базові сині квадратики
+* **після додавання path point** вони зникають
+* далі керування йде через waypoint-и
+
+Це дуже чиста логіка для MVP.
+
+---
+
+# 6. Waypoint-и лишаємо draggable по своїй осі
+
+Оце в тебе вже майже правильно.
+
+```jsx id="iyu7gn"
+{waypoints.map((wp) => (
+  <Circle
+    key={wp.id}
+    x={wp.x}
+    y={wp.y}
+    radius={5}
+    fill="#F2C94C"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      wp.axis === "y"
+        ? { x: wp.x, y: pos.y }
+        : { x: pos.x, y: wp.y }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorWaypointDragMove?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorWaypointDragEnd?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onContextMenu={(e) => {
+      canvasController.handleConnectorWaypointContextMenu?.(
+        e,
+        connector,
+        wp
+      );
+    }}
+  />
+))}
+```
+
+Оце якраз і є поведінка:
+
+* горизонтальний waypoint → вверх/вниз
+* вертикальний waypoint → вліво/вправо
+
+---
+
+# 7. Що це дасть по факту
+
+Після цих змін поведінка стане такою:
+
+## стартовий elbow connector
+
+* має базові сині квадратики по центру сегментів
+* drag цих квадратиків **не створює path point**
+* він лише змінює `route.baseOffset`
+* форма лінії змінюється, але це ще не `waypoint`
+
+## після “Додати точку шляху”
+
+* у `route.waypoints[]` з’являється справжня точка
+* вона стає жовтою draggable точкою
+* її можна видалити через context menu
+* рухається тільки по потрібній осі
+
+Це саме той поділ, який ти хотів.
+
+---
+
+# 8. Важливе уточнення
+
+Ти написав:
+
+> початково створені квадратики мають тільки переміщати відрізок по вертикалі або горизонталі але не ломати його
+
+Тут треба дуже чесно зафіксувати:
+
+## Візуально лінія все одно може отримати додаткові коліна
+
+бо інакше сегмент не змістити при фіксованих endpoints.
+
+Але:
+
+* це **не буде user waypoint**
+* це буде просто **базова форма connector-а через `baseOffset`**
+
+І це вже правильна різниця.
+
+---
+
+# 9. Якщо хочеш ще чистіше
+
+Можна навіть візуально розрізнити:
+
+* **сині квадратики** = базові segment handles
+* **жовті кружки/квадратики** = user waypoints
+
+Щоб користувачеві було зрозуміло:
+
+* сині — це “регулювання сегмента”
+* жовті — це “додані точки шляху”
+
+---
+
+# 10. Найкоротший список змін
+
+Тобі треба зараз змінити 4 місця:
+
+## `connectorModel.js`
+
+* додати `route.baseOffset`
+
+## `connectorGeometry.js`
+
+* `buildOrthogonalElbowPoints(start, end, route)`
+
+## `connectorEditing.js`
+
+* `moveElbowSegmentHandle()` не створює waypoint
+* `createWaypointAtSegment()` додає `axis`
+
+## `ConnectorsLayer.jsx`
+
+* `segmentHandles` показувати тільки коли `waypoints.length === 0`
+
+---
+
+# 11. Підсумок
+
+Проблема не в drag, а в тому, що зараз один і той самий механізм використовується для двох різних сутностей:
+
+* базовий segment handle
+* user path point
+
+А їх треба розділити.
+
+## Правильний розподіл:
+
+* **segment handle** → змінює `route.baseOffset`
+* **waypoint** → живе в `route.waypoints[]`
+
+Оце і підправляє поведінку так, як ти хочеш.
+
+---
+
+Якщо хочеш, я можу наступним повідомленням дати тобі вже **цільний оновлений код трьох файлів одним шматком**:
+
+* `connectorModel.js`
+* `connectorGeometry.js`
+* `connectorEditing.js`
+
+щоб ти не збирав це по фрагментах.

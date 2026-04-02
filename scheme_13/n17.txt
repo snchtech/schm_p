@@ -1,0 +1,548 @@
+Так, тут у тебе зараз дві окремі задачі:
+
+1. **чому preview anchor-и частково “під” фігурою**
+2. **як стандартизувати отримання anchor-ів із registry**
+
+І обидві краще вирішити не “костилем у конкретному shape”, а через одну узгоджену модель.
+
+---
+
+# 1. Чому anchor-и під фігурою
+
+Найімовірніше причина одна з двох:
+
+## A. Неправильний порядок шарів
+
+У `Konva` те, що намальовано пізніше, лежить вище.
+
+Тобто якщо:
+
+* спочатку малюється preview anchor layer
+* а потім layer із node shape
+
+то кружки частково перекриваються фігурою.
+
+## B. Anchor ставиться точно на край фігури
+
+Наприклад правий anchor:
+
+```js
+x: x + width,
+y: y + height / 2
+```
+
+Це **центр точки прив’язки прямо на межі shape**.
+Якщо ти малюєш preview circle радіусом 6–8 px, половина круга опиниться “всередині” shape.
+
+---
+
+# 2. Як зробити правильно
+
+Найкраще рішення — **розділити логічний anchor і візуальний preview anchor**.
+
+Тобто:
+
+## логічний anchor у registry
+
+повинен лишатися таким:
+
+```js id="rmlxyb"
+{
+  id: `${node.id}-right`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "right",
+  x: x + width,
+  y: y + height / 2,
+}
+```
+
+Це правильна **точка прив’язки**.
+
+---
+
+## візуальний preview anchor
+
+треба рендерити **з невеликим зміщенням назовні** від shape.
+
+Наприклад:
+
+* `top` → `y - 8`
+* `bottom` → `y + 8`
+* `left` → `x - 8`
+* `right` → `x + 8`
+
+Тоді preview буде над фігурою, а не “в половину в ній”.
+
+---
+
+# 3. Найкраща практика: registry повертає ще й normal/offset direction
+
+Я б радив стандартизувати registry так, щоб кожен anchor мав не тільки `direction`, а ще й “назовнішній вектор”.
+
+Наприклад:
+
+```js id="0n3d7a"
+{
+  id: `${node.id}-right`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "right",
+  x: x + width,
+  y: y + height / 2,
+  normal: { x: 1, y: 0 },
+}
+```
+
+Для інших:
+
+* `top` → `{ x: 0, y: -1 }`
+* `bottom` → `{ x: 0, y: 1 }`
+* `left` → `{ x: -1, y: 0 }`
+
+Тоді preview layer сам обчислює:
+
+```js id="nslz1z"
+previewX = anchor.x + anchor.normal.x * offset
+previewY = anchor.y + anchor.normal.y * offset
+```
+
+І ти не псуєш “справжню” точку прив’язки.
+
+---
+
+# 4. Як це зробити без великої перебудови
+
+Якщо не хочеш зараз міняти всю registry-модель, можна просто зробити helper.
+
+---
+
+## helper для preview-position
+
+```js id="8fj4cv"
+export function getPreviewAnchorPosition(anchor, offset = 8) {
+  switch (anchor.direction) {
+    case "top":
+      return { x: anchor.x, y: anchor.y - offset };
+    case "bottom":
+      return { x: anchor.x, y: anchor.y + offset };
+    case "left":
+      return { x: anchor.x - offset, y: anchor.y };
+    case "right":
+      return { x: anchor.x + offset, y: anchor.y };
+    default:
+      return { x: anchor.x, y: anchor.y };
+  }
+}
+```
+
+І в `NodesAnchorPreviewLayer` рендерити не `anchor.x / anchor.y`, а:
+
+```js id="kc55ei"
+const p = getPreviewAnchorPosition(anchor, 8);
+```
+
+---
+
+# 5. Що я б порадив по шарах
+
+Навіть якщо зробиш offset, усе одно краще, щоб preview layer був **над shapes**.
+
+Тобто порядок рендеру бажано такий:
+
+```jsx id="ndrtft"
+<LegacyEdgesLayer />
+<ConnectorsLayer />
+<NodesLayer />
+<NodesAnchorPreviewLayer />
+```
+
+або хоча б:
+
+```jsx id="wdrwvz"
+<NodesLayer />
+<NodesAnchorPreviewLayer />
+```
+
+де `NodesAnchorPreviewLayer` іде **після** shapes.
+
+Якщо preview зараз малюється раніше за `NodesLayer`, ти гарантовано матимеш перекриття.
+
+---
+
+# 6. Чи можна підсвічувати всі anchor-точки при наближенні до фігури
+
+## Так, і саме так краще
+
+Це кращий UX, ніж показувати тільки одну зелену точку.
+
+Правильна логіка така:
+
+### під час drag endpoint:
+
+1. знайшли найближчий node
+2. взяли **всі anchors цього node**
+3. показали їх
+4. одну з них відмітили як `activeAnchor`
+
+Це якраз те, що ми вже обговорювали з `connectorAttachPreview`:
+
+```js id="nafp9d"
+{
+  edgeId,
+  end: "start" | "end",
+  nodeId,
+  anchors: [...],
+  activeAnchor: {...}
+}
+```
+
+Тобто:
+
+* **усі anchors** сині/блакитні
+* **активний anchor** зелений
+
+Оце найкращий UX.
+
+---
+
+# 7. Як врахувати, що anchor-и задаються в registry
+
+Оце якраз дуже хороший підхід.
+І я б радив **не рахувати anchor-и вдруге в attach helper-ах вручну**, а брати їх централізовано з registry.
+
+Тобто замість окремого `getNodeAnchorPoints(node)` з hardcoded rect-логікою, краще зробити універсальний helper:
+
+---
+
+## `getAnchorsForNode(node)`
+
+```js id="g65ap8"
+import { ELEMENT_REGISTRY } from "@/lib/registry";
+
+export function getAnchorsForNode(node) {
+  const entry = ELEMENT_REGISTRY[node.type];
+  if (!entry || typeof entry.getAnchors !== "function") {
+    return [];
+  }
+
+  return entry.getAnchors(node) || [];
+}
+```
+
+І вже далі:
+
+* preview layer
+* attach logic
+* connector attach search
+
+усі працюють через **одне джерело правди**.
+
+Це дуже важливо.
+
+---
+
+# 8. Як я б стандартизував registry
+
+Усі `getAnchors(node)` мають повертати однаковий формат:
+
+```js id="7lwwcw"
+{
+  id: string,
+  type: "node-anchor",
+  nodeId: string,
+  direction: "top" | "bottom" | "left" | "right",
+  x: number,
+  y: number,
+}
+```
+
+Опційно можна додати:
+
+```js id="jb44d6"
+normal?: { x: number, y: number }
+kind?: "default" | "input" | "output"
+```
+
+---
+
+## Я б радив саме таке правило
+
+### registry відповідає тільки за:
+
+* де логічно знаходиться anchor
+* який у нього `direction`
+
+### preview/render helper відповідає за:
+
+* зміщення назовні
+* колір
+* radius
+* hover style
+
+Це правильне розділення відповідальності.
+
+---
+
+# 9. Як переписати твою логіку attach preview правильно
+
+Замість hardcoded anchor generator для node, зроби так:
+
+---
+
+## helper
+
+```js id="k2hbvq"
+import { ELEMENT_REGISTRY } from "@/lib/registry";
+
+export function getAnchorsForNode(node) {
+  const entry = ELEMENT_REGISTRY[node.type];
+  if (!entry?.getAnchors) return [];
+
+  return entry.getAnchors(node).map((anchor) => ({
+    ...anchor,
+    type: anchor.type || "node-anchor",
+  }));
+}
+```
+
+---
+
+## знайти найближчий node
+
+```js id="lav4hx"
+export function findClosestNodeByPoint(nodes, point, maxDistance = 40) {
+  let bestNode = null;
+  let bestDist = Infinity;
+
+  for (const node of nodes) {
+    const width = node.data?.width || 0;
+    const height = node.data?.height || 0;
+
+    const center = {
+      x: node.position.x + width / 2,
+      y: node.position.y + height / 2,
+    };
+
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+
+    if (d < bestDist) {
+      bestDist = d;
+      bestNode = node;
+    }
+  }
+
+  if (!bestNode || bestDist > maxDistance) {
+    return null;
+  }
+
+  return bestNode;
+}
+```
+
+---
+
+## активний preview
+
+```js id="r0rmo1"
+export function getConnectorAttachPreview(nodes, point) {
+  const node = findClosestNodeByPoint(nodes, point);
+  if (!node) return null;
+
+  const anchors = getAnchorsForNode(node);
+  if (!anchors.length) return null;
+
+  let activeAnchor = null;
+  let bestDist = Infinity;
+
+  for (const anchor of anchors) {
+    const dx = point.x - anchor.x;
+    const dy = point.y - anchor.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+
+    if (d < bestDist) {
+      bestDist = d;
+      activeAnchor = anchor;
+    }
+  }
+
+  return {
+    nodeId: node.id,
+    anchors,
+    activeAnchor,
+  };
+}
+```
+
+---
+
+# 10. Як рендерити preview anchors над shape
+
+У `NodesAnchorPreviewLayer`:
+
+```jsx id="v58fbt"
+import { getPreviewAnchorPosition } from "@/lib/connectors/anchorPreview";
+
+...
+
+{preview.anchors.map((anchor) => {
+  const key = `${anchor.nodeId}:${anchor.direction}`;
+  const isActive =
+    preview.activeAnchor &&
+    preview.activeAnchor.id === anchor.id;
+
+  const p = getPreviewAnchorPosition(anchor, 8);
+
+  return (
+    <Circle
+      key={key}
+      x={p.x}
+      y={p.y}
+      radius={isActive ? 8 : 6}
+      fill={isActive ? "rgba(39, 174, 96, 0.30)" : "rgba(47, 128, 237, 0.20)"}
+      stroke={isActive ? "#27AE60" : "#2F80ED"}
+      strokeWidth={isActive ? 2.5 : 1.5}
+    />
+  );
+})}
+```
+
+Оце одразу вирішує проблему “anchor partly under object”.
+
+---
+
+# 11. Що я б порадив по стандартизації registry
+
+Те, що ти зараз прописуєш anchor-и руками в кожному shape, працює, але краще спростити.
+
+---
+
+## Найкращий підхід
+
+Мати маленькі helper-и для типових shape.
+
+Наприклад:
+
+```js id="zk6h5p"
+export function createRectAnchors(node) {
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+  const { x = 0, y = 0 } = node.position || {};
+
+  return [
+    {
+      id: `${node.id}-top`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "top",
+      x: x + width / 2,
+      y,
+    },
+    {
+      id: `${node.id}-right`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+    {
+      id: `${node.id}-bottom`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      id: `${node.id}-left`,
+      type: "node-anchor",
+      nodeId: node.id,
+      direction: "left",
+      x,
+      y: y + height / 2,
+    },
+  ];
+}
+```
+
+А далі в registry:
+
+```js id="18u8pd"
+rect: {
+  component: RectShape,
+  getAnchors: createRectAnchors,
+}
+```
+
+---
+
+## Для складніших shape
+
+Можна мати окремі helper-и:
+
+* `createTriangleAnchors`
+* `createArrowAnchors`
+* `createSymbolAnchors`
+
+Але інтерфейс у всіх один і той самий.
+
+Це дуже покращить підтримку.
+
+---
+
+# 12. Моя практична рекомендація
+
+Ось що я б радив зробити прямо зараз:
+
+## 1.
+
+Не міняти логічні координати anchor-ів у registry.
+
+## 2.
+
+У preview layer рендерити їх із зовнішнім offset.
+
+## 3.
+
+Усі anchor-и для attach брати тільки через `registry.getAnchors(node)`.
+
+## 4.
+
+Показувати всі anchors найближчого node при drag endpoint.
+
+## 5.
+
+Окремо підсвічувати `activeAnchor`.
+
+---
+
+# 13. Висновок
+
+Так, обидві задачі нормально вирішуються:
+
+### anchor-и під shape
+
+вирішуються через:
+
+* правильний z-order
+* render offset назовні
+
+### підсвітка всіх anchor-точок
+
+так, це правильно і зручно для UX
+і краще робити це через `connectorAttachPreview.anchors`
+
+### стандартизація
+
+найкраще:
+
+* registry = єдине джерело правди для логічних anchor-ів
+* preview layer = візуалізація цих anchor-ів
+* спільні helper-и для типових shape
+
+---
+
+Якщо хочеш, я можу наступним повідомленням дати тобі **готовий код для `connectorAttach.js + NodesAnchorPreviewLayer.jsx` уже в стандартизованому вигляді під registry**, щоб ти просто вставив.

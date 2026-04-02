@@ -1,0 +1,391 @@
+Так. Це теж важливий момент.
+
+Бо після reattach у тебе connector уже прив’язаний до node через:
+
+* `start.attached`
+* або `end.attached`
+
+І якщо node потім рухається, connector повинен:
+
+* перебудувати `geometry.points`
+* але **не втратити**
+
+  * `route.baseOffset`
+  * `route.waypoints`
+  * `connectorType`
+
+Тобто логіка така сама, як і для гарного reattach:
+**при русі node не чіпати route, тільки перебудувати геометрію від нових endpoint-ів**.
+
+---
+
+# 1. Що тут головне
+
+У тебе зараз уже є добра основа:
+
+* `resolveConnectorEndpoint(endpoint, nodes)`
+  якщо endpoint attached до node, бере актуальну позицію anchor-а
+* `buildConnectorPoints(connector, nodes)`
+* `rebuildConnectorGeometry(connector, nodes)`
+
+Отже, якщо node рухається, тобі не треба змінювати сам connector вручну.
+Достатньо:
+
+1. оновити `nodes`
+2. знайти connector-и, які attached до цього node
+3. викликати для них:
+
+```js id="d9uxw0"
+rebuildConnectorGeometry(edge, nextNodes)
+```
+
+І все.
+
+---
+
+# 2. Який тут правильний принцип
+
+## Не робити так:
+
+* переписувати `start.x/y` вручну
+* переписувати `end.x/y` вручну
+* скидати `route`
+* створювати новий connector
+
+## Робити так:
+
+* endpoint attached лишається attached
+* `resolveConnectorEndpoint()` сам знайде нову точку anchor-а через registry
+* geometry перераховується
+* форма зберігається
+
+---
+
+# 3. Правильний helper у controller
+
+Тобі вже потрібен helper рівня:
+
+```js id="qj5kdn"
+rebuildConnectorsForNode(nodeId, nodes, edges)
+```
+
+І він має бути **недеструктивний**.
+
+Ось правильний варіант:
+
+```js id="ntqvme"
+rebuildConnectorsForNode(nodeId, nodes, edges) {
+  return edges.map((edge) => {
+    if (edge.kind !== "connector") return edge;
+
+    const touchesStart =
+      edge.start?.attached?.type === "node" &&
+      edge.start.attached.nodeId === nodeId;
+
+    const touchesEnd =
+      edge.end?.attached?.type === "node" &&
+      edge.end.attached.nodeId === nodeId;
+
+    if (!touchesStart && !touchesEnd) {
+      return edge;
+    }
+
+    // route НЕ чіпаємо, просто rebuild geometry
+    return rebuildConnectorGeometry(edge, nodes);
+  });
+}
+```
+
+Оце і є правильна логіка.
+
+---
+
+# 4. Як вбудувати це в `handleNodeDragMove`
+
+У тебе там уже, ймовірно, є логіка для legacy edge. Її не чіпаємо.
+Просто після неї додаємо rebuild connector-ів.
+
+---
+
+## Варіант для `dragmove`
+
+```js id="fhjlwm"
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  let nextEdges = [...store.edges];
+
+  // ===== 1. тут лишаєш свою existing legacy-логіку =====
+  // nextEdges = rebuildLegacyEdgesForNode(...)
+
+  // ===== 2. додаємо rebuild connector-ів =====
+  nextEdges = this.rebuildConnectorsForNode(id, nextNodes, nextEdges);
+
+  if (store.setNodeAndEdges) {
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  } else {
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  }
+}
+```
+
+---
+
+## Варіант для `dragend`
+
+Якщо хочеш легший режим для продуктивності:
+
+```js id="c9q2m3"
+handleNodeDragEnd(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  let nextEdges = [...store.edges];
+
+  // legacy edges
+  // nextEdges = rebuildLegacyEdgesForNode(...)
+
+  // connectors
+  nextEdges = this.rebuildConnectorsForNode(id, nextNodes, nextEdges);
+
+  if (store.setNodeAndEdges) {
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  } else {
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  }
+}
+```
+
+---
+
+# 5. Чому форма не губиться
+
+Бо `rebuildConnectorGeometry(edge, nodes)` повинна лише:
+
+* взяти існуючий connector
+* прочитати його:
+
+  * `start`
+  * `end`
+  * `route.baseOffset`
+  * `route.waypoints`
+* побудувати новий `geometry.points`
+
+Тобто:
+
+```js id="fghspn"
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+Тут `route` не скидається.
+Саме тому:
+
+* after reattach форма зберігається
+* after node drag форма теж зберігається
+
+---
+
+# 6. Дуже важливий момент про `start.x/y` і `end.x/y`
+
+Коли endpoint attached до node, у тебе в connector все ще можуть залишатися старі `start.x/y` або `end.x/y`.
+
+Це нормально.
+
+Бо для attached endpoint-ів джерело правди — не ці поля, а:
+
+```js id="1r0m1w"
+endpoint.attached
+```
+
+І далі `resolveConnectorEndpoint()` бере актуальну позицію через registry.
+
+Тобто:
+
+* attached endpoint живе через `attached`
+* detached endpoint живе через свої власні `x/y`
+
+Це правильна модель.
+
+---
+
+# 7. Що перевірити, якщо після node drag форма ламається
+
+Якщо після руху node connector “ламає” форму, то проблема майже напевно в одному з цих місць:
+
+## A. `rebuildConnectorGeometry()`
+
+може скидати `route`
+
+## B. `buildOrthogonalElbowPoints()`
+
+може ігнорувати:
+
+* `route.baseOffset`
+* або `route.waypoints`
+
+## C. `handleNodeDragMove()`
+
+може десь переписувати connector “з нуля”
+
+---
+
+# 8. Як це має працювати на практиці
+
+Припустимо, у тебе є connector:
+
+* `start` attached до node A
+* `end` attached до node B
+* є `baseOffset`
+* є 1 user waypoint
+
+Користувач рухає node A.
+
+Тоді система повинна:
+
+* знайти connector, де `start.attached.nodeId === A`
+* викликати `rebuildConnectorGeometry(connector, nextNodes)`
+* і отримаєш новий `geometry.points`, але:
+
+  * той самий `route.baseOffset`
+  * той самий `waypoint`
+  * той самий `connectorType`
+
+Тобто connector просто “перетягнеться” за node.
+
+---
+
+# 9. Що я б ще порадив для продуктивності
+
+Якщо node drag часто викликається, краще:
+
+## на `dragmove`
+
+робити rebuild через `requestAnimationFrame`
+
+## на `dragend`
+
+робити фінальний rebuild
+
+Але поки, якщо connector-ів не дуже багато, можна почати з прямого оновлення.
+
+---
+
+# 10. Готовий цільний блок для вставки в `canvasController.js`
+
+Ось так я б це оформив.
+
+```js id="p4gbmj"
+rebuildConnectorsForNode(nodeId, nodes, edges) {
+  return edges.map((edge) => {
+    if (edge.kind !== "connector") return edge;
+
+    const touchesStart =
+      edge.start?.attached?.type === "node" &&
+      edge.start.attached.nodeId === nodeId;
+
+    const touchesEnd =
+      edge.end?.attached?.type === "node" &&
+      edge.end.attached.nodeId === nodeId;
+
+    if (!touchesStart && !touchesEnd) {
+      return edge;
+    }
+
+    return rebuildConnectorGeometry(edge, nodes);
+  });
+},
+
+handleNodeDragMove(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  let nextEdges = [...store.edges];
+
+  // ===== legacy edges =====
+  // тут лишаєш свою існуючу логіку для старих edges
+
+  // ===== connectors =====
+  nextEdges = this.rebuildConnectorsForNode(id, nextNodes, nextEdges);
+
+  if (store.setNodeAndEdges) {
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  } else {
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  }
+},
+
+handleNodeDragEnd(id, e) {
+  const { x, y } = e.target.position();
+  const store = useCanvasStore.getState();
+
+  const nextNodes = store.nodes.map((n) =>
+    n.id === id ? { ...n, position: { x, y } } : n
+  );
+
+  let nextEdges = [...store.edges];
+
+  // ===== legacy edges =====
+  // тут лишаєш свою існуючу логіку для старих edges
+
+  // ===== connectors =====
+  nextEdges = this.rebuildConnectorsForNode(id, nextNodes, nextEdges);
+
+  if (store.setNodeAndEdges) {
+    store.setNodeAndEdges(id, x, y, nextEdges);
+  } else {
+    store.updateNodePosition(id, x, y);
+    store.setEdges(nextEdges);
+  }
+},
+```
+
+---
+
+# 11. Якщо коротко
+
+Щоб connector оновлювався після node drag **без втрати форми**, треба:
+
+* при русі node знайти attached connector-и
+* викликати тільки `rebuildConnectorGeometry(edge, nextNodes)`
+* не чіпати `route`
+
+Це все.
+
+---
+
+# 12. Моя рекомендація
+
+Зараз уже є сенс зафіксувати таке правило для всієї нової connector-системи:
+
+> **усі ручні налаштування форми живуть у `route`, а `geometry` завжди тільки похідна**
+
+Це дуже правильна архітектурна межа.
+
+---
+
+Якщо хочеш, далі я можу допомогти тобі вже з наступним корисним кроком:
+**щоб при видаленні node attached connector не зникав, а автоматично ставав detached endpoint-ом і лишався на canvas**.

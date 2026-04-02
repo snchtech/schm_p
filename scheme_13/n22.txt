@@ -1,0 +1,343 @@
+Ось **цільний оновлений `connectorGeometry.js`** для твого поточного MVP, уже з урахуванням:
+
+* `kind: "connector"`
+* `orthogonal-straight`
+* `orthogonal-elbow`
+* `route.baseOffset`
+* `route.waypoints`
+* attach до node через registry
+* **невеликий відступ від фігури**, щоб лінія не налипала на shape
+
+---
+
+## `lib/connectors/connectorGeometry.js`
+
+```js id="ykcyw2"
+import { getAnchorsForNode } from "@/lib/connectors/connectorAttach";
+
+export const CONNECTOR_ATTACH_GAP = 8;
+
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+/**
+ * Невеликий відступ назовні від фігури,
+ * щоб connector не прилипав впритул до shape.
+ */
+function applyAnchorGap(anchor, gap = CONNECTOR_ATTACH_GAP) {
+  switch (anchor.direction) {
+    case "top":
+      return {
+        x: anchor.x,
+        y: anchor.y - gap,
+      };
+
+    case "bottom":
+      return {
+        x: anchor.x,
+        y: anchor.y + gap,
+      };
+
+    case "left":
+      return {
+        x: anchor.x - gap,
+        y: anchor.y,
+      };
+
+    case "right":
+      return {
+        x: anchor.x + gap,
+        y: anchor.y,
+      };
+
+    default:
+      return {
+        x: anchor.x,
+        y: anchor.y,
+      };
+  }
+}
+
+/**
+ * Резолвить endpoint connector-а:
+ * - якщо attached до node -> беремо anchor з registry
+ * - додаємо невеликий gap від фігури
+ * - якщо detached -> повертаємо власні x/y
+ */
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) {
+    return { x: 0, y: 0 };
+  }
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+
+    if (!node) {
+      return {
+        x: endpoint.x,
+        y: endpoint.y,
+      };
+    }
+
+    const anchors = getAnchorsForNode(node);
+    const anchor = anchors.find(
+      (a) => a.direction === endpoint.attached.anchor
+    );
+
+    if (anchor) {
+      return applyAnchorGap(anchor, CONNECTOR_ATTACH_GAP);
+    }
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+
+/**
+ * Прибирає дублікати сусідніх точок і зайві колінеарні точки.
+ */
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  // 1. прибираємо однакові сусідні точки
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  // 2. прибираємо зайві колінеарні точки
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) {
+      continue;
+    }
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+/**
+ * Straight:
+ * - якщо start/end на одній осі -> одна пряма
+ * - інакше fallback у просту L-форму
+ */
+export function buildOrthogonalStraightPoints(start, end) {
+  if (same(start.x, end.x) || same(start.y, end.y)) {
+    return [start.x, start.y, end.x, end.y];
+  }
+
+  return normalizePoints([
+    start.x, start.y,
+    end.x, start.y,
+    end.x, end.y,
+  ]);
+}
+
+/**
+ * Elbow:
+ * 1. Якщо є user waypoints -> будуємо маршрут через них
+ * 2. Якщо user waypoints нема, але є baseOffset -> зміщуємо базовий сегмент
+ * 3. Інакше дефолтна L-форма
+ */
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const waypoints = route?.waypoints || [];
+  const baseOffset = route?.baseOffset || null;
+
+  // ===== 1. user waypoints =====
+  if (waypoints.length) {
+    const points = [start.x, start.y];
+    let current = { ...start };
+
+    for (const wp of waypoints) {
+      if (!same(current.x, wp.x)) {
+        points.push(wp.x, current.y);
+        current = { x: wp.x, y: current.y };
+      }
+
+      if (!same(current.y, wp.y)) {
+        points.push(current.x, wp.y);
+        current = { x: current.x, y: wp.y };
+      }
+    }
+
+    if (!same(current.x, end.x)) {
+      points.push(end.x, current.y);
+      current = { x: end.x, y: current.y };
+    }
+
+    if (!same(current.y, end.y)) {
+      points.push(current.x, end.y);
+    }
+
+    return normalizePoints(points);
+  }
+
+  // ===== 2. базове зміщення сегмента =====
+  if (baseOffset?.axis === "y") {
+    return normalizePoints([
+      start.x, start.y,
+      start.x, baseOffset.value,
+      end.x, baseOffset.value,
+      end.x, end.y,
+    ]);
+  }
+
+  if (baseOffset?.axis === "x") {
+    return normalizePoints([
+      start.x, start.y,
+      baseOffset.value, start.y,
+      baseOffset.value, end.y,
+      end.x, end.y,
+    ]);
+  }
+
+  // ===== 3. дефолтний elbow =====
+  return normalizePoints([
+    start.x, start.y,
+    end.x, start.y,
+    end.x, end.y,
+  ]);
+}
+
+/**
+ * Головна build function для connector-а.
+ */
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+
+  switch (connector.connectorType) {
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, connector.route || {});
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+
+/**
+ * Перебудова geometry для connector-а.
+ */
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+---
+
+# Що ще важливо перевірити
+
+Щоб цей файл працював правильно, у тебе має бути:
+
+## 1. `connectorAttach.js`
+
+з функцією:
+
+```js id="gu8fup"
+export function getAnchorsForNode(node) {
+  const entry = ELEMENT_REGISTRY[node.type];
+  if (!entry?.getAnchors) return [];
+  return entry.getAnchors(node) || [];
+}
+```
+
+## 2. У registry всі anchor-и мають однаковий формат
+
+Мінімально:
+
+```js id="1u1i06"
+{
+  id,
+  type: "node-anchor",
+  nodeId,
+  direction,
+  x,
+  y,
+}
+```
+
+## 3. `endpoint.attached.anchor`
+
+має містити саме:
+
+* `"top"`
+* `"bottom"`
+* `"left"`
+* `"right"`
+
+щоб співпадало з `anchor.direction`
+
+---
+
+# Що це дасть у поведінці
+
+Після цього:
+
+* connector все ще **логічно** приєднаний до реального anchor на фігурі
+* але лінія буде стартувати/закінчуватись на `8px` назовні
+* тобто не “липнутиме” до shape
+* preview точки приєднання можеш як і раніше рендерити окремо, теж із зовнішнім offset
+
+---
+
+# Якщо захочеш налаштовувати відступ
+
+Можеш змінити:
+
+```js id="7vw2te"
+export const CONNECTOR_ATTACH_GAP = 8;
+```
+
+на:
+
+* `6` — якщо хочеш компактніше
+* `10` або `12` — якщо shape товстіші або stroke ширший
+
+---
+
+# Моя порада
+
+Після вставки цього файла перевір 3 кейси:
+
+1. attach до `right`
+2. attach до `top`
+3. рух node після attach
+
+Якщо connector відривається саме по логіці, а не по візуалу — тоді дивимось уже на rebuild при drag node.
+Але якщо проблема тільки в “налипанні” на shape, цей варіант її закриває.
+
+Наступним кроком я б радив або допиляти **підсвітку всього node при attach preview**, або зробити **гарне reattach існуючого connector-а до іншого об’єкта без втрати форми**.

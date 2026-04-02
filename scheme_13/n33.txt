@@ -1,0 +1,385 @@
+Так. Нижче даю **узгоджений `connectorEditing.js` уже під `pathType`**, щоб ця частина більше не лишалась у старій моделі.
+
+Цілі цього файла тепер такі:
+
+* працює з `pathType`, а не `connectorType`
+* `segment handles` тільки для `orthogonal-elbow`
+* `user waypoint` тільки для `orthogonal-elbow`
+* базові segment handles **не створюють** waypoint
+* waypoint-и рухаються тільки по своїй осі
+
+---
+
+## `lib/connectors/connectorEditing.js`
+
+```js id="glh3m2"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+/**
+ * Розбиває polyline на сегменти.
+ * Працює для будь-якого connector-а, але редагування далі
+ * ми дозволяємо не для всіх pathType.
+ */
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    let orientation = "diagonal";
+    if (same(y1, y2)) orientation = "horizontal";
+    if (same(x1, x2)) orientation = "vertical";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+
+/**
+ * Базові segment handles показуємо тільки для orthogonal-elbow
+ * і тільки поки немає user waypoints.
+ */
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") {
+    return [];
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const waypoints = connector.route?.waypoints || [];
+  if (waypoints.length > 0) {
+    return [];
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+
+function projectPointOnSegment(px, py, seg) {
+  const { x1, y1, x2, y2, orientation } = seg;
+
+  if (orientation === "horizontal") {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const x = Math.max(minX, Math.min(maxX, px));
+    const y = y1;
+
+    const dx = px - x;
+    const dy = py - y;
+
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  if (orientation === "vertical") {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+    const x = x1;
+    const y = Math.max(minY, Math.min(maxY, py));
+
+    const dx = px - x;
+    const dy = py - y;
+
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  // fallback для diagonal/free-straight
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const dx = px - mx;
+  const dy = py - my;
+
+  return {
+    x: mx,
+    y: my,
+    distance: Math.sqrt(dx * dx + dy * dy),
+  };
+}
+
+/**
+ * Найближчий сегмент до точки.
+ * Корисно для context menu.
+ */
+export function findClosestConnectorSegment(connector, point) {
+  if (!connector || connector.kind !== "connector") {
+    return null;
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  let best = null;
+  let bestDistance = Infinity;
+
+  for (const seg of segments) {
+    const projected = projectPointOnSegment(point.x, point.y, seg);
+
+    if (projected.distance < bestDistance) {
+      bestDistance = projected.distance;
+      best = {
+        segmentIndex: seg.index,
+        orientation: seg.orientation,
+        x: projected.x,
+        y: projected.y,
+      };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Створення user waypoint у середині сегмента.
+ * Має сенс тільки для orthogonal-elbow.
+ *
+ * axis:
+ * - horizontal segment -> waypoint рухається по Y
+ * - vertical segment -> waypoint рухається по X
+ */
+export function createWaypointAtSegment(connector, segmentIndex) {
+  if (!connector || connector.kind !== "connector") {
+    return null;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return null;
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+  if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+    return null;
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+
+/**
+ * Базовий segment handle для orthogonal-elbow:
+ * не створює waypoint,
+ * а тільки міняє route.baseOffset.
+ */
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const route = {
+    ...(connector.route || {}),
+  };
+
+  const waypoints = route.waypoints || [];
+
+  // якщо вже є user waypoints — базові segment handles не чіпаємо
+  if (waypoints.length > 0) {
+    return connector;
+  }
+
+  if (handle.orientation === "horizontal") {
+    route.baseOffset = {
+      axis: "y",
+      value: pos.y,
+    };
+  } else if (handle.orientation === "vertical") {
+    route.baseOffset = {
+      axis: "x",
+      value: pos.x,
+    };
+  }
+
+  return {
+    ...connector,
+    route,
+  };
+}
+
+/**
+ * Рух user waypoint.
+ * Працює тільки для orthogonal-elbow.
+ *
+ * axis:
+ * - "y" -> тільки вгору/вниз
+ * - "x" -> тільки вліво/вправо
+ */
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return {
+        ...wp,
+        y: pos.y,
+      };
+    }
+
+    if (wp.axis === "x") {
+      return {
+        ...wp,
+        x: pos.x,
+      };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+```
+
+---
+
+# Що тепер узгоджено
+
+Після цього файла в тебе вже однакова логіка по всій новій connector-системі:
+
+## Використовується:
+
+* `pathType`
+* `endcaps`
+* `behavior`
+
+## А не старе:
+
+* `connectorType`
+
+---
+
+# Що треба перевірити ще в інших файлах
+
+Щоб усе було повністю узгоджено, перевір 3 місця.
+
+## 1. `connectorGeometry.js`
+
+має використовувати:
+
+```js id="6xppgw"
+connector.pathType
+```
+
+а не `connector.connectorType`.
+
+## 2. `ConnectorsLayer.jsx`
+
+має перевіряти:
+
+```js id="2zjlwm"
+connector.pathType === "orthogonal-elbow"
+```
+
+для:
+
+* `segmentHandles`
+* `waypoints`
+
+## 3. `canvasController.js`
+
+має перевіряти:
+
+```js id="k5tx4d"
+if (connector.pathType !== "orthogonal-elbow") return;
+```
+
+у методах:
+
+* `handleConnectorSegmentDragMove`
+* `handleConnectorSegmentDragEnd`
+* `handleConnectorWaypointDragMove`
+* `handleConnectorWaypointDragEnd`
+* `addConnectorWaypointFromContextMenu`
+* `removeConnectorWaypointFromContextMenu`
+
+---
+
+# Коротко, що дає цей файл
+
+## `free-straight`
+
+* не має segment handles
+* не має waypoints
+
+## `orthogonal-straight`
+
+* теж не має segment handles
+* теж не має waypoints
+
+## `orthogonal-elbow`
+
+* має базові segment handles
+* може мати user waypoints
+* має керування по осі
+
+Це правильний поділ.
+
+---
+
+# Моя порада
+
+Після цього вже є сенс зробити ще одну маленьку чистку:
+перевірити `ConnectorsLayer.jsx`, щоб він теж був повністю на `pathType` і не тримав жодного `connectorType`.
+
+Якщо хочеш, я наступним повідомленням можу дати тобі **короткий checklist, де саме в проєкті найімовірніше ще залишились старі згадки `connectorType` і що там замінити**.

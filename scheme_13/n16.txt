@@ -1,0 +1,658 @@
+Добре. Нижче даю **цільний оновлений код трьох файлів** так, щоб:
+
+* початкові **сині segment handles** не створювали user waypoint
+* вони керували тільки **базовим зміщенням сегмента**
+* **waypoint-и**, додані через контекстне меню, жили окремо
+* waypoint-и рухались тільки по своїй осі:
+
+  * горизонтальні — вверх/вниз
+  * вертикальні — вліво/вправо
+
+---
+
+# 1. `lib/connectors/connectorModel.js`
+
+```js id="4i5h2o"
+export function createConnector({
+  connectorType = "orthogonal-straight",
+  start,
+  end,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+    connectorType, // orthogonal-straight | orthogonal-elbow
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      // user-created точки шляху
+      waypoints: [],
+
+      // базове зміщення для стартових segment handles
+      // { axis: "x" | "y", value: number } | null
+      baseOffset: null,
+    },
+
+    geometry: {
+      points: [],
+    },
+
+    style: {
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  };
+}
+
+export function updateConnectorStart(connector, patch) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      ...patch,
+    },
+  };
+}
+
+export function updateConnectorEnd(connector, patch) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      ...patch,
+    },
+  };
+}
+
+export function attachConnectorStart(connector, attachment) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: attachment,
+    },
+  };
+}
+
+export function attachConnectorEnd(connector, attachment) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: attachment,
+    },
+  };
+}
+
+export function detachConnectorStart(connector) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function detachConnectorEnd(connector) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+---
+
+# 2. `lib/connectors/connectorGeometry.js`
+
+```js id="4wzk20"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getNodeAnchorPosition(node, anchor = "right") {
+  if (!node) return null;
+
+  const { x, y } = node.position;
+  const width = node.data?.width || 0;
+  const height = node.data?.height || 0;
+
+  switch (anchor) {
+    case "top":
+      return { x: x + width / 2, y };
+    case "bottom":
+      return { x: x + width / 2, y: y + height };
+    case "left":
+      return { x, y: y + height / 2 };
+    case "right":
+    default:
+      return { x: x + width, y: y + height / 2 };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+    if (pos) return pos;
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  // 1. прибираємо дублікати сусідніх точок
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  // 2. прибираємо зайві колінеарні точки
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) {
+      continue;
+    }
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+export function buildOrthogonalStraightPoints(start, end) {
+  if (same(start.x, end.x) || same(start.y, end.y)) {
+    return [start.x, start.y, end.x, end.y];
+  }
+
+  // fallback
+  return [start.x, start.y, end.x, start.y, end.x, end.y];
+}
+
+/**
+ * orthogonal-elbow:
+ * 1. Якщо є user waypoints -> будуємо через них
+ * 2. Якщо user waypoints нема, але є baseOffset -> будуємо базову форму зі зміщенням
+ * 3. Інакше дефолтна L-форма
+ */
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const waypoints = route?.waypoints || [];
+  const baseOffset = route?.baseOffset || null;
+
+  // ===== 1. Є user waypoints =====
+  if (waypoints.length) {
+    const points = [start.x, start.y];
+    let current = { ...start };
+
+    for (const wp of waypoints) {
+      if (!same(current.x, wp.x)) {
+        points.push(wp.x, current.y);
+        current = { x: wp.x, y: current.y };
+      }
+
+      if (!same(current.y, wp.y)) {
+        points.push(current.x, wp.y);
+        current = { x: current.x, y: wp.y };
+      }
+    }
+
+    if (!same(current.x, end.x)) {
+      points.push(end.x, current.y);
+      current = { x: end.x, y: current.y };
+    }
+
+    if (!same(current.y, end.y)) {
+      points.push(current.x, end.y);
+    }
+
+    return normalizePoints(points);
+  }
+
+  // ===== 2. Є базове зміщення сегмента =====
+  if (baseOffset?.axis === "y") {
+    return normalizePoints([
+      start.x, start.y,
+      start.x, baseOffset.value,
+      end.x, baseOffset.value,
+      end.x, end.y,
+    ]);
+  }
+
+  if (baseOffset?.axis === "x") {
+    return normalizePoints([
+      start.x, start.y,
+      baseOffset.value, start.y,
+      baseOffset.value, end.y,
+      end.x, end.y,
+    ]);
+  }
+
+  // ===== 3. Дефолтний elbow =====
+  return normalizePoints([
+    start.x, start.y,
+    end.x, start.y,
+    end.x, end.y,
+  ]);
+}
+
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+
+  switch (connector.connectorType) {
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, connector.route || {});
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+
+export function rebuildConnectorGeometry(connector, nodes) {
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      points: buildConnectorPoints(connector, nodes),
+    },
+  };
+}
+```
+
+---
+
+# 3. `lib/connectors/connectorEditing.js`
+
+```js id="7rt66n"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function getConnectorSegments(points = []) {
+  const segments = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    let orientation = "diagonal";
+    if (same(y1, y2)) orientation = "horizontal";
+    if (same(x1, x2)) orientation = "vertical";
+
+    segments.push({
+      index: i / 2,
+      x1,
+      y1,
+      x2,
+      y2,
+      orientation,
+      cx: (x1 + x2) / 2,
+      cy: (y1 + y2) / 2,
+    });
+  }
+
+  return segments;
+}
+
+/**
+ * Базові segment handles показуємо лише для orthogonal-elbow
+ * і лише поки немає user waypoints.
+ */
+export function getConnectorSegmentHandles(connector) {
+  if (connector.connectorType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const waypoints = connector.route?.waypoints || [];
+  if (waypoints.length > 0) {
+    return [];
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+
+function projectPointOnSegment(px, py, seg) {
+  const { x1, y1, x2, y2, orientation } = seg;
+
+  if (orientation === "horizontal") {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const x = Math.max(minX, Math.min(maxX, px));
+    const y = y1;
+    const dx = px - x;
+    const dy = py - y;
+
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  if (orientation === "vertical") {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+    const x = x1;
+    const y = Math.max(minY, Math.min(maxY, py));
+    const dx = px - x;
+    const dy = py - y;
+
+    return {
+      x,
+      y,
+      distance: Math.sqrt(dx * dx + dy * dy),
+    };
+  }
+
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const dx = px - mx;
+  const dy = py - my;
+
+  return {
+    x: mx,
+    y: my,
+    distance: Math.sqrt(dx * dx + dy * dy),
+  };
+}
+
+export function findClosestConnectorSegment(connector, point) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  let best = null;
+  let bestDistance = Infinity;
+
+  for (const seg of segments) {
+    if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+      continue;
+    }
+
+    const projected = projectPointOnSegment(point.x, point.y, seg);
+
+    if (projected.distance < bestDistance) {
+      bestDistance = projected.distance;
+      best = {
+        segmentIndex: seg.index,
+        orientation: seg.orientation,
+        x: projected.x,
+        y: projected.y,
+      };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * User waypoint створюється через контекстне меню.
+ * Він знає, по якій осі його можна рухати.
+ */
+export function createWaypointAtSegment(connector, segmentIndex) {
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+
+/**
+ * ВАЖЛИВО:
+ * Базовий segment handle БІЛЬШЕ не створює waypoint.
+ * Він лише змінює baseOffset, поки user waypoints ще немає.
+ */
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const route = {
+    ...(connector.route || {}),
+  };
+
+  const waypoints = route.waypoints || [];
+
+  // якщо вже є user waypoints — базові segment handles не працюють
+  if (waypoints.length > 0) {
+    return connector;
+  }
+
+  if (handle.orientation === "horizontal") {
+    route.baseOffset = {
+      axis: "y",
+      value: pos.y,
+    };
+  } else if (handle.orientation === "vertical") {
+    route.baseOffset = {
+      axis: "x",
+      value: pos.x,
+    };
+  }
+
+  return {
+    ...connector,
+    route,
+  };
+}
+
+/**
+ * User waypoint рухається тільки по своїй осі:
+ * axis: "y" -> тільки вверх/вниз
+ * axis: "x" -> тільки вліво/вправо
+ */
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return {
+        ...wp,
+        y: pos.y,
+      };
+    }
+
+    if (wp.axis === "x") {
+      return {
+        ...wp,
+        x: pos.x,
+      };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+```
+
+---
+
+# Що ще треба оновити в `ConnectorsLayer.jsx`
+
+Оце один важливий шматок, який треба змінити, якщо ти ще не змінив.
+
+Було приблизно так:
+
+```js id="v2q42q"
+const segmentHandles = isSelected
+  ? getConnectorSegmentHandles(connector)
+  : [];
+
+const waypoints = isSelected
+  ? connector.route?.waypoints || []
+  : [];
+```
+
+Залишити можна так само, бо `getConnectorSegmentHandles()` вже сам ховає їх, якщо `waypoints.length > 0`.
+
+Але waypoint render у тебе має бути draggable по осі:
+
+```jsx id="41udow"
+{waypoints.map((wp) => (
+  <Circle
+    key={wp.id}
+    x={wp.x}
+    y={wp.y}
+    radius={5}
+    fill="#F2C94C"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      wp.axis === "y"
+        ? { x: wp.x, y: pos.y }
+        : { x: pos.x, y: wp.y }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorWaypointDragMove?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorWaypointDragEnd?.(
+        connector.id,
+        wp,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          wp.axis === "y" ? "ns-resize" : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+    onContextMenu={(e) => {
+      canvasController.handleConnectorWaypointContextMenu?.(
+        e,
+        connector,
+        wp
+      );
+    }}
+  />
+))}
+```
+
+---
+
+# Підсумок
+
+Після цих змін у тебе буде саме те, що ти описав:
+
+## стартові сині квадратики
+
+* тільки зміщують базовий сегмент
+* не створюють `waypoint`
+* керують `route.baseOffset`
+
+## точки, додані через “Додати точку шляху”
+
+* стають справжніми `route.waypoints[]`
+* рухаються тільки по своїй осі
+* можуть видалятись через context menu
+
+Це правильний поділ ролей.
+
+Якщо хочеш, наступним повідомленням я можу так само зібрати **цільний оновлений `ConnectorsLayer.jsx` одним блоком**, щоб ти не збирав зміни по шматках.

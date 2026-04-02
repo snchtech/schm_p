@@ -1,0 +1,651 @@
+Добре. Нижче дам тобі **правильну модель і MVP helper-и** для нового типу:
+
+* `free-straight`
+* `endcaps.start / endcaps.end`
+
+без рендер-коду наконечників поки що, але так, щоб ти **правильно заклав архітектуру** і далі без болю додав:
+
+* стрілку з одного боку
+* стрілки з двох боків
+* navigation arrow
+* інші маркери, якщо знадобляться
+
+---
+
+# 1. Головна ідея
+
+Тепер connector у тебе має складатися з трьох незалежних частин:
+
+## A. Геометрія шляху
+
+```js id="khdd8r"
+pathType
+```
+
+Наприклад:
+
+* `orthogonal-straight`
+* `orthogonal-elbow`
+* `free-straight`
+
+## B. Оформлення кінців
+
+```js id="qzji28"
+endcaps
+```
+
+Наприклад:
+
+* `none`
+* `arrow`
+
+## C. Поведінка / метадані
+
+```js id="r4n4yk"
+behavior
+```
+
+Наприклад:
+
+* `default`
+* `navigation`
+
+Оце і є правильний фундамент.
+
+---
+
+# 2. Нова цільова модель connector
+
+Я б радив таку структуру:
+
+```js id="qs5x6r"
+{
+  id: "edge_1",
+  kind: "connector",
+
+  pathType: "free-straight", // free-straight | orthogonal-straight | orthogonal-elbow
+
+  start: {
+    x: 100,
+    y: 100,
+    attached: { type: "none" }
+  },
+
+  end: {
+    x: 260,
+    y: 100,
+    attached: { type: "none" }
+  },
+
+  route: {
+    baseOffset: null,
+    waypoints: [],
+  },
+
+  endcaps: {
+    start: "none", // none | arrow
+    end: "arrow",  // none | arrow
+  },
+
+  behavior: {
+    type: "default", // default | navigation
+    link: null,      // або { targetSchemeId, highlightParam }
+  },
+
+  geometry: {
+    points: [],
+  },
+
+  style: {
+    stroke: "black",
+    strokeWidth: 2,
+  },
+}
+```
+
+---
+
+# 3. Чому не лишати `connectorType`
+
+У тебе зараз є:
+
+```js id="1dxwk0"
+connectorType: "orthogonal-elbow"
+```
+
+Я б радив поступово перейти до:
+
+```js id="zdjlwm"
+pathType: "orthogonal-elbow"
+```
+
+бо тепер це вже не “тип конектора взагалі”, а саме **тип траєкторії**.
+
+Інакше ти дуже швидко прийдеш до хаосу:
+
+* `arrow-elbow`
+* `double-arrow-line`
+* `navigation-arrow`
+
+Краще цього уникнути.
+
+---
+
+# 4. Як мінімально адаптувати `connectorModel.js`
+
+Ось оновлена модель створення connector-а.
+
+## `lib/connectors/connectorModel.js`
+
+```js id="3goxux"
+export function createConnector({
+  pathType = "orthogonal-straight",
+  start,
+  end,
+  endcaps,
+  behavior,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+
+    pathType, // free-straight | orthogonal-straight | orthogonal-elbow
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      waypoints: [],
+      baseOffset: null,
+    },
+
+    endcaps: {
+      start: endcaps?.start ?? "none",
+      end: endcaps?.end ?? "none",
+    },
+
+    behavior: {
+      type: behavior?.type ?? "default",
+      link: behavior?.link ?? null,
+    },
+
+    geometry: {
+      points: [],
+    },
+
+    style: {
+      stroke: "black",
+      strokeWidth: 2,
+    },
+  };
+}
+
+export function updateConnectorStart(connector, patch) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      ...patch,
+    },
+  };
+}
+
+export function updateConnectorEnd(connector, patch) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      ...patch,
+    },
+  };
+}
+
+export function attachConnectorStart(connector, attachment) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: attachment,
+    },
+  };
+}
+
+export function attachConnectorEnd(connector, attachment) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: attachment,
+    },
+  };
+}
+
+export function detachConnectorStart(connector) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function detachConnectorEnd(connector) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+
+export function setConnectorEndcaps(connector, endcapsPatch) {
+  return {
+    ...connector,
+    endcaps: {
+      ...connector.endcaps,
+      ...endcapsPatch,
+    },
+  };
+}
+
+export function setConnectorBehavior(connector, behaviorPatch) {
+  return {
+    ...connector,
+    behavior: {
+      ...connector.behavior,
+      ...behaviorPatch,
+    },
+  };
+}
+```
+
+---
+
+# 5. Оновлюємо `connectorGeometry.js`
+
+Тепер треба додати `free-straight`.
+
+---
+
+## нова функція
+
+```js id="utvxz2"
+export function buildFreeStraightPoints(start, end) {
+  return [start.x, start.y, end.x, end.y];
+}
+```
+
+---
+
+## оновити `buildConnectorPoints()`
+
+Було щось типу:
+
+```js id="dhuaxw"
+switch (connector.connectorType) { ... }
+```
+
+Треба зробити так:
+
+```js id="ombp04"
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+
+  switch (connector.pathType) {
+    case "free-straight":
+      return buildFreeStraightPoints(start, end);
+
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, connector.route || {});
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+```
+
+---
+
+## шматок для вставки
+
+```js id="pyy2v7"
+export function buildFreeStraightPoints(start, end) {
+  return [start.x, start.y, end.x, end.y];
+}
+
+export function buildConnectorPoints(connector, nodes) {
+  const start = resolveConnectorEndpoint(connector.start, nodes);
+  const end = resolveConnectorEndpoint(connector.end, nodes);
+
+  switch (connector.pathType) {
+    case "free-straight":
+      return buildFreeStraightPoints(start, end);
+
+    case "orthogonal-elbow":
+      return buildOrthogonalElbowPoints(start, end, connector.route || {});
+
+    case "orthogonal-straight":
+    default:
+      return buildOrthogonalStraightPoints(start, end);
+  }
+}
+```
+
+---
+
+# 6. Як створювати стрілку і подвійну стрілку
+
+У controller достатньо створити connector із різними `pathType/endcaps`.
+
+---
+
+## `canvasController.js`
+
+### звичайна похила/вільна лінія
+
+```js id="rkst3p"
+createTestFreeLine() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 280,
+      y: 170,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "none",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+### стрілка з одного боку
+
+```js id="09ycce"
+createTestArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+### подвійна стрілка
+
+```js id="vxb2ya"
+createTestDoubleArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "arrow",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+### navigation arrow
+
+```js id="sx4t2c"
+createTestNavigationArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+    behavior: {
+      type: "navigation",
+      link: {
+        targetSchemeId: "scheme-2",
+        highlightParam: "element-15",
+      },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+# 7. Як це краще подати в UI
+
+Я б радив не плодити 10 кнопок довго. Для старту ок, але архітектурно краще розділити:
+
+## Блок “Траєкторія”
+
+* Пряма
+* Ортогональна пряма
+* Ламана
+
+## Блок “Кінці”
+
+* Без стрілки
+* Стрілка в кінці
+* Стрілки з двох боків
+
+## Блок “Поведінка”
+
+* Звичайний
+* Перехід
+
+Але для MVP тестові кнопки теж нормальні.
+
+---
+
+## MVP кнопки
+
+```jsx id="lbbowh"
+<Button onClick={() => canvasController.createTestFreeLine()}>
+  Додати лінію
+</Button>
+
+<Button onClick={() => canvasController.createTestArrow()}>
+  Додати стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestDoubleArrow()}>
+  Додати подвійну стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestNavigationArrow()}>
+  Додати стрілку переходу
+</Button>
+```
+
+---
+
+# 8. Як це лягає на майбутній render
+
+Поки без коду, але логіка така:
+
+* `geometry.points` рендериш як `Line`
+* якщо `endcaps.end === "arrow"` → малюєш наконечник на останньому сегменті
+* якщо `endcaps.start === "arrow"` → малюєш наконечник на першому сегменті
+
+Тобто ніяких окремих типів “double-arrow-line” не потрібно.
+
+---
+
+# 9. Найважливіший архітектурний плюс
+
+Оце рішення дозволяє без росту хаосу підтримати:
+
+* звичайну лінію
+* стрілку
+* подвійну стрілку
+* navigation arrow
+* у майбутньому інші marker-и
+
+Бо все це **один connector**, а не 8 різних сутностей.
+
+---
+
+# 10. Що змінити в уже існуючому коді мінімально
+
+Щоб не ламати все одразу, можеш тимчасово зробити так:
+
+* `connectorType` ще лишити, але нові connector-и вже створювати з `pathType`
+* або перейти на `pathType` повністю одразу
+
+Я б радив **у новому коді вже використовувати `pathType`**, а старі тестові elbow/straight теж підправити під нього.
+
+---
+
+# 11. Найкоротший практичний набір
+
+Ось що реально треба зараз зробити:
+
+## у `connectorModel.js`
+
+додати:
+
+* `pathType`
+* `endcaps`
+* `behavior`
+
+## у `connectorGeometry.js`
+
+додати:
+
+* `buildFreeStraightPoints()`
+* `buildConnectorPoints()` через `pathType`
+
+## у controller
+
+додати:
+
+* `createTestFreeLine()`
+* `createTestArrow()`
+* `createTestDoubleArrow()`
+* `createTestNavigationArrow()`
+
+## у UI
+
+додати 2–4 тестові кнопки
+
+---
+
+# 12. Висновок
+
+Правильна архітектура для “лінії зі стрілкою” у твоєму редакторі — це:
+
+* **не окремий тип сутності**
+* а **звичайний connector**
+* з:
+
+  * `pathType`
+  * `endcaps`
+  * `behavior`
+
+Саме так ти без хаосу отримаєш:
+
+* line
+* arrow
+* double arrow
+* navigation arrow
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі **наступний практичний шматок: як саме рендерити наконечник стрілки для `free-straight` і потім узагальнити це для будь-якого connector-а**.

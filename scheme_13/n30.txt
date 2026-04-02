@@ -1,0 +1,580 @@
+Добре. Далі найправильніший крок — **не переходити на `Konva.Arrow`**, а залишити свій `Line` і окремо домалювати **наконечники стрілок** як окремі shape.
+
+Це краще для твоєї архітектури, бо:
+
+* один рендер-пайплайн для всіх connector-ів
+* одна логіка для:
+
+  * `free-straight`
+  * `orthogonal-straight`
+  * `orthogonal-elbow`
+* легко підтримати:
+
+  * стрілку в кінці
+  * стрілку на початку
+  * стрілки з двох боків
+* потім можна додати інші endcaps без перелому архітектури
+
+---
+
+# 1. Ідея рендеру стрілки
+
+У тебе вже є:
+
+```js id="nuw46v"
+connector.geometry.points
+```
+
+Це polyline.
+
+Щоб намалювати стрілку, треба взяти:
+
+## для кінцевої стрілки
+
+останні 2 точки polyline:
+
+* передостанню
+* останню
+
+І по цьому сегменту обчислити трикутник наконечника.
+
+## для початкової стрілки
+
+перші 2 точки polyline:
+
+* першу
+* другу
+
+І по цьому сегменту так само обчислити трикутник.
+
+---
+
+# 2. Що саме треба зробити
+
+Я б виніс це в окремий файл:
+
+```txt id="jlwm4g"
+/lib/connectors/connectorMarkers.js
+```
+
+Там буде 2 helper-и:
+
+* `getArrowHeadPoints(from, to, size)`
+* `getConnectorEndcapShapes(connector)`
+
+---
+
+# 3. `lib/connectors/connectorMarkers.js`
+
+Ось готовий MVP.
+
+```js id="4co66a"
+function normalize(dx, dy) {
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return {
+    x: dx / len,
+    y: dy / len,
+  };
+}
+
+/**
+ * Будує трикутник стрілки в точці `to`,
+ * орієнтований вздовж напрямку from -> to.
+ */
+export function getArrowHeadPoints(from, to, size = 12, width = 8) {
+  const dir = normalize(to.x - from.x, to.y - from.y);
+
+  // точка основи стрілки трохи назад від вершини
+  const base = {
+    x: to.x - dir.x * size,
+    y: to.y - dir.y * size,
+  };
+
+  // перпендикуляр
+  const perp = {
+    x: -dir.y,
+    y: dir.x,
+  };
+
+  const left = {
+    x: base.x + perp.x * (width / 2),
+    y: base.y + perp.y * (width / 2),
+  };
+
+  const right = {
+    x: base.x - perp.x * (width / 2),
+    y: base.y - perp.y * (width / 2),
+  };
+
+  return [
+    to.x, to.y,
+    left.x, left.y,
+    right.x, right.y,
+  ];
+}
+
+/**
+ * Витягує початковий сегмент polyline
+ */
+export function getStartSegment(points = []) {
+  if (!points || points.length < 4) return null;
+
+  return {
+    from: { x: points[1 * 0], y: points[1 * 0 + 1] }, // just to keep code simple? no
+  };
+}
+```
+
+Тут я зупинюсь і дам одразу правильну фінальну версію без сміття:
+
+```js id="hqgf6t"
+function normalize(dx, dy) {
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return {
+    x: dx / len,
+    y: dy / len,
+  };
+}
+
+export function getArrowHeadPoints(from, to, size = 12, width = 8) {
+  const dir = normalize(to.x - from.x, to.y - from.y);
+
+  const base = {
+    x: to.x - dir.x * size,
+    y: to.y - dir.y * size,
+  };
+
+  const perp = {
+    x: -dir.y,
+    y: dir.x,
+  };
+
+  const left = {
+    x: base.x + perp.x * (width / 2),
+    y: base.y + perp.y * (width / 2),
+  };
+
+  const right = {
+    x: base.x - perp.x * (width / 2),
+    y: base.y - perp.y * (width / 2),
+  };
+
+  return [
+    to.x, to.y,
+    left.x, left.y,
+    right.x, right.y,
+  ];
+}
+
+export function getConnectorStartSegment(points = []) {
+  if (!points || points.length < 4) return null;
+
+  return {
+    from: {
+      x: points[2],
+      y: points[3],
+    },
+    to: {
+      x: points[0],
+      y: points[1],
+    },
+  };
+}
+
+export function getConnectorEndSegment(points = []) {
+  if (!points || points.length < 4) return null;
+
+  const n = points.length;
+
+  return {
+    from: {
+      x: points[n - 4],
+      y: points[n - 3],
+    },
+    to: {
+      x: points[n - 2],
+      y: points[n - 1],
+    },
+  };
+}
+```
+
+---
+
+# 4. Як це рендерити в `ConnectorsLayer.jsx`
+
+Тобі потрібно імпортувати `Line` і `Shape` або краще `Line` для трикутника теж можна, але простіше `Line` з `closed`.
+
+Я раджу:
+
+* сам connector → `Line`
+* стрілка → ще один `Line`, але з `closed`
+
+---
+
+## Імпорт
+
+```js id="0skmql"
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+```
+
+---
+
+## Усередині map(connector)
+
+Після того, як у тебе вже є:
+
+```js id="omfgng"
+const pts = connector.geometry?.points || [];
+```
+
+додай:
+
+```js id="tpir22"
+const startSegment = getConnectorStartSegment(pts);
+const endSegment = getConnectorEndSegment(pts);
+
+const startArrowPoints =
+  connector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+    : null;
+
+const endArrowPoints =
+  connector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+    : null;
+```
+
+---
+
+## І нижче, після основної `Line`, домалюй наконечники
+
+```jsx id="jlwmfj"
+{startArrowPoints && (
+  <Line
+    points={startArrowPoints}
+    closed
+    fill={connector.style?.stroke || "black"}
+    stroke={connector.style?.stroke || "black"}
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+
+{endArrowPoints && (
+  <Line
+    points={endArrowPoints}
+    closed
+    fill={connector.style?.stroke || "black"}
+    stroke={connector.style?.stroke || "black"}
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+```
+
+---
+
+# 5. Як це працює
+
+## Для звичайної лінії
+
+```js id="qcwqsl"
+endcaps: {
+  start: "none",
+  end: "none",
+}
+```
+
+Нічого не малюється.
+
+## Для стрілки
+
+```js id="yfh5bh"
+endcaps: {
+  start: "none",
+  end: "arrow",
+}
+```
+
+Малюється тільки наконечник у кінці.
+
+## Для подвійної стрілки
+
+```js id="egrw3x"
+endcaps: {
+  start: "arrow",
+  end: "arrow",
+}
+```
+
+Малюються два наконечники.
+
+---
+
+# 6. Чому це добре для `free-straight`
+
+Для `free-straight` це працює ідеально:
+
+* у тебе всього один сегмент
+* наконечник точно орієнтований за напрямком лінії
+* якщо перетягнеш кінець вліво — стрілка автоматично дивиться вліво
+* якщо під кутом — теж все ок
+
+Тобто ніякої окремої логіки “стрілка вправо/вліво” не треба.
+
+---
+
+# 7. І чому це добре для `orthogonal-*`
+
+Для `orthogonal-elbow` або `orthogonal-straight` це теж працює:
+
+* стрілка просто орієнтується по останньому сегменту
+* а початкова — по першому
+
+Це універсальний підхід.
+
+---
+
+# 8. Онови `createTest...` методи в controller
+
+Щоб почати тестувати, роби нові connector-и так.
+
+---
+
+## Звичайна лінія під будь-яким кутом
+
+```js id="n4esvu"
+createTestFreeLine() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 280,
+      y: 180,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "none",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+## Стрілка
+
+```js id="7v63g3"
+createTestArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+## Подвійна стрілка
+
+```js id="tcjlwm"
+createTestDoubleArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "arrow",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+## Стрілка-перехід
+
+```js id="m6is9w"
+createTestNavigationArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+    behavior: {
+      type: "navigation",
+      link: {
+        targetSchemeId: "scheme-2",
+        highlightParam: "element-15",
+      },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+# 9. Які кнопки додати в UI
+
+```jsx id="75xwkb"
+<Button onClick={() => canvasController.createTestFreeLine()}>
+  Додати лінію
+</Button>
+
+<Button onClick={() => canvasController.createTestArrow()}>
+  Додати стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestDoubleArrow()}>
+  Додати подвійну стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestNavigationArrow()}>
+  Додати стрілку переходу
+</Button>
+```
+
+---
+
+# 10. Як це красиво вписати в інтерфейс
+
+Якщо говорити не про тестові кнопки, а про майбутній UX, я б радив так:
+
+## блок “Лінії”
+
+* Пряма
+* Ламана
+
+## блок “Наконечники”
+
+* Без стрілок
+* Стрілка
+* Подвійна стрілка
+
+## блок “Дія”
+
+* Звичайна
+* Перехід
+
+Тобто не множити кнопки без кінця, а комбінувати параметри.
+
+Але для MVP тестові кнопки — ок.
+
+---
+
+# 11. Дуже важлива архітектурна межа
+
+Оце варто зафіксувати як правило:
+
+## `pathType`
+
+відповідає тільки за геометрію шляху
+
+## `endcaps`
+
+відповідає тільки за оформлення кінців
+
+## `behavior`
+
+відповідає тільки за функціональну роль
+
+Саме це не дасть коду розростися хаотично.
+
+---
+
+# 12. Підсумок
+
+Щоб додати “лінію зі стрілкою під будь-яким кутом”, треба:
+
+* додати `pathType: "free-straight"`
+* додати `endcaps`
+* рендерити arrowhead окремо від `Line`
+* створити тестову кнопку
+
+І це ж саме автоматично дає тобі:
+
+* звичайну лінію
+* стрілку
+* подвійну стрілку
+* navigation arrow
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі **цільний оновлений `ConnectorsLayer.jsx` одним блоком**, уже з:
+
+* `Line`
+* `arrowhead render`
+* `start/end handles`
+* `segment handles` тільки для elbow
+* `waypoints` тільки для elbow.

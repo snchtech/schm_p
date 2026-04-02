@@ -1,0 +1,874 @@
+Так. Нижче даю **цільний узгоджений варіант** для:
+
+* `connectorModel.js`
+* `canvasController.js`
+
+під нову модель:
+
+* `pathType`
+* `endcaps`
+* `behavior`
+
+Щоб у тебе вже не було змішаного стану:
+
+* десь `connectorType`
+* десь `pathType`
+
+---
+
+# 1. `lib/connectors/connectorModel.js`
+
+Це базова модель connector-а.
+
+```js
+export function createConnector({
+  pathType = "orthogonal-straight", // free-straight | orthogonal-straight | orthogonal-elbow
+  start,
+  end,
+  endcaps,
+  behavior,
+  style,
+}) {
+  return {
+    id: crypto.randomUUID(),
+    kind: "connector",
+
+    pathType,
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      // тільки для orthogonal-elbow
+      waypoints: [],
+      baseOffset: null,
+    },
+
+    endcaps: {
+      start: endcaps?.start ?? "none", // none | arrow
+      end: endcaps?.end ?? "none",     // none | arrow
+    },
+
+    behavior: {
+      type: behavior?.type ?? "default", // default | navigation
+      link: behavior?.link ?? null,      // { targetSchemeId, highlightParam } | null
+    },
+
+    geometry: {
+      points: [],
+    },
+
+    style: {
+      stroke: style?.stroke ?? "black",
+      strokeWidth: style?.strokeWidth ?? 2,
+    },
+  };
+}
+
+export function updateConnectorStart(connector, patch) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      ...patch,
+    },
+  };
+}
+
+export function updateConnectorEnd(connector, patch) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      ...patch,
+    },
+  };
+}
+
+export function attachConnectorStart(connector, attachment) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: attachment,
+    },
+  };
+}
+
+export function attachConnectorEnd(connector, attachment) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: attachment,
+    },
+  };
+}
+
+export function detachConnectorStart(connector) {
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function detachConnectorEnd(connector) {
+  return {
+    ...connector,
+    end: {
+      ...connector.end,
+      attached: { type: "none" },
+    },
+  };
+}
+
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [...(connector.route?.waypoints || []), waypoint],
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+
+export function setConnectorBaseOffset(connector, baseOffset) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      baseOffset,
+    },
+  };
+}
+
+export function clearConnectorBaseOffset(connector) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      baseOffset: null,
+    },
+  };
+}
+
+export function setConnectorEndcaps(connector, patch) {
+  return {
+    ...connector,
+    endcaps: {
+      ...connector.endcaps,
+      ...patch,
+    },
+  };
+}
+
+export function setConnectorBehavior(connector, patch) {
+  return {
+    ...connector,
+    behavior: {
+      ...connector.behavior,
+      ...patch,
+    },
+  };
+}
+
+export function setConnectorStyle(connector, patch) {
+  return {
+    ...connector,
+    style: {
+      ...connector.style,
+      ...patch,
+    },
+  };
+}
+```
+
+---
+
+# 2. `canvasController.js`
+
+Нижче даю **цільний блок саме для connector-частини** controller-а.
+Його можна вставити в твій існуючий `canvasController`, не чіпаючи legacy edge-методи.
+
+Тут я використовую:
+
+* `createConnector`
+* `updateConnectorStart`
+* `updateConnectorEnd`
+* `attachConnectorStart`
+* `attachConnectorEnd`
+* `removeConnectorWaypoint`
+* `addConnectorWaypoint`
+* `rebuildConnectorGeometry`
+* `moveElbowSegmentHandle`
+* `moveConnectorWaypoint`
+* `createWaypointAtSegment`
+* `findClosestConnectorSegment`
+* `getConnectorAttachPreview`
+
+---
+
+## Імпорти
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+import {
+  createConnector,
+  updateConnectorStart,
+  updateConnectorEnd,
+  attachConnectorStart,
+  attachConnectorEnd,
+  addConnectorWaypoint,
+  removeConnectorWaypoint,
+} from "@/lib/connectors/connectorModel";
+
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+import {
+  moveElbowSegmentHandle,
+  moveConnectorWaypoint,
+  createWaypointAtSegment,
+  findClosestConnectorSegment,
+} from "@/lib/connectors/connectorEditing";
+
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+```
+
+---
+
+## Цільний блок методів
+
+```js
+export const canvasController = {
+  // =========================================================
+  // CREATE TEST CONNECTORS
+  // =========================================================
+
+  createTestConnector({
+    pathType = "orthogonal-elbow",
+    endcaps = { start: "none", end: "none" },
+    behavior = { type: "default", link: null },
+    start = { x: 120, y: 120, attached: { type: "none" } },
+    end,
+  } = {}) {
+    const store = useCanvasStore.getState();
+
+    const resolvedEnd =
+      end ||
+      (pathType === "orthogonal-elbow"
+        ? { x: 320, y: 220, attached: { type: "none" } }
+        : { x: 320, y: 120, attached: { type: "none" } });
+
+    let connector = createConnector({
+      pathType,
+      start,
+      end: resolvedEnd,
+      endcaps,
+      behavior,
+    });
+
+    connector = rebuildConnectorGeometry(connector, store.nodes);
+
+    store.addEdge?.(connector);
+    store.setSelection?.({ type: "edge", id: connector.id });
+  },
+
+  createTestOrthogonalElbow() {
+    this.createTestConnector({
+      pathType: "orthogonal-elbow",
+      endcaps: { start: "none", end: "none" },
+    });
+  },
+
+  createTestOrthogonalStraight() {
+    this.createTestConnector({
+      pathType: "orthogonal-straight",
+      endcaps: { start: "none", end: "none" },
+    });
+  },
+
+  createTestFreeLine() {
+    this.createTestConnector({
+      pathType: "free-straight",
+      start: { x: 120, y: 120, attached: { type: "none" } },
+      end: { x: 300, y: 180, attached: { type: "none" } },
+      endcaps: { start: "none", end: "none" },
+    });
+  },
+
+  createTestArrow() {
+    this.createTestConnector({
+      pathType: "free-straight",
+      start: { x: 120, y: 120, attached: { type: "none" } },
+      end: { x: 320, y: 120, attached: { type: "none" } },
+      endcaps: { start: "none", end: "arrow" },
+    });
+  },
+
+  createTestDoubleArrow() {
+    this.createTestConnector({
+      pathType: "free-straight",
+      start: { x: 120, y: 120, attached: { type: "none" } },
+      end: { x: 320, y: 120, attached: { type: "none" } },
+      endcaps: { start: "arrow", end: "arrow" },
+    });
+  },
+
+  createTestNavigationArrow() {
+    this.createTestConnector({
+      pathType: "free-straight",
+      start: { x: 120, y: 120, attached: { type: "none" } },
+      end: { x: 320, y: 120, attached: { type: "none" } },
+      endcaps: { start: "none", end: "arrow" },
+      behavior: {
+        type: "navigation",
+        link: {
+          targetSchemeId: "scheme-2",
+          highlightParam: "element-15",
+        },
+      },
+    });
+  },
+
+  // =========================================================
+  // START HANDLE DRAG
+  // =========================================================
+
+  handleConnectorStartDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const preview = getConnectorAttachPreview(store.nodes, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    if (preview) {
+      store.setConnectorAttachPreview?.({
+        edgeId,
+        end: "start",
+        nodeId: preview.nodeId,
+        anchors: preview.anchors,
+        activeAnchor: preview.activeAnchor,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    // non-destructive update: route не чіпаємо
+    let next = {
+      ...connector,
+      start: {
+        ...connector.start,
+        x: pos.x,
+        y: pos.y,
+        attached: { type: "none" },
+      },
+      route: {
+        ...connector.route,
+        waypoints: [...(connector.route?.waypoints || [])],
+      },
+    };
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorStartDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const preview =
+      store.connectorAttachPreview?.edgeId === edgeId &&
+      store.connectorAttachPreview?.end === "start"
+        ? store.connectorAttachPreview
+        : null;
+
+    const attachTarget = preview?.activeAnchor || null;
+
+    let next = {
+      ...connector,
+      start: {
+        ...connector.start,
+      },
+      route: {
+        ...connector.route,
+        waypoints: [...(connector.route?.waypoints || [])],
+      },
+    };
+
+    if (attachTarget) {
+      next = attachConnectorStart(next, {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.direction,
+      });
+
+      next = updateConnectorStart(next, {
+        x: attachTarget.x,
+        y: attachTarget.y,
+      });
+    } else {
+      next = updateConnectorStart(next, {
+        x: pos.x,
+        y: pos.y,
+        attached: { type: "none" },
+      });
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+    store.clearConnectorAttachPreview?.();
+  },
+
+  // =========================================================
+  // END HANDLE DRAG
+  // =========================================================
+
+  handleConnectorEndDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const preview = getConnectorAttachPreview(store.nodes, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    if (preview) {
+      store.setConnectorAttachPreview?.({
+        edgeId,
+        end: "end",
+        nodeId: preview.nodeId,
+        anchors: preview.anchors,
+        activeAnchor: preview.activeAnchor,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    // non-destructive update: route не чіпаємо
+    let next = {
+      ...connector,
+      end: {
+        ...connector.end,
+        x: pos.x,
+        y: pos.y,
+        attached: { type: "none" },
+      },
+      route: {
+        ...connector.route,
+        waypoints: [...(connector.route?.waypoints || [])],
+      },
+    };
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorEndDragEnd(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    const preview =
+      store.connectorAttachPreview?.edgeId === edgeId &&
+      store.connectorAttachPreview?.end === "end"
+        ? store.connectorAttachPreview
+        : null;
+
+    const attachTarget = preview?.activeAnchor || null;
+
+    let next = {
+      ...connector,
+      end: {
+        ...connector.end,
+      },
+      route: {
+        ...connector.route,
+        waypoints: [...(connector.route?.waypoints || [])],
+      },
+    };
+
+    if (attachTarget) {
+      next = attachConnectorEnd(next, {
+        type: "node",
+        nodeId: attachTarget.nodeId,
+        anchor: attachTarget.direction,
+      });
+
+      next = updateConnectorEnd(next, {
+        x: attachTarget.x,
+        y: attachTarget.y,
+      });
+    } else {
+      next = updateConnectorEnd(next, {
+        x: pos.x,
+        y: pos.y,
+        attached: { type: "none" },
+      });
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+    store.clearConnectorAttachPreview?.();
+  },
+
+  // =========================================================
+  // SEGMENT HANDLE DRAG (тільки для orthogonal-elbow)
+  // =========================================================
+
+  handleConnectorSegmentDragMove(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragEnd(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x + 5,
+      y: pos.y + 5,
+    };
+
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  // =========================================================
+  // USER WAYPOINT DRAG (тільки для orthogonal-elbow)
+  // =========================================================
+
+  handleConnectorWaypointDragMove(edgeId, waypoint, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x,
+      y: pos.y,
+    };
+
+    let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorWaypointDragEnd(edgeId, waypoint, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+
+    const normalizedPos = {
+      x: pos.x,
+      y: pos.y,
+    };
+
+    let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  // =========================================================
+  // CONTEXT MENU ON CONNECTOR
+  // =========================================================
+
+  handleConnectorContextMenu(e, connector) {
+    e.evt.preventDefault();
+    e.cancelBubble = true;
+
+    const store = useCanvasStore.getState();
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+
+    if (!pointer) return;
+
+    const closest = findClosestConnectorSegment(connector, {
+      x: pointer.x,
+      y: pointer.y,
+    });
+
+    store.setSelection?.({ type: "edge", id: connector.id });
+
+    store.setContextMenu?.({
+      type: "connector",
+      edgeId: connector.id,
+      segmentIndex: closest?.segmentIndex ?? null,
+      x: pointer.x,
+      y: pointer.y,
+    });
+  },
+
+  handleConnectorWaypointContextMenu(e, connector, waypoint) {
+    e.evt.preventDefault();
+    e.cancelBubble = true;
+
+    const store = useCanvasStore.getState();
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+
+    if (!pointer) return;
+
+    store.setSelection?.({ type: "edge", id: connector.id });
+
+    store.setContextMenu?.({
+      type: "connector-waypoint",
+      edgeId: connector.id,
+      waypointId: waypoint.id,
+      x: pointer.x,
+      y: pointer.y,
+    });
+  },
+
+  // =========================================================
+  // CONTEXT MENU ACTIONS
+  // =========================================================
+
+  addConnectorWaypointFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+
+    if (!menu || menu.type !== "connector") return;
+
+    const connector = store.edges.find((e) => e.id === menu.edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+    if (menu.segmentIndex == null) return;
+
+    const waypoint = createWaypointAtSegment(connector, menu.segmentIndex);
+    if (!waypoint) {
+      store.clearContextMenu?.();
+      return;
+    }
+
+    let next = addConnectorWaypoint(connector, waypoint);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(connector.id, next);
+    store.clearContextMenu?.();
+  },
+
+  removeConnectorWaypointFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+
+    if (!menu || menu.type !== "connector-waypoint") return;
+
+    const connector = store.edges.find((e) => e.id === menu.edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (connector.pathType !== "orthogonal-elbow") return;
+
+    let next = removeConnectorWaypoint(connector, menu.waypointId);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(connector.id, next);
+    store.clearContextMenu?.();
+  },
+
+  deleteConnectorFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+
+    if (!menu || menu.type !== "connector") return;
+    if (!menu.edgeId) return;
+
+    const connector = store.edges.find((e) => e.id === menu.edgeId);
+    if (!connector || connector.kind !== "connector") {
+      store.clearContextMenu?.();
+      return;
+    }
+
+    store.removeEdge?.(menu.edgeId);
+    store.clearContextMenu?.();
+  },
+
+  // =========================================================
+  // REBUILD WHEN NODE MOVES
+  // =========================================================
+
+  rebuildConnectorsForNode(nodeId, nodes, edges) {
+    return edges.map((edge) => {
+      if (edge.kind !== "connector") return edge;
+
+      const touchesStart =
+        edge.start?.attached?.type === "node" &&
+        edge.start.attached.nodeId === nodeId;
+
+      const touchesEnd =
+        edge.end?.attached?.type === "node" &&
+        edge.end.attached.nodeId === nodeId;
+
+      if (!touchesStart && !touchesEnd) {
+        return edge;
+      }
+
+      return rebuildConnectorGeometry(edge, nodes);
+    });
+  },
+};
+```
+
+---
+
+# 3. Що ще треба узгодити у тебе після цього
+
+Є 3 місця, які тепер мають працювати вже з **`pathType`**, а не зі старим `connectorType`.
+
+---
+
+## A. `connectorGeometry.js`
+
+`buildConnectorPoints()` має читати:
+
+```js
+connector.pathType
+```
+
+а не `connector.connectorType`.
+
+---
+
+## B. `connectorEditing.js`
+
+де ти фільтруєш elbow-логіку, має бути:
+
+```js
+if (connector.pathType !== "orthogonal-elbow") return [];
+```
+
+і аналогічно в інших місцях.
+
+---
+
+## C. `ConnectorsLayer.jsx`
+
+де ти перевіряєш, коли показувати:
+
+* `segmentHandles`
+* `waypoints`
+
+треба дивитися на:
+
+```js
+connector.pathType === "orthogonal-elbow"
+```
+
+---
+
+# 4. Моя практична рекомендація
+
+Щоб не мати хаосу, після вставки цього коду краще:
+
+* повністю прибрати `connectorType`
+* і всюди перейти на `pathType`
+
+Бо інакше потім буде плутанина.
+
+---
+
+# 5. Що це тобі дає
+
+Після цього в тебе вже буде одна цілісна модель connector-а:
+
+* `pathType`
+* `endcaps`
+* `behavior`
+
+І вона покриває:
+
+* вільну лінію
+* стрілку
+* подвійну стрілку
+* стрілку-перехід
+* ортогональну пряму
+* ламану
+
+без плодіння окремих сутностей.
+
+---
+
+# 6. Що логічно робити далі
+
+Після такого узгодження моделі наступний сильний крок — один із двох:
+
+### варіант 1
+
+зробити **toolbar controls**:
+
+* path type
+* endcaps
+* behavior
+
+### варіант 2
+
+зробити **клік по navigation arrow у viewer mode**, щоб реально відкривав іншу схему
+
+На мою думку, якщо зараз ти доробляєш редактор, то краще йти в **toolbar/config редактора**.
+
+Якщо хочеш, я наступним повідомленням можу дати тобі **узгоджений оновлений `connectorEditing.js` під `pathType`**, щоб і ця частина вже не лишалась частково старою.

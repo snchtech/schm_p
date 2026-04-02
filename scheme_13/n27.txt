@@ -1,0 +1,256 @@
+Ось **цільний практичний блок**, щоб додати ще одну тестову кнопку для **прямого connector-а** і зробити його окремим типом, який:
+
+* додається як об’єкт у `edges`
+* має `start/end` handles
+* приєднується до фігур так само, як ламаний
+* але сам маршрут будується **без зламів**, тільки:
+
+  * горизонтально
+  * або вертикально
+
+---
+
+# 1. Онови `buildOrthogonalStraightPoints()` у `connectorGeometry.js`
+
+Заміни поточну функцію на цю:
+
+```js id="20p7s3"
+export function buildOrthogonalStraightPoints(start, end) {
+  const dx = Math.abs(end.x - start.x);
+  const dy = Math.abs(end.y - start.y);
+
+  // якщо переважає горизонталь — тримаємо одну горизонтальну лінію
+  if (dx >= dy) {
+    return [start.x, start.y, end.x, start.y];
+  }
+
+  // інакше тримаємо одну вертикальну лінію
+  return [start.x, start.y, start.x, end.y];
+}
+```
+
+---
+
+# 2. Додай універсальний `createTestConnector(type)` у `canvasController.js`
+
+Якщо в тебе вже є `createTestConnector`, просто заміни його на такий варіант:
+
+```js id="jupc8y"
+createTestConnector(type = "orthogonal-elbow") {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    connectorType: type,
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: type === "orthogonal-straight" ? 320 : 320,
+      y: type === "orthogonal-straight" ? 120 : 220,
+      attached: { type: "none" },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+# 3. Додай кнопки в панель
+
+Наприклад у твою панель інструментів / test buttons:
+
+```jsx id="q41d1h"
+<Button
+  size="small"
+  variant="outlined"
+  onClick={() =>
+    canvasController.createTestConnector("orthogonal-straight")
+  }
+>
+  Додати пряму лінію
+</Button>
+
+<Button
+  size="small"
+  variant="outlined"
+  onClick={() =>
+    canvasController.createTestConnector("orthogonal-elbow")
+  }
+>
+  Додати ламану лінію
+</Button>
+```
+
+---
+
+# 4. Переконайся, що `ConnectorsLayer.jsx` не показує зайві handles для straight
+
+Для прямого connector-а не треба:
+
+* segment handles
+* waypoints
+
+Отже, у `ConnectorsLayer.jsx` краще мати так:
+
+```js id="j3miz7"
+const waypoints = isSelected
+  ? connector.route?.waypoints || []
+  : [];
+
+const segmentHandles =
+  isSelected && connector.connectorType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+```
+
+Якщо `getConnectorSegmentHandles()` вже саме повертає `[]` для straight — теж ок, але цей варіант явніший.
+
+---
+
+# 5. Start/end drag для straight працює без додаткових змін
+
+Оце важливий плюс твоєї архітектури.
+
+Тобі не треба окремий controller для straight connector-а, бо вже є:
+
+* `handleConnectorStartDragMove`
+* `handleConnectorStartDragEnd`
+* `handleConnectorEndDragMove`
+* `handleConnectorEndDragEnd`
+
+Вони працюють однаково для:
+
+* `orthogonal-elbow`
+* `orthogonal-straight`
+
+Відрізняється тільки те, як `rebuildConnectorGeometry()` будує points.
+
+---
+
+# 6. Що буде по поведінці
+
+Після цього straight connector буде поводитись так:
+
+## при створенні
+
+* додається як окремий object у `edges`
+* стартово горизонтальний
+
+## при drag start/end
+
+* endpoint можна тягнути
+* при наближенні до фігури показуються anchor точки
+* при drop endpoint attached до фігури
+
+## при побудові
+
+* лінія лишається без зламів
+* автоматично вибирає:
+
+  * або горизонталь
+  * або вертикаль
+
+---
+
+# 7. Повний мінімальний комплект змін
+
+Якщо коротко, тобі реально достатньо цих трьох шматків.
+
+---
+
+## `connectorGeometry.js`
+
+```js id="8n14h9"
+export function buildOrthogonalStraightPoints(start, end) {
+  const dx = Math.abs(end.x - start.x);
+  const dy = Math.abs(end.y - start.y);
+
+  if (dx >= dy) {
+    return [start.x, start.y, end.x, start.y];
+  }
+
+  return [start.x, start.y, start.x, end.y];
+}
+```
+
+---
+
+## `canvasController.js`
+
+```js id="2p9qaz"
+createTestConnector(type = "orthogonal-elbow") {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    connectorType: type,
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: type === "orthogonal-straight" ? 120 : 220,
+      attached: { type: "none" },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+## Панель кнопок
+
+```jsx id="i678bj"
+<Button
+  size="small"
+  variant="outlined"
+  onClick={() =>
+    canvasController.createTestConnector("orthogonal-straight")
+  }
+>
+  Додати пряму лінію
+</Button>
+
+<Button
+  size="small"
+  variant="outlined"
+  onClick={() =>
+    canvasController.createTestConnector("orthogonal-elbow")
+  }
+>
+  Додати ламану лінію
+</Button>
+```
+
+---
+
+# 8. Моя рекомендація
+
+Після того, як це запрацює, дуже логічний наступний крок — зробити:
+
+* окремий tool mode для straight connector
+* не просто test button, а:
+
+  * клік по canvas → start
+  * клік по canvas або object → end
+
+Але для перевірки нової моделі test button зараз ідеальний варіант.
+
+Хочеш, я далі можу зібрати ще **готовий компактний `ConnectorsToolSection.jsx`**, де одразу будуть кнопки:
+
+* пряма лінія
+* ламана лінія
+* скасувати режим / очистити selection.

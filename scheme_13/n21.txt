@@ -1,0 +1,416 @@
+Так, це треба робити. І найкраще — **не зміщувати самі anchor-и в registry**, а робити окремий **connector attachment gap** тільки для геометрії конектора.
+
+Тобто:
+
+* **registry anchor** лишається реальною точкою прив’язки на межі фігури
+* **connector endpoint** для промальовки зміщується трохи назовні
+* attach логіка все одно працює по справжньому anchor
+* лінія не “налипає” на shape
+
+Це найчистіший варіант.
+
+---
+
+# 1. Правильний принцип
+
+Потрібно розділити 2 речі:
+
+## логічний anchor
+
+це точка в registry:
+
+```js id="nfjlwm"
+{
+  id: `${node.id}-right`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "right",
+  x: ...,
+  y: ...
+}
+```
+
+## візуальний endpoint connector-а
+
+це вже точка, від якої реально стартує/закінчується лінія:
+
+```js id="bcjlwm"
+{
+  x: anchor.x + gap,
+  y: anchor.y
+}
+```
+
+для `right`, і аналогічно для інших сторін.
+
+---
+
+# 2. Де саме це робити
+
+Роби це в **`connectorGeometry.js`**, у функції, яка резолвить endpoint connector-а.
+
+Тобто не тут:
+
+* не в registry
+* не в preview layer
+* не в controller
+
+А саме в геометрії connector-а.
+
+---
+
+# 3. Що змінити в `connectorGeometry.js`
+
+Зараз у тебе, ймовірно, є щось таке:
+
+```js id="5v3cb7"
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+    if (pos) return pos;
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+```
+
+Треба переписати так, щоб був **невеликий outward gap**.
+
+---
+
+## Оновлений варіант
+
+```js id="jctjqj"
+function applyAnchorGap(anchor, gap = 8) {
+  switch (anchor.direction) {
+    case "top":
+      return {
+        x: anchor.x,
+        y: anchor.y - gap,
+      };
+
+    case "bottom":
+      return {
+        x: anchor.x,
+        y: anchor.y + gap,
+      };
+
+    case "left":
+      return {
+        x: anchor.x - gap,
+        y: anchor.y,
+      };
+
+    case "right":
+      return {
+        x: anchor.x + gap,
+        y: anchor.y,
+      };
+
+    default:
+      return {
+        x: anchor.x,
+        y: anchor.y,
+      };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    const pos = getNodeAnchorPosition(node, endpoint.attached.anchor);
+
+    if (pos) {
+      return applyAnchorGap(
+        {
+          ...pos,
+          direction: endpoint.attached.anchor,
+        },
+        8
+      );
+    }
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+```
+
+---
+
+# 4. Якщо ти вже береш anchor-и через registry — ще краще
+
+Якщо ти вже перейшов на підхід, де attach endpoint працює через `ELEMENT_REGISTRY.getAnchors(node)`, то ще краще зробити це не через `getNodeAnchorPosition()`, а через helper, який шукає конкретний anchor із registry.
+
+---
+
+## Варіант через registry anchor
+
+```js id="5b2too"
+import { getAnchorsForNode } from "@/lib/connectors/connectorAttach";
+
+function applyAnchorGap(anchor, gap = 8) {
+  switch (anchor.direction) {
+    case "top":
+      return { x: anchor.x, y: anchor.y - gap };
+    case "bottom":
+      return { x: anchor.x, y: anchor.y + gap };
+    case "left":
+      return { x: anchor.x - gap, y: anchor.y };
+    case "right":
+      return { x: anchor.x + gap, y: anchor.y };
+    default:
+      return { x: anchor.x, y: anchor.y };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) return { x: 0, y: 0 };
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    if (!node) {
+      return { x: endpoint.x, y: endpoint.y };
+    }
+
+    const anchors = getAnchorsForNode(node);
+    const anchor = anchors.find(
+      (a) => a.direction === endpoint.attached.anchor
+    );
+
+    if (anchor) {
+      return applyAnchorGap(anchor, 8);
+    }
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+```
+
+Оце взагалі найкращий варіант, бо:
+
+* registry = джерело правди
+* connector geometry = тільки візуальний відступ
+
+---
+
+# 5. Чому це краще, ніж зсувати сам anchor у registry
+
+Бо якщо зсунути anchor у registry, ти отримаєш побічні ефекти:
+
+* preview anchor-и будуть не там
+* attach до об’єкта буде “не в край”
+* старі edge-логіки можуть почати вести себе дивно
+* логічна точка прив’язки перестане бути реальною точкою shape
+
+А так:
+
+* attach лишається точним
+* connector просто стартує на 6–10px назовні
+
+---
+
+# 6. Який gap краще поставити
+
+Я б радив почати з:
+
+```js id="9svxq4"
+const CONNECTOR_ATTACH_GAP = 8;
+```
+
+Якщо shape товстіші або лінія ширша — можна 10 або 12.
+
+Можеш винести це в константу:
+
+```js id="dvi07h"
+export const CONNECTOR_ATTACH_GAP = 8;
+```
+
+---
+
+# 7. Якщо хочеш ще акуратніше
+
+Можна зробити 2 різні відступи:
+
+* для **preview anchor circles**
+* для **реальної лінії connector-а**
+
+Наприклад:
+
+```js id="p0oi5n"
+export const PREVIEW_ANCHOR_OFFSET = 8;
+export const CONNECTOR_ATTACH_GAP = 10;
+```
+
+Тоді:
+
+* preview точки красиво видно над shape
+* сама лінія теж не налипає
+
+---
+
+# 8. Що буде після цього
+
+Якщо endpoint attached до `right` anchor, то:
+
+### логічно attach:
+
+```js id="0vq1ib"
+x = anchor.x
+y = anchor.y
+```
+
+### але промальовка connector-а:
+
+```js id="j555au"
+x = anchor.x + 8
+y = anchor.y
+```
+
+Тобто лінія вже починається трохи правіше shape.
+
+Аналогічно:
+
+* `top` → трохи вище
+* `bottom` → трохи нижче
+* `left` → трохи лівіше
+
+---
+
+# 9. Важливе уточнення для прямої і elbow лінії
+
+Це однаково добре працює і для:
+
+* `orthogonal-straight`
+* `orthogonal-elbow`
+
+бо зміщується не сам тип лінії, а **resolved endpoint**.
+
+Тобто вся існуюча логіка build points лишається та сама.
+
+---
+
+# 10. Якщо endpoint detached
+
+Тоді gap не застосовується.
+Тобто:
+
+```js id="1kntw0"
+if (endpoint.attached?.type !== "node")
+```
+
+повертаєш як є:
+
+```js id="jlwmrl"
+{ x: endpoint.x, y: endpoint.y }
+```
+
+І це правильно.
+
+---
+
+# 11. Найкраща версія для твоєї архітектури
+
+Я б радив у тебе зробити саме так:
+
+## у `connectorGeometry.js`
+
+* `resolveConnectorEndpoint()`
+* `applyAnchorGap()`
+
+## у `connectorAttach.js`
+
+* не чіпати логічні anchor-и
+* тільки preview logic
+
+## у registry
+
+* нічого не зсувати
+
+---
+
+# 12. Готовий шматок для вставки
+
+Ось фінальний компактний варіант, який я б прямо вставив.
+
+```js id="ayk1bm"
+import { getAnchorsForNode } from "@/lib/connectors/connectorAttach";
+
+export const CONNECTOR_ATTACH_GAP = 8;
+
+function applyAnchorGap(anchor, gap = CONNECTOR_ATTACH_GAP) {
+  switch (anchor.direction) {
+    case "top":
+      return { x: anchor.x, y: anchor.y - gap };
+    case "bottom":
+      return { x: anchor.x, y: anchor.y + gap };
+    case "left":
+      return { x: anchor.x - gap, y: anchor.y };
+    case "right":
+      return { x: anchor.x + gap, y: anchor.y };
+    default:
+      return { x: anchor.x, y: anchor.y };
+  }
+}
+
+export function resolveConnectorEndpoint(endpoint, nodes) {
+  if (!endpoint) {
+    return { x: 0, y: 0 };
+  }
+
+  if (endpoint.attached?.type === "node") {
+    const node = nodes.find((n) => n.id === endpoint.attached.nodeId);
+    if (!node) {
+      return { x: endpoint.x, y: endpoint.y };
+    }
+
+    const anchors = getAnchorsForNode(node);
+    const anchor = anchors.find(
+      (a) => a.direction === endpoint.attached.anchor
+    );
+
+    if (anchor) {
+      return applyAnchorGap(anchor, CONNECTOR_ATTACH_GAP);
+    }
+  }
+
+  return {
+    x: endpoint.x,
+    y: endpoint.y,
+  };
+}
+```
+
+---
+
+# 13. Висновок
+
+Так, для connector-ів при attach до фігури треба робити невеликий відступ.
+Найкращий спосіб:
+
+* **не чіпати registry anchor-и**
+* **не чіпати preview logic**
+* робити **outward gap у `resolveConnectorEndpoint()`**
+
+Це дасть тобі:
+
+* чисту архітектуру
+* правильну прив’язку
+* лінія не налипатиме на shape
+
+---
+
+Якщо хочеш, я наступним повідомленням можу ще дати тобі **готовий оновлений `connectorGeometry.js` цілком**, уже з цим gap вбудованим у твій поточний MVP.

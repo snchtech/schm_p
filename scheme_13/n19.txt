@@ -1,0 +1,484 @@
+Ось хороший варіант, як **стандартизувати anchor-и через helper-и** і перестати дублювати математику в `registry.js`.
+
+Ідея така:
+
+* у `ELEMENT_REGISTRY` кожен shape має `getAnchors`
+* але `getAnchors` не пишеться вручну в кожному елементі
+* замість цього ти використовуєш helper-и з одного файла
+* preview/attach логіка бере anchor-и **тільки через registry**
+
+Це сильно спростить підтримку.
+
+---
+
+# 1. Новий файл `lib/anchors/shapeAnchors.js`
+
+```js id="he3cjf"
+function getNodeBase(node) {
+  const width = node?.data?.width || 0;
+  const height = node?.data?.height || 0;
+  const scale = node?.data?.scale || 1;
+
+  const { x = 0, y = 0 } = node?.position || {};
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    scale,
+    scaledWidth: width * scale,
+    scaledHeight: height * scale,
+  };
+}
+
+function makeAnchor(node, direction, x, y) {
+  return {
+    id: `${node.id}-${direction}`,
+    type: "node-anchor",
+    nodeId: node.id,
+    direction,
+    x,
+    y,
+  };
+}
+
+/**
+ * 4 стандартні anchor-и для прямокутних shape:
+ * top / right / bottom / left
+ */
+export function createRectAnchors(node) {
+  const { x, y, scaledWidth, scaledHeight } = getNodeBase(node);
+
+  return [
+    makeAnchor(node, "top", x + scaledWidth / 2, y),
+    makeAnchor(node, "right", x + scaledWidth, y + scaledHeight / 2),
+    makeAnchor(node, "bottom", x + scaledWidth / 2, y + scaledHeight),
+    makeAnchor(node, "left", x, y + scaledHeight / 2),
+  ];
+}
+
+/**
+ * Тільки top + right
+ * Зручно для shape, де реально потрібні 2 точки
+ */
+export function createTopRightAnchors(node) {
+  const { x, y, scaledWidth, scaledHeight } = getNodeBase(node);
+
+  return [
+    makeAnchor(node, "top", x + scaledWidth / 2, y),
+    makeAnchor(node, "right", x + scaledWidth, y + scaledHeight / 2),
+  ];
+}
+
+/**
+ * Тільки left + right
+ */
+export function createLeftRightAnchors(node) {
+  const { x, y, scaledWidth, scaledHeight } = getNodeBase(node);
+
+  return [
+    makeAnchor(node, "left", x, y + scaledHeight / 2),
+    makeAnchor(node, "right", x + scaledWidth, y + scaledHeight / 2),
+  ];
+}
+
+/**
+ * Тільки top + bottom
+ */
+export function createTopBottomAnchors(node) {
+  const { x, y, scaledWidth, scaledHeight } = getNodeBase(node);
+
+  return [
+    makeAnchor(node, "top", x + scaledWidth / 2, y),
+    makeAnchor(node, "bottom", x + scaledWidth / 2, y + scaledHeight),
+  ];
+}
+
+/**
+ * Кастомні anchor-и за конфігом.
+ * positions:
+ * [
+ *   { direction: "top", x: 0.5, y: 0 },
+ *   { direction: "right", x: 1, y: 0.5 }
+ * ]
+ *
+ * x/y тут у відносних координатах [0..1]
+ */
+export function createAnchorsFromRelativePositions(node, positions = []) {
+  const { x, y, scaledWidth, scaledHeight } = getNodeBase(node);
+
+  return positions.map((p) =>
+    makeAnchor(
+      node,
+      p.direction,
+      x + scaledWidth * p.x,
+      y + scaledHeight * p.y
+    )
+  );
+}
+
+/**
+ * Допоміжний wrapper:
+ * createAnchorGetter(createRectAnchors)
+ * або
+ * createAnchorGetter((node) => createAnchorsFromRelativePositions(node, [...]))
+ */
+export function createAnchorGetter(factory) {
+  return (node) => {
+    const anchors = factory(node) || [];
+
+    return anchors.map((a) => ({
+      type: "node-anchor",
+      nodeId: node.id,
+      ...a,
+    }));
+  };
+}
+```
+
+---
+
+# 2. Як використовувати в `registry.js`
+
+Тепер твій `ELEMENT_REGISTRY` можна дуже спростити.
+
+---
+
+## Було
+
+Умовно щось таке, де ти вручну пишеш `x/y` для кожного shape.
+
+## Стало
+
+```js id="8z0wgm"
+import {
+  createRectAnchors,
+  createTopRightAnchors,
+  createLeftRightAnchors,
+  createTopBottomAnchors,
+  createAnchorsFromRelativePositions,
+  createAnchorGetter,
+} from "@/lib/anchors/shapeAnchors";
+
+export const ELEMENT_REGISTRY = {
+  rect: {
+    component: RectShape,
+    getAnchors: createAnchorGetter(createRectAnchors),
+  },
+
+  twoTrianglesArrowDown: {
+    component: TwoTrianglesArrowDownShape,
+    defaultSize: { width: 40, height: 30 },
+    getAnchors: createAnchorGetter(createTopRightAnchors),
+  },
+
+  monitorCrossIcon: {
+    component: MonitorCrossIconShape,
+    defaultSize: { width: 40, height: 30 },
+    getAnchors: createAnchorGetter(createLeftRightAnchors),
+  },
+
+  someVerticalShape: {
+    component: SomeVerticalShape,
+    getAnchors: createAnchorGetter(createTopBottomAnchors),
+  },
+
+  customShape: {
+    component: CustomShape,
+    getAnchors: createAnchorGetter((node) =>
+      createAnchorsFromRelativePositions(node, [
+        { direction: "top", x: 0.5, y: 0 },
+        { direction: "right", x: 1, y: 0.5 },
+        { direction: "bottom", x: 0.5, y: 1 },
+      ])
+    ),
+  },
+};
+```
+
+---
+
+# 3. Що це дає
+
+Тепер у тебе є 3 рівні зручності:
+
+## Рівень 1 — типові shape
+
+Прямокутні, прості, стандартні:
+
+```js id="as9n1m"
+getAnchors: createAnchorGetter(createRectAnchors)
+```
+
+## Рівень 2 — shape з 2 anchor-ами
+
+Наприклад тільки `top/right` або `left/right`:
+
+```js id="94hvjx"
+getAnchors: createAnchorGetter(createTopRightAnchors)
+```
+
+## Рівень 3 — кастомний shape
+
+Через відносні координати:
+
+```js id="69q2e7"
+getAnchors: createAnchorGetter((node) =>
+  createAnchorsFromRelativePositions(node, [...])
+)
+```
+
+Це вже дуже гнучко.
+
+---
+
+# 4. Чому це краще за ручне прописування в `registry.js`
+
+Бо зараз у тебе, судячи з фото, у різних shape:
+
+* десь враховується `scale`
+* десь ні
+* десь різні назви змінних
+* десь ручна математика повторюється
+
+А з helper-ами:
+
+* логіка масштабу уніфікована
+* `x/y/width/height/scale` читаються однаково
+* формат anchor-а однаковий
+* attach логіка стабільна
+* preview layer стабільний
+
+---
+
+# 5. Як це використовувати в `connectorAttach.js`
+
+Там треба брати anchor-и **не напряму з shape**, а через registry helper.
+
+Якщо ти вже вставив попередній варіант, у тебе має бути щось таке:
+
+```js id="e3utq9"
+import { ELEMENT_REGISTRY } from "@/lib/registry";
+
+export function getAnchorsForNode(node) {
+  if (!node || !node.type) return [];
+
+  const entry = ELEMENT_REGISTRY[node.type];
+  if (!entry || typeof entry.getAnchors !== "function") {
+    return [];
+  }
+
+  const anchors = entry.getAnchors(node) || [];
+
+  return anchors.map((anchor) => ({
+    ...anchor,
+    type: anchor.type || "node-anchor",
+    nodeId: anchor.nodeId || node.id,
+  }));
+}
+```
+
+Це правильно. Саме так і залишай.
+
+---
+
+# 6. Як вирішити проблему “anchor частково під shape”
+
+Для цього, як ми вже обговорювали, треба не міняти логічні координати з registry, а робити preview offset.
+
+---
+
+## Додай helper у `connectorAttach.js`
+
+```js id="s1ew73"
+export function getPreviewAnchorPosition(anchor, offset = 8) {
+  switch (anchor.direction) {
+    case "top":
+      return { x: anchor.x, y: anchor.y - offset };
+    case "bottom":
+      return { x: anchor.x, y: anchor.y + offset };
+    case "left":
+      return { x: anchor.x - offset, y: anchor.y };
+    case "right":
+      return { x: anchor.x + offset, y: anchor.y };
+    default:
+      return { x: anchor.x, y: anchor.y };
+  }
+}
+```
+
+---
+
+# 7. `NodesAnchorPreviewLayer.jsx`
+
+Ось готовий варіант, який:
+
+* малює всі anchors найближчого node
+* активний робить зеленим
+* всі інші сині
+* рендерить **зі зміщенням назовні**
+
+```jsx id="0qg2yy"
+"use client";
+
+import React from "react";
+import { Group, Circle } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { getPreviewAnchorPosition } from "@/lib/connectors/connectorAttach";
+
+export default function NodesAnchorPreviewLayer() {
+  const preview = useCanvasStore((s) => s.connectorAttachPreview);
+
+  if (!preview || !preview.anchors?.length) {
+    return null;
+  }
+
+  const activeId = preview.activeAnchor?.id || null;
+
+  return (
+    <Group listening={false}>
+      {preview.anchors.map((anchor) => {
+        const isActive = anchor.id === activeId;
+        const p = getPreviewAnchorPosition(anchor, 8);
+
+        return (
+          <Circle
+            key={anchor.id}
+            x={p.x}
+            y={p.y}
+            radius={isActive ? 8 : 6}
+            fill={
+              isActive
+                ? "rgba(39, 174, 96, 0.30)"
+                : "rgba(47, 128, 237, 0.20)"
+            }
+            stroke={isActive ? "#27AE60" : "#2F80ED"}
+            strokeWidth={isActive ? 2.5 : 1.5}
+          />
+        );
+      })}
+    </Group>
+  );
+}
+```
+
+---
+
+# 8. Як правильно розмістити layer-и
+
+Це теж важливо.
+
+Щоб preview точки були **над shape**, `NodesAnchorPreviewLayer` має бути вставлений **після** layer-а з фігурами.
+
+Наприклад:
+
+```jsx id="iw2hwt"
+<EdgesLayer />
+<ConnectorsLayer />
+<NodesLayer />
+<NodesAnchorPreviewLayer />
+```
+
+або якщо все в одному Layer — просто рендерити preview нижче у JSX, щоб він малювався пізніше.
+
+---
+
+# 9. Як адаптувати твої поточні записи в registry
+
+На фото видно, що ти десь пишеш anchors прямо так:
+
+```js id="f4bg9g"
+{
+  id: `${node.id}-top`,
+  nodeId: node.id,
+  direction: "top",
+  x: ...,
+  y: ...
+}
+```
+
+Я б радив уже зараз привести їх хоча б до такого мінімуму:
+
+```js id="wmrxt2"
+{
+  id: `${node.id}-top`,
+  type: "node-anchor",
+  nodeId: node.id,
+  direction: "top",
+  x: ...,
+  y: ...
+}
+```
+
+Навіть якщо поки не винесеш усі shape в helper-и — **додай `type: "node-anchor"` скрізь**.
+Це полегшить майбутню підтримку.
+
+---
+
+# 10. Практичний план міграції registry
+
+Щоб не переписувати все одразу, роби так:
+
+## Етап 1
+
+Додай `type: "node-anchor"` у всі існуючі `getAnchors`.
+
+## Етап 2
+
+Для найтиповіших shape почни використовувати:
+
+* `createRectAnchors`
+* `createTopRightAnchors`
+* `createLeftRightAnchors`
+* `createTopBottomAnchors`
+
+## Етап 3
+
+Для складних shape винеси кастомні relative-position helper-и.
+
+---
+
+# 11. Найкоротший корисний набір, який тобі реально варто вставити зараз
+
+Якщо без великої міграції, то прямо зараз найважливіше:
+
+### файл 1
+
+`lib/connectors/connectorAttach.js`
+
+### файл 2
+
+`lib/anchors/shapeAnchors.js`
+
+### файл 3
+
+`NodesAnchorPreviewLayer.jsx`
+
+І вже після цього поступово спрощувати `registry.js`.
+
+---
+
+# 12. Короткий підсумок
+
+Тобі потрібна така стандартизація:
+
+## registry
+
+єдине джерело правди для логічних anchor-ів
+
+## `shapeAnchors.js`
+
+набір reusable helper-ів для shape
+
+## `connectorAttach.js`
+
+робота з attach preview через registry
+
+## `NodesAnchorPreviewLayer`
+
+тільки візуалізація preview над shape
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі ще **готовий фрагмент оновленого `ELEMENT_REGISTRY` на 3–4 твох прикладах shape**, щоб показати, як саме переписувати записи з ручного стилю на helper-и.

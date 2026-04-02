@@ -1,0 +1,451 @@
+Так. Ось як перевірити `ConnectorsLayer.jsx`, щоб він був **повністю на `pathType`** і ніде не тримав `connectorType`.
+
+---
+
+# 1. Що треба знайти в файлі
+
+Пошуком по файлу знайди всі входження:
+
+```js id="8jkxnh"
+connectorType
+```
+
+і заміни їх на:
+
+```js id="ieycj2"
+pathType
+```
+
+Але важливо не просто механічно замінити, а перевірити логіку в 4 місцях.
+
+---
+
+# 2. Критичні місця в `ConnectorsLayer.jsx`
+
+## A. Segment handles
+
+Тут має бути так:
+
+```js id="3n0yhj"
+const segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+```
+
+Не так:
+
+```js id="o6o6mk"
+connector.connectorType === "orthogonal-elbow"
+```
+
+---
+
+## B. Waypoints
+
+Тут теж тільки через `pathType`:
+
+```jsx id="t2x8ax"
+{connector.pathType === "orthogonal-elbow" &&
+  waypoints.map((wp) => (
+    ...
+  ))}
+```
+
+---
+
+## C. Умови для elbow-only UI
+
+Будь-які умови на:
+
+* segment handles
+* waypoint handles
+* context actions для path points
+
+мають дивитися на:
+
+```js id="rqrmw7"
+connector.pathType
+```
+
+---
+
+## D. Ніде не повинно лишитися fallback на `connectorType`
+
+Наприклад такого:
+
+```js id="xxr30r"
+connector.pathType || connector.connectorType
+```
+
+Я б так не лишав, якщо ти вже чистиш модель. Краще одразу всюди перейти на `pathType`.
+
+---
+
+# 3. Яким має бути узгоджений `ConnectorsLayer.jsx`
+
+Ось правильний орієнтир. Якщо в тебе файл виглядає приблизно так — все ок.
+
+```jsx id="7j7icn"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorEditing";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const waypoints = isSelected ? connector.route?.waypoints || [] : [];
+
+        const segmentHandles =
+          isSelected && connector.pathType === "orthogonal-elbow"
+            ? getConnectorSegmentHandles(connector)
+            : [];
+
+        const startSegment = getConnectorStartSegment(pts);
+        const endSegment = getConnectorEndSegment(pts);
+
+        const startArrowPoints =
+          connector.endcaps?.start === "arrow" && startSegment
+            ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+            : null;
+
+        const endArrowPoints =
+          connector.endcaps?.end === "arrow" && endSegment
+            ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+            : null;
+
+        const stroke = connector.style?.stroke || "black";
+        const strokeWidth = connector.style?.strokeWidth || 2;
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : stroke}
+              strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+            />
+
+            {startArrowPoints && (
+              <Line
+                points={startArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {endArrowPoints && (
+              <Line
+                points={endArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {isSelected && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                />
+
+                {segmentHandles.map((handle) => (
+                  <Rect
+                    key={handle.id}
+                    x={handle.x - 5}
+                    y={handle.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="black"
+                    strokeWidth={1}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      handle.orientation === "horizontal"
+                        ? { x: handle.x - 5, y: pos.y }
+                        : { x: pos.x, y: handle.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorSegmentDragMove?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorSegmentDragEnd?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                  />
+                ))}
+
+                {connector.pathType === "orthogonal-elbow" &&
+                  waypoints.map((wp) => (
+                    <Circle
+                      key={wp.id}
+                      x={wp.x}
+                      y={wp.y}
+                      radius={5}
+                      fill="#F2C94C"
+                      stroke="black"
+                      strokeWidth={1}
+                      draggable
+                      dragBoundFunc={(pos) =>
+                        wp.axis === "y"
+                          ? { x: wp.x, y: pos.y }
+                          : { x: pos.x, y: wp.y }
+                      }
+                      onDragMove={(e) => {
+                        canvasController.handleConnectorWaypointDragMove?.(
+                          connector.id,
+                          wp,
+                          e
+                        );
+                      }}
+                      onDragEnd={(e) => {
+                        canvasController.handleConnectorWaypointDragEnd?.(
+                          connector.id,
+                          wp,
+                          e
+                        );
+                      }}
+                      onContextMenu={(e) => {
+                        canvasController.handleConnectorWaypointContextMenu?.(
+                          e,
+                          connector,
+                          wp
+                        );
+                      }}
+                    />
+                  ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 4. Найімовірніші старі місця, де міг лишитися `connectorType`
+
+Ось конкретний чекліст.
+
+## Перевір 1
+
+Було:
+
+```js id="trye2j"
+if (connector.connectorType !== "orthogonal-elbow") return;
+```
+
+Має бути:
+
+```js id="3cbgl1"
+if (connector.pathType !== "orthogonal-elbow") return;
+```
+
+---
+
+## Перевір 2
+
+Було:
+
+```js id="9pft3e"
+const segmentHandles =
+  isSelected && connector.connectorType === "orthogonal-elbow"
+```
+
+Має бути:
+
+```js id="q770zx"
+const segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+```
+
+---
+
+## Перевір 3
+
+Було:
+
+```jsx id="6p4i4q"
+{connector.connectorType === "orthogonal-elbow" && ...}
+```
+
+Має бути:
+
+```jsx id="hr4qxo"
+{connector.pathType === "orthogonal-elbow" && ...}
+```
+
+---
+
+## Перевір 4
+
+Якщо десь у debug/tooltip/label ти виводиш тип connector-а, має бути:
+
+```js id="36sdd8"
+connector.pathType
+```
+
+а не `connector.connectorType`.
+
+---
+
+# 5. Якщо хочеш дуже швидко перевірити файл
+
+Зроби по файлу 2 пошуки:
+
+### Пошук 1
+
+```txt id="pw0q1t"
+connectorType
+```
+
+Результат має бути: **0 входжень**
+
+### Пошук 2
+
+```txt id="58hqor"
+pathType
+```
+
+І подивись, що він використовується саме в місцях:
+
+* segment handles
+* waypoints
+* будь-які elbow-only перевірки
+
+---
+
+# 6. Що ще я б перевірив поруч із `ConnectorsLayer.jsx`
+
+Після цього майже напевно треба ще глянути:
+
+* `connectorGeometry.js`
+* `connectorEditing.js`
+* `canvasController.js`
+
+щоб ніде не лишилось старого `connectorType`.
+
+Особливо в controller у методах:
+
+* `handleConnectorSegmentDragMove`
+* `handleConnectorSegmentDragEnd`
+* `handleConnectorWaypointDragMove`
+* `handleConnectorWaypointDragEnd`
+* `addConnectorWaypointFromContextMenu`
+* `removeConnectorWaypointFromContextMenu`
+
+Там теж має бути тільки `pathType`.
+
+---
+
+# 7. Висновок
+
+Щоб `ConnectorsLayer.jsx` був повністю узгоджений, треба:
+
+* прибрати всі згадки `connectorType`
+* всю логіку elbow-only перевести на `pathType === "orthogonal-elbow"`
+* стрілки рендерити через `endcaps`
+* прямі/косі/ламані лінії рендерити через `geometry.points`
+
+---
+
+Якщо хочеш, наступним кроком я можу допомогти так само швидко пройтись по `connectorGeometry.js` або `canvasController.js` і дати тобі короткий checklist, чи там уже все чисто під `pathType`.
