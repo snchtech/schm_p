@@ -1,0 +1,473 @@
+Добре. Робимо **тільки крок 1 — сині точки**.
+
+Зараз їх треба жорстко відокремити від жовтих.
+
+# Що має бути після кроку 1
+
+Синя точка:
+
+* **не зберігається** в `route`
+* **не є** точкою шляху
+* **завжди** рахується з поточної `geometry.points`
+* **завжди** стоїть в центрі свого сегмента
+* при drag:
+
+  * для горизонтального сегмента рухається тільки по `y`
+  * для вертикального тільки по `x`
+* після перебудови знову стає в центрі нового сегмента
+* **не створює** жодної нової жовтої точки
+* **не перетворюється** на крайову вершину polyline
+
+---
+
+# Головна причина поточного бага
+
+У тебе синя точка зараз частково поводиться як `waypoint`.
+
+А має бути навпаки:
+
+* **синя** = `segment handle`
+* **жовта** = `path handle`
+
+Тобто синя не повинна жити в `route.waypoints[]` взагалі.
+
+---
+
+# Що робимо саме зараз
+
+На цьому кроці я рекомендую **зафіксувати сині точки тільки для connector-а без жовтих точок**.
+
+Тобто поки:
+
+* якщо `route.waypoints.length === 0` → сині точки працюють
+* якщо вже є жовті точки → сині точки тимчасово не чіпаємо в drag-логіці, щоб не мішати крокам 2 і 3
+
+Це нормально для поетапного виправлення.
+
+---
+
+# 1. Правило моделі
+
+Для синіх точок зараз лишаємо тільки це:
+
+```js
+route: {
+  baseOffset: null,
+  waypoints: []
+}
+```
+
+І працюємо так:
+
+* синя точка на горизонтальному сегменті міняє:
+
+```js
+baseOffset = { axis: "y", value: ... }
+```
+
+* синя точка на вертикальному сегменті міняє:
+
+```js
+baseOffset = { axis: "x", value: ... }
+```
+
+Тобто синя точка керує **базовим зміщенням сегмента**, а не точкою шляху.
+
+---
+
+# 2. `connectorEditing.js`
+
+Оце для кроку 1 має бути правильним.
+
+## `getConnectorSegmentHandles`
+
+```js id="krok1-01"
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") {
+    return [];
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const waypoints = connector.route?.waypoints || [];
+
+  // Крок 1: сині точки працюють тільки поки немає жовтих
+  if (waypoints.length > 0) {
+    return [];
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+
+  return segments
+    .filter(
+      (seg) => seg.orientation === "horizontal" || seg.orientation === "vertical"
+    )
+    .map((seg) => ({
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+    }));
+}
+```
+
+---
+
+## `moveElbowSegmentHandle`
+
+Оце ключова функція. Вона **не повинна створювати waypoint**.
+
+```js id="krok1-02"
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const waypoints = connector.route?.waypoints || [];
+
+  // Крок 1: якщо вже є жовті точки, сині не рухаємо
+  if (waypoints.length > 0) {
+    return connector;
+  }
+
+  const nextRoute = {
+    ...connector.route,
+    baseOffset:
+      handle.orientation === "horizontal"
+        ? { axis: "y", value: pos.y }
+        : { axis: "x", value: pos.x },
+  };
+
+  return {
+    ...connector,
+    route: nextRoute,
+  };
+}
+```
+
+---
+
+# 3. `connectorGeometry.js`
+
+Щоб синя точка реально рухала сегмент, `buildOrthogonalElbowPoints()` має читати `baseOffset`.
+
+Ось правильна логіка для кроку 1:
+
+```js id="krok1-03"
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const waypoints = route?.waypoints || [];
+  const baseOffset = route?.baseOffset || null;
+
+  // Крок 1: якщо жовтих ще нема — працюємо тільки з baseOffset
+  if (waypoints.length === 0) {
+    if (baseOffset?.axis === "y") {
+      return normalizePoints([
+        start.x, start.y,
+        start.x, baseOffset.value,
+        end.x, baseOffset.value,
+        end.x, end.y,
+      ]);
+    }
+
+    if (baseOffset?.axis === "x") {
+      return normalizePoints([
+        start.x, start.y,
+        baseOffset.value, start.y,
+        baseOffset.value, end.y,
+        end.x, end.y,
+      ]);
+    }
+
+    return normalizePoints([
+      start.x, start.y,
+      end.x, start.y,
+      end.x, end.y,
+    ]);
+  }
+
+  // waypoint-логіку поки не чіпаємо, це крок 2
+  let points = [start.x, start.y];
+  let current = { ...start };
+
+  for (const wp of waypoints) {
+    if (current.x !== wp.x) {
+      points.push(wp.x, current.y);
+      current = { x: wp.x, y: current.y };
+    }
+
+    if (current.y !== wp.y) {
+      points.push(current.x, wp.y);
+      current = { x: current.x, y: wp.y };
+    }
+  }
+
+  if (current.x !== end.x) {
+    points.push(end.x, current.y);
+    current = { x: end.x, y: current.y };
+  }
+
+  if (current.y !== end.y) {
+    points.push(current.x, end.y);
+  }
+
+  return normalizePoints(points);
+}
+```
+
+---
+
+# 4. `canvasController.js`
+
+Тут синя точка повинна викликати тільки `moveElbowSegmentHandle()`.
+
+## `handleConnectorSegmentDragMove`
+
+```js id="krok1-04"
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+## `handleConnectorSegmentDragEnd`
+
+```js id="krok1-05"
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+# 5. `ConnectorsLayer.jsx`
+
+Оце важливий момент.
+
+Синя точка має бути:
+
+* **computed**
+* в центрі сегмента
+* drag тільки по перпендикулярній осі
+
+І вона не повинна “їздити вздовж лінії”.
+
+Це означає, що її координати беруться тільки з `segmentHandles`, а не з локального state.
+
+## segment handles
+
+```js id="krok1-06"
+const segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+```
+
+---
+
+## синій `Rect`
+
+```jsx id="krok1-07"
+{segmentHandles.map((handle) => (
+  <Rect
+    key={handle.id}
+    x={handle.x - 5}
+    y={handle.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      handle.orientation === "horizontal"
+        ? { x: handle.x - 5, y: pos.y }
+        : { x: pos.x, y: handle.y - 5 }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorSegmentDragMove?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorSegmentDragEnd?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          handle.orientation === "horizontal"
+            ? "ns-resize"
+            : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+  />
+))}
+```
+
+---
+
+# Чому це вирішує твої пункти 1 і 2
+
+## Пункт 1
+
+> не мають мати можливості перетягуватись по лінії
+
+Так і буде, бо:
+
+* `x` або `y` зафіксовані через `dragBoundFunc`
+* після кожного rebuild синя точка знову рахується з центру сегмента
+
+Тобто вона не “зберігає власну позицію”, а щоразу ставиться в центр нового сегмента.
+
+---
+
+## Пункт 2
+
+> мають рухати відрізок по осі x або y
+
+Так і буде, бо:
+
+* горизонтальний handle міняє тільки `baseOffset.axis = "y"`
+* вертикальний — тільки `baseOffset.axis = "x"`
+
+---
+
+# Важливе уточнення
+
+Ти писав:
+
+> вони ніяк не розділяють лінію на злам, а тільки перетягуть прямий відрізок
+
+Тут важливий нюанс.
+
+**Візуально** після зміщення сегмента кількість колін може змінитись.
+Але це не означає, що ти створив `waypoint`.
+
+Тобто:
+
+* синя точка не створює жовту
+* не записується в `waypoints`
+* не стає “точкою шляху”
+* просто перебудовує геометрію базового elbow
+
+Це і є правильна поведінка для кроку 1.
+
+---
+
+# Що ми поки не чіпаємо
+
+На цьому кроці **не ліземо в жовті точки**.
+
+Тобто поки лишаємо як є:
+
+* `createWaypointAtSegment`
+* `moveConnectorWaypoint`
+* `waypoint render`
+
+Бо зараз задача — спочатку стабілізувати сині.
+
+---
+
+# Як перевірити, що крок 1 виправлено
+
+Після внесення змін перевір 3 речі:
+
+## Тест 1
+
+Створив ламаний connector без path points.
+Бачиш 2 сині точки.
+
+### Очікування:
+
+* кожна в центрі свого сегмента
+* drag синьої горизонтальної — тільки вверх/вниз
+* drag синьої вертикальної — тільки вліво/вправо
+
+---
+
+## Тест 2
+
+Потягнув синю точку.
+
+### Очікування:
+
+* синя не стає жовтою
+* жовта не з’являється
+* після відпускання синя опиняється в центрі нового сегмента
+
+---
+
+## Тест 3
+
+Потягнув синю кілька разів.
+
+### Очікування:
+
+* вона не “ковзає вздовж лінії”
+* а завжди знову центрується після rebuild
+
+---
+
+# Підсумок кроку 1
+
+На цьому етапі треба домогтися одного:
+
+> **синя точка = чистий computed segment handle, який керує тільки baseOffset**
+
+Якщо це зробити, тоді вже можна правильно переходити до кроку 2:
+
+> жовта точка як окрема path-handle сутність, а не вершина polyline
+
+---
+
+Якщо хочеш, далі одразу йдемо в **крок 2 по жовтих точках**.

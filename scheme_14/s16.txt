@@ -1,0 +1,409 @@
+Ось нормальний варіант **кнопок інструментів для панелі**, уже під новий flow:
+
+* кнопка **не вставляє** готовий connector
+* кнопка **активує tool**
+* далі користувач будує connector від anchor до anchor / canvas
+
+Я дам тобі:
+
+1. логіку кнопок
+2. приклад UI-блоку
+3. як показати активний інструмент
+4. кнопку скасування
+
+---
+
+# 1. Який UX я раджу
+
+Для старту зроби окремий блок **“Зв’язки”** у панелі:
+
+* Ламана
+* Ортогональна пряма
+* Лінія
+* Стрілка
+* Подвійна стрілка
+* Скасувати
+
+Це вже покриє твої основні варіанти без перевантаження.
+
+---
+
+# 2. Який шаблон має активувати кожна кнопка
+
+## Ламана
+
+```js id="tool-btn-01"
+{
+  pathType: "orthogonal-elbow",
+  endcaps: { start: "none", end: "none" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Ортогональна пряма
+
+```js id="tool-btn-02"
+{
+  pathType: "orthogonal-straight",
+  endcaps: { start: "none", end: "none" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Лінія
+
+```js id="tool-btn-03"
+{
+  pathType: "free-straight",
+  endcaps: { start: "none", end: "none" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Стрілка
+
+```js id="tool-btn-04"
+{
+  pathType: "free-straight",
+  endcaps: { start: "none", end: "arrow" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Подвійна стрілка
+
+```js id="tool-btn-05"
+{
+  pathType: "free-straight",
+  endcaps: { start: "arrow", end: "arrow" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Стрілка переходу
+
+Можна поки або не виносити в панель, або окремою кнопкою:
+
+```js id="tool-btn-06"
+{
+  pathType: "free-straight",
+  endcaps: { start: "none", end: "arrow" },
+  behavior: { type: "navigation", link: null }
+}
+```
+
+---
+
+# 3. Компонент панелі інструментів
+
+Наприклад файл:
+
+```txt id="tool-btn-07"
+/components/editor/ConnectorsToolSection.jsx
+```
+
+---
+
+## `ConnectorsToolSection.jsx`
+
+```jsx id="tool-btn-08"
+"use client";
+
+import React from "react";
+import { Box, Button, Stack, Typography } from "@mui/material";
+
+import DeviceHubIcon from "@mui/icons-material/DeviceHub";
+import HorizontalRuleIcon from "@mui/icons-material/HorizontalRule";
+import TrendingFlatIcon from "@mui/icons-material/TrendingFlat";
+import ArrowRightAltIcon from "@mui/icons-material/ArrowRightAlt";
+import SyncAltIcon from "@mui/icons-material/SyncAlt";
+import CloseIcon from "@mui/icons-material/Close";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+function isSameTool(activeTool, expected) {
+  if (!activeTool) return false;
+
+  return (
+    activeTool.pathType === expected.pathType &&
+    activeTool.endcaps?.start === expected.endcaps?.start &&
+    activeTool.endcaps?.end === expected.endcaps?.end &&
+    activeTool.behavior?.type === expected.behavior?.type
+  );
+}
+
+export default function ConnectorsToolSection() {
+  const activeConnectorTool = useCanvasStore((s) => s.activeConnectorTool);
+
+  const tools = [
+    {
+      key: "orthogonal-elbow",
+      label: "Ламана",
+      icon: <DeviceHubIcon fontSize="small" />,
+      template: {
+        pathType: "orthogonal-elbow",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "orthogonal-straight",
+      label: "Ортогональна",
+      icon: <HorizontalRuleIcon fontSize="small" />,
+      template: {
+        pathType: "orthogonal-straight",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "free-line",
+      label: "Лінія",
+      icon: <TrendingFlatIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "arrow",
+      label: "Стрілка",
+      icon: <ArrowRightAltIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "none", end: "arrow" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "double-arrow",
+      label: "Подвійна",
+      icon: <SyncAltIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "arrow", end: "arrow" },
+        behavior: { type: "default", link: null },
+      },
+    },
+  ];
+
+  return (
+    <Box>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Зв’язки
+      </Typography>
+
+      <Stack direction="column" spacing={1}>
+        {tools.map((tool) => {
+          const active = isSameTool(activeConnectorTool, tool.template);
+
+          return (
+            <Button
+              key={tool.key}
+              variant={active ? "contained" : "outlined"}
+              size="small"
+              startIcon={tool.icon}
+              onClick={() => {
+                canvasController.activateConnectorTool?.(tool.template);
+              }}
+              sx={{ justifyContent: "flex-start" }}
+            >
+              {tool.label}
+            </Button>
+          );
+        })}
+
+        <Button
+          variant="text"
+          size="small"
+          color="inherit"
+          startIcon={<CloseIcon fontSize="small" />}
+          onClick={() => {
+            canvasController.cancelDraftConnector?.();
+            useCanvasStore.getState().clearActiveConnectorTool?.();
+          }}
+          sx={{ justifyContent: "flex-start" }}
+        >
+          Скасувати
+        </Button>
+      </Stack>
+    </Box>
+  );
+}
+```
+
+---
+
+# 4. Що це дає
+
+Після цього:
+
+## Натиснув “Ламана”
+
+* `activeConnectorTool` встановився
+* кнопка стала активною
+* далі користувач тицяє в anchor і починає будувати connector
+
+## Натиснув “Стрілка”
+
+* активується інший шаблон
+* далі той самий flow, але вже з `endcaps.end = "arrow"`
+
+## Натиснув “Скасувати”
+
+* draft очищається
+* інструмент вимикається
+
+---
+
+# 5. Якщо хочеш показувати, що інструмент активний глобально
+
+Можна додати маленький status line над canvas або в toolbar:
+
+```jsx id="tool-btn-09"
+const activeConnectorTool = useCanvasStore((s) => s.activeConnectorTool);
+
+{activeConnectorTool && (
+  <Typography variant="caption">
+    Активний інструмент: {activeConnectorTool.pathType}
+  </Typography>
+)}
+```
+
+Але краще красивіше.
+
+---
+
+## Варіант людською мовою
+
+```jsx id="tool-btn-10"
+function getToolName(tool) {
+  if (!tool) return "";
+
+  if (
+    tool.pathType === "orthogonal-elbow" &&
+    tool.endcaps?.start === "none" &&
+    tool.endcaps?.end === "none"
+  ) {
+    return "Ламана лінія";
+  }
+
+  if (
+    tool.pathType === "orthogonal-straight" &&
+    tool.endcaps?.start === "none" &&
+    tool.endcaps?.end === "none"
+  ) {
+    return "Ортогональна лінія";
+  }
+
+  if (
+    tool.pathType === "free-straight" &&
+    tool.endcaps?.start === "none" &&
+    tool.endcaps?.end === "none"
+  ) {
+    return "Лінія";
+  }
+
+  if (
+    tool.pathType === "free-straight" &&
+    tool.endcaps?.start === "none" &&
+    tool.endcaps?.end === "arrow"
+  ) {
+    return "Стрілка";
+  }
+
+  if (
+    tool.pathType === "free-straight" &&
+    tool.endcaps?.start === "arrow" &&
+    tool.endcaps?.end === "arrow"
+  ) {
+    return "Подвійна стрілка";
+  }
+
+  return "Зв’язок";
+}
+```
+
+І відобразити:
+
+```jsx id="tool-btn-11"
+{activeConnectorTool && (
+  <Typography variant="caption" sx={{ mt: 1, display: "block" }}>
+    Активно: {getToolName(activeConnectorTool)}
+  </Typography>
+)}
+```
+
+---
+
+# 6. Моя UX-порада
+
+Коли інструмент активний, я б радив:
+
+* підсвічувати кнопки, як у коді вище
+* міняти курсор на canvas
+* показувати кнопку “Скасувати”
+* після створення одного connector-а інструмент вимикати
+
+Це найпростіше і найбезпечніше для MVP.
+
+Потім, якщо захочеш UX як у draw.io, можна зробити:
+
+* інструмент залишається активним, поки користувач сам його не вимкне
+
+Але для старту краще не так.
+
+---
+
+# 7. Якщо хочеш окрему кнопку “Стрілка переходу”
+
+Можеш просто додати ще один tool у масив.
+
+```jsx id="tool-btn-12"
+{
+  key: "navigation-arrow",
+  label: "Стрілка переходу",
+  icon: <ArrowRightAltIcon fontSize="small" />,
+  template: {
+    pathType: "free-straight",
+    endcaps: { start: "none", end: "arrow" },
+    behavior: { type: "navigation", link: null },
+  },
+}
+```
+
+Поки цього достатньо, бо link потім задаси в окремій формі/панелі властивостей.
+
+---
+
+# 8. Як це зв’язати з anchor click
+
+Після додавання цього блока кнопок у тебе вже має працювати така логіка:
+
+* кнопка → `activateConnectorTool(template)`
+* anchor click → `startDraftConnectorFromAnchor(anchor)`
+* mousemove → `updateDraftConnector(pointer)`
+* mouseup / другий anchor click → `finishDraftConnector(...)`
+
+Тобто панель просто задає шаблон.
+
+---
+
+# 9. Підсумок
+
+Замість “тестових кнопок вставки” ти тепер матимеш нормальні **кнопки-інструменти**:
+
+* Ламана
+* Ортогональна
+* Лінія
+* Стрілка
+* Подвійна стрілка
+* Скасувати
+
+І це вже правильно вписується в draw.io-подібний flow.
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі ще **короткий список, у які саме місця editor canvas треба підключити `updateDraftConnector(pointer)` та `finishDraftConnector(...)`**, щоб ти не шукав це по всьому коду.

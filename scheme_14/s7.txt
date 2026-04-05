@@ -1,0 +1,382 @@
+Добре. Йдемо в **крок 3**:
+стабілізуємо **жовту точку як path handle**, щоб вона:
+
+* жила окремо від синіх
+* не перетворювалась на вершину polyline
+* не ламалась після перебудови
+* нормально рухалась по осі
+* не конфліктувала з controller
+
+Тут треба підправити 3 місця:
+
+* `createWaypointAtSegment()`
+* `moveConnectorWaypoint()`
+* методи в `canvasController` для drag жовтої точки
+
+---
+
+# 1. Що саме зараз має бути моделлю жовтої точки
+
+Для поточного етапу я рекомендую такий формат:
+
+```js id="step3-01"
+{
+  id,
+  segmentIndex,
+  axis: "x" | "y",
+  x,
+  y,
+}
+```
+
+Значення полів:
+
+* `segmentIndex` — сегмент базової elbow-лінії, на який була додана path point
+* `axis`
+
+  * `"y"` якщо додали на горизонтальний сегмент
+  * `"x"` якщо додали на вертикальний
+* `x, y` — **центр нового вставленого сегмента**
+
+---
+
+# 2. Дуже важливе правило
+
+Поки що ми підтримуємо **тільки одну жовту точку**.
+
+Це не слабкість, а нормальний етап стабілізації.
+
+Отже:
+
+* якщо `route.waypoints.length > 0`
+* на новий сегмент **не додаємо** ще одну жовту точку
+
+Це одразу прибере купу хаосу.
+
+---
+
+# 3. Оновлений `createWaypointAtSegment()`
+
+Оце треба зробити жорстко.
+
+## `connectorEditing.js`
+
+```js id="step3-02"
+export function createWaypointAtSegment(connector, segmentIndex) {
+  if (!connector || connector.kind !== "connector") {
+    return null;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return null;
+  }
+
+  const existing = connector.route?.waypoints || [];
+
+  // Крок 3: поки дозволяємо тільки одну path point
+  if (existing.length > 0) {
+    return null;
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+  if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+    return null;
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    segmentIndex,
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+```
+
+---
+
+# 4. Оновлений `moveConnectorWaypoint()`
+
+Тут важливо:
+
+* не чіпати `segmentIndex`
+* не міняти `axis`
+* міняти тільки координату по осі
+
+## `connectorEditing.js`
+
+```js id="step3-03"
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return {
+        ...wp,
+        y: pos.y,
+      };
+    }
+
+    if (wp.axis === "x") {
+      return {
+        ...wp,
+        x: pos.x,
+      };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+```
+
+---
+
+# 5. Що має робити controller для жовтої точки
+
+Controller не повинен вигадувати нову геометрію.
+Його задача тільки:
+
+1. знайти connector
+2. викликати `moveConnectorWaypoint(...)`
+3. викликати `rebuildConnectorGeometry(...)`
+
+Все.
+
+---
+
+## `canvasController.js`
+
+### `handleConnectorWaypointDragMove`
+
+```js id="step3-04"
+handleConnectorWaypointDragMove(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x,
+    y: pos.y,
+  };
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+### `handleConnectorWaypointDragEnd`
+
+```js id="step3-05"
+handleConnectorWaypointDragEnd(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x,
+    y: pos.y,
+  };
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+# 6. Оновлений `addConnectorWaypointFromContextMenu()`
+
+Тут теж важливо:
+
+* не створювати 2-гу жовту точку
+* не додавати точку в `free-straight`
+* не додавати в `orthogonal-straight`
+
+## `canvasController.js`
+
+```js id="step3-06"
+addConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+  if (menu.segmentIndex == null) return;
+
+  const existing = connector.route?.waypoints || [];
+  if (existing.length > 0) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  const waypoint = createWaypointAtSegment(connector, menu.segmentIndex);
+  if (!waypoint) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  let next = addConnectorWaypoint(connector, waypoint);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+# 7. Оновлений `removeConnectorWaypointFromContextMenu()`
+
+Це лишається майже прямим:
+
+```js id="step3-07"
+removeConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector-waypoint") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = removeConnectorWaypoint(connector, menu.waypointId);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+# 8. Що ще важливо в `ConnectorsLayer.jsx`
+
+Там уже після попереднього кроку має бути:
+
+* `segmentHandles` фільтруються, якщо збігаються з жовтою точкою
+* жовта точка рендериться окремо
+* `dragBoundFunc` рухає тільки по осі
+
+Оце якраз і працює разом із новим builder-ом.
+
+---
+
+# 9. Як це тепер має поводитись
+
+## Сценарій 1: додав жовту точку
+
+* вона з’являється не як вершина
+* а як центр нового внутрішнього сегмента
+
+## Сценарій 2: тягну жовту
+
+* якщо `axis === "y"` → лише вгору/вниз
+* якщо `axis === "x"` → лише вліво/вправо
+* лінія реально перебудовується
+* жовта лишається центром нового сегмента
+
+## Сценарій 3: синя й жовта не накладаються
+
+* стара синя на цьому місці більше не рендериться
+* нові сині точки з’являються тільки на актуальних сегментах
+
+---
+
+# 10. Які проблеми з твого списку це закриває
+
+### Закриває краще:
+
+3. жовта не має бути крайовою — тепер так
+4. жовта не повинна накладатись на синю — так
+5. має рухатись лінія, а не лише точка — так
+6. курсор по осі для жовтої — так
+7. жовта не повинна випадково їхати вправо від синьої — значно стабілізується
+
+### Що ще може лишитись нюансом
+
+* `segmentIndex` у майбутньому нестабільний для багатьох path point
+* але для однієї жовтої точки це нормальний MVP
+
+---
+
+# 11. Що я раджу перевірити після цих змін
+
+## Тест 1
+
+Створи базовий elbow
+→ сині точки є
+
+## Тест 2
+
+Додай жовту на горизонтальний сегмент
+→ з’являється новий короткий сегмент
+→ жовта в його центрі
+
+## Тест 3
+
+Потягни жовту вгору/вниз
+→ короткий сегмент рухається
+→ жовта лишається його центром
+
+## Тест 4
+
+Видали жовту
+→ повертається базовий elbow
+→ сині точки знову на центрах базових сегментів
+
+---
+
+# 12. Підсумок кроку 3
+
+На цьому етапі ти вже отримуєш нормальну базову поведінку:
+
+* синя точка = handle сегмента
+* жовта точка = path handle
+* вони більше не зливаються в одну роль
+
+Це головне.
+
+---
+
+Наступний логічний крок після цього — уже не geometry, а **тонке допрацювання UX**:
+
+* сховати “Додати точку шляху”, якщо на сегменті вже є жовта точка
+* або підсвічувати тільки допустимі сегменти для додавання точки
+
+Але спочатку варто перевірити, чи цей крок у тебе стабілізує поведінку на практиці.

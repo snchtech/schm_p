@@ -1,0 +1,642 @@
+Добре. Нижче даю **точкові зміни для `ConnectorsLayer.jsx`**, щоб після нової геометрії:
+
+* сині точки не конфліктували з жовтими
+* жовта не “сиділа” на місці старої синьої
+* сині завжди рахувались із **актуальної** `geometry.points`
+* жовті рендерились окремо як `path handles`
+* курсори були правильні
+* сині не з’являлись на сегменті, який уже має жовту точку
+
+---
+
+# Головна ідея для `ConnectorsLayer`
+
+Після того як `buildOrthogonalElbowPoints()` вставляє новий внутрішній сегмент, тобі треба:
+
+1. брати **сині** тільки з `getConnectorSegmentHandles(connector)`
+2. брати **жовті** тільки з `connector.route.waypoints`
+3. **не показувати синю точку на сегменті, де вже живе жовта**
+4. показувати `segment handles` тільки для `orthogonal-elbow`
+
+Тобто `ConnectorsLayer` не має сам придумувати, де синя/жовта точка. Він тільки правильно розкладає already-computed ролі.
+
+---
+
+# 1. Що важливо змінити концептуально
+
+Зараз у тебе, ймовірно, така проблема:
+
+* `segmentHandles` малюються на всіх сегментах
+* жовта точка малюється поверх
+* візуально виходить накладання
+
+Після нової геометрії це треба відфільтрувати:
+
+## правило
+
+Якщо є жовта точка, синій handle не треба показувати **на тому короткому внутрішньому сегменті**, центром якого вона є.
+
+---
+
+# 2. Як це зробити просто
+
+Ми не будемо поки робити складну карту `segmentId`.
+Для MVP достатньо перевіряти близькість:
+
+* якщо центр синього handle майже збігається з жовтою точкою
+* такий синій handle не рендеримо
+
+Це нормальний практичний крок.
+
+---
+
+# 3. Додай helper прямо в `ConnectorsLayer.jsx`
+
+На початку файла або перед компонентом:
+
+```jsx id="layer-fix-01"
+const samePoint = (a, b, eps = 0.5) =>
+  Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps;
+```
+
+---
+
+# 4. Як формувати `segmentHandles`
+
+Заміни логіку на таку:
+
+```jsx id="layer-fix-02"
+const waypoints = isSelected ? connector.route?.waypoints || [] : [];
+
+let segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+
+// Якщо є жовті точки — не показуємо синю точку там,
+// де центр handle майже збігається з жовтою
+if (waypoints.length > 0) {
+  segmentHandles = segmentHandles.filter(
+    (handle) =>
+      !waypoints.some((wp) =>
+        samePoint({ x: handle.x, y: handle.y }, { x: wp.x, y: wp.y })
+      )
+  );
+}
+```
+
+Це одразу прибирає накладання.
+
+---
+
+# 5. Жовті точки рендеримо окремо і тільки для elbow
+
+Оце правило лишається:
+
+```jsx id="layer-fix-03"
+{connector.pathType === "orthogonal-elbow" &&
+  waypoints.map((wp) => (
+    ...
+  ))}
+```
+
+---
+
+# 6. Оновлений блок waypoint render
+
+Тут важливо:
+
+* правильний курсор
+* правильний `dragBoundFunc`
+* окремий `onContextMenu`
+
+Ось нормальний варіант:
+
+```jsx id="layer-fix-04"
+{connector.pathType === "orthogonal-elbow" &&
+  waypoints.map((wp) => (
+    <Circle
+      key={wp.id}
+      x={wp.x}
+      y={wp.y}
+      radius={5}
+      fill="#F2C94C"
+      stroke="black"
+      strokeWidth={1}
+      draggable
+      dragBoundFunc={(pos) =>
+        wp.axis === "y"
+          ? { x: wp.x, y: pos.y }
+          : { x: pos.x, y: wp.y }
+      }
+      onDragMove={(e) => {
+        canvasController.handleConnectorWaypointDragMove?.(
+          connector.id,
+          wp,
+          e
+        );
+      }}
+      onDragEnd={(e) => {
+        canvasController.handleConnectorWaypointDragEnd?.(
+          connector.id,
+          wp,
+          e
+        );
+      }}
+      onMouseEnter={(e) => {
+        const stage = e.target.getStage();
+        if (stage?.container()?.style) {
+          stage.container().style.cursor =
+            wp.axis === "y" ? "ns-resize" : "ew-resize";
+        }
+      }}
+      onMouseLeave={(e) => {
+        const stage = e.target.getStage();
+        if (stage?.container()?.style) {
+          stage.container().style.cursor = "default";
+        }
+      }}
+      onContextMenu={(e) => {
+        canvasController.handleConnectorWaypointContextMenu?.(
+          e,
+          connector,
+          wp
+        );
+      }}
+    />
+  ))}
+```
+
+---
+
+# 7. Оновлений блок синіх точок
+
+Тут зберігаємо:
+
+* drag тільки по потрібній осі
+* синя точка завжди computed
+* ніяких локальних позицій
+
+```jsx id="layer-fix-05"
+{segmentHandles.map((handle) => (
+  <Rect
+    key={handle.id}
+    x={handle.x - 5}
+    y={handle.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      handle.orientation === "horizontal"
+        ? { x: handle.x - 5, y: pos.y }
+        : { x: pos.x, y: handle.y - 5 }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorSegmentDragMove?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorSegmentDragEnd?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          handle.orientation === "horizontal"
+            ? "ns-resize"
+            : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+  />
+))}
+```
+
+---
+
+# 8. Повний оновлений фрагмент усередині `map(connector)`
+
+Ось саме той шматок, який тобі треба замінити в `ConnectorsLayer.jsx`.
+
+```jsx id="layer-fix-06"
+const pts = connector.geometry?.points || [];
+if (!pts || pts.length < 4) return null;
+
+const isSelected =
+  selection?.type === "edge" && selection?.id === connector.id;
+
+const startPoint = {
+  x: pts[0],
+  y: pts[1],
+};
+
+const endPoint = {
+  x: pts[pts.length - 2],
+  y: pts[pts.length - 1],
+};
+
+const waypoints = isSelected ? connector.route?.waypoints || [] : [];
+
+let segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+
+if (waypoints.length > 0) {
+  segmentHandles = segmentHandles.filter(
+    (handle) =>
+      !waypoints.some((wp) =>
+        samePoint({ x: handle.x, y: handle.y }, { x: wp.x, y: wp.y })
+      )
+  );
+}
+
+const startSegment = getConnectorStartSegment(pts);
+const endSegment = getConnectorEndSegment(pts);
+
+const startArrowPoints =
+  connector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+    : null;
+
+const endArrowPoints =
+  connector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+    : null;
+
+const stroke = connector.style?.stroke || "black";
+const strokeWidth = connector.style?.strokeWidth || 2;
+```
+
+---
+
+# 9. Повний оновлений `ConnectorsLayer.jsx`
+
+Нижче вже цільний варіант, якщо хочеш просто замінити.
+
+```jsx id="layer-fix-07"
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorEditing";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+const samePoint = (a, b, eps = 0.5) =>
+  Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps;
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const waypoints = isSelected ? connector.route?.waypoints || [] : [];
+
+        let segmentHandles =
+          isSelected && connector.pathType === "orthogonal-elbow"
+            ? getConnectorSegmentHandles(connector)
+            : [];
+
+        if (waypoints.length > 0) {
+          segmentHandles = segmentHandles.filter(
+            (handle) =>
+              !waypoints.some((wp) =>
+                samePoint({ x: handle.x, y: handle.y }, { x: wp.x, y: wp.y })
+              )
+          );
+        }
+
+        const startSegment = getConnectorStartSegment(pts);
+        const endSegment = getConnectorEndSegment(pts);
+
+        const startArrowPoints =
+          connector.endcaps?.start === "arrow" && startSegment
+            ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+            : null;
+
+        const endArrowPoints =
+          connector.endcaps?.end === "arrow" && endSegment
+            ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+            : null;
+
+        const stroke = connector.style?.stroke || "black";
+        const strokeWidth = connector.style?.strokeWidth || 2;
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : stroke}
+              strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+            />
+
+            {startArrowPoints && (
+              <Line
+                points={startArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {endArrowPoints && (
+              <Line
+                points={endArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {isSelected && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(
+                      connector.id,
+                      e
+                    );
+                  }}
+                  onMouseEnter={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "pointer";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    const stage = e.target.getStage();
+                    if (stage?.container()?.style) {
+                      stage.container().style.cursor = "default";
+                    }
+                  }}
+                />
+
+                {segmentHandles.map((handle) => (
+                  <Rect
+                    key={handle.id}
+                    x={handle.x - 5}
+                    y={handle.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="black"
+                    strokeWidth={1}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      handle.orientation === "horizontal"
+                        ? { x: handle.x - 5, y: pos.y }
+                        : { x: pos.x, y: handle.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorSegmentDragMove?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorSegmentDragEnd?.(
+                        connector.id,
+                        handle,
+                        e
+                      );
+                    }}
+                    onMouseEnter={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor =
+                          handle.orientation === "horizontal"
+                            ? "ns-resize"
+                            : "ew-resize";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      const stage = e.target.getStage();
+                      if (stage?.container()?.style) {
+                        stage.container().style.cursor = "default";
+                      }
+                    }}
+                  />
+                ))}
+
+                {connector.pathType === "orthogonal-elbow" &&
+                  waypoints.map((wp) => (
+                    <Circle
+                      key={wp.id}
+                      x={wp.x}
+                      y={wp.y}
+                      radius={5}
+                      fill="#F2C94C"
+                      stroke="black"
+                      strokeWidth={1}
+                      draggable
+                      dragBoundFunc={(pos) =>
+                        wp.axis === "y"
+                          ? { x: wp.x, y: pos.y }
+                          : { x: pos.x, y: wp.y }
+                      }
+                      onDragMove={(e) => {
+                        canvasController.handleConnectorWaypointDragMove?.(
+                          connector.id,
+                          wp,
+                          e
+                        );
+                      }}
+                      onDragEnd={(e) => {
+                        canvasController.handleConnectorWaypointDragEnd?.(
+                          connector.id,
+                          wp,
+                          e
+                        );
+                      }}
+                      onMouseEnter={(e) => {
+                        const stage = e.target.getStage();
+                        if (stage?.container()?.style) {
+                          stage.container().style.cursor =
+                            wp.axis === "y" ? "ns-resize" : "ew-resize";
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        const stage = e.target.getStage();
+                        if (stage?.container()?.style) {
+                          stage.container().style.cursor = "default";
+                        }
+                      }}
+                      onContextMenu={(e) => {
+                        canvasController.handleConnectorWaypointContextMenu?.(
+                          e,
+                          connector,
+                          wp
+                        );
+                      }}
+                    />
+                  ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+```
+
+---
+
+# 10. Що це вирішує зараз
+
+Ці зміни в `ConnectorsLayer.jsx` вирішують такі речі:
+
+## Вирішує
+
+* синя й жовта точки не накладаються одна на одну
+* жовта рендериться окремо
+* сині точки перераховуються тільки з актуальної geometry
+* курсор для жовтої залежить від `axis`
+* синя точка не з’являється на місці жовтої
+
+## Ще не вирішує повністю
+
+* кілька жовтих точок на різних сегментах
+* стабільні `segmentId` замість `segmentIndex`
+* складні правила для кількох path point одночасно
+
+Але для поточного етапу це вже правильна стабілізація.
+
+---
+
+# 11. Що я раджу перевірити після цього
+
+Після вставки цього `ConnectorsLayer.jsx` перевір:
+
+### Тест A
+
+Базова ламана без жовтих:
+
+* сині є
+* тягнуться правильно
+
+### Тест B
+
+Додай жовту:
+
+* вона не сидить на синій
+* синя на тому місці зникає
+
+### Тест C
+
+Потягни жовту:
+
+* курсор правильний
+* жовта лишається центром нового сегмента
+* лінія реально перебудовується
+
+---
+
+Якщо хочеш, наступним кроком я б уже пішов у **крок 3: виправити `createWaypointAtSegment()` і `moveConnectorWaypoint()` разом із `canvasController`, щоб жовта точка стабільно жила як path handle, а не ламалась при наступних перебудовах**.

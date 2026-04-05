@@ -1,0 +1,392 @@
+Так. Нижче даю **готовий MVP** для переміщення всього connector-а, але тільки якщо:
+
+* `start.attached.type === "none"`
+* і `end.attached.type === "none"`
+
+Як тільки хоч один кінець прикріплений до об’єкта — drag всього connector-а блокується.
+
+---
+
+# 1. Додаємо helper-и в `connectorEditing.js`
+
+Оце найкраще тримати саме тут.
+
+## `lib/connectors/connectorEditing.js`
+
+Додай в кінець файла:
+
+```js id="drag-all-01"
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") {
+    return false;
+  }
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  let next = {
+    ...connector,
+
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).map((wp) => ({
+        ...wp,
+        x: wp.x + dx,
+        y: wp.y + dy,
+      })),
+    },
+  };
+
+  // Якщо є baseOffset — теж треба змістити по відповідній осі
+  if (next.route?.baseOffset?.axis === "x") {
+    next.route = {
+      ...next.route,
+      baseOffset: {
+        ...next.route.baseOffset,
+        value: next.route.baseOffset.value + dx,
+      },
+    };
+  }
+
+  if (next.route?.baseOffset?.axis === "y") {
+    next.route = {
+      ...next.route,
+      baseOffset: {
+        ...next.route.baseOffset,
+        value: next.route.baseOffset.value + dy,
+      },
+    };
+  }
+
+  return next;
+}
+```
+
+---
+
+# 2. Додаємо drag-state в store
+
+У `useCanvasStore.js` додай:
+
+```js id="drag-all-02"
+connectorDragState: null,
+// {
+//   edgeId,
+//   startPointer: { x, y },
+//   lastPointer: { x, y }
+// }
+
+setConnectorDragState: (connectorDragState) => set({ connectorDragState }),
+clearConnectorDragState: () => set({ connectorDragState: null }),
+```
+
+---
+
+# 3. Імпорти в `canvasController.js`
+
+Додай:
+
+```js id="drag-all-03"
+import {
+  canDragWholeConnector,
+  translateConnector,
+} from "@/lib/connectors/connectorEditing";
+```
+
+---
+
+# 4. Додаємо 3 методи в `canvasController.js`
+
+Ось готовий блок.
+
+```js id="drag-all-04"
+handleConnectorBodyDragStart(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  if (!canDragWholeConnector(connector)) {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  store.setSelection?.({ type: "edge", id: edgeId });
+
+  store.setConnectorDragState?.({
+    edgeId,
+    startPointer: { x: pointer.x, y: pointer.y },
+    lastPointer: { x: pointer.x, y: pointer.y },
+  });
+},
+
+handleConnectorBodyDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (!canDragWholeConnector(connector)) return;
+
+  const dragState = store.connectorDragState;
+  if (!dragState || dragState.edgeId !== edgeId) return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const dx = pointer.x - dragState.lastPointer.x;
+  const dy = pointer.y - dragState.lastPointer.y;
+
+  if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) {
+    return;
+  }
+
+  let next = translateConnector(connector, dx, dy);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+
+  store.setConnectorDragState?.({
+    ...dragState,
+    lastPointer: { x: pointer.x, y: pointer.y },
+  });
+},
+
+handleConnectorBodyDragEnd(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  const dragState = store.connectorDragState;
+  if (!dragState || dragState.edgeId !== edgeId) {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  // фінальна очистка
+  store.clearConnectorDragState?.();
+},
+```
+
+---
+
+# 5. Підключаємо drag у `ConnectorsLayer.jsx`
+
+Тут важливо:
+
+* drag всього connector-а має працювати по самій лінії
+* але не за endpoint handles
+* не за сині/жовті точки
+* тільки якщо connector detached з обох кінців
+
+---
+
+## Імпорт
+
+Якщо хочеш ще й курсор міняти розумно, додай:
+
+```jsx id="drag-all-05"
+import { canDragWholeConnector } from "@/lib/connectors/connectorEditing";
+```
+
+---
+
+## Усередині `map(connector)` додай:
+
+```jsx id="drag-all-06"
+const canDragWhole = canDragWholeConnector(connector);
+```
+
+---
+
+## Онови основну `<Line />`
+
+Ось готовий варіант блоку для основної лінії:
+
+```jsx id="drag-all-07"
+<Line
+  points={pts}
+  stroke={isSelected ? "#2F80ED" : stroke}
+  strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+  lineJoin="round"
+  lineCap="round"
+  onMouseDown={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+
+    canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+  }}
+  onMouseMove={(e) => {
+    if (connector.pathType === "orthogonal-elbow") {
+      const stage = e.target.getStage();
+      const pointer = stage?.getPointerPosition();
+
+      if (pointer) {
+        const closest = findClosestConnectorSegment(connector, {
+          x: pointer.x,
+          y: pointer.y,
+        });
+
+        if (closest) {
+          setHoveredConnectorSegment?.({
+            edgeId: connector.id,
+            segmentIndex: closest.segmentIndex,
+            orientation: closest.orientation,
+            x: closest.x,
+            y: closest.y,
+          });
+        } else {
+          clearHoveredConnectorSegment?.();
+        }
+      }
+    }
+
+    canvasController.handleConnectorBodyDragMove?.(connector.id, e);
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = canDragWhole ? "move" : "pointer";
+    }
+  }}
+  onMouseUp={(e) => {
+    canvasController.handleConnectorBodyDragEnd?.(connector.id, e);
+  }}
+  onClick={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+  }}
+  onContextMenu={(e) => {
+    canvasController.handleConnectorContextMenu?.(e, connector);
+  }}
+  onMouseLeave={(e) => {
+    clearHoveredConnectorSegment?.();
+
+    canvasController.handleConnectorBodyDragEnd?.(connector.id, e);
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = "default";
+    }
+  }}
+/>
+```
+
+---
+
+# 6. Що ще треба підключити в store hooks у `ConnectorsLayer.jsx`
+
+Якщо ще нема, додай:
+
+```jsx id="drag-all-08"
+const setHoveredConnectorSegment = useCanvasStore((s) => s.setHoveredConnectorSegment);
+const clearHoveredConnectorSegment = useCanvasStore((s) => s.clearHoveredConnectorSegment);
+```
+
+---
+
+# 7. Як це працює
+
+## Якщо connector вільний
+
+* натискаєш на лінію
+* тягнеш
+* рухається весь connector:
+
+  * start
+  * end
+  * waypoints
+  * baseOffset
+* geometry перебудовується
+
+## Якщо хоч один кінець attached
+
+* drag всього connector-а не працює
+* курсор звичайний `pointer`
+* можна тільки:
+
+  * тягнути start/end
+  * редагувати сині/жовті точки
+
+---
+
+# 8. Чому це MVP хороший
+
+Бо він:
+
+* не ламає твою поточну модель
+* не чіпає attach logic
+* не чіпає edge routing
+* працює через store/controller
+* легко розширити потім
+
+---
+
+# 9. Що ще можна покращити пізніше
+
+Пізніше можна зробити:
+
+* drag всього connector-а тільки якщо він selected
+* threshold, щоб клік не вважався drag одразу
+* окремий hit-area для drag тіла line
+* throttle / requestAnimationFrame для плавності
+
+Але для MVP це вже робочий варіант.
+
+---
+
+# 10. Найкоротший підсумок
+
+Тобі треба додати:
+
+## у `connectorEditing.js`
+
+* `canDragWholeConnector`
+* `translateConnector`
+
+## у store
+
+* `connectorDragState`
+* `setConnectorDragState`
+* `clearConnectorDragState`
+
+## у `canvasController.js`
+
+* `handleConnectorBodyDragStart`
+* `handleConnectorBodyDragMove`
+* `handleConnectorBodyDragEnd`
+
+## у `ConnectorsLayer.jsx`
+
+* виклик цих методів з основної `Line`
+
+---
+
+Якщо хочеш, наступним повідомленням я можу дати тобі **цільний оновлений `ConnectorsLayer.jsx` уже з цим drag whole connector вбудованим**, щоб ти не вставляв шматками.

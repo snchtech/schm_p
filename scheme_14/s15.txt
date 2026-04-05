@@ -1,0 +1,547 @@
+Добре. Нижче даю **MVP-код для store + controller skeleton + DraftConnectorLayer**, щоб ти міг перейти до draw.io-подібного створення connector-а через інструмент, а не через вставку готової лінії.
+
+---
+
+# 1. `useCanvasStore.js`
+
+Додай у store нові стани для інструмента і чернетки connector-а.
+
+```js
+import { create } from "zustand";
+
+export const useCanvasStore = create((set, get) => ({
+  // ===== GRAPH =====
+  nodes: [],
+  edges: [],
+
+  // ===== UI =====
+  selection: null,
+
+  hoveredConnectorSegment: null,
+  // { edgeId, segmentIndex, orientation, x, y }
+
+  connectorDragState: null,
+  // { edgeId, startPointer: {x,y}, lastPointer: {x,y} }
+
+  // ===== CONNECTOR TOOL =====
+  activeConnectorTool: null,
+  // {
+  //   pathType: "orthogonal-elbow" | "orthogonal-straight" | "free-straight",
+  //   endcaps: { start: "none" | "arrow", end: "none" | "arrow" },
+  //   behavior: { type: "default" | "navigation", link: null | {...} }
+  // }
+
+  draftConnector: null,
+
+  connectorAttachPreview: null,
+  // {
+  //   edgeId?: string,
+  //   end?: "start" | "end",
+  //   nodeId,
+  //   anchors,
+  //   activeAnchor
+  // }
+
+  contextMenu: null,
+
+  // ===== NODES =====
+  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
+
+  updateNodePosition: (id, x, y) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? { ...n, position: { x, y } } : n
+      ),
+    })),
+
+  removeNode: (id) =>
+    set((s) => ({
+      nodes: s.nodes.filter((n) => n.id !== id),
+      edges: s.edges.filter(
+        (e) =>
+          e.source?.nodeId !== id &&
+          e.target?.nodeId !== id &&
+          e.start?.attached?.nodeId !== id &&
+          e.end?.attached?.nodeId !== id
+      ),
+    })),
+
+  // ===== EDGES =====
+  addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((s) => ({
+      edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+    })),
+
+  updateEdge: (id, data) =>
+    set((s) => ({
+      edges: s.edges.map((e) => (e.id === id ? { ...e, ...data } : e)),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+      selection:
+        s.selection?.type === "edge" && s.selection?.id === id
+          ? null
+          : s.selection,
+      contextMenu: s.contextMenu?.edgeId === id ? null : s.contextMenu,
+    })),
+
+  setEdges: (edges) => set({ edges }),
+
+  // ===== SELECTION =====
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  // ===== HOVERED CONNECTOR SEGMENT =====
+  setHoveredConnectorSegment: (hoveredConnectorSegment) =>
+    set({ hoveredConnectorSegment }),
+  clearHoveredConnectorSegment: () => set({ hoveredConnectorSegment: null }),
+
+  // ===== CONNECTOR BODY DRAG =====
+  setConnectorDragState: (connectorDragState) => set({ connectorDragState }),
+  clearConnectorDragState: () => set({ connectorDragState: null }),
+
+  // ===== CONNECTOR TOOL =====
+  setActiveConnectorTool: (activeConnectorTool) => set({ activeConnectorTool }),
+  clearActiveConnectorTool: () => set({ activeConnectorTool: null }),
+
+  setDraftConnector: (draftConnector) => set({ draftConnector }),
+  clearDraftConnector: () => set({ draftConnector: null }),
+
+  // ===== ATTACH PREVIEW =====
+  setConnectorAttachPreview: (connectorAttachPreview) =>
+    set({ connectorAttachPreview }),
+  clearConnectorAttachPreview: () => set({ connectorAttachPreview: null }),
+
+  // ===== CONTEXT MENU =====
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+}));
+```
+
+---
+
+# 2. Що мають робити кнопки інструментів
+
+Тепер вони **не створюють edge**, а активують tool.
+
+```js
+onClick={() =>
+  useCanvasStore.getState().setActiveConnectorTool({
+    pathType: "orthogonal-elbow",
+    endcaps: { start: "none", end: "none" },
+    behavior: { type: "default", link: null },
+  })
+}
+```
+
+Для стрілки:
+
+```js
+onClick={() =>
+  useCanvasStore.getState().setActiveConnectorTool({
+    pathType: "free-straight",
+    endcaps: { start: "none", end: "arrow" },
+    behavior: { type: "default", link: null },
+  })
+}
+```
+
+---
+
+# 3. `canvasController.js` — нові методи для draft connector
+
+Додай імпорти:
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createConnector } from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+```
+
+Тепер додай цей блок у `canvasController`:
+
+```js
+activateConnectorTool(template) {
+  const store = useCanvasStore.getState();
+
+  store.setActiveConnectorTool?.({
+    pathType: template?.pathType || "orthogonal-elbow",
+    endcaps: template?.endcaps || { start: "none", end: "none" },
+    behavior: template?.behavior || { type: "default", link: null },
+  });
+
+  store.clearDraftConnector?.();
+  store.clearConnectorAttachPreview?.();
+},
+
+cancelDraftConnector() {
+  const store = useCanvasStore.getState();
+  store.clearDraftConnector?.();
+  store.clearConnectorAttachPreview?.();
+},
+
+startDraftConnectorFromAnchor(anchor) {
+  const store = useCanvasStore.getState();
+  const tool = store.activeConnectorTool;
+
+  if (!tool) return;
+
+  let draft = createConnector({
+    pathType: tool.pathType,
+    endcaps: tool.endcaps,
+    behavior: tool.behavior,
+    start: {
+      x: anchor.x,
+      y: anchor.y,
+      attached: {
+        type: "node",
+        nodeId: anchor.nodeId,
+        anchor: anchor.direction,
+      },
+    },
+    end: {
+      x: anchor.x,
+      y: anchor.y,
+      attached: { type: "none" },
+    },
+  });
+
+  draft = rebuildConnectorGeometry(draft, store.nodes);
+
+  store.setDraftConnector?.(draft);
+},
+
+updateDraftConnector(pointer) {
+  const store = useCanvasStore.getState();
+  const draft = store.draftConnector;
+
+  if (!draft || !pointer) return;
+
+  const preview = getConnectorAttachPreview(store.nodes, pointer);
+
+  let next = {
+    ...draft,
+    end: {
+      ...draft.end,
+      x: pointer.x,
+      y: pointer.y,
+      attached: { type: "none" },
+    },
+  };
+
+  if (preview?.activeAnchor) {
+    next.end = {
+      ...next.end,
+      x: preview.activeAnchor.x,
+      y: preview.activeAnchor.y,
+      attached: {
+        type: "node",
+        nodeId: preview.activeAnchor.nodeId,
+        anchor: preview.activeAnchor.direction,
+      },
+    };
+
+    store.setConnectorAttachPreview?.({
+      nodeId: preview.nodeId,
+      anchors: preview.anchors,
+      activeAnchor: preview.activeAnchor,
+    });
+  } else {
+    store.clearConnectorAttachPreview?.();
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.setDraftConnector?.(next);
+},
+
+finishDraftConnector(anchorOrNull, pointerOrNull) {
+  const store = useCanvasStore.getState();
+  const draft = store.draftConnector;
+
+  if (!draft) return;
+
+  let next = {
+    ...draft,
+    end: {
+      ...draft.end,
+    },
+  };
+
+  if (anchorOrNull) {
+    next.end = {
+      ...next.end,
+      x: anchorOrNull.x,
+      y: anchorOrNull.y,
+      attached: {
+        type: "node",
+        nodeId: anchorOrNull.nodeId,
+        anchor: anchorOrNull.direction,
+      },
+    };
+  } else if (pointerOrNull) {
+    next.end = {
+      ...next.end,
+      x: pointerOrNull.x,
+      y: pointerOrNull.y,
+      attached: { type: "none" },
+    };
+  }
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.addEdge?.(next);
+  store.setSelection?.({ type: "edge", id: next.id });
+
+  store.clearDraftConnector?.();
+  store.clearConnectorAttachPreview?.();
+
+  // MVP: після одного створення інструмент вимикаємо
+  store.clearActiveConnectorTool?.();
+},
+```
+
+---
+
+# 4. Як стартувати draft із кліку по anchor
+
+У тому місці, де ти зараз обробляєш клік по anchor фігури, треба додати розгалуження:
+
+```js
+handleNodeAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.activeConnectorTool && !store.draftConnector) {
+    this.startDraftConnectorFromAnchor(anchor);
+    return;
+  }
+
+  if (store.activeConnectorTool && store.draftConnector) {
+    this.finishDraftConnector(anchor, null);
+    return;
+  }
+
+  // ... решта твоєї поточної логіки
+}
+```
+
+Якщо в тебе вже є інший метод для node anchor click — інтегруй цю гілку туди.
+
+---
+
+# 5. `DraftConnectorLayer.jsx`
+
+Новий файл. Він просто малює тимчасовий connector без хендлів.
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+export default function DraftConnectorLayer() {
+  const draftConnector = useCanvasStore((s) => s.draftConnector);
+
+  if (!draftConnector) return null;
+
+  const pts = draftConnector.geometry?.points || [];
+  if (pts.length < 4) return null;
+
+  const stroke = draftConnector.style?.stroke || "black";
+  const strokeWidth = draftConnector.style?.strokeWidth || 2;
+
+  const startSegment = getConnectorStartSegment(pts);
+  const endSegment = getConnectorEndSegment(pts);
+
+  const startArrowPoints =
+    draftConnector.endcaps?.start === "arrow" && startSegment
+      ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+      : null;
+
+  const endArrowPoints =
+    draftConnector.endcaps?.end === "arrow" && endSegment
+      ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+      : null;
+
+  return (
+    <Group listening={false}>
+      <Line
+        points={pts}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="round"
+        lineCap="round"
+        dash={[6, 4]}
+      />
+
+      {startArrowPoints && (
+        <Line
+          points={startArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+
+      {endArrowPoints && (
+        <Line
+          points={endArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+# 6. Де рендерити `DraftConnectorLayer`
+
+У головному editor canvas, поруч із `ConnectorsLayer`.
+
+Наприклад:
+
+```jsx
+<ConnectorsLayer />
+<DraftConnectorLayer />
+<NodesAnchorPreviewLayer />
+```
+
+Я б саме так і ставив.
+
+---
+
+# 7. Як підключити `mousemove` і `mouseup` на stage
+
+У компоненті, де в тебе `Stage`, додай:
+
+```jsx
+onMouseMove={(e) => {
+  const store = useCanvasStore.getState();
+  if (!store.draftConnector) return;
+
+  const stage = e.target.getStage?.() || e.target;
+  const pointer = stage?.getPointerPosition?.();
+  if (!pointer) return;
+
+  canvasController.updateDraftConnector(pointer);
+}}
+
+onMouseUp={(e) => {
+  const store = useCanvasStore.getState();
+  if (!store.draftConnector) return;
+
+  const stage = e.target.getStage?.() || e.target;
+  const pointer = stage?.getPointerPosition?.();
+  if (!pointer) return;
+
+  canvasController.finishDraftConnector(null, pointer);
+}}
+```
+
+Тут логіка така:
+
+* якщо `mouseup` стався не на anchor — connector завершиться як detached-end
+* якщо `mouseup` був на anchor і ти викликав `finishDraftConnector(anchor, null)` раніше, просто слідкуй, щоб не було подвійного фінішу. Для MVP це зазвичай вирішується тим, що після першого фінішу `draftConnector` уже `null`.
+
+---
+
+# 8. Як виглядатиме MVP flow
+
+## Кнопка “Ламана”
+
+Активує:
+
+```js
+{
+  pathType: "orthogonal-elbow",
+  endcaps: { start: "none", end: "none" },
+  behavior: { type: "default", link: null }
+}
+```
+
+## Далі
+
+1. hover на фігуру → anchor preview
+2. клік по anchor → `startDraftConnectorFromAnchor`
+3. drag → `updateDraftConnector(pointer)`
+4. drop:
+
+   * на anchor → attached до node
+   * у canvas → detached end
+
+## Після створення
+
+* tool вимикається
+* connector вже живе у `edges`
+* далі його можна reattach/edit як зараз
+
+---
+
+# 9. Що ще можна додати одразу, але необов’язково
+
+Для зручності можна ще зробити кнопку “Скасувати інструмент”:
+
+```js
+onClick={() => {
+  const store = useCanvasStore.getState();
+  store.clearActiveConnectorTool?.();
+  store.clearDraftConnector?.();
+  store.clearConnectorAttachPreview?.();
+}}
+```
+
+---
+
+# 10. Підсумок по файлах
+
+### `useCanvasStore.js`
+
+додати:
+
+* `activeConnectorTool`
+* `draftConnector`
+
+### `canvasController.js`
+
+додати:
+
+* `activateConnectorTool`
+* `cancelDraftConnector`
+* `startDraftConnectorFromAnchor`
+* `updateDraftConnector`
+* `finishDraftConnector`
+
+### `DraftConnectorLayer.jsx`
+
+новий файл
+
+### `Stage`
+
+додати:
+
+* `onMouseMove`
+* `onMouseUp`
+
+### `anchor click handler`
+
+додати старт/фініш draft connector-а
+
+---
+
+Якщо хочеш, наступним кроком я можу дати тобі ще **готовий приклад кнопок інструментів для панелі**, уже не тестових, а саме під цей новий flow.

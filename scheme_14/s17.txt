@@ -1,0 +1,297 @@
+Так. Ось **короткий і практичний список**, куди саме в editor canvas підключити:
+
+* `updateDraftConnector(pointer)`
+* `finishDraftConnector(...)`
+
+щоб новий flow реально запрацював і не довелося шукати це по всьому коду.
+
+---
+
+# 1. Де має запускатись `startDraftConnectorFromAnchor(anchor)`
+
+Це треба підключити **в обробник кліку по anchor фігури**.
+
+Тобто в тому місці, де ти рендериш anchor-и node і зараз ловиш клік по ним.
+
+## Логіка має бути така
+
+### якщо активний connector tool і draft ще не існує:
+
+```js id="draft-hook-01"
+canvasController.startDraftConnectorFromAnchor(anchor)
+```
+
+### якщо активний connector tool і draft уже існує:
+
+```js id="draft-hook-02"
+canvasController.finishDraftConnector(anchor, null)
+```
+
+---
+
+## Типовий вигляд
+
+```js id="draft-hook-03"
+handleNodeAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.activeConnectorTool && !store.draftConnector) {
+    this.startDraftConnectorFromAnchor(anchor);
+    return;
+  }
+
+  if (store.activeConnectorTool && store.draftConnector) {
+    this.finishDraftConnector(anchor, null);
+    return;
+  }
+
+  // інша логіка anchor click
+}
+```
+
+---
+
+# 2. Де має запускатись `updateDraftConnector(pointer)`
+
+Це треба підключити **на рівні Stage або головного canvas wrapper**, тобто там, де у тебе є глобальний `onMouseMove`.
+
+Це важливо, бо draft connector треба оновлювати не тільки тоді, коли курсор над конкретною фігурою, а по всьому canvas.
+
+---
+
+## Куди саме
+
+У компоненті типу:
+
+* `EditorCanvas`
+* або там, де в тебе `<Stage />`
+
+---
+
+## Має бути так
+
+```jsx id="draft-hook-04"
+<Stage
+  ...
+  onMouseMove={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.updateDraftConnector(pointer);
+  }}
+>
+```
+
+---
+
+# 3. Де має запускатись `finishDraftConnector(null, pointer)`
+
+Це теж треба підключити **на рівні Stage**, у глобальний `onMouseUp`.
+
+Чому:
+
+* якщо користувач не відпустив на anchor
+* але відпустив у пустому місці canvas
+* connector усе одно має створитись як detached-end
+
+---
+
+## Має бути так
+
+```jsx id="draft-hook-05"
+<Stage
+  ...
+  onMouseUp={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.finishDraftConnector(null, pointer);
+  }}
+>
+```
+
+---
+
+# 4. Де рендерити `DraftConnectorLayer`
+
+Це треба вставити **поруч із `ConnectorsLayer`**, не замість нього.
+
+---
+
+## Рекомендований порядок
+
+```jsx id="draft-hook-06"
+<ConnectorsLayer />
+<DraftConnectorLayer />
+<NodesAnchorPreviewLayer />
+```
+
+---
+
+## Чому саме так
+
+* `ConnectorsLayer` — уже існуючі connector-и
+* `DraftConnectorLayer` — тимчасовий preview
+* `NodesAnchorPreviewLayer` — preview anchor-ів поверх усього
+
+---
+
+# 5. Де підключати `activeConnectorTool`
+
+Це не в canvas, а в **панелі інструментів**.
+
+Тобто кнопки:
+
+* Ламана
+* Лінія
+* Стрілка
+
+мають викликати:
+
+```js id="draft-hook-07"
+canvasController.activateConnectorTool(template)
+```
+
+А не `createTestConnector()`.
+
+---
+
+# 6. Який мінімальний flow ти повинен отримати
+
+Після всіх підключень логіка має бути така:
+
+## Крок 1
+
+Натиснув кнопку “Ламана”
+
+→ `activeConnectorTool` став активним
+
+## Крок 2
+
+Клік по anchor фігури
+
+→ `startDraftConnectorFromAnchor(anchor)`
+
+## Крок 3
+
+Рухаєш мишкою по canvas
+
+→ `updateDraftConnector(pointer)`
+
+## Крок 4
+
+Відпускаєш:
+
+* або на іншому anchor
+* або в canvas
+
+→ `finishDraftConnector(...)`
+
+---
+
+# 7. Де НЕ треба це підключати
+
+Щоб не було конфліктів, **не треба** запускати `updateDraftConnector()`:
+
+* у `ConnectorsLayer`
+* у `NodesLayer`
+* у node shape окремо
+* у waypoint handlers
+
+Це має бути саме **глобальна stage-подія**.
+
+Інакше ти отримаєш:
+
+* уривчастий drag
+* зникання preview
+* конфлікти з hover/select
+
+---
+
+# 8. Що ще рекомендую додати одразу
+
+Щоб flow був акуратний, я б радив ще `Escape` для скасування draft.
+
+Це теж краще вішати на рівні editor/canvas wrapper.
+
+---
+
+## Наприклад у `useEffect`
+
+```js id="draft-hook-08"
+useEffect(() => {
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") {
+      canvasController.cancelDraftConnector?.();
+      useCanvasStore.getState().clearActiveConnectorTool?.();
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown);
+  return () => window.removeEventListener("keydown", onKeyDown);
+}, []);
+```
+
+---
+
+# 9. Найкоротший checklist по місцях
+
+Ось прямо список, куди лізти.
+
+## Панель інструментів
+
+Підключити:
+
+* `activateConnectorTool(template)`
+
+## Node anchors
+
+Підключити:
+
+* `startDraftConnectorFromAnchor(anchor)`
+* `finishDraftConnector(anchor, null)`
+
+## Stage / EditorCanvas
+
+Підключити:
+
+* `onMouseMove -> updateDraftConnector(pointer)`
+* `onMouseUp -> finishDraftConnector(null, pointer)`
+
+## Canvas layers
+
+Додати:
+
+* `DraftConnectorLayer`
+
+---
+
+# 10. Якщо коротко
+
+Тобі треба 3 точки інтеграції:
+
+### 1. В anchor click
+
+старт/фініш draft connector-а
+
+### 2. В Stage onMouseMove
+
+оновлення preview
+
+### 3. В Stage onMouseUp
+
+фіналізація в canvas
+
+Це і є мінімальний правильний каркас.
+
+---
+
+Якщо хочеш, наступним повідомленням я можу дати тобі **готовий приклад `EditorCanvas` або `Stage` wrapper-а**, куди це все вже вставлено разом: `onMouseMove`, `onMouseUp`, `DraftConnectorLayer`, `Escape`.

@@ -1,0 +1,353 @@
+Ось **конкретний оновлений код** для:
+
+* `buildOrthogonalElbowPoints()`
+* `insertPathHandleIntoSegment()`
+
+під твою поточну модель, де:
+
+* `baseOffset` керує **синіми** segment handles
+* `waypoints[0]` — це **жовта** path point
+* жовта точка тепер трактується як **центр нового вставленого сегмента**, а не вершина polyline
+
+Цей варіант свідомо робить **тільки 1 жовту точку**. Це правильний крок для стабілізації логіки.
+
+---
+
+## `connectorGeometry.js`
+
+```js
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) continue;
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+/**
+ * Базова elbow-лінія без жовтих path point.
+ * Працює від baseOffset або дефолтної L-форми.
+ */
+function buildBaseOrthogonalElbowPoints(start, end, baseOffset = null) {
+  if (baseOffset?.axis === "y") {
+    return normalizePoints([
+      start.x, start.y,
+      start.x, baseOffset.value,
+      end.x, baseOffset.value,
+      end.x, end.y,
+    ]);
+  }
+
+  if (baseOffset?.axis === "x") {
+    return normalizePoints([
+      start.x, start.y,
+      baseOffset.value, start.y,
+      baseOffset.value, end.y,
+      end.x, end.y,
+    ]);
+  }
+
+  return normalizePoints([
+    start.x, start.y,
+    end.x, start.y,
+    end.x, end.y,
+  ]);
+}
+
+/**
+ * Вставляє 1 жовту path point у конкретний сегмент.
+ *
+ * ВАЖЛИВО:
+ * waypoint НЕ стає вершиною polyline.
+ * Він стає центром нового вставленого короткого сегмента.
+ *
+ * Підтримує:
+ * - axis: "y" для горизонтального сегмента
+ * - axis: "x" для вертикального сегмента
+ */
+export function insertPathHandleIntoSegment(points, waypoint, insertedHalf = 20) {
+  if (!points || points.length < 4 || !waypoint) {
+    return points;
+  }
+
+  const segIndex = waypoint.segmentIndex;
+  if (segIndex == null) {
+    return points;
+  }
+
+  const i = segIndex * 2;
+  if (i + 3 >= points.length) {
+    return points;
+  }
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  const isHorizontal = same(y1, y2);
+  const isVertical = same(x1, x2);
+
+  const before = points.slice(0, i + 2);
+  const after = points.slice(i + 2);
+
+  // === waypoint додано на горизонтальний сегмент ===
+  if (waypoint.axis === "y" && isHorizontal) {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+
+    const leftX = Math.max(minX, Math.min(maxX, waypoint.x - insertedHalf));
+    const rightX = Math.max(minX, Math.min(maxX, waypoint.x + insertedHalf));
+
+    const inserted = [
+      leftX, y1,
+      leftX, waypoint.y,
+      rightX, waypoint.y,
+      rightX, y1,
+    ];
+
+    return normalizePoints([
+      ...before,
+      ...inserted,
+      ...after,
+    ]);
+  }
+
+  // === waypoint додано на вертикальний сегмент ===
+  if (waypoint.axis === "x" && isVertical) {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    const topY = Math.max(minY, Math.min(maxY, waypoint.y - insertedHalf));
+    const bottomY = Math.max(minY, Math.min(maxY, waypoint.y + insertedHalf));
+
+    const inserted = [
+      x1, topY,
+      waypoint.x, topY,
+      waypoint.x, bottomY,
+      x1, bottomY,
+    ];
+
+    return normalizePoints([
+      ...before,
+      ...inserted,
+      ...after,
+    ]);
+  }
+
+  return points;
+}
+
+/**
+ * Оновлена elbow-логіка:
+ * 1. Спочатку будуємо базову ламану без жовтих точок
+ * 2. Якщо є 1 жовта точка — вставляємо новий внутрішній сегмент
+ *
+ * Поки що підтримується тільки ОДНА path point.
+ */
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const waypoints = route?.waypoints || [];
+  const baseOffset = route?.baseOffset || null;
+
+  // 1. базова форма
+  let basePoints = buildBaseOrthogonalElbowPoints(start, end, baseOffset);
+
+  // 2. якщо path point немає — повертаємо базову лінію
+  if (waypoints.length === 0) {
+    return basePoints;
+  }
+
+  // 3. MVP: підтримуємо тільки одну жовту точку
+  const wp = waypoints[0];
+
+  return insertPathHandleIntoSegment(basePoints, wp, 20);
+}
+```
+
+---
+
+# Що це дає
+
+## Було раніше
+
+Жовта точка ставала реальною вершиною маршруту.
+
+## Тепер
+
+Жовта точка:
+
+* не є кутом
+* є **центром нового короткого сегмента**
+* навколо неї автоматично утворюються **2 злами**
+* після rebuild сині точки перераховуються на нових сегментах
+
+---
+
+# Важливо, що ще треба врахувати
+
+Щоб це працювало правильно, `createWaypointAtSegment()` має повертати не просто `x/y`, а ще й:
+
+```js
+{
+  id,
+  segmentIndex,
+  axis: "x" | "y",
+  x,
+  y,
+}
+```
+
+Тобто `segmentIndex` тепер обов’язковий.
+
+Оновлений варіант:
+
+```js
+export function createWaypointAtSegment(connector, segmentIndex) {
+  if (!connector || connector.kind !== "connector") {
+    return null;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return null;
+  }
+
+  const points = connector.geometry?.points || [];
+  const segments = getConnectorSegments(points);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+  if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+    return null;
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    segmentIndex,
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+```
+
+---
+
+# І ще один важливий момент
+
+Щоб жовта точка не “їздила сама по собі”, а реально перебудовувала лінію, `moveConnectorWaypoint()` має міняти тільки її `x/y`, а `buildOrthogonalElbowPoints()` уже вставить правильний новий сегмент.
+
+Тобто логіка `moveConnectorWaypoint()` може лишатись простою:
+
+```js
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return {
+        ...wp,
+        y: pos.y,
+      };
+    }
+
+    if (wp.axis === "x") {
+      return {
+        ...wp,
+        x: pos.x,
+      };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+```
+
+---
+
+# Що перевірити після вставки
+
+## Тест 1
+
+Побудуй базову ламану.
+
+Очікування:
+
+* сині точки в центрах сегментів
+
+## Тест 2
+
+Додай жовту точку на горизонтальний сегмент.
+
+Очікування:
+
+* вона **не накладається** на синю
+* з’являється новий короткий сегмент
+* жовта в його центрі
+
+## Тест 3
+
+Потягни жовту вверх/вниз.
+
+Очікування:
+
+* перебудовується саме внутрішній сегмент
+* жовта лишається його центром
+* сині точки перераховуються на нових сегментах
+
+---
+
+Якщо хочеш, наступним повідомленням я дам тобі **точкові зміни для `ConnectorsLayer.jsx`**, щоб сині й жовті точки не конфліктували після цієї нової геометрії.

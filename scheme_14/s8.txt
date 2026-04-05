@@ -1,0 +1,317 @@
+Так, це якраз логічне допрацювання. Тут 3 окремі речі:
+
+1. курсор для жовтої точки шляху
+2. іконки в context menu
+3. видалення точки шляху з поверненням сегмента в попередній стан
+
+Нижче дам готові зміни.
+
+---
+
+# 1. Курсор для точки шляху
+
+Для жовтої точки курсор має залежати від `axis`:
+
+* `axis === "y"` → `ns-resize`
+* `axis === "x"` → `ew-resize`
+
+У тебе це вже майже було, але зафіксуй саме в рендері жовтої точки.
+
+## `ConnectorsLayer.jsx`
+
+У блоці жовтої точки залиш або заміни на це:
+
+```jsx
+onMouseEnter={(e) => {
+  const stage = e.target.getStage();
+  if (stage?.container()?.style) {
+    stage.container().style.cursor =
+      wp.axis === "y" ? "ns-resize" : "ew-resize";
+  }
+}}
+onMouseLeave={(e) => {
+  const stage = e.target.getStage();
+  if (stage?.container()?.style) {
+    stage.container().style.cursor = "default";
+  }
+}}
+```
+
+Якщо хочеш трохи кращий UX, можна ще збільшити жовту точку на hover, але це вже необов’язково.
+
+---
+
+# 2. Іконки в context menu
+
+Якщо ти використовуєш MUI `Menu` / `MenuItem`, найпростіше додати іконки через `ListItemIcon`.
+
+## Імпорти
+
+```jsx
+import { Menu, MenuItem, Divider, ListItemIcon, ListItemText } from "@mui/material";
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+```
+
+---
+
+## Оновлений `CanvasContextMenu.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import {
+  Menu,
+  MenuItem,
+  Divider,
+  ListItemIcon,
+  ListItemText,
+} from "@mui/material";
+
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  return (
+    <Menu
+      open={!!contextMenu}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "connector" && (
+        <>
+          <MenuItem
+            onClick={() => {
+              canvasController.addConnectorWaypointFromContextMenu?.();
+            }}
+          >
+            <ListItemIcon>
+              <AddCircleOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Додати точку шляху</ListItemText>
+          </MenuItem>
+
+          <Divider />
+
+          <MenuItem
+            onClick={() => {
+              canvasController.deleteConnectorFromContextMenu?.();
+            }}
+          >
+            <ListItemIcon>
+              <DeleteOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Видалити лінію</ListItemText>
+          </MenuItem>
+        </>
+      )}
+
+      {contextMenu?.type === "connector-waypoint" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.removeConnectorWaypointFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <RemoveCircleOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Прибрати точку шляху</ListItemText>
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+```
+
+---
+
+# 3. Видалення точки шляху і повернення сегмента до попереднього стану
+
+Оце найважливіше.
+
+У твоїй поточній моделі “попередній стан” уже закладений правильно, якщо:
+
+* базова форма connector-а зберігається в `route.baseOffset`
+* жовта точка живе тільки в `route.waypoints`
+* `buildOrthogonalElbowPoints()` спочатку будує базову лінію з `baseOffset`, а потім поверх неї вставляє path handle
+
+Тобто логіка видалення має бути така:
+
+1. прибрати `waypoint` з `route.waypoints`
+2. rebuild geometry
+3. builder автоматично поверне connector до базової форми через `baseOffset`
+
+---
+
+## Правильний `removeConnectorWaypointFromContextMenu()`
+
+```js
+removeConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector-waypoint") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  // route.baseOffset НЕ чіпаємо
+  let next = removeConnectorWaypoint(connector, menu.waypointId);
+
+  // rebuild поверне базову форму без жовтої точки
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+# 4. Важливо: `removeConnectorWaypoint()` не повинен чіпати `baseOffset`
+
+Перевір, щоб у `connectorModel.js` він був саме таким:
+
+```js
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+Тобто:
+
+* `baseOffset` лишається
+* `pathType` лишається
+* `endcaps` лишаються
+* `behavior` лишається
+
+Змінюється тільки масив `waypoints`.
+
+---
+
+# 5. Щоб сегмент реально повертався до попереднього стану
+
+Перевір `buildOrthogonalElbowPoints()` — там порядок має бути саме такий:
+
+1. побудувати базову форму з `baseOffset`
+2. якщо `waypoints.length === 0` → одразу повернути базову форму
+3. якщо `waypoints.length > 0` → вставити path handle
+
+Критичний шматок:
+
+```js
+let basePoints = buildBaseOrthogonalElbowPoints(start, end, baseOffset);
+
+if (waypoints.length === 0) {
+  return basePoints;
+}
+
+const wp = waypoints[0];
+return insertPathHandleIntoSegment(basePoints, wp, 20);
+```
+
+Саме це і дає “повернення до попереднього стану”.
+
+---
+
+# 6. Ще одна корисна дрібниця
+
+Щоб у меню не було зайвого пункту “Додати точку шляху”, коли жовта точка вже існує, краще сховати цей пункт.
+
+## У `CanvasContextMenu.jsx`
+
+```jsx
+const edges = useCanvasStore((s) => s.edges);
+
+const selectedConnector =
+  contextMenu?.edgeId
+    ? edges.find((e) => e.id === contextMenu.edgeId)
+    : null;
+
+const canAddWaypoint =
+  contextMenu?.type === "connector" &&
+  selectedConnector?.kind === "connector" &&
+  selectedConnector?.pathType === "orthogonal-elbow" &&
+  (selectedConnector?.route?.waypoints?.length || 0) === 0;
+```
+
+І далі:
+
+```jsx
+{contextMenu?.type === "connector" && (
+  <>
+    {canAddWaypoint && (
+      <MenuItem
+        onClick={() => {
+          canvasController.addConnectorWaypointFromContextMenu?.();
+        }}
+      >
+        <ListItemIcon>
+          <AddCircleOutlineIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Додати точку шляху</ListItemText>
+      </MenuItem>
+    )}
+
+    {canAddWaypoint && <Divider />}
+
+    <MenuItem
+      onClick={() => {
+        canvasController.deleteConnectorFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <DeleteOutlineIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Видалити лінію</ListItemText>
+    </MenuItem>
+  </>
+)}
+```
+
+Це прибере неправильний UX.
+
+---
+
+# 7. Підсумок
+
+Що ти отримаєш після цих змін:
+
+* жовта точка матиме правильний курсор по осі
+* у меню будуть іконки для:
+
+  * додавання точки шляху
+  * прибирання точки шляху
+  * видалення лінії
+* при видаленні точки шляху connector повернеться до базового стану через `baseOffset`
+* у меню “Додати точку шляху” можна сховати, якщо точка вже існує
+
+---
+
+Наступним логічним кроком я б радив допиляти ще одну UX-річ: щоб при наведенні на сам connector перед контекстним меню було зрозуміло, на який саме сегмент буде додана path point.

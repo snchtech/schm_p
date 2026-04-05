@@ -1,0 +1,368 @@
+Так. Найпростіший варіант — зробити **hover-preview сегмента**, без великої перебудови архітектури.
+
+Ідея така:
+
+* коли миша рухається по connector-у
+* ми знаходимо **найближчий сегмент**
+* зберігаємо його в store
+* у `ConnectorsLayer` малюємо:
+
+  * підсвічений сегмент
+  * маленький preview-marker у центрі
+
+Тобто користувач ще **до ПКМ** бачить, куди саме додасться точка шляху.
+
+---
+
+# 1. Що додати в store
+
+У `useCanvasStore.js` додай:
+
+```js id="hover-preview-01"
+hoveredConnectorSegment: null,
+// {
+//   edgeId,
+//   segmentIndex,
+//   orientation,
+//   x,
+//   y
+// }
+
+setHoveredConnectorSegment: (hoveredConnectorSegment) =>
+  set({ hoveredConnectorSegment }),
+
+clearHoveredConnectorSegment: () =>
+  set({ hoveredConnectorSegment: null }),
+```
+
+---
+
+# 2. Що використати з уже наявного
+
+У тебе вже є корисна функція:
+
+```js id="hover-preview-02"
+findClosestConnectorSegment(connector, point)
+```
+
+Вона якраз підходить.
+
+---
+
+# 3. Додати hover-логіку в `ConnectorsLayer.jsx`
+
+На початку компонента підтягуєш store:
+
+```jsx id="hover-preview-03"
+const hoveredConnectorSegment = useCanvasStore((s) => s.hoveredConnectorSegment);
+const setHoveredConnectorSegment = useCanvasStore((s) => s.setHoveredConnectorSegment);
+const clearHoveredConnectorSegment = useCanvasStore((s) => s.clearHoveredConnectorSegment);
+```
+
+---
+
+# 4. Додати `onMouseMove` на основну лінію connector-а
+
+У головний `<Line />` додай:
+
+```jsx id="hover-preview-04"
+onMouseMove={(e) => {
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const closest = findClosestConnectorSegment(connector, {
+    x: pointer.x,
+    y: pointer.y,
+  });
+
+  if (!closest) {
+    clearHoveredConnectorSegment();
+    return;
+  }
+
+  setHoveredConnectorSegment({
+    edgeId: connector.id,
+    segmentIndex: closest.segmentIndex,
+    orientation: closest.orientation,
+    x: closest.x,
+    y: closest.y,
+  });
+}}
+onMouseLeave={(e) => {
+  clearHoveredConnectorSegment();
+
+  const stage = e.target.getStage();
+  if (stage?.container()?.style) {
+    stage.container().style.cursor = "default";
+  }
+}}
+```
+
+---
+
+# 5. Потрібен helper, щоб намалювати саме підсвічений сегмент
+
+Додай у `connectorEditing.js` helper:
+
+```js id="hover-preview-05"
+export function getSegmentByIndex(points = [], segmentIndex) {
+  const segments = getConnectorSegments(points);
+  return segments.find((s) => s.index === segmentIndex) || null;
+}
+```
+
+---
+
+# 6. Імпорт у `ConnectorsLayer.jsx`
+
+Додай:
+
+```jsx id="hover-preview-06"
+import {
+  getConnectorSegmentHandles,
+  findClosestConnectorSegment,
+  getSegmentByIndex,
+} from "@/lib/connectors/connectorEditing";
+```
+
+---
+
+# 7. Побудувати hovered segment усередині `map(connector)`
+
+Після того, як у тебе вже є `pts`, додай:
+
+```jsx id="hover-preview-07"
+const hoveredSegment =
+  hoveredConnectorSegment?.edgeId === connector.id
+    ? getSegmentByIndex(pts, hoveredConnectorSegment.segmentIndex)
+    : null;
+```
+
+---
+
+# 8. Намалювати preview сегмента
+
+Перед основною `<Line />` або після неї, але краще **перед**, щоб основна лінія не зникала, додай:
+
+```jsx id="hover-preview-08"
+{hoveredSegment && (
+  <Line
+    points={[
+      hoveredSegment.x1,
+      hoveredSegment.y1,
+      hoveredSegment.x2,
+      hoveredSegment.y2,
+    ]}
+    stroke="#F2C94C"
+    strokeWidth={6}
+    lineJoin="round"
+    lineCap="round"
+    listening={false}
+    opacity={0.6}
+  />
+)}
+```
+
+Це дасть м’яку жовту підсвітку сегмента.
+
+---
+
+# 9. Намалювати preview marker у центрі
+
+Після підсвітки сегмента додай маленький marker:
+
+```jsx id="hover-preview-09"
+{hoveredConnectorSegment?.edgeId === connector.id && (
+  <Circle
+    x={hoveredConnectorSegment.x}
+    y={hoveredConnectorSegment.y}
+    radius={4}
+    fill="rgba(242, 201, 76, 0.85)"
+    stroke="black"
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+```
+
+Це вже буде дуже схоже на зрозумілий preview для “Додати точку шляху”.
+
+---
+
+# 10. Щоб preview не заважав жовтій точці
+
+Якщо вже є `waypoint`, краще не показувати preview-marker прямо поверх нього.
+
+Можна додати просту перевірку:
+
+```jsx id="hover-preview-10"
+const shouldShowHoveredMarker =
+  hoveredConnectorSegment?.edgeId === connector.id &&
+  !waypoints.some(
+    (wp) =>
+      Math.abs(wp.x - hoveredConnectorSegment.x) < 0.5 &&
+      Math.abs(wp.y - hoveredConnectorSegment.y) < 0.5
+  );
+```
+
+І далі:
+
+```jsx id="hover-preview-11"
+{shouldShowHoveredMarker && (
+  <Circle
+    x={hoveredConnectorSegment.x}
+    y={hoveredConnectorSegment.y}
+    radius={4}
+    fill="rgba(242, 201, 76, 0.85)"
+    stroke="black"
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+```
+
+---
+
+# 11. Повний шматок для `ConnectorsLayer.jsx`
+
+Ось мінімальний набір змін.
+
+## Імпорти
+
+```jsx id="hover-preview-12"
+import {
+  getConnectorSegmentHandles,
+  findClosestConnectorSegment,
+  getSegmentByIndex,
+} from "@/lib/connectors/connectorEditing";
+```
+
+## Store hooks
+
+```jsx id="hover-preview-13"
+const hoveredConnectorSegment = useCanvasStore((s) => s.hoveredConnectorSegment);
+const setHoveredConnectorSegment = useCanvasStore((s) => s.setHoveredConnectorSegment);
+const clearHoveredConnectorSegment = useCanvasStore((s) => s.clearHoveredConnectorSegment);
+```
+
+## Усередині `map(connector)`
+
+```jsx id="hover-preview-14"
+const hoveredSegment =
+  hoveredConnectorSegment?.edgeId === connector.id
+    ? getSegmentByIndex(pts, hoveredConnectorSegment.segmentIndex)
+    : null;
+
+const shouldShowHoveredMarker =
+  hoveredConnectorSegment?.edgeId === connector.id &&
+  !waypoints.some(
+    (wp) =>
+      Math.abs(wp.x - hoveredConnectorSegment.x) < 0.5 &&
+      Math.abs(wp.y - hoveredConnectorSegment.y) < 0.5
+  );
+```
+
+## Hover-preview render
+
+```jsx id="hover-preview-15"
+{hoveredSegment && (
+  <Line
+    points={[
+      hoveredSegment.x1,
+      hoveredSegment.y1,
+      hoveredSegment.x2,
+      hoveredSegment.y2,
+    ]}
+    stroke="#F2C94C"
+    strokeWidth={6}
+    lineJoin="round"
+    lineCap="round"
+    listening={false}
+    opacity={0.6}
+  />
+)}
+
+{shouldShowHoveredMarker && (
+  <Circle
+    x={hoveredConnectorSegment.x}
+    y={hoveredConnectorSegment.y}
+    radius={4}
+    fill="rgba(242, 201, 76, 0.85)"
+    stroke="black"
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+```
+
+## У головний `<Line />`
+
+```jsx id="hover-preview-16"
+onMouseMove={(e) => {
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const closest = findClosestConnectorSegment(connector, {
+    x: pointer.x,
+    y: pointer.y,
+  });
+
+  if (!closest) {
+    clearHoveredConnectorSegment();
+    return;
+  }
+
+  setHoveredConnectorSegment({
+    edgeId: connector.id,
+    segmentIndex: closest.segmentIndex,
+    orientation: closest.orientation,
+    x: closest.x,
+    y: closest.y,
+  });
+}}
+onMouseLeave={(e) => {
+  clearHoveredConnectorSegment();
+
+  const stage = e.target.getStage();
+  if (stage?.container()?.style) {
+    stage.container().style.cursor = "default";
+  }
+}}
+```
+
+---
+
+# 12. Що це дасть по UX
+
+Після цього користувач:
+
+* наводить мишку на connector
+* бачить, **який саме сегмент** активний
+* бачить центр, куди буде додано точку шляху
+* натискає ПКМ
+* обирає “Додати точку шляху”
+* отримує точку саме там, де preview був показаний
+
+Це різко покращує передбачуваність.
+
+---
+
+# 13. Моя порада
+
+Почни саме з:
+
+* підсвітки сегмента
+* маленького preview-marker
+
+Цього вже вистачить.
+Не треба поки додавати складніші hover-ефекти.
+
+---
+
+Якщо хочеш, далі можу допомогти ще з одним корисним покращенням: **щоб контекстне меню відкривалось не тільки по лінії в цілому, а вже гарантовано по активному hovered segment, який був підсвічений перед ПКМ**.

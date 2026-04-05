@@ -1,0 +1,480 @@
+Добре. Ось **MVP-план по файлах**, щоб перейти від “кнопка вставляє готову лінію” до **draw.io-подібного режиму побудови connector-а**:
+
+* вибрав інструмент
+* натиснув на anchor першої фігури
+* потягнув
+* побачив preview
+* відпустив на другій фігурі або в canvas
+* отримав готовий connector
+* потім його можна від’єднувати й переприв’язувати
+
+---
+
+# 1. Що додаємо в store
+
+У `useCanvasStore.js` треба додати **2 нові сутності**:
+
+## A. Активний інструмент connector-а
+
+Це шаблон того, що користувач зараз хоче малювати.
+
+```js
+activeConnectorTool: null,
+// {
+//   pathType: "orthogonal-elbow" | "orthogonal-straight" | "free-straight",
+//   endcaps: { start: "none" | "arrow", end: "none" | "arrow" },
+//   behavior: { type: "default" | "navigation", link: null | {...} }
+// }
+
+setActiveConnectorTool: (activeConnectorTool) => set({ activeConnectorTool }),
+clearActiveConnectorTool: () => set({ activeConnectorTool: null }),
+```
+
+---
+
+## B. Чернетка connector-а під час drag
+
+Це тимчасовий connector, який ще не збережений в `edges`.
+
+```js
+draftConnector: null,
+// {
+//   kind: "connector",
+//   pathType,
+//   start,
+//   end,
+//   route,
+//   endcaps,
+//   behavior,
+//   geometry,
+//   style
+// }
+
+setDraftConnector: (draftConnector) => set({ draftConnector }),
+clearDraftConnector: () => set({ draftConnector: null }),
+```
+
+---
+
+# 2. Що міняємо в панелі інструментів
+
+Зараз кнопка, скоріш за все, робить щось типу:
+
+* `createTestOrthogonalElbow()`
+
+Це треба змінити.
+
+## Правильно:
+
+кнопка **не створює edge одразу**, а тільки активує інструмент.
+
+Наприклад:
+
+```js
+onClick={() =>
+  store.setActiveConnectorTool({
+    pathType: "orthogonal-elbow",
+    endcaps: { start: "none", end: "none" },
+    behavior: { type: "default", link: null },
+  })
+}
+```
+
+Для стрілки:
+
+```js
+onClick={() =>
+  store.setActiveConnectorTool({
+    pathType: "free-straight",
+    endcaps: { start: "none", end: "arrow" },
+    behavior: { type: "default", link: null },
+  })
+}
+```
+
+---
+
+# 3. Де запускати створення draft connector-а
+
+Запуск має відбуватись **не по кнопці**, а **по кліку на anchor фігури**, коли активний інструмент.
+
+Тобто у тебе вже є логіка hover/select anchor-ів на node.
+Саме туди треба додати нову гілку:
+
+## Якщо `activeConnectorTool !== null`
+
+то клік по anchor **не редагує старий connector**, а:
+
+* створює `draftConnector`
+* ставить `start` attached до цього anchor
+* `end` поки йде за мишкою
+
+---
+
+# 4. Який метод додати в controller
+
+У `canvasController.js` додати 4 нові методи.
+
+---
+
+## A. `startDraftConnectorFromAnchor(anchor)`
+
+Що робить:
+
+* бере `activeConnectorTool`
+* створює draft connector
+* `start` = attached до node anchor
+* `end` = тимчасово в цій же точці
+* rebuild geometry
+* кладе у `draftConnector`
+
+Суть:
+
+```js
+startDraftConnectorFromAnchor(anchor)
+```
+
+---
+
+## B. `updateDraftConnector(pointer)`
+
+Що робить:
+
+* якщо є `draftConnector`
+* оновлює його `end`
+* якщо є preview anchor другої фігури — прилипає до нього
+* rebuild geometry
+* оновлює `draftConnector`
+
+---
+
+## C. `finishDraftConnector(targetAnchor, pointer)`
+
+Що робить:
+
+* якщо є `draftConnector`
+* завершує його:
+
+  * або attached до другої фігури
+  * або detached у точці canvas
+* кладе у `edges`
+* очищає `draftConnector`
+* за бажанням очищає `activeConnectorTool`
+
+---
+
+## D. `cancelDraftConnector()`
+
+Що робить:
+
+* `clearDraftConnector()`
+* optionally `clearActiveConnectorTool()`
+
+---
+
+# 5. Який вигляд матиме `startDraftConnectorFromAnchor`
+
+Логічно він використовує вже існуючу модель connector-а:
+
+```js
+let draft = createConnector({
+  pathType: activeConnectorTool.pathType,
+  endcaps: activeConnectorTool.endcaps,
+  behavior: activeConnectorTool.behavior,
+  start: {
+    x: anchor.x,
+    y: anchor.y,
+    attached: {
+      type: "node",
+      nodeId: anchor.nodeId,
+      anchor: anchor.direction,
+    },
+  },
+  end: {
+    x: anchor.x,
+    y: anchor.y,
+    attached: { type: "none" },
+  },
+});
+```
+
+Далі:
+
+* `draft = rebuildConnectorGeometry(draft, nodes)`
+* `setDraftConnector(draft)`
+
+---
+
+# 6. Як оновлювати draft під час руху миші
+
+Тут можна використати вже наявну логіку attach preview.
+
+Тобто в `updateDraftConnector(pointer)`:
+
+1. перевіряєш `getConnectorAttachPreview(nodes, pointer)`
+2. якщо є activeAnchor:
+
+   * `end.x/y = activeAnchor.x/y`
+   * можна тимчасово показувати, що він прилипає
+3. якщо нема:
+
+   * `end.x/y = pointer.x/pointer.y`
+4. rebuild geometry
+
+---
+
+# 7. Як завершувати draft
+
+### Випадок 1: користувач відпустив на anchor
+
+Створюєш реальний connector:
+
+* `start` уже attached
+* `end` теж attached
+
+### Випадок 2: користувач відпустив у canvas
+
+Створюєш реальний connector:
+
+* `start` attached
+* `end` detached
+
+Я тобі раджу саме так, бо це дуже зручно.
+
+---
+
+# 8. Окремий `DraftConnectorLayer`
+
+Це дуже бажано зробити окремим компонентом.
+
+## Навіщо
+
+Щоб:
+
+* не пхати draft у `edges`
+* не змішувати його з selection/context menu/редагуванням
+* легко скасовувати створення
+
+---
+
+## Новий файл
+
+`DraftConnectorLayer.jsx`
+
+Він робить просту річ:
+
+* читає `draftConnector` зі store
+* якщо він є — малює його так само, як звичайний connector
+* але:
+
+  * без selection handles
+  * без waypoint handles
+  * без context menu
+
+Тобто тільки preview path.
+
+---
+
+# 9. Де саме рендерити `DraftConnectorLayer`
+
+Поруч із `ConnectorsLayer`, але окремо.
+
+Наприклад:
+
+```jsx
+<ConnectorsLayer />
+<DraftConnectorLayer />
+<NodesAnchorPreviewLayer />
+```
+
+Або `NodesAnchorPreviewLayer` ще вище, якщо хочеш, щоб preview anchor-и були поверх draft connector-а.
+
+---
+
+# 10. Як запустити це з anchor click
+
+Тобі треба в обробнику кліку по anchor фігури зробити розгалуження.
+
+## Зараз там, скоріш за все:
+
+* або create edge
+* або select
+* або старий flow
+
+## Треба так:
+
+### якщо `activeConnectorTool` активний і `draftConnector === null`
+
+```js
+startDraftConnectorFromAnchor(anchor)
+```
+
+### якщо `activeConnectorTool` активний і `draftConnector !== null`
+
+```js
+finishDraftConnector(anchor, null)
+```
+
+Тобто:
+
+* перший клік по anchor → старт
+* другий клік по anchor → завершення
+
+Або:
+
+* перший клік по anchor → старт
+* drag → mouseup → завершення
+
+Для MVP я б робив **drag/mouseup**, бо це ближче до draw.io.
+
+---
+
+# 11. Які події треба підчепити на canvas/stage
+
+Коли `draftConnector !== null`, треба ловити:
+
+## `mousemove`
+
+щоб оновлювати draft
+
+## `mouseup`
+
+щоб завершувати draft у точці canvas, якщо не потрапили на anchor
+
+Тобто ці обробники краще повісити на `Stage` або на головний canvas component.
+
+---
+
+# 12. Мінімальний порядок реалізації по файлах
+
+---
+
+## `useCanvasStore.js`
+
+Додати:
+
+* `activeConnectorTool`
+* `draftConnector`
+* setters/clearers
+
+---
+
+## `canvasController.js`
+
+Додати:
+
+* `activateConnectorTool(template)`
+* `cancelDraftConnector()`
+* `startDraftConnectorFromAnchor(anchor)`
+* `updateDraftConnector(pointer)`
+* `finishDraftConnector(anchorOrNull, pointerOrNull)`
+
+---
+
+## `DraftConnectorLayer.jsx`
+
+Новий файл:
+
+* читає `draftConnector`
+* рендерить preview
+
+---
+
+## `ConnectorsToolSection.jsx` або панель
+
+Кнопки тепер:
+
+* активують tool
+* а не створюють одразу edge
+
+---
+
+## `Node anchor click handler`
+
+Додати:
+
+* якщо активний connector tool → старт/фініш draft connector-а
+
+---
+
+## Головний canvas/stage component
+
+Додати:
+
+* `onMouseMove` → `updateDraftConnector(pointer)`
+* `onMouseUp` → `finishDraftConnector(null, pointer)`
+
+---
+
+# 13. Який MVP UX я б радив
+
+Ось найкращий стартовий варіант:
+
+### Кнопка “Ламана”
+
+* активує tool
+
+### Hover по фігурі
+
+* видно всі anchor-и
+
+### MouseDown по anchor
+
+* стартує draft
+
+### Drag
+
+* видно preview connector-а
+* кінець прилипає до anchor-ів інших фігур
+
+### MouseUp
+
+* якщо на anchor → attached до нього
+* якщо не на anchor → detached end
+
+### Escape / кнопка “Скасувати”
+
+* скидає draft
+
+Це вже дуже близько до draw.io.
+
+---
+
+# 14. Важлива порада по станах
+
+Я б радив таке правило:
+
+## `activeConnectorTool`
+
+живе доти, доки користувач сам його не вимкне
+**або**
+очищати після одного створення connector-а
+
+Для MVP можна робити так:
+
+* після створення одного connector-а tool вимикається
+
+Потім, якщо захочеш UX як у draw.io, можна залишати tool активним довше.
+
+---
+
+# 15. Короткий підсумок
+
+Щоб перенести принцип побудови з draw.io, треба:
+
+* кнопка більше не створює готову лінію
+* кнопка активує **інструмент**
+* клік по anchor стартує **draft connector**
+* під час drag рендериться preview
+* drop створює справжній connector
+* далі працює вже твоя існуюча логіка reattach/edit
+
+---
+
+# 16. Що пропоную далі
+
+Наступним повідомленням я можу дати вже **готовий MVP-код по store + controller skeleton**, тобто:
+
+* що саме дописати в `useCanvasStore.js`
+* які конкретні методи вставити в `canvasController.js`
+* і який мінімальний `DraftConnectorLayer.jsx` зробити.
