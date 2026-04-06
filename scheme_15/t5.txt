@@ -1,0 +1,525 @@
+Ок. Даю **2 готові MVP-допрацювання**:
+
+1. **merge / cleanup після drag**
+2. **фіксація start/end anchor під час drag**, щоб конектор не перескакував між сторонами фігури.
+
+Це логічне продовження схеми, де маршрут уже зберігається через `route.vertices`, а не через `baseOffset`, і `rebuildConnectorGeometry()` має лише перебудовувати `points`, не вигадуючи нову топологію.  
+
+---
+
+## 1. merge / cleanup after drag
+
+### `connectorGeometry.js`
+
+Заміняє твою просту нормалізацію на більш жорстку:
+
+* прибирає дублікати
+* прибирає колінеарні точки
+* прибирає “zig-zag” з мікро-сегментів
+* склеює зайве після split/move
+
+```js id="py0hgh"
+export function createRoutePoint(x, y, id = null) {
+  return {
+    id: id || `rp_${Math.random().toString(36).slice(2, 10)}`,
+    x,
+    y,
+  };
+}
+
+export function cloneRoutePoints(points = []) {
+  return points.map((p) => ({ ...p }));
+}
+
+export function getFullOrthogonalRoutePoints(start, end, route = {}) {
+  const vertices = cloneRoutePoints(route?.vertices || []);
+  return [
+    { x: start.x, y: start.y, kind: "start" },
+    ...vertices.map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+}
+
+function dedupeNeighborPoints(points) {
+  const out = [];
+  for (const p of points) {
+    const prev = out[out.length - 1];
+    if (prev && prev.x === p.x && prev.y === p.y) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+function removeCollinearMiddlePoints(points) {
+  const out = [...points];
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (let i = 1; i < out.length - 1; i++) {
+      const a = out[i - 1];
+      const b = out[i];
+      const c = out[i + 1];
+
+      const sameVertical = a.x === b.x && b.x === c.x;
+      const sameHorizontal = a.y === b.y && b.y === c.y;
+
+      if (sameVertical || sameHorizontal) {
+        out.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return out;
+}
+
+function removeTinyOrthogonalSteps(points, epsilon = 1) {
+  const out = [...points];
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (let i = 1; i < out.length - 1; i++) {
+      const a = out[i - 1];
+      const b = out[i];
+      const c = out[i + 1];
+
+      const ab = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      const bc = Math.abs(b.x - c.x) + Math.abs(b.y - c.y);
+
+      if (ab <= epsilon || bc <= epsilon) {
+        out.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return out;
+}
+
+export function normalizeOrthogonalVertices(start, end, vertices = []) {
+  let full = [
+    { x: start.x, y: start.y, kind: "start" },
+    ...cloneRoutePoints(vertices).map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+
+  full = dedupeNeighborPoints(full);
+  full = removeTinyOrthogonalSteps(full, 1);
+  full = removeCollinearMiddlePoints(full);
+  full = dedupeNeighborPoints(full);
+
+  return full
+    .slice(1, -1)
+    .map((p) => createRoutePoint(p.x, p.y, p.id));
+}
+
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const full = getFullOrthogonalRoutePoints(start, end, route);
+  const points = [];
+
+  for (const p of full) {
+    points.push(p.x, p.y);
+  }
+
+  return normalizePoints(points);
+}
+
+export function getOrthogonalRouteSegments(start, end, route = {}) {
+  const pts = getFullOrthogonalRoutePoints(start, end, route);
+  const segments = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+
+    const isHorizontal = a.y === b.y;
+    const isVertical = a.x === b.x;
+
+    if (!isHorizontal && !isVertical) continue;
+
+    segments.push({
+      index: i,
+      a,
+      b,
+      orientation: isHorizontal ? "horizontal" : "vertical",
+      cx: (a.x + b.x) / 2,
+      cy: (a.y + b.y) / 2,
+      isFirst: i === 0,
+      isLast: i === pts.length - 2,
+    });
+  }
+
+  return segments;
+}
+```
+
+---
+
+## 2. fixed anchors during drag
+
+Суть: під час drag **не викликаємо** агресивне `resolveConnectorStartPoint / resolveConnectorEndPoint`, а працюємо з already-fixed `geometry.start / geometry.end`.
+Це важливо, бо якщо кожен `dragMove` переобирає інший порт/сторону, лінія буде “скакати”. Такий ризик ми вже обговорювали. 
+
+### `connectorEditing.js`
+
+```js id="e1ba6g"
+import {
+  createRoutePoint,
+  cloneRoutePoints,
+  getFullOrthogonalRoutePoints,
+  normalizeOrthogonalVertices,
+} from "./connectorGeometry";
+
+function ensureDragAnchorState(connector) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+
+  if (!start || !end) return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: {
+        start: { x: start.x, y: start.y },
+        end: { x: end.x, y: end.y },
+      },
+    },
+  };
+}
+
+export function beginConnectorSegmentDrag(connector) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+  return ensureDragAnchorState(connector);
+}
+
+export function endConnectorSegmentDrag(connector) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: null,
+    },
+  };
+}
+
+function getActiveAnchors(connector) {
+  const fixed = connector.route?.fixedAnchors;
+  if (fixed?.start && fixed?.end) {
+    return {
+      start: fixed.start,
+      end: fixed.end,
+    };
+  }
+
+  return {
+    start: connector.geometry?.start,
+    end: connector.geometry?.end,
+  };
+}
+
+export function moveOrthogonalSegment(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const full = getFullOrthogonalRoutePoints(start, end, { vertices });
+
+  const i = handle.segmentIndex;
+  if (i < 0 || i >= full.length - 1) return connector;
+
+  const a = full[i];
+  const b = full[i + 1];
+
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+  if (!isHorizontal && !isVertical) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+
+  const leftVertexIndex = i - 1;
+  const rightVertexIndex = i;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function splitSimpleElbowHorizontal(connector, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const nextVertices = [
+    createRoutePoint(start.x, pos.y),
+    createRoutePoint(end.x, pos.y),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function splitSimpleElbowVertical(connector, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const nextVertices = [
+    createRoutePoint(pos.x, start.y),
+    createRoutePoint(pos.x, end.y),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const vertices = connector.route?.vertices || [];
+
+  if (vertices.length === 1) {
+    if (handle.orientation === "horizontal") {
+      return splitSimpleElbowHorizontal(connector, pos);
+    }
+    if (handle.orientation === "vertical") {
+      return splitSimpleElbowVertical(connector, pos);
+    }
+  }
+
+  return moveOrthogonalSegment(connector, handle, pos);
+}
+```
+
+---
+
+## 3. `rebuildConnectorGeometry` — fixed anchors support
+
+`rebuildConnectorGeometry()` у тебе вже має працювати лише через `route.vertices` і будувати `points` без нових `baseOffset`. 
+Тут додаємо only one thing: якщо drag активний, беремо `fixedAnchors`.
+
+```js id="b0d4cb"
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  const fixed = connector.route?.fixedAnchors;
+
+  const start = fixed?.start || resolveConnectorStartPoint(connector, nodes);
+  const end = fixed?.end || resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) return connector;
+
+  const points =
+    connector.pathType === "orthogonal-elbow"
+      ? buildOrthogonalElbowPoints(start, end, connector.route)
+      : connector.geometry?.points || [];
+
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      start,
+      end,
+      points,
+    },
+  };
+}
+```
+
+---
+
+## 4. Контролер drag — start / move / end
+
+### `onDragStart`
+
+```js id="jq0vm4"
+handleConnectorSegmentDragStart(edgeId) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = beginConnectorSegmentDrag(connector);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+### `onDragMove`
+
+```js id="z4olb6"
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+### `onDragEnd`
+
+```js id="t8f4uq"
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = endConnectorSegmentDrag(next);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## 5. `Rect` — додай `onDragStart`
+
+```jsx id="grtbam"
+{segmentHandles.map((handle) => (
+  <Rect
+    key={handle.id}
+    x={handle.x - 5}
+    y={handle.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      handle.orientation === "horizontal"
+        ? { x: handle.x - 5, y: pos.y }
+        : { x: pos.x, y: handle.y - 5 }
+    }
+    onDragStart={() => {
+      canvasController.handleConnectorSegmentDragStart?.(connector.id);
+    }}
+    onDragMove={(e) => {
+      canvasController.handleConnectorSegmentDragMove?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorSegmentDragEnd?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+  />
+))}
+```
+
+---
+
+## 6. Що це дає
+
+Після цього MVP:
+
+* **split horizontal** уже працює;
+* **split vertical** уже працює;
+* після drag зайві мікро-злами будуть чиститись через `normalizeOrthogonalVertices`;
+* під час drag **start/end не перескакують між сторонами вузла**, бо фіксуються в `route.fixedAnchors`;
+* `segmentIndex` лишається стабільнішим, бо маршрут зберігається через `route.vertices`, а не через один `baseOffset`.  
+
+---
+
+## 7. Що ще може лишитись кривим
+
+Якщо після цього буде скакати, причина майже напевно тут:
+
+* `resolveConnectorStartPoint / resolveConnectorEndPoint` занадто агресивно міняють сторону прив’язки;
+* або десь ще в коді лишився старий `baseOffset`-шлях.
+
+---
+
+## 8. Найкращий наступний крок
+
+Став спочатку саме цей MVP.
+Потім я дам тобі ще один короткий patch:
+
+* **snap to grid для vertices**
+* **merge тільки на dragEnd**
+* **мінімальна логіка як у draw.io: не split-ити, якщо рух занадто малий**

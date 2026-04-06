@@ -1,0 +1,766 @@
+Так. Нижче даю **MVP саме для нового функціоналу побудови і перетягування конектора** під нову архітектуру.
+
+Що входить у цей MVP:
+
+* **побудова конектора як у draw.io**: інструмент → клік по anchor → drag preview → drop;
+* **перетягування всього конектора**, але тільки якщо обидва кінці detached;
+* усе вже на новій моделі:
+
+  * `route.vertices`
+  * `route.pathHandles`
+  * `geometry.segmentsMeta`
+
+Що **не входить**:
+
+* smart reroute
+* obstacle avoidance
+* auto-routing
+* складні path handle сценарії під час draft
+
+---
+
+# 1. Store: додаємо tool + draft + body drag
+
+## `useCanvasStore.js`
+
+```js
+import { create } from "zustand";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+
+  selection: null,
+  contextMenu: null,
+
+  hoveredConnectorSegment: null,
+  // { edgeId, segmentId, orientation, x, y }
+
+  connectorDragState: null,
+  // {
+  //   edgeId,
+  //   startPointer: { x, y },
+  //   lastPointer: { x, y }
+  // }
+
+  activeConnectorTool: null,
+  // {
+  //   pathType: "orthogonal-elbow" | "orthogonal-straight" | "free-straight",
+  //   endcaps: { start: "none" | "arrow", end: "none" | "arrow" },
+  //   behavior: { type: "default" | "navigation", link: null | {...} }
+  // }
+
+  draftConnector: null,
+
+  connectorAttachPreview: null,
+  // {
+  //   nodeId,
+  //   anchors,
+  //   activeAnchor
+  // }
+
+  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
+  addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((s) => ({
+      edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+    })),
+
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+
+  setHoveredConnectorSegment: (hoveredConnectorSegment) =>
+    set({ hoveredConnectorSegment }),
+  clearHoveredConnectorSegment: () =>
+    set({ hoveredConnectorSegment: null }),
+
+  setConnectorDragState: (connectorDragState) =>
+    set({ connectorDragState }),
+  clearConnectorDragState: () =>
+    set({ connectorDragState: null }),
+
+  setActiveConnectorTool: (activeConnectorTool) =>
+    set({ activeConnectorTool }),
+  clearActiveConnectorTool: () =>
+    set({ activeConnectorTool: null }),
+
+  setDraftConnector: (draftConnector) => set({ draftConnector }),
+  clearDraftConnector: () => set({ draftConnector: null }),
+
+  setConnectorAttachPreview: (connectorAttachPreview) =>
+    set({ connectorAttachPreview }),
+  clearConnectorAttachPreview: () =>
+    set({ connectorAttachPreview: null }),
+}));
+```
+
+---
+
+# 2. New route model
+
+Кожен новий connector має створюватися так:
+
+```js
+route: {
+  vertices: [],
+  pathHandles: [],
+  fixedAnchors: null,
+}
+```
+
+Для `orthogonal-elbow` стартовий route можна робити через helper:
+
+```js
+export function createInitialOrthogonalElbowRoute(start, end) {
+  return {
+    vertices: [
+      {
+        id: crypto.randomUUID(),
+        x: end.x,
+        y: start.y,
+      },
+    ],
+    pathHandles: [],
+    fixedAnchors: null,
+  };
+}
+```
+
+---
+
+# 3. Create connector: одразу на новій моделі
+
+## `connectorModel.js`
+
+```js
+import { createInitialOrthogonalElbowRoute } from "./connectorGeometry";
+
+export function createConnector({
+  id = crypto.randomUUID(),
+  pathType = "orthogonal-elbow",
+  start,
+  end,
+  endcaps = { start: "none", end: "none" },
+  behavior = { type: "default", link: null },
+  style = { stroke: "black", strokeWidth: 2 },
+}) {
+  let route = {
+    vertices: [],
+    pathHandles: [],
+    fixedAnchors: null,
+  };
+
+  if (pathType === "orthogonal-elbow") {
+    route = createInitialOrthogonalElbowRoute(start, end);
+  }
+
+  return {
+    id,
+    kind: "connector",
+    pathType,
+    start,
+    end,
+    route,
+    endcaps,
+    behavior,
+    style,
+    geometry: {
+      start: { x: start.x, y: start.y },
+      end: { x: end.x, y: end.y },
+      points: [],
+      segmentsMeta: [],
+    },
+  };
+}
+```
+
+---
+
+# 4. Geometry rebuild
+
+## `connectorGeometry.js`
+
+Тут головне — `rebuildConnectorGeometry()` має повертати:
+
+* `points`
+* `segmentsMeta`
+
+```js
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  const fixed = connector.route?.fixedAnchors;
+
+  const start = fixed?.start || resolveConnectorStartPoint(connector, nodes);
+  const end = fixed?.end || resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) return connector;
+
+  if (connector.pathType === "orthogonal-elbow") {
+    const built = buildOrthogonalElbowGeometry(start, end, connector.route);
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points: built.points,
+        segmentsMeta: built.segmentsMeta,
+      },
+    };
+  }
+
+  if (connector.pathType === "orthogonal-straight") {
+    const points = [start.x, start.y, end.x, end.y];
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points,
+        segmentsMeta: [
+          {
+            id: "seg_main",
+            orientation: start.x === end.x ? "vertical" : "horizontal",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+            kind: "base",
+            cx: (start.x + end.x) / 2,
+            cy: (start.y + end.y) / 2,
+          },
+        ],
+      },
+    };
+  }
+
+  if (connector.pathType === "free-straight") {
+    const points = [start.x, start.y, end.x, end.y];
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points,
+        segmentsMeta: [],
+      },
+    };
+  }
+
+  return connector;
+}
+```
+
+---
+
+# 5. Connector tool flow
+
+## `canvasController.js`
+
+```js
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createConnector } from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+import {
+  canDragWholeConnector,
+  translateConnector,
+} from "@/lib/connectors/connectorEditing";
+
+export const canvasController = {
+  activateConnectorTool(template) {
+    const store = useCanvasStore.getState();
+
+    store.setActiveConnectorTool?.({
+      pathType: template?.pathType || "orthogonal-elbow",
+      endcaps: template?.endcaps || { start: "none", end: "none" },
+      behavior: template?.behavior || { type: "default", link: null },
+    });
+
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+  },
+
+  cancelDraftConnector() {
+    const store = useCanvasStore.getState();
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+    store.clearActiveConnectorTool?.();
+  },
+
+  startDraftConnectorFromAnchor(anchor) {
+    const store = useCanvasStore.getState();
+    const tool = store.activeConnectorTool;
+    if (!tool) return;
+
+    let draft = createConnector({
+      pathType: tool.pathType,
+      endcaps: tool.endcaps,
+      behavior: tool.behavior,
+      start: {
+        x: anchor.x,
+        y: anchor.y,
+        attached: {
+          type: "node",
+          nodeId: anchor.nodeId,
+          anchor: anchor.direction,
+        },
+      },
+      end: {
+        x: anchor.x,
+        y: anchor.y,
+        attached: { type: "none" },
+      },
+    });
+
+    draft = rebuildConnectorGeometry(draft, store.nodes);
+    store.setDraftConnector?.(draft);
+  },
+
+  updateDraftConnector(pointer) {
+    const store = useCanvasStore.getState();
+    const draft = store.draftConnector;
+    if (!draft || !pointer) return;
+
+    const preview = getConnectorAttachPreview(store.nodes, pointer);
+
+    let next = {
+      ...draft,
+      end: {
+        ...draft.end,
+        x: pointer.x,
+        y: pointer.y,
+        attached: { type: "none" },
+      },
+    };
+
+    if (preview?.activeAnchor) {
+      next.end = {
+        ...next.end,
+        x: preview.activeAnchor.x,
+        y: preview.activeAnchor.y,
+        attached: {
+          type: "node",
+          nodeId: preview.activeAnchor.nodeId,
+          anchor: preview.activeAnchor.direction,
+        },
+      };
+
+      store.setConnectorAttachPreview?.({
+        nodeId: preview.nodeId,
+        anchors: preview.anchors,
+        activeAnchor: preview.activeAnchor,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.setDraftConnector?.(next);
+  },
+
+  finishDraftConnector(anchorOrNull, pointerOrNull) {
+    const store = useCanvasStore.getState();
+    const draft = store.draftConnector;
+    if (!draft) return;
+
+    let next = {
+      ...draft,
+      end: { ...draft.end },
+    };
+
+    if (anchorOrNull) {
+      next.end = {
+        ...next.end,
+        x: anchorOrNull.x,
+        y: anchorOrNull.y,
+        attached: {
+          type: "node",
+          nodeId: anchorOrNull.nodeId,
+          anchor: anchorOrNull.direction,
+        },
+      };
+    } else if (pointerOrNull) {
+      next.end = {
+        ...next.end,
+        x: pointerOrNull.x,
+        y: pointerOrNull.y,
+        attached: { type: "none" },
+      };
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.addEdge?.(next);
+    store.setSelection?.({ type: "edge", id: next.id });
+
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+    store.clearActiveConnectorTool?.();
+  },
+```
+
+---
+
+# 6. Drag whole connector
+
+Продовження того ж `canvasController.js`:
+
+```js
+  handleConnectorBodyDragStart(edgeId, e) {
+    const store = useCanvasStore.getState();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    if (!canDragWholeConnector(connector)) {
+      store.clearConnectorDragState?.();
+      return;
+    }
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    store.setSelection?.({ type: "edge", id: edgeId });
+
+    store.setConnectorDragState?.({
+      edgeId,
+      startPointer: { x: pointer.x, y: pointer.y },
+      lastPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (!canDragWholeConnector(connector)) return;
+
+    const dragState = store.connectorDragState;
+    if (!dragState || dragState.edgeId !== edgeId) return;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const dx = pointer.x - dragState.lastPointer.x;
+    const dy = pointer.y - dragState.lastPointer.y;
+
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return;
+
+    let next = translateConnector(connector, dx, dy);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+
+    store.setConnectorDragState?.({
+      ...dragState,
+      lastPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragEnd(edgeId) {
+    const store = useCanvasStore.getState();
+    store.clearConnectorDragState?.();
+  },
+};
+```
+
+---
+
+# 7. translateConnector на новій моделі
+
+## `connectorEditing.js`
+
+```js
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") return false;
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+    route: {
+      ...connector.route,
+      vertices: (connector.route?.vertices || []).map((v) => ({
+        ...v,
+        x: v.x + dx,
+        y: v.y + dy,
+      })),
+      pathHandles: (connector.route?.pathHandles || []).map((ph) => ({
+        ...ph,
+        x: ph.x + dx,
+        y: ph.y + dy,
+      })),
+      fixedAnchors: connector.route?.fixedAnchors
+        ? {
+            start: {
+              x: connector.route.fixedAnchors.start.x + dx,
+              y: connector.route.fixedAnchors.start.y + dy,
+            },
+            end: {
+              x: connector.route.fixedAnchors.end.x + dx,
+              y: connector.route.fixedAnchors.end.y + dy,
+            },
+          }
+        : null,
+    },
+  };
+}
+```
+
+---
+
+# 8. DraftConnectorLayer
+
+## `DraftConnectorLayer.jsx`
+
+```jsx
+"use client";
+
+import React from "react";
+import { Group, Line } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+export default function DraftConnectorLayer() {
+  const draftConnector = useCanvasStore((s) => s.draftConnector);
+
+  if (!draftConnector) return null;
+
+  const pts = draftConnector.geometry?.points || [];
+  if (pts.length < 4) return null;
+
+  const stroke = draftConnector.style?.stroke || "black";
+  const strokeWidth = draftConnector.style?.strokeWidth || 2;
+
+  const startSegment = getConnectorStartSegment(pts);
+  const endSegment = getConnectorEndSegment(pts);
+
+  const startArrowPoints =
+    draftConnector.endcaps?.start === "arrow" && startSegment
+      ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+      : null;
+
+  const endArrowPoints =
+    draftConnector.endcaps?.end === "arrow" && endSegment
+      ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+      : null;
+
+  return (
+    <Group listening={false}>
+      <Line
+        points={pts}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="round"
+        lineCap="round"
+        dash={[6, 4]}
+      />
+
+      {startArrowPoints && (
+        <Line
+          points={startArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+
+      {endArrowPoints && (
+        <Line
+          points={endArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+# 9. Node anchor click
+
+У тому місці, де в тебе обробляється клік по anchor, додай це:
+
+```js
+handleNodeAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.activeConnectorTool && !store.draftConnector) {
+    canvasController.startDraftConnectorFromAnchor(anchor);
+    return;
+  }
+
+  if (store.activeConnectorTool && store.draftConnector) {
+    canvasController.finishDraftConnector(anchor, null);
+    return;
+  }
+
+  // інша поточна логіка
+}
+```
+
+---
+
+# 10. Stage mouse move / mouse up
+
+У компоненті, де в тебе `Stage`:
+
+```jsx
+<Stage
+  ...
+  onMouseMove={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.updateDraftConnector(pointer);
+  }}
+  onMouseUp={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.finishDraftConnector(null, pointer);
+  }}
+>
+```
+
+---
+
+# 11. ConnectorsLayer: drag whole connector
+
+У головний `<Line />` конектора:
+
+```jsx
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  setSelection({ type: "edge", id: connector.id });
+  canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+}}
+onMouseMove={(e) => {
+  canvasController.handleConnectorBodyDragMove?.(connector.id, e);
+}}
+onMouseUp={() => {
+  canvasController.handleConnectorBodyDragEnd?.(connector.id);
+}}
+onMouseLeave={() => {
+  canvasController.handleConnectorBodyDragEnd?.(connector.id);
+}}
+```
+
+---
+
+# 12. Tool buttons
+
+Тепер кнопка не створює лінію, а активує інструмент:
+
+```js
+onClick={() =>
+  canvasController.activateConnectorTool({
+    pathType: "orthogonal-elbow",
+    endcaps: { start: "none", end: "none" },
+    behavior: { type: "default", link: null },
+  })
+}
+```
+
+---
+
+# 13. Що отримаєш
+
+Після цього MVP у тебе буде:
+
+### Побудова
+
+* вибрав інструмент;
+* натиснув на anchor першої фігури;
+* потягнув;
+* побачив preview;
+* відпустив на другій фігурі або в canvas;
+* отримав готовий connector.
+
+### Перетягування всього конектора
+
+* якщо обидва кінці detached — можна рухати весь connector;
+* рухаються:
+
+  * `start/end`
+  * `route.vertices`
+  * `route.pathHandles`
+
+---
+
+# 14. Що ще не входить
+
+Поки без:
+
+* drag whole connector для attached connector
+* semi-auto reroute
+* smart reroute
+* sticky mode, де tool не вимикається після одного створення
+
+---
+
+# 15. Практичний порядок впровадження
+
+1. store
+2. `createConnector`
+3. `rebuildConnectorGeometry`
+4. `canvasController` draft methods
+5. `DraftConnectorLayer`
+6. stage mouse events
+7. anchor click
+8. body drag
+
+Якщо хочеш, я наступним повідомленням можу дати ще **мінімальний patch для кнопок панелі інструментів і для anchor preview**, щоб цей flow вже зібрався в один сценарій.

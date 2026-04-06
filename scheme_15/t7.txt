@@ -1,0 +1,464 @@
+Так. Для **поточного MVP на `route.vertices`** я б додавав точки шляху так:
+
+* **жовта точка = не vertex polyline**
+* **жовта точка = центр вставленого керованого сегмента**
+* поки що **тільки 1 path point на конектор**
+* `segmentIndex` поки достатньо для MVP, далі можна перейти на `segmentId`
+
+Це збігається з правильною ідеєю з попередніх напрацювань: жовта точка не повинна ставати кутом маршруту, вона має бути центром нового сегмента.  
+
+---
+
+## 1. Що додати в `route`
+
+```js
+route: {
+  vertices: [...],
+  waypoints: [
+    {
+      id: "wp1",
+      segmentIndex: 1,
+      axis: "y", // "y" для horizontal segment, "x" для vertical
+      x: 240,
+      y: 180,
+    }
+  ]
+}
+```
+
+---
+
+## 2. `connectorGeometry.js` — додай helper вставки path point
+
+```js id="mvp-path-01"
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) continue;
+
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
+export function insertPathHandleIntoSegment(points, waypoint, insertedHalf = 20) {
+  if (!points || points.length < 4 || !waypoint) return points;
+
+  const segIndex = waypoint.segmentIndex;
+  if (segIndex == null) return points;
+
+  const i = segIndex * 2;
+  if (i + 3 >= points.length) return points;
+
+  const x1 = points[i];
+  const y1 = points[i + 1];
+  const x2 = points[i + 2];
+  const y2 = points[i + 3];
+
+  const isHorizontal = same(y1, y2);
+  const isVertical = same(x1, x2);
+
+  const before = points.slice(0, i + 2);
+  const after = points.slice(i + 2);
+
+  if (waypoint.axis === "y" && isHorizontal) {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+
+    const leftX = Math.max(minX, Math.min(maxX, waypoint.x - insertedHalf));
+    const rightX = Math.max(minX, Math.min(maxX, waypoint.x + insertedHalf));
+
+    const inserted = [
+      leftX, y1,
+      leftX, waypoint.y,
+      rightX, waypoint.y,
+      rightX, y1,
+    ];
+
+    return normalizePoints([
+      ...before,
+      ...inserted,
+      ...after,
+    ]);
+  }
+
+  if (waypoint.axis === "x" && isVertical) {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    const topY = Math.max(minY, Math.min(maxY, waypoint.y - insertedHalf));
+    const bottomY = Math.max(minY, Math.min(maxY, waypoint.y + insertedHalf));
+
+    const inserted = [
+      x1, topY,
+      waypoint.x, topY,
+      waypoint.x, bottomY,
+      x1, bottomY,
+    ];
+
+    return normalizePoints([
+      ...before,
+      ...inserted,
+      ...after,
+    ]);
+  }
+
+  return points;
+}
+```
+
+---
+
+## 3. `buildOrthogonalElbowPoints()` — спочатку базова ламана, потім waypoint
+
+Це головна зміна:
+спочатку будуєш маршрут із `vertices`, а **потім**, якщо є жовта точка, вставляєш у нього внутрішній сегмент. Це той самий принцип, який ми вже фіксували: path point не повинен бути просто вершиною маршруту.  
+
+```js id="mvp-path-02"
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const full = getFullOrthogonalRoutePoints(start, end, route);
+  let points = [];
+
+  for (const p of full) {
+    points.push(p.x, p.y);
+  }
+
+  points = normalizePoints(points);
+
+  const waypoints = route?.waypoints || [];
+  if (waypoints.length === 0) {
+    return points;
+  }
+
+  // MVP: тільки одна path point
+  return insertPathHandleIntoSegment(points, waypoints[0], 20);
+}
+```
+
+---
+
+## 4. `connectorEditing.js` — create/add/move/remove waypoint
+
+```js id="mvp-path-03"
+import { getOrthogonalRouteSegments } from "./connectorGeometry";
+
+export function createWaypointAtSegment(connector, segmentIndex) {
+  if (!connector || connector.kind !== "connector") return null;
+  if (connector.pathType !== "orthogonal-elbow") return null;
+
+  const existing = connector.route?.waypoints || [];
+  if (existing.length > 0) return null; // MVP: одна точка
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return null;
+
+  const segments = getOrthogonalRouteSegments(start, end, connector.route);
+  const seg = segments.find((s) => s.index === segmentIndex);
+
+  if (!seg) return null;
+  if (seg.orientation !== "horizontal" && seg.orientation !== "vertical") {
+    return null;
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    segmentIndex,
+    x: seg.cx,
+    y: seg.cy,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+  };
+}
+
+export function addConnectorWaypoint(connector, waypoint) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: [waypoint], // MVP: тільки одна
+    },
+  };
+}
+
+export function moveConnectorWaypoint(connector, waypointId, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const waypoints = [...(connector.route?.waypoints || [])];
+
+  const nextWaypoints = waypoints.map((wp) => {
+    if (wp.id !== waypointId) return wp;
+
+    if (wp.axis === "y") {
+      return { ...wp, y: pos.y };
+    }
+
+    if (wp.axis === "x") {
+      return { ...wp, x: pos.x };
+    }
+
+    return wp;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: nextWaypoints,
+    },
+  };
+}
+
+export function removeConnectorWaypoint(connector, waypointId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      waypoints: (connector.route?.waypoints || []).filter(
+        (wp) => wp.id !== waypointId
+      ),
+    },
+  };
+}
+```
+
+---
+
+## 5. `canvasController` — add / move / remove
+
+```js id="mvp-path-04"
+addConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+  if (menu.segmentIndex == null) return;
+
+  const existing = connector.route?.waypoints || [];
+  if (existing.length > 0) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  const waypoint = createWaypointAtSegment(connector, menu.segmentIndex);
+  if (!waypoint) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  let next = addConnectorWaypoint(connector, waypoint);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+
+handleConnectorWaypointDragMove(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+}
+
+handleConnectorWaypointDragEnd(edgeId, waypoint, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = moveConnectorWaypoint(connector, waypoint.id, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+}
+
+removeConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector-waypoint") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = removeConnectorWaypoint(connector, menu.waypointId);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+## 6. `ConnectorsLayer.jsx` — жовті окремо, сині не показувати поверх жовтої
+
+Оце теж вже було в попередніх напрацюваннях і це правильно: сині й жовті мають жити окремо, а синій handle на місці жовтої не треба рендерити. 
+
+```jsx id="mvp-path-05"
+const samePoint = (a, b, eps = 0.5) =>
+  Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps;
+
+const waypoints = isSelected ? connector.route?.waypoints || [] : [];
+
+let segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+
+if (waypoints.length > 0) {
+  segmentHandles = segmentHandles.filter(
+    (handle) =>
+      !waypoints.some((wp) =>
+        samePoint({ x: handle.x, y: handle.y }, { x: wp.x, y: wp.y })
+      )
+  );
+}
+```
+
+```jsx id="mvp-path-06"
+{connector.pathType === "orthogonal-elbow" &&
+  waypoints.map((wp) => (
+    <Circle
+      key={wp.id}
+      x={wp.x}
+      y={wp.y}
+      radius={5}
+      fill="#F2C94C"
+      stroke="black"
+      strokeWidth={1}
+      draggable
+      dragBoundFunc={(pos) =>
+        wp.axis === "y"
+          ? { x: wp.x, y: pos.y }
+          : { x: pos.x, y: wp.y }
+      }
+      onDragMove={(e) => {
+        canvasController.handleConnectorWaypointDragMove?.(
+          connector.id,
+          wp,
+          e
+        );
+      }}
+      onDragEnd={(e) => {
+        canvasController.handleConnectorWaypointDragEnd?.(
+          connector.id,
+          wp,
+          e
+        );
+      }}
+      onMouseEnter={(e) => {
+        const stage = e.target.getStage();
+        if (stage?.container()?.style) {
+          stage.container().style.cursor =
+            wp.axis === "y" ? "ns-resize" : "ew-resize";
+        }
+      }}
+      onMouseLeave={(e) => {
+        const stage = e.target.getStage();
+        if (stage?.container()?.style) {
+          stage.container().style.cursor = "default";
+        }
+      }}
+      onContextMenu={(e) => {
+        canvasController.handleConnectorWaypointContextMenu?.(
+          e,
+          connector,
+          wp
+        );
+      }}
+    />
+  ))}
+```
+
+---
+
+## 7. Що це закриє вже зараз
+
+Цей MVP дає:
+
+* додавання **1 path point** на конектор;
+* path point не є вершиною маршруту, а вставляє новий внутрішній сегмент; 
+* drag жовтої точки тільки по потрібній осі;
+* видалення path point і повернення до базової форми;
+* синя й жовта точки не конфліктують.  
+
+---
+
+## 8. Що ще НЕ закрито
+
+Поки що без розширення не буде:
+
+* кількох path point на одному конекторі;
+* стабільного `segmentId` після складних перебудов;
+* add point саме на новостворених внутрішніх сегментах у багатокроковому сценарії;
+* draw.io-рівня “smart reroute”.
+
+---
+
+## 9. Висновок
+
+Для **MVP з точками шляху** треба доопрацювати тільки 4 місця:
+
+* `buildOrthogonalElbowPoints()`
+* `insertPathHandleIntoSegment()`
+* `create/add/move/remove waypoint`
+* `ConnectorsLayer` для окремого рендеру жовтих
+
+Цього достатньо, щоб отримати **першу робочу версію path point**, не ламаючи твій новий підхід із `route.vertices`.
+
+Якщо хочеш, наступним повідомленням я зберу тобі це у форматі **“що вставити в який файл”** без пояснень, просто готовим patch-блоком.

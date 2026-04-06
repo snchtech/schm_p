@@ -1,0 +1,177 @@
+Ок. Ось **малий patch**, щоб:
+
+* **не дозволяти додати path point** на занадто короткий сегмент;
+* окремо фільтрувати `kind: "path-inner"`;
+* не плодити дрібний хаос на вже вставлених внутрішніх сегментах.
+
+Це добре лягає на поточну схему з `segmentsMeta` і `segmentId`. 
+
+---
+
+## 1. helper: довжина сегмента
+
+### `canvasController.js`
+
+```js id="short-1"
+function segmentLength(seg) {
+  return Math.abs(seg.x2 - seg.x1) + Math.abs(seg.y2 - seg.y1);
+}
+```
+
+---
+
+## 2. helper: чи можна додавати point на сегмент
+
+### `canvasController.js`
+
+```js id="short-2"
+function canAddPathPointToSegment(seg) {
+  if (!seg) return false;
+
+  const len = segmentLength(seg);
+
+  // базовий сегмент — можна, якщо не занадто короткий
+  if (seg.kind === "base" || seg.kind === "runtime") {
+    return len >= 24;
+  }
+
+  // already inserted inner segment — вимагаємо більшу довжину
+  // щоб не плодити мікро-сходинки
+  if (seg.kind === "path-inner") {
+    return len >= 48;
+  }
+
+  return false;
+}
+```
+
+---
+
+## 3. онови `handleConnectorContextMenu`
+
+### заміни на це
+
+```js id="short-3"
+handleConnectorContextMenu(e, connector) {
+  e.evt.preventDefault();
+
+  const store = useCanvasStore.getState();
+  if (!connector || connector.kind !== "connector") return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const clickedSegment = pickClosestConnectorSegment(connector, pointer, 12);
+  const allowAddPathPoint = canAddPathPointToSegment(clickedSegment);
+
+  store.setContextMenu?.({
+    type: "connector",
+    edgeId: connector.id,
+    segmentId: allowAddPathPoint ? clickedSegment.id : null,
+    x: pointer.x,
+    y: pointer.y,
+  });
+}
+```
+
+---
+
+## 4. `CanvasContextMenu.jsx` — показувати add тільки якщо `segmentId` валідний
+
+Якщо ще не вставив, то блок має бути таким:
+
+```jsx id="short-4"
+{contextMenu?.type === "connector" && (
+  <>
+    {contextMenu.segmentId && (
+      <>
+        <MenuItem
+          onClick={() => {
+            canvasController.addConnectorPathHandleFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <AddCircleOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Додати точку шляху</ListItemText>
+        </MenuItem>
+
+        <Divider />
+      </>
+    )}
+
+    <MenuItem
+      onClick={() => {
+        canvasController.deleteConnectorFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <DeleteOutlineIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Видалити лінію</ListItemText>
+    </MenuItem>
+  </>
+)}
+```
+
+---
+
+## 5. Якщо хочеш жорсткіше блокувати вкладення у `path-inner`
+
+Замість `len >= 48` можеш взагалі заборонити add у `path-inner`:
+
+```js id="short-5"
+function canAddPathPointToSegment(seg) {
+  if (!seg) return false;
+
+  const len = segmentLength(seg);
+
+  if (seg.kind === "base" || seg.kind === "runtime") {
+    return len >= 24;
+  }
+
+  if (seg.kind === "path-inner") {
+    return false;
+  }
+
+  return false;
+}
+```
+
+### Який варіант раджу
+
+Для MVP я б радив **не забороняти повністю**, а лишити:
+
+* `base/runtime >= 24`
+* `path-inner >= 48`
+
+Так ти вже зможеш вкладені сценарії, але без мікро-сегментів.
+
+---
+
+## 6. Що це дає
+
+Після цього:
+
+* add point не з’являється на занадто коротких сегментах;
+* внутрішні `path-inner` не будуть швидко перетворюватися на сміття;
+* багатокроковий сценарій лишається можливим, але контрольованим.
+
+---
+
+## 7. Хороші стартові пороги
+
+Я б почав з таких значень:
+
+* `base/runtime`: `24`
+* `path-inner`: `48`
+* `pickClosestConnectorSegment maxDistance`: `12`
+
+Якщо буде важко влучати, підніми `maxDistance` до `16`.
+
+---
+
+## 8. Найкращий наступний крок після цього
+
+Після цього вже варто доробити **visual hover preview сегмента**, на який зараз додасться point. Це сильно спростить UX.

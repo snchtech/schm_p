@@ -1,0 +1,815 @@
+Так, давай одразу в робочому вигляді.
+
+Нижче даю тобі **цілісний набір функцій**, який замінює підхід із `baseOffset`. Саме він у тебе зараз і ламає поведінку: сині хендли будуються з уже перебудованої геометрії, а зміна сегмента зберігається як один глобальний offset, тому після drag ти втрачаєш стабільну прив’язку до конкретного сегмента. Це видно в твоєму коді: `getConnectorSegmentHandles()` бере `geometry.points`, `moveElbowSegmentHandle()` пише тільки `baseOffset`, а `buildOrthogonalElbowPoints()` заново перебудовує весь маршрут. 
+
+## Що буде після цієї заміни
+
+Ти отримаєш таку поведінку:
+
+* простий elbow має стабільно 2 сегменти і 2 сині точки;
+* drag вертикального сегмента рухає тільки вертикальний сегмент;
+* drag горизонтального сегмента:
+
+  * або просто зміщує його, якщо ти хочеш “просту” поведінку,
+  * або може один раз зробити `split` і перетворити elbow у ламану з 3 сегментами;
+* після split кожен новий сегмент має свій власний синій handle;
+* не буде “перескакування” синьої точки з правої вертикалі на ліву;
+* не буде дригання через те, що під час руху змінюється топологія без стабільної моделі маршруту.
+
+---
+
+# 1. Нова модель даних route
+
+Замість:
+
+```js
+route: {
+  baseOffset: ...
+}
+```
+
+робимо:
+
+```js
+route: {
+  vertices: [
+    { id: "v1", x: 300, y: 120 }
+  ]
+}
+```
+
+Тобто:
+
+* `start` і `end` — від вузлів;
+* `vertices` — внутрішні точки зламу;
+* повний маршрут = `[start, ...vertices, end]`.
+
+---
+
+# 2. Базові helper-и
+
+```js
+export function createRoutePoint(x, y, id = null) {
+  return {
+    id: id || `rp_${Math.random().toString(36).slice(2, 10)}`,
+    x,
+    y,
+  };
+}
+
+export function cloneRoutePoints(points = []) {
+  return points.map((p) => ({ ...p }));
+}
+```
+
+---
+
+# 3. Початковий simple elbow
+
+Ось стартова побудова для нового конектора.
+
+```js
+export function createInitialOrthogonalElbowRoute(start, end) {
+  return {
+    vertices: [
+      createRoutePoint(end.x, start.y),
+    ],
+  };
+}
+```
+
+Це дає геометрію:
+
+```text
+start ---- bend
+           |
+           |
+          end
+```
+
+---
+
+# 4. Повний список точок маршруту
+
+```js
+export function getFullOrthogonalRoutePoints(start, end, route = {}) {
+  const vertices = cloneRoutePoints(route?.vertices || []);
+
+  return [
+    { x: start.x, y: start.y, kind: "start" },
+    ...vertices.map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+}
+```
+
+---
+
+# 5. Нормалізація маршруту
+
+Це дуже важлива функція. Вона:
+
+* прибирає дублікати точок;
+* прибирає нульові сегменти;
+* прибирає зайві колінеарні вершини.
+
+```js
+export function normalizeOrthogonalVertices(start, end, vertices = []) {
+  const full = [
+    { x: start.x, y: start.y, kind: "start" },
+    ...cloneRoutePoints(vertices).map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+
+  // 1. прибираємо дублікати сусідніх точок
+  const deduped = [];
+  for (const p of full) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.x === p.x && prev.y === p.y) continue;
+    deduped.push(p);
+  }
+
+  // 2. прибираємо зайві середні точки на одній прямій
+  let changed = true;
+  while (changed) {
+    changed = false;
+
+    for (let i = 1; i < deduped.length - 1; i++) {
+      const a = deduped[i - 1];
+      const b = deduped[i];
+      const c = deduped[i + 1];
+
+      const sameVertical =
+        a.x === b.x && b.x === c.x;
+
+      const sameHorizontal =
+        a.y === b.y && b.y === c.y;
+
+      if (sameVertical || sameHorizontal) {
+        deduped.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return deduped
+    .slice(1, -1)
+    .map((p) => createRoutePoint(p.x, p.y, p.id));
+}
+```
+
+---
+
+# 6. Побудова `geometry.points`
+
+Це заміна твоєму `buildOrthogonalElbowPoints`.
+
+```js
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const full = getFullOrthogonalRoutePoints(start, end, route);
+  const points = [];
+
+  for (const p of full) {
+    points.push(p.x, p.y);
+  }
+
+  return normalizePoints(points);
+}
+```
+
+---
+
+# 7. Сегменти маршруту
+
+Тепер сегменти будуються не з “випадкової поточної geometry”, а зі стабільного маршруту.
+
+```js
+export function getOrthogonalRouteSegments(start, end, route = {}) {
+  const pts = getFullOrthogonalRoutePoints(start, end, route);
+  const segments = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+
+    const isHorizontal = a.y === b.y;
+    const isVertical = a.x === b.x;
+
+    if (!isHorizontal && !isVertical) continue;
+
+    segments.push({
+      index: i,
+      a,
+      b,
+      orientation: isHorizontal ? "horizontal" : "vertical",
+      cx: (a.x + b.x) / 2,
+      cy: (a.y + b.y) / 2,
+      isFirst: i === 0,
+      isLast: i === pts.length - 2,
+    });
+  }
+
+  return segments;
+}
+```
+
+---
+
+# 8. Новий `getConnectorSegmentHandles`
+
+Ось це вставляй замість старого.
+
+```js
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") {
+    return [];
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return [];
+  }
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+
+  if (!start || !end) {
+    return [];
+  }
+
+  const segments = getOrthogonalRouteSegments(start, end, connector.route);
+
+  return segments.map((seg) => ({
+    id: `seg-handle-${connector.id}-${seg.index}`,
+    connectorId: connector.id,
+    segmentIndex: seg.index,
+    orientation: seg.orientation,
+    x: seg.cx,
+    y: seg.cy,
+    isFirst: seg.isFirst,
+    isLast: seg.isLast,
+  }));
+}
+```
+
+### Чому це стабільніше
+
+Бо handle тепер означає:
+
+* “сегмент між точками `i` і `i+1` у маршруті”,
+  а не просто “якийсь центр сегмента з перебудованої геометрії”.
+
+---
+
+# 9. Базовий рух сегмента без split
+
+Це головна стабільна логіка.
+
+```js
+export function moveOrthogonalSegment(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+
+  if (!start || !end) {
+    return connector;
+  }
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const full = getFullOrthogonalRoutePoints(start, end, { vertices });
+
+  const i = handle.segmentIndex;
+  if (i < 0 || i >= full.length - 1) {
+    return connector;
+  }
+
+  const a = full[i];
+  const b = full[i + 1];
+
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+
+  if (!isHorizontal && !isVertical) {
+    return connector;
+  }
+
+  const nextVertices = cloneRoutePoints(vertices);
+
+  // якщо сегмент між full[i] і full[i+1],
+  // то сусідні внутрішні вершини мають індекси:
+  const leftVertexIndex = i - 1;
+  const rightVertexIndex = i;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+```
+
+---
+
+# 10. Split simple elbow у ламану з 3 сегментами
+
+Оце якраз вирішує твій кейс із горизонтальним сегментом.
+
+У simple elbow маршрут має 1 вершину:
+
+```js
+vertices = [{ x: end.x, y: start.y }]
+```
+
+Коли ти тягнеш горизонтальний сегмент вгору/вниз, ти хочеш не просто рухати одну вершину, а зробити нову ламану:
+
+```text
+було:
+start ---- bend
+           |
+           end
+
+стало:
+start
+|
++--------+
+         |
+         end
+```
+
+Ось функція.
+
+```js
+export function splitSimpleElbowAndMove(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+
+  if (!start || !end) {
+    return connector;
+  }
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+
+  // split тільки для simple elbow
+  if (vertices.length !== 1) {
+    return moveOrthogonalSegment(connector, handle, pos);
+  }
+
+  const bend = vertices[0];
+
+  if (handle.orientation === "horizontal") {
+    const newY = pos.y;
+
+    const nextVertices = [
+      createRoutePoint(start.x, newY),
+      createRoutePoint(end.x, newY),
+    ];
+
+    return {
+      ...connector,
+      route: {
+        ...connector.route,
+        vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+      },
+    };
+  }
+
+  if (handle.orientation === "vertical") {
+    const nextVertices = [
+      {
+        ...bend,
+        x: pos.x,
+      },
+    ];
+
+    return {
+      ...connector,
+      route: {
+        ...connector.route,
+        vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+      },
+    };
+  }
+
+  return connector;
+}
+```
+
+---
+
+# 11. Головна функція для drag
+
+Оце ставиш замість старого `moveElbowSegmentHandle`.
+
+```js
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  if (connector.pathType !== "orthogonal-elbow") {
+    return connector;
+  }
+
+  const vertices = connector.route?.vertices || [];
+
+  // simple elbow
+  if (vertices.length <= 1) {
+    return splitSimpleElbowAndMove(connector, handle, pos);
+  }
+
+  // складніша ламана
+  return moveOrthogonalSegment(connector, handle, pos);
+}
+```
+
+---
+
+# 12. Якщо хочеш спочатку без split
+
+Щоб не ускладнювати собі відразу все, можеш зробити проміжний стабільний варіант.
+
+Тоді функція буде така:
+
+```js
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  return moveOrthogonalSegment(connector, handle, pos);
+}
+```
+
+І для simple elbow:
+
+* горизонтальний drag просто змінює `y` в одній вершині;
+* вертикальний drag просто змінює `x` в одній вершині.
+
+Це дуже хороший крок для дебагу. Я б навіть радив саме так:
+
+1. спочатку добитися стабільності без split;
+2. потім увімкнути split.
+
+---
+
+# 13. `rebuildConnectorGeometry`
+
+Оце критично: ця функція не повинна вигадувати route. Вона повинна лише:
+
+* знайти актуальні `start/end`,
+* побудувати `points` з route.vertices,
+* зберегти geometry.
+
+Приклад:
+
+```js
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") {
+    return connector;
+  }
+
+  const start = resolveConnectorStartPoint(connector, nodes);
+  const end = resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) {
+    return connector;
+  }
+
+  const points =
+    connector.pathType === "orthogonal-elbow"
+      ? buildOrthogonalElbowPoints(start, end, connector.route)
+      : connector.geometry?.points || [];
+
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      start,
+      end,
+      points,
+    },
+  };
+}
+```
+
+### Дуже важливо
+
+`rebuildConnectorGeometry()` не має:
+
+* додавати `baseOffset`;
+* замінювати `vertices`;
+* міняти кількість сегментів сама по собі.
+
+Інакше ти знову повернеш хаос.
+
+---
+
+# 14. Контролер drag
+
+Твій контролер можна лишити майже таким самим.
+
+```js
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+# 15. Синій `Rect`
+
+Його можна лишити майже без змін.
+
+```jsx
+{segmentHandles.map((handle) => (
+  <Rect
+    key={handle.id}
+    x={handle.x - 5}
+    y={handle.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke="black"
+    strokeWidth={1}
+    draggable
+    dragBoundFunc={(pos) =>
+      handle.orientation === "horizontal"
+        ? { x: handle.x - 5, y: pos.y }
+        : { x: pos.x, y: handle.y - 5 }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorSegmentDragMove?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorSegmentDragEnd?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          handle.orientation === "horizontal"
+            ? "ns-resize"
+            : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+  />
+))}
+```
+
+---
+
+# 16. Що ти отримаєш по сценаріях
+
+## Сценарій A. Простий elbow, drag вертикального сегмента
+
+Було:
+
+```text
+start ---- bend
+           |
+           end
+```
+
+Після drag:
+
+* змінюється тільки `bend.x`;
+* горизонталь подовжується або скорочується;
+* вертикаль переноситься;
+* другий handle не “перекидається”.
+
+## Сценарій B. Простий elbow, drag горизонтального сегмента, split увімкнений
+
+Було:
+
+```text
+start ---- bend
+           |
+           end
+```
+
+Стало:
+
+```text
+start
+|
++--------+
+         |
+         end
+```
+
+Тобто:
+
+* автоматично створюються 2 внутрішні вершини;
+* з’являється 3 сегменти;
+* у кожного сегмента буде своя синя точка.
+
+## Сценарій C. Після split тягнеш ліву вертикаль
+
+* змінюється тільки ліва вертикаль;
+* центральний горизонтальний сегмент змінює довжину;
+* права вертикаль лишається на місці.
+
+## Сценарій D. Після split тягнеш центральний горизонтальний сегмент
+
+* змінюється тільки `y` у двох вершинах;
+* вертикалі зліва і справа просто перебудовують висоту.
+
+## Сценарій E. Після split тягнеш праву вертикаль
+
+* змінюється тільки права вертикаль;
+* горизонтальний сегмент перебудовує довжину;
+* ліва вертикаль не рухається.
+
+---
+
+# 17. Чому в тебе зараз був хаос
+
+Причина така:
+
+* handle будувався з `geometry.points`;
+* ти на кожному `dragMove` робив `replaceEdge`;
+* після `replaceEdge` геометрія вже інша;
+* нові сегменти мають уже інші індекси та інші центри;
+* але drag все ще триває для старого handle;
+* у результаті починають змішуватись різні сегменти.
+
+Тобто проблема системна, не локальна. Саме через це тобі й здавалося, що “код не підтримує такої поведінки”. По суті так і було: поточна модель з `baseOffset` справді не підходить для стабільного редагування ламаних конекторів. 
+
+---
+
+# 18. Як я раджу впроваджувати без болю
+
+Роби в такому порядку:
+
+### Крок 1
+
+Прибери повністю:
+
+* `route.baseOffset`
+* логіку “сині точки тільки коли немає waypoints”
+
+### Крок 2
+
+Перейди на:
+
+```js
+route.vertices
+```
+
+### Крок 3
+
+Встав:
+
+* `createInitialOrthogonalElbowRoute`
+* `getFullOrthogonalRoutePoints`
+* `normalizeOrthogonalVertices`
+* `buildOrthogonalElbowPoints`
+* `getOrthogonalRouteSegments`
+* `getConnectorSegmentHandles`
+
+### Крок 4
+
+Спочатку зроби стабільну версію без split:
+
+```js
+moveElbowSegmentHandle = moveOrthogonalSegment
+```
+
+### Крок 5
+
+Перевір:
+
+* vertical drag;
+* horizontal drag;
+* відсутність дригання;
+* відсутність перескакування синіх точок.
+
+### Крок 6
+
+Після цього вмикай:
+
+```js
+splitSimpleElbowAndMove
+```
+
+---
+
+# 19. Де в тебе найімовірніше ще може бути проблема
+
+Перевір, чи `resolveConnectorStartPoint` і `resolveConnectorEndPoint` не змінюють прив’язки занадто агресивно під час drag.
+
+Бо якщо при кожному `dragMove` старт або енд конектора:
+
+* переобирає інший порт,
+* або змінює сторону прив’язки до вузла,
+
+то навіть нова логіка може давати дивну перебудову.
+
+Тобто для стабільності ще бажано:
+
+* під час drag сегмента не перепризначати сторону порта автоматично;
+* використовувати вже зафіксовані `start/end anchor`.
+
+---
+
+# 20. Найкраща наступна дія
+
+Зараз найправильніше — не змішувати все одразу. Спочатку зроби **стабільний варіант без split**. Коли він запрацює, ми додамо split як окремий шар логіки.
+
+Напиши мені наступним повідомленням:
+
+* чи хочеш ти, щоб я одразу зібрав це **під твою структуру файлів** (`connectorGeometry.js`, `connectorEditing.js`, `diagramConnections...`);
+* або щоб я дав тобі **мінімальний patch diff**: що саме видалити і що саме вставити у кожний файл.

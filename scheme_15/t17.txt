@@ -1,0 +1,148 @@
+Так, **адаптувати треба**, але **не переписувати окремо як нову систему**.
+
+Для прямої лінії й стрілок правильний шлях такий:
+
+* **залишити їх як той самий `connector`**
+* перевести на нову модель:
+
+  * `pathType`
+  * `endcaps`
+  * `behavior`
+* не робити окремі сутності типу “arrow-line”, “double-arrow-line”, “navigation-arrow” 
+
+## Що саме треба адаптувати
+
+### 1. `connectorType` -> `pathType`
+
+Старі напрацювання для straight line треба підчистити так, щоб вони працювали через:
+
+```js
+pathType: "free-straight" | "orthogonal-straight" | "orthogonal-elbow"
+```
+
+А не через старий `connectorType`. Це головна уніфікація моделі.  
+
+---
+
+### 2. Стрілки винести в `endcaps`
+
+Тобто:
+
+* звичайна лінія:
+
+```js
+endcaps: { start: "none", end: "none" }
+```
+
+* стрілка:
+
+```js
+endcaps: { start: "none", end: "arrow" }
+```
+
+* подвійна стрілка:
+
+```js
+endcaps: { start: "arrow", end: "arrow" }
+```
+
+Це краще, ніж окремі типи connector-а.  
+
+---
+
+### 3. Поведінку переходу винести в `behavior`
+
+“Стрілка переходу” — це не окрема геометрія, а звичайний connector з:
+
+```js
+behavior: {
+  type: "navigation",
+  link: ...
+}
+```
+
+Тобто геометрія й бізнес-логіка не змішуються. 
+
+---
+
+### 4. Пряма лінія без зламів
+
+Якщо в тебе є напрацювання для “простої лінії”, їх треба привести до одного з двох режимів:
+
+* **`free-straight`** — лінія під будь-яким кутом
+* **`orthogonal-straight`** — строго горизонтальна або вертикальна
+
+Для `orthogonal-straight` у тебе вже був правильний підхід: будувати її без L-форми, а вибирати горизонталь або вертикаль по `dx/dy`.  
+
+---
+
+## Що можна лишити майже без змін
+
+Можна зберегти:
+
+* start/end drag
+* attach до фігур
+* flow побудови через tool + draft
+* render через спільний `ConnectorsLayer`
+
+Бо straight/arrow добре вкладаються в той самий pipeline, що й інші connector-и. 
+
+---
+
+## Що треба реально переписати
+
+### У моделі
+
+`createConnector(...)` має створювати connector уже з полями:
+
+* `pathType`
+* `endcaps`
+* `behavior`
+
+### У geometry
+
+Треба мати:
+
+* `buildFreeStraightPoints(start, end)`
+* `buildOrthogonalStraightPoints(start, end)`
+* загальний switch по `pathType` 
+
+### У render
+
+`ConnectorsLayer` має:
+
+* малювати `Line`
+* окремо домальовувати arrowheads через `endcaps`
+* показувати segment handles тільки для `orthogonal-elbow`  
+
+---
+
+## Практичний висновок
+
+**Так, адаптація потрібна.**
+Але вона не означає “переписати все”.
+
+### Треба зробити:
+
+* стару просту лінію перевести на `pathType`
+* стрілки перевести на `endcaps`
+* стрілку переходу перевести на `behavior`
+* рендер наконечників винести в окремі marker helpers
+
+### Не треба робити:
+
+* окрему систему для line
+* окрему систему для arrow
+* окрему систему для double arrow
+
+---
+
+## Моя рекомендація по порядку
+
+1. Спочатку перевести **simple line / arrow / double arrow** на:
+
+   * `pathType + endcaps + behavior`
+2. Потім уже звести їх в один `ConnectorsLayer`
+3. І тільки після цього чіпати їхні tool buttons
+
+Якщо хочеш, я наступним повідомленням дам тобі **чіткий MVP migration patch саме для simple line + arrow**, без elbow-логіки.

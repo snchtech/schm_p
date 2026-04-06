@@ -1,0 +1,175 @@
+Так — **частково треба переробити**, але **не все з нуля**.
+
+## Що можна лишити майже без змін
+
+Ось це в тебе нормальне і добре лягає на нову архітектуру:
+
+* `activeConnectorTool`
+* `draftConnector`
+* flow `activate tool -> startDraftConnectorFromAnchor -> updateDraftConnector -> finishDraftConnector`
+* `DraftConnectorLayer`
+* attach preview / anchor preview
+* правило для drag всього конектора: **тільки якщо обидва кінці detached**   
+
+Тобто **режим побудови як у draw.io можна зберегти**. Він архітектурно правильний: окремий draft, окремий tool, потім коміт у `edges`.  
+
+---
+
+## Що точно треба переписати під новий підхід
+
+### 1. `translateConnector`
+
+Старий варіант у тебе зміщував:
+
+* `start/end`
+* `waypoints`
+* `baseOffset`  
+
+А в новій архітектурі треба зміщувати:
+
+* `start/end`
+* `route.vertices`
+* `route.pathHandles`
+* за потреби `route.fixedAnchors`
+
+**`baseOffset` і старі `waypoints` вже не повинні бути основою.**
+
+---
+
+### 2. Увесь код, де є `segmentIndex`
+
+Для MVP 2.0 він уже застарілий.
+Треба переводити на:
+
+* `geometry.segmentsMeta`
+* `segmentId`
+
+Це стосується:
+
+* context menu
+* add path point
+* hover segment
+* drag segment
+* drag path handle
+
+Бо `segmentIndex` ламається після split / insert. Це якраз одна з причин, чому ми переходили далі. 
+
+---
+
+### 3. Побудова geometry
+
+Старий builder із:
+
+* `baseOffset`
+* `waypoints[0]`
+* `insertPathHandleIntoSegment(points, waypoint)` — це вже перехідний етап на 1 path point.   
+
+Під нову архітектуру треба вже тримати:
+
+* `route.vertices`
+* `route.pathHandles[]`
+* `geometry.segmentsMeta`
+
+Тобто так, **builder треба оновити**.
+
+---
+
+## Що я б лишив як є, але адаптував
+
+### Побудова конектора між двома об’єктами
+
+Тут не треба все переписувати.
+Треба лише, щоб `draftConnector` одразу створювався в **новому route-форматі**:
+
+```js
+route: {
+  vertices: createInitialOrthogonalElbowRoute(start, end).vertices,
+  pathHandles: [],
+  fixedAnchors: null,
+}
+```
+
+Тобто:
+
+* **flow лишається**
+* **структура route змінюється**
+
+---
+
+### Перетягування всього конектора
+
+Тут теж не треба все ламати.
+Лишаються правильними:
+
+* `canDragWholeConnector()`
+* `connectorDragState`
+* `handleConnectorBodyDragStart/Move/End`
+* model-driven drag через store/controller  
+
+Але сам `translateConnector()` треба переписати на нову модель.
+
+---
+
+## Практично: що саме міняти
+
+### Переписати
+
+* `translateConnector`
+* `buildOrthogonalElbowPoints` / builder
+* `createWaypointAtSegment` -> `createPathHandleAtSegment`
+* усе, що працює через `segmentIndex`
+* context menu payload: `segmentId`, не `segmentIndex`
+
+### Лишити й адаптувати
+
+* `activeConnectorTool`
+* `draftConnector`
+* `DraftConnectorLayer`
+* `startDraftConnectorFromAnchor`
+* `updateDraftConnector`
+* `finishDraftConnector`
+* `canDragWholeConnector`
+* `handleConnectorBodyDragStart/Move/End`
+
+---
+
+## Коротка відповідь
+
+**Так, код треба переробити під нову архітектуру, але не повністю.**
+
+### Не викидати:
+
+* режим створення через tool + draft
+* attach preview
+* draft layer
+* body-drag controller flow
+
+### Переписати:
+
+* route model
+* geometry builder
+* translate logic
+* segment addressing (`segmentId` замість `segmentIndex`)
+* path point model (`pathHandles[]` замість старих `waypoints/baseOffset`)
+
+---
+
+## Моя рекомендація
+
+Зараз найправильніше:
+
+1. **не тягнути старий `baseOffset/waypoints` код далі**
+2. використати старі напрацювання тільки як:
+
+   * UX-flow
+   * controller lifecycle
+   * store states
+3. а модель маршруту й geometry вже тримати тільки в новому форматі
+
+Тобто: **архітектуру створення й drag можна зберегти, але дані й builder треба перевести на нову схему.**
+
+Якщо хочеш, я наступним повідомленням можу дати тобі **чітку migration-карту**:
+
+* які старі функції видалити,
+* які лишити,
+* які замінити 1-в-1 на нові.

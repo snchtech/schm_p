@@ -1,0 +1,257 @@
+Так. Ось **де в першу чергу** замінити пряме читання `connector.connectorType` на helper `getConnectorPathType(connector)`.
+
+## 1. Спочатку створи helper
+
+### `lib/connectors/getConnectorPathType.js`
+
+```js id="path-helper-01"
+export function getConnectorPathType(connector) {
+  return connector?.pathType || connector?.connectorType || "orthogonal-elbow";
+}
+```
+
+---
+
+## 2. Місця першого пріоритету
+
+### A. `ConnectorsLayer.jsx`
+
+Тут у тебе вже є перевірки типу:
+
+* показувати `segmentHandles` тільки для elbow
+* показувати waypoint/path handles тільки для elbow
+* рендер arrowheads для всіх pathType
+
+Тобто заміни всі місця виду:
+
+```js id="path-helper-02"
+connector.connectorType === "orthogonal-elbow"
+```
+
+на:
+
+```js id="path-helper-03"
+const pathType = getConnectorPathType(connector);
+
+pathType === "orthogonal-elbow"
+```
+
+Це один із найкритичніших файлів, бо він напряму впливає на render і selection UX. 
+
+---
+
+### B. `connectorGeometry.js`
+
+Це другий найважливіший файл.
+
+Тут треба замінити всі `switch` / `if` по `connectorType` на `pathType`, бо саме тут визначається:
+
+* `free-straight`
+* `orthogonal-straight`
+* `orthogonal-elbow`
+* `segmentsMeta`
+* `points`
+
+Тобто замість:
+
+```js id="path-helper-04"
+switch (connector.connectorType) { ... }
+```
+
+робиш:
+
+```js id="path-helper-05"
+const pathType = getConnectorPathType(connector);
+
+switch (pathType) { ... }
+```
+
+Це ядро нової моделі. 
+
+---
+
+### C. `connectorEditing.js`
+
+Тут є логіка:
+
+* `moveElbowSegmentHandle`
+* `createPathHandleAtSegment`
+* `moveConnectorPathHandle`
+* `canDragWholeConnector`
+* `translateConnector`
+
+У всіх перевірках типу:
+
+```js id="path-helper-06"
+if (connector.connectorType !== "orthogonal-elbow") return connector;
+```
+
+заміни на helper.
+
+Саме тут найчастіше буде тихий баг, якщо один файл уже на `pathType`, а цей ще на `connectorType`.
+
+---
+
+### D. `canvasController.js`
+
+Тут критичні місця:
+
+* `addConnectorPathHandleFromContextMenu`
+* `handleConnectorPathHandleDragMove/End`
+* `handleConnectorSegmentDragStart/Move/End`
+* `handleConnectorBodyDragStart/Move/End`
+* `startDraftConnectorFromAnchor`
+* `finishDraftConnector`
+
+Усе, що перевіряє тип конектора перед rebuild або edit, треба перевести на helper.
+
+Особливо важливо для нового flow:
+
+* tool → draftConnector
+* create connector
+* drag body
+* add/remove path point
+
+---
+
+### E. `DraftConnectorLayer.jsx`
+
+Якщо там є перевірки по типу конектора для preview geometry або endpoint markers — теж заміни.
+Це важливо для нового режиму побудови через tool + draft.
+
+---
+
+## 3. Другий пріоритет
+
+### F. Toolbar / `ConnectorsToolSection.jsx`
+
+Тут зазвичай не читається `connectorType` з edge, а формуються шаблони tool-ів.
+Тому тут не так критично.
+
+Але якщо десь є порівняння активного інструмента зі старим полем — перевести теж треба. Твої кнопки вже мисляться через `pathType`, і це правильно.
+
+---
+
+### G. Context menu
+
+Особливо:
+
+* add path point
+* remove path point
+* connector actions
+
+Якщо є перевірки:
+
+```js
+connector.connectorType === ...
+```
+
+теж перевести.
+
+---
+
+## 4. Що можна не чіпати одразу
+
+### H. Marker helpers (`connectorMarkers.js`)
+
+Тут зазвичай немає читання типу конектора, бо вони працюють тільки з `points`.
+Їх можна не чіпати першими. 
+
+### I. Файли, де є тільки UI-іконки / тексти кнопок
+
+Теж не пріоритет.
+
+---
+
+## 5. Найбезпечніша схема міграції
+
+### Крок 1
+
+Додай helper:
+
+```js id="path-helper-07"
+export function getConnectorPathType(connector) {
+  return connector?.pathType || connector?.connectorType || "orthogonal-elbow";
+}
+```
+
+### Крок 2
+
+Замінюй **читання** у файлах цього порядку:
+
+1. `connectorGeometry.js`
+2. `connectorEditing.js`
+3. `canvasController.js`
+4. `ConnectorsLayer.jsx`
+5. `DraftConnectorLayer.jsx`
+
+### Крок 3
+
+`createConnector()` уже нехай **пише тільки `pathType`**
+
+### Крок 4
+
+Тимчасово можеш навіть писати обидва поля:
+
+```js id="path-helper-08"
+return {
+  ...,
+  pathType,
+  connectorType: pathType, // тимчасова сумісність
+}
+```
+
+Це дуже знижує ризик падіння.
+
+---
+
+## 6. Що шукати по проекту
+
+Прямо пошуком шукай такі патерни:
+
+```txt
+connectorType
+.connectorType
+=== "orthogonal-elbow"
+=== "orthogonal-straight"
+=== "free-straight"
+switch (connector.
+```
+
+І вручну в кожному місці міняй на:
+
+```js id="path-helper-09"
+const pathType = getConnectorPathType(connector);
+```
+
+---
+
+## 7. Мінімальний приклад заміни
+
+Було:
+
+```js id="path-helper-10"
+if (connector.connectorType !== "orthogonal-elbow") return [];
+```
+
+Стало:
+
+```js id="path-helper-11"
+const pathType = getConnectorPathType(connector);
+if (pathType !== "orthogonal-elbow") return [];
+```
+
+---
+
+## 8. Короткий висновок
+
+**Першими міняй:**
+
+* `connectorGeometry.js`
+* `connectorEditing.js`
+* `canvasController.js`
+* `ConnectorsLayer.jsx`
+
+Саме там найбільший ризик, що все посиплеться, якщо частина коду вже на `pathType`, а частина ще на `connectorType`. Це прямо випливає з твоїх поточних напрацювань по geometry, toolbar і render layer.
+
+Якщо хочеш, я можу наступним повідомленням дати тобі **готовий patch для `getConnectorPathType()` + приклади заміни в 4 ключових файлах**.

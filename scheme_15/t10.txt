@@ -1,0 +1,733 @@
+Ок. Йдемо одразу в **MVP 2.0**:
+
+* **`route.pathHandles[]`**
+* **stable `segmentId`**
+* **`segmentsMeta` у `geometry`**
+* **можна додавати point і на newly created inner segments**
+
+Це якраз той крок, який прибирає залежність від `segmentIndex` і дозволяє кілька path point без розвалу логіки. Раніше ми вже зафіксували, що для цього треба перейти від однієї `waypoint` до масиву path handles і від `segmentIndex` до стабільного `segmentId`.  
+
+---
+
+# 1. Нова структура `route`
+
+## що було
+
+```js id="old-route"
+route: {
+  vertices: [...],
+  waypoints: [...]
+}
+```
+
+## що стане
+
+```js id="new-route"
+route: {
+  vertices: [
+    { id: "v1", x: 300, y: 120 },
+    { id: "v2", x: 300, y: 260 }
+  ],
+
+  pathHandles: [
+    {
+      id: "ph1",
+      parentSegmentId: "seg_v1_v2",
+      axis: "x", // "x" для vertical parent, "y" для horizontal parent
+      x: 360,
+      y: 190,
+      halfSize: 20
+    }
+  ]
+}
+```
+
+---
+
+# 2. `geometry` тепер теж зберігає `segmentsMeta`
+
+```js id="new-geometry"
+geometry: {
+  start,
+  end,
+  points: [...],
+  segmentsMeta: [
+    {
+      id: "seg_start_v1",
+      orientation: "horizontal",
+      x1: 100, y1: 120,
+      x2: 300, y2: 120,
+      kind: "base"
+    },
+    {
+      id: "seg_v1_v2",
+      orientation: "vertical",
+      x1: 300, y1: 120,
+      x2: 300, y2: 260,
+      kind: "base"
+    },
+    {
+      id: "seg_ph1_inner",
+      orientation: "vertical",
+      x1: 360, y1: 170,
+      x2: 360, y2: 210,
+      kind: "path-inner",
+      pathHandleId: "ph1"
+    }
+  ]
+}
+```
+
+---
+
+# 3. `connectorGeometry.js` — новий builder
+
+## 3.1. helper-и
+
+```js id="geom-helpers"
+export function createRoutePoint(x, y, id = null) {
+  return {
+    id: id || `rp_${Math.random().toString(36).slice(2, 10)}`,
+    x,
+    y,
+  };
+}
+
+export function createSegmentId(fromId, toId) {
+  return `seg_${fromId}_${toId}`;
+}
+
+export function cloneRoutePoints(points = []) {
+  return points.map((p) => ({ ...p }));
+}
+
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+export function normalizePoints(points = []) {
+  if (points.length <= 4) return points;
+
+  const raw = [];
+  for (let i = 0; i < points.length; i += 2) {
+    raw.push({ x: points[i], y: points[i + 1] });
+  }
+
+  const dedup = [];
+  for (const p of raw) {
+    const last = dedup[dedup.length - 1];
+    if (!last || !same(last.x, p.x) || !same(last.y, p.y)) {
+      dedup.push(p);
+    }
+  }
+
+  if (dedup.length <= 2) {
+    return dedup.flatMap((p) => [p.x, p.y]);
+  }
+
+  const out = [dedup[0]];
+
+  for (let i = 1; i < dedup.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = dedup[i];
+    const c = dedup[i + 1];
+
+    const horizontal = same(a.y, b.y) && same(b.y, c.y);
+    const vertical = same(a.x, b.x) && same(b.x, c.x);
+
+    if (horizontal || vertical) continue;
+    out.push(b);
+  }
+
+  out.push(dedup[dedup.length - 1]);
+
+  return out.flatMap((p) => [p.x, p.y]);
+}
+```
+
+---
+
+## 3.2. повний маршрут із base vertices
+
+```js id="geom-base-route"
+export function getFullOrthogonalRoutePoints(start, end, route = {}) {
+  const vertices = cloneRoutePoints(route?.vertices || []);
+
+  return [
+    { id: "start", x: start.x, y: start.y, kind: "start" },
+    ...vertices.map((p) => ({ ...p, kind: "vertex" })),
+    { id: "end", x: end.x, y: end.y, kind: "end" },
+  ];
+}
+
+export function buildBaseRouteWithMeta(start, end, route = {}) {
+  const pts = getFullOrthogonalRoutePoints(start, end, route);
+
+  const points = [];
+  const segmentsMeta = [];
+
+  for (let i = 0; i < pts.length; i++) {
+    points.push(pts[i].x, pts[i].y);
+  }
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+
+    const isHorizontal = a.y === b.y;
+    const isVertical = a.x === b.x;
+    if (!isHorizontal && !isVertical) continue;
+
+    segmentsMeta.push({
+      id: createSegmentId(a.id, b.id),
+      orientation: isHorizontal ? "horizontal" : "vertical",
+      x1: a.x,
+      y1: a.y,
+      x2: b.x,
+      y2: b.y,
+      kind: "base",
+      sourceFrom: a.id,
+      sourceTo: b.id,
+    });
+  }
+
+  return {
+    points: normalizePoints(points),
+    segmentsMeta,
+  };
+}
+```
+
+---
+
+## 3.3. вставка одного `pathHandle` по `parentSegmentId`
+
+```js id="geom-insert-handle"
+function buildMetaFromPoints(points) {
+  const segmentsMeta = [];
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const x1 = points[i];
+    const y1 = points[i + 1];
+    const x2 = points[i + 2];
+    const y2 = points[i + 3];
+
+    const isHorizontal = same(y1, y2);
+    const isVertical = same(x1, x2);
+    if (!isHorizontal && !isVertical) continue;
+
+    segmentsMeta.push({
+      id: `seg_runtime_${i / 2}`,
+      orientation: isHorizontal ? "horizontal" : "vertical",
+      x1,
+      y1,
+      x2,
+      y2,
+      kind: "runtime",
+    });
+  }
+
+  return segmentsMeta;
+}
+
+export function insertPathHandleIntoSegmentById(routeBuild, pathHandle) {
+  if (!routeBuild || !pathHandle) return routeBuild;
+
+  const { points, segmentsMeta } = routeBuild;
+  const parent = segmentsMeta.find((s) => s.id === pathHandle.parentSegmentId);
+  if (!parent) return routeBuild;
+
+  const flat = [...points];
+
+  let segmentFlatIndex = -1;
+  for (let i = 0, segCounter = 0; i < flat.length - 2; i += 2, segCounter++) {
+    const x1 = flat[i];
+    const y1 = flat[i + 1];
+    const x2 = flat[i + 2];
+    const y2 = flat[i + 3];
+
+    if (
+      same(x1, parent.x1) &&
+      same(y1, parent.y1) &&
+      same(x2, parent.x2) &&
+      same(y2, parent.y2)
+    ) {
+      segmentFlatIndex = i;
+      break;
+    }
+  }
+
+  if (segmentFlatIndex < 0) return routeBuild;
+
+  const x1 = flat[segmentFlatIndex];
+  const y1 = flat[segmentFlatIndex + 1];
+  const x2 = flat[segmentFlatIndex + 2];
+  const y2 = flat[segmentFlatIndex + 3];
+
+  const before = flat.slice(0, segmentFlatIndex + 2);
+  const after = flat.slice(segmentFlatIndex + 2);
+
+  let inserted = [];
+
+  const half = pathHandle.halfSize || 20;
+
+  if (pathHandle.axis === "y" && same(y1, y2)) {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+
+    const leftX = Math.max(minX, Math.min(maxX, pathHandle.x - half));
+    const rightX = Math.max(minX, Math.min(maxX, pathHandle.x + half));
+
+    inserted = [
+      leftX, y1,
+      leftX, pathHandle.y,
+      rightX, pathHandle.y,
+      rightX, y1,
+    ];
+  } else if (pathHandle.axis === "x" && same(x1, x2)) {
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    const topY = Math.max(minY, Math.min(maxY, pathHandle.y - half));
+    const bottomY = Math.max(minY, Math.min(maxY, pathHandle.y + half));
+
+    inserted = [
+      x1, topY,
+      pathHandle.x, topY,
+      pathHandle.x, bottomY,
+      x1, bottomY,
+    ];
+  } else {
+    return routeBuild;
+  }
+
+  const nextPoints = normalizePoints([
+    ...before,
+    ...inserted,
+    ...after,
+  ]);
+
+  const nextSegmentsMeta = buildMetaFromPoints(nextPoints).map((seg, idx) => {
+    // призначаємо спеціальний id центральному вставленому сегменту
+    if (
+      pathHandle.axis === "y" &&
+      same(seg.y1, pathHandle.y) &&
+      same(seg.y2, pathHandle.y)
+    ) {
+      return {
+        ...seg,
+        id: `seg_${pathHandle.id}_inner_${idx}`,
+        kind: "path-inner",
+        pathHandleId: pathHandle.id,
+      };
+    }
+
+    if (
+      pathHandle.axis === "x" &&
+      same(seg.x1, pathHandle.x) &&
+      same(seg.x2, pathHandle.x)
+    ) {
+      return {
+        ...seg,
+        id: `seg_${pathHandle.id}_inner_${idx}`,
+        kind: "path-inner",
+        pathHandleId: pathHandle.id,
+      };
+    }
+
+    return seg;
+  });
+
+  return {
+    points: nextPoints,
+    segmentsMeta: nextSegmentsMeta,
+  };
+}
+```
+
+---
+
+## 3.4. фінальний builder із кількома pathHandles
+
+```js id="geom-final-builder"
+export function buildOrthogonalElbowGeometry(start, end, route = {}) {
+  let built = buildBaseRouteWithMeta(start, end, route);
+
+  const pathHandles = route?.pathHandles || [];
+
+  for (const ph of pathHandles) {
+    built = insertPathHandleIntoSegmentById(built, ph);
+  }
+
+  return built;
+}
+```
+
+---
+
+## 3.5. `buildOrthogonalElbowPoints()` лишаємо як wrapper
+
+```js id="geom-wrapper"
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  return buildOrthogonalElbowGeometry(start, end, route).points;
+}
+```
+
+---
+
+# 4. `connectorEditing.js`
+
+## 4.1. create path handle by `segmentId`
+
+```js id="edit-create-ph"
+export function createPathHandleAtSegment(connector, segmentId) {
+  if (!connector || connector.kind !== "connector") return null;
+  if (connector.pathType !== "orthogonal-elbow") return null;
+
+  const segments = connector.geometry?.segmentsMeta || [];
+  const seg = segments.find((s) => s.id === segmentId);
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    parentSegmentId: segmentId,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+    x: (seg.x1 + seg.x2) / 2,
+    y: (seg.y1 + seg.y2) / 2,
+    halfSize: 20,
+  };
+}
+```
+
+---
+
+## 4.2. add / move / remove path handles
+
+```js id="edit-path-handles"
+export function addConnectorPathHandle(connector, pathHandle) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: [...(connector.route?.pathHandles || []), pathHandle],
+    },
+  };
+}
+
+export function moveConnectorPathHandle(connector, pathHandleId, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const pathHandles = [...(connector.route?.pathHandles || [])];
+
+  const nextPathHandles = pathHandles.map((ph) => {
+    if (ph.id !== pathHandleId) return ph;
+
+    if (ph.axis === "y") {
+      return { ...ph, y: pos.y };
+    }
+
+    if (ph.axis === "x") {
+      return { ...ph, x: pos.x };
+    }
+
+    return ph;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: nextPathHandles,
+    },
+  };
+}
+
+export function removeConnectorPathHandle(connector, pathHandleId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: (connector.route?.pathHandles || []).filter(
+        (ph) => ph.id !== pathHandleId
+      ),
+    },
+  };
+}
+```
+
+---
+
+# 5. `rebuildConnectorGeometry`
+
+Ось тут тепер важливо: крім `points`, треба зберігати й `segmentsMeta`.
+
+```js id="rebuild-with-meta"
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  const fixed = connector.route?.fixedAnchors;
+
+  const start = fixed?.start || resolveConnectorStartPoint(connector, nodes);
+  const end = fixed?.end || resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) return connector;
+
+  if (connector.pathType === "orthogonal-elbow") {
+    const built = buildOrthogonalElbowGeometry(start, end, connector.route);
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points: built.points,
+        segmentsMeta: built.segmentsMeta,
+      },
+    };
+  }
+
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      start,
+      end,
+      points: connector.geometry?.points || [],
+    },
+  };
+}
+```
+
+---
+
+# 6. `canvasController.js`
+
+## 6.1. add path handle from context menu
+
+Тепер використовуємо **`segmentId`**, не `segmentIndex`.
+
+```js id="controller-add-ph"
+addConnectorPathHandleFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+  if (!menu.segmentId) return;
+
+  const pathHandle = createPathHandleAtSegment(connector, menu.segmentId);
+  if (!pathHandle) {
+    store.clearContextMenu?.();
+    return;
+  }
+
+  let next = addConnectorPathHandle(connector, pathHandle);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+## 6.2. drag path handle
+
+```js id="controller-move-ph"
+handleConnectorPathHandleDragMove(edgeId, pathHandle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = moveConnectorPathHandle(connector, pathHandle.id, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+}
+
+handleConnectorPathHandleDragEnd(edgeId, pathHandle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = moveConnectorPathHandle(connector, pathHandle.id, {
+    x: pos.x,
+    y: pos.y,
+  });
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## 6.3. remove path handle
+
+```js id="controller-remove-ph"
+removeConnectorPathHandleFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "connector-path-handle") return;
+
+  const connector = store.edges.find((e) => e.id === menu.edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  let next = removeConnectorPathHandle(connector, menu.pathHandleId);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(connector.id, next);
+  store.clearContextMenu?.();
+}
+```
+
+---
+
+# 7. `ConnectorsLayer.jsx`
+
+Тепер source of truth для add-point — це `geometry.segmentsMeta`.
+
+## 7.1. сині handles
+
+Тут нічого принципово не міняється.
+
+## 7.2. рендер path handle як спеціального синього rect
+
+```jsx id="layer-path-handle"
+const pathHandles = isSelected ? connector.route?.pathHandles || [] : [];
+const segmentsMeta = connector.geometry?.segmentsMeta || [];
+```
+
+```jsx id="layer-render-path-handles"
+{pathHandles.map((ph) => (
+  <Rect
+    key={ph.id}
+    x={ph.x - 5}
+    y={ph.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke="#0B3D91"
+    strokeWidth={2}
+    draggable
+    dragBoundFunc={(pos) =>
+      ph.axis === "y"
+        ? { x: ph.x - 5, y: pos.y }
+        : { x: pos.x, y: ph.y - 5 }
+    }
+    onDragMove={(e) => {
+      canvasController.handleConnectorPathHandleDragMove?.(
+        connector.id,
+        ph,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      canvasController.handleConnectorPathHandleDragEnd?.(
+        connector.id,
+        ph,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor =
+          ph.axis === "y" ? "ns-resize" : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+    onContextMenu={(e) => {
+      canvasController.handleConnectorPathHandleContextMenu?.(
+        e,
+        connector,
+        ph
+      );
+    }}
+  />
+))}
+```
+
+---
+
+# 8. Контекстне меню тепер має працювати по `segmentId`
+
+Коли відкриваєш menu на сегменті, передавай:
+
+```js id="menu-segment-id"
+{
+  type: "connector",
+  edgeId: connector.id,
+  segmentId: clickedSegment.id,
+  x,
+  y
+}
+```
+
+Не `segmentIndex`, а саме `segmentId`.
+
+---
+
+# 9. Що ти отримаєш після цього
+
+Після цієї зміни:
+
+* можна мати **кілька path handle** на одному конекторі;
+* вони не ламаються від зсуву індексів;
+* newly created inner segment теж має свій `id` у `segmentsMeta`;
+* на нього теж можна додати ще одну path point;
+* тобто багатокроковий сценарій уже працює.
+
+---
+
+# 10. Що ще залишиться після цього
+
+Оце вже буде **хороший MVP 2.0**, але ще не full draw.io.
+Потім можна окремо додати:
+
+* cleanup/merge для складних маршрутів,
+* захист від add point на дуже короткий tiny inner segment,
+* smarter normalize,
+* semi-auto reroute.
+
+---
+
+# 11. Висновок
+
+Так, **це вже правильний наступний крок**:
+
+* multiple path points
+* stable `segmentId`
+* add point on newly created segments
+
+І саме їх варто робити одним пакетом.
+Smart reroute — окремо потім.
+
+Якщо хочеш, я наступним повідомленням зберу це вже у форматі **“файл за файлом без пояснень”**:
+
+* `connectorGeometry.js`
+* `connectorEditing.js`
+* `canvasController.js`
+* `ConnectorsLayer.jsx`
+* `CanvasContextMenu.jsx`

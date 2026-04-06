@@ -1,0 +1,223 @@
+Так — я б **не розділяв** це на три окремі великі етапи.
+
+Правильний порядок для тебе зараз:
+
+**1. одразу додати `stable segmentId`**
+**2. одразу перевести `1 waypoint` -> `pathHandles[]`**
+**3. одразу дати `add point` на нові внутрішні сегменти**
+
+А от **smart reroute** — не зараз.
+
+Чому так:
+
+* у твоєму поточному MVP `waypoint` ще сидить на `segmentIndex`, а це крихка прив’язка; це нормально для 1 точки, але ламається при кількох вставках і перебудовах. 
+* сама ідея `path point` уже правильна: це не вершина polyline, а центр вставленого керованого сегмента. Але для кількох точок цього вже мало без стабільного id сегмента.  
+
+## Моя рекомендація
+
+### Робимо зараз одним пакетом
+
+* `route.pathHandles[]` замість логіки “тільки одна точка”
+* `segmentId` замість `segmentIndex`
+* `segmentsMeta` після build
+* можливість додати point на **будь-який сегмент з `segmentsMeta`**, включно з newly created inner segment
+
+### Не робимо зараз
+
+* obstacle avoidance
+* auto route search
+* full draw.io smart reroute
+* aggressive auto cleanup, який сам “думає” за користувача
+
+---
+
+# Чому краще одразу додати і `Add point on new segments`
+
+Бо без цього вийде напіврішення:
+
+ти зможеш мати кілька path point “в теорії”, але не зможеш нормально:
+
+* клікнути по новому сегменту після першої вставки,
+* додати ще одну точку на нього,
+* пройти багатокроковий сценарій.
+
+Тобто якщо вже робити `stable segmentId`, то логічно одразу робити і **адресацію нових сегментів**. Це одна й та сама архітектурна зміна.
+
+---
+
+# Мінімальна нова модель route
+
+Я б перейшов на таку MVP-структуру:
+
+```js
+route: {
+  vertices: [
+    { id: "v1", x: 300, y: 120 },
+    { id: "v2", x: 300, y: 260 }
+  ],
+
+  pathHandles: [
+    {
+      id: "ph1",
+      parentSegmentId: "seg_v1_v2",
+      axis: "x",
+      x: 360,
+      y: 190,
+      halfSize: 20
+    }
+  ]
+}
+```
+
+І окремо під час build отримуєш:
+
+```js
+geometry: {
+  start,
+  end,
+  points,
+  segmentsMeta: [
+    {
+      id: "seg_start_v1",
+      orientation: "horizontal",
+      x1, y1, x2, y2,
+      kind: "base"
+    },
+    {
+      id: "seg_v1_v2",
+      orientation: "vertical",
+      x1, y1, x2, y2,
+      kind: "base"
+    },
+    {
+      id: "seg_ph1_inner",
+      orientation: "vertical",
+      x1, y1, x2, y2,
+      kind: "path-inner",
+      pathHandleId: "ph1"
+    }
+  ]
+}
+```
+
+---
+
+# Як це працює
+
+## Було
+
+`createWaypointAtSegment(connector, segmentIndex)`
+
+## Має стати
+
+`createPathHandleAtSegment(connector, segmentId)`
+
+Тобто контекстне меню більше не працює по індексу, а працює по **стабільному id сегмента**.
+
+---
+
+# Що дає `segmentsMeta`
+
+Воно вирішує одразу 3 твої задачі:
+
+### 1. Кілька path point
+
+Бо кожен path handle чіпляється до `parentSegmentId`, а не до нестабільного номера сегмента.
+
+### 2. Stable segmentId
+
+Бо кожен сегмент, який бачить UI, має свій `id`.
+
+### 3. Add point on new segments
+
+Бо newly created inner segment теж потрапляє в `segmentsMeta`, і на нього теж можна повісити `add path point`.
+
+---
+
+# Який builder потрібен
+
+Замість:
+
+```js
+points = buildBaseRoute(...)
+points = insertPathHandleIntoSegment(points, waypoint)
+```
+
+треба зробити так:
+
+```js
+const base = buildBaseRouteWithMeta(start, end, route.vertices)
+
+let current = base
+
+for (const handle of route.pathHandles) {
+  current = insertPathHandleIntoSegmentById(current, handle)
+}
+
+return current
+```
+
+де `current` це не просто масив points, а об’єкт:
+
+```js
+{
+  points: [...],
+  segmentsMeta: [...]
+}
+```
+
+---
+
+# Тобто відповідь коротко
+
+**Так, я б одразу додавав і multiple path points, і stable segmentId, і add point on new segments.**
+
+Бо:
+
+* `multiple path points` без `stable segmentId` буде ламатись;
+* `stable segmentId` без `add point on new segments` не дасть повного сценарію;
+* ці 3 речі — фактично один логічний блок.
+
+А ось **smart reroute** я б точно відкладав на наступний етап.
+
+---
+
+# Як би я ділив роботу
+
+## Етап A — робимо зараз
+
+* `route.pathHandles[]`
+* `segmentId`
+* `segmentsMeta`
+* `createPathHandleAtSegment(segmentId)`
+* `movePathHandle(pathHandleId)`
+* `removePathHandle(pathHandleId)`
+* `add point` на будь-який сегмент із `segmentsMeta`
+
+## Етап B — після стабілізації
+
+* merge / normalize для кількох handles
+* блокування повторного add на той самий tiny inner segment
+* UX як у draw.io
+
+## Етап C — потім
+
+* semi-auto reroute
+* smart reroute
+
+---
+
+# Практичний висновок
+
+Роби **одразу пакет із 3 речей**:
+
+* кілька path point
+* stable segmentId
+* add point на нові сегменти
+
+Це правильний MVP 2.0.
+
+**Не додавай зараз smart reroute.**
+Він зараз тільки ускладнить відладку ручного редактора.
+
+Наступним повідомленням я можу одразу дати тобі **готову нову структуру `route` + `segmentsMeta` + patch для `connectorGeometry.js`**, вже під цей новий MVP.

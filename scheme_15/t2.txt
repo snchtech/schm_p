@@ -1,0 +1,607 @@
+Так. Нижче даю вже **нормальну опорну реалізацію**, яку можна ставити замість поточної моделі з `baseOffset`. Саме вона є причиною хаосу: зараз handle-и щоразу будуються з нової геометрії, а рух зберігається як один глобальний offset, тому після перебудови ти фактично вже редагуєш не той самий сегмент. Це видно і в твоєму коді: `getConnectorSegmentHandles()` бере сегменти з `connector.geometry.points`, `moveElbowSegmentHandle()` зберігає тільки `baseOffset`, а `buildOrthogonalElbowPoints()` перебудовує весь шлях заново. 
+
+## Що робимо замість цього
+
+Переходимо на модель:
+
+```js
+route: {
+  vertices: [
+    { id: "...", x: ..., y: ... }
+  ]
+}
+```
+
+Тобто:
+
+* `start` і `end` — прив’язки до вузлів
+* `vertices` — внутрішні точки зламу
+* сині точки — це **handles сегментів**
+* жовті точки — це **vertices**
+* рух синьої точки міняє **тільки сусідні точки конкретного сегмента**
+* якщо треба “розламати” простий elbow на складнішу ламану — робимо це **явно**, а не побічно
+
+---
+
+# Що отримаєш після заміни
+
+1. Перетягування вертикального сегмента рухатиме тільки його.
+2. Перетягування горизонтального сегмента не буде “перекидати” handle на іншу сторону.
+3. Не буде дригання через те, що під час drag у тебе змінюється топологія маршруту.
+4. Зможеш далі нормально додати:
+
+   * split сегмента
+   * merge зайвих точок
+   * waypoint-и
+   * snap до grid
+
+---
+
+# Логіка роботи по сценаріях
+
+## Сценарій 1. Простий elbow
+
+Було:
+
+```text
+start ---- bend
+           |
+           |
+          end
+```
+
+Є 2 сегменти:
+
+* горизонтальний
+* вертикальний
+
+Є 2 сині точки:
+
+* центр горизонтального
+* центр вертикального
+
+### Якщо тягнеш вертикальний
+
+міняється `x` у `bend`.
+
+### Якщо тягнеш горизонтальний
+
+міняється `y` у `bend`.
+
+Ніяких нових точок тут автоматично не створюємо. Це дає **стабільний етап 1**.
+
+---
+
+## Сценарій 2. Хочеш саме “розлам” горизонтального сегмента
+
+Було одна вершина:
+
+```js
+[{ x: end.x, y: start.y }]
+```
+
+Після drag горизонтального сегмента в новий `y` робимо split і стає:
+
+```js
+[
+  { x: start.x, y: newY },
+  { x: end.x, y: newY }
+]
+```
+
+Тоді маршрут стає:
+
+```text
+start
+|
+|
++--------+
+         |
+         end
+```
+
+Тобто з’являються:
+
+* ліва вертикаль
+* середня горизонталь
+* права вертикаль
+
+І на кожному сегменті вже своя синя точка.
+
+---
+
+## Сценарій 3. Після split тягнеш ліву вертикаль
+
+Має рухатись тільки ліва вертикаль.
+Середня горизонталь лише змінює довжину.
+Права вертикаль стоїть на місці.
+
+---
+
+## Сценарій 4. Після split тягнеш середню горизонталь
+
+Має змінюватись тільки `y` у двох вершинах, що її утворюють.
+
+---
+
+# Готова структура
+
+---
+
+## 1. helpers для route
+
+```js
+function createRoutePoint(x, y, id = null) {
+  return {
+    id: id || `p_${Math.random().toString(36).slice(2, 9)}`,
+    x,
+    y,
+  };
+}
+
+function cloneVertices(vertices = []) {
+  return vertices.map((p) => ({ ...p }));
+}
+```
+
+---
+
+## 2. початковий route для simple elbow
+
+Це важливо: більше **не використовуємо `baseOffset`**.
+
+```js
+export function createInitialOrthogonalElbowRoute(start, end) {
+  return {
+    vertices: [createRoutePoint(end.x, start.y)],
+  };
+}
+```
+
+---
+
+## 3. побудова повного списку точок маршруту
+
+```js
+export function getFullConnectorRoutePoints(start, end, route = {}) {
+  const vertices = cloneVertices(route?.vertices || []);
+  return [
+    { x: start.x, y: start.y, kind: "start" },
+    ...vertices.map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+}
+```
+
+---
+
+## 4. нормалізація vertices
+
+Це прибирає дублікати, нульові сегменти і зайві колінеарні точки.
+
+```js
+export function normalizeOrthogonalVertices(start, end, vertices = []) {
+  const pts = [
+    { x: start.x, y: start.y, kind: "start" },
+    ...cloneVertices(vertices).map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+
+  const cleaned = [pts[0]];
+
+  for (let i = 1; i < pts.length; i++) {
+    const prev = cleaned[cleaned.length - 1];
+    const curr = pts[i];
+
+    if (prev.x === curr.x && prev.y === curr.y) continue;
+    cleaned.push(curr);
+  }
+
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (let i = 1; i < cleaned.length - 1; i++) {
+      const a = cleaned[i - 1];
+      const b = cleaned[i];
+      const c = cleaned[i + 1];
+
+      const abVertical = a.x === b.x;
+      const bcVertical = b.x === c.x;
+
+      const abHorizontal = a.y === b.y;
+      const bcHorizontal = b.y === c.y;
+
+      if ((abVertical && bcVertical) || (abHorizontal && bcHorizontal)) {
+        cleaned.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return cleaned
+    .slice(1, -1)
+    .map((p) => createRoutePoint(p.x, p.y, p.id));
+}
+```
+
+---
+
+## 5. build points для geometry
+
+```js
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const full = getFullConnectorRoutePoints(start, end, route);
+  const flat = [];
+
+  for (const p of full) {
+    flat.push(p.x, p.y);
+  }
+
+  return normalizePoints(flat);
+}
+```
+
+---
+
+## 6. отримання сегментів маршруту
+
+Тут handle вже прив’язаний до **конкретного segmentIndex**.
+
+```js
+export function getRouteSegments(start, end, route = {}) {
+  const pts = getFullConnectorRoutePoints(start, end, route);
+  const segments = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+
+    const horizontal = a.y === b.y;
+    const vertical = a.x === b.x;
+
+    if (!horizontal && !vertical) continue;
+
+    segments.push({
+      index: i,
+      a,
+      b,
+      orientation: horizontal ? "horizontal" : "vertical",
+      cx: (a.x + b.x) / 2,
+      cy: (a.y + b.y) / 2,
+      isEdgeSegment: i === 0 || i === pts.length - 2,
+    });
+  }
+
+  return segments;
+}
+```
+
+---
+
+## 7. новий `getConnectorSegmentHandles`
+
+Тепер він не залежить від нестабільного `geometry.points`.
+
+```js
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") return [];
+  if (connector.pathType !== "orthogonal-elbow") return [];
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return [];
+
+  const segments = getRouteSegments(start, end, connector.route);
+
+  return segments.map((seg) => ({
+    id: `seg-handle-${connector.id}-${seg.index}`,
+    connectorId: connector.id,
+    segmentIndex: seg.index,
+    orientation: seg.orientation,
+    x: seg.cx,
+    y: seg.cy,
+    isEdgeSegment: seg.isEdgeSegment,
+  }));
+}
+```
+
+---
+
+# Ключова функція: стабільний рух сегмента
+
+---
+
+## 8. рух сегмента без split
+
+Це базова стабільна логіка. Вона не створює нових точок, лише локально рухає сегмент.
+
+```js
+export function moveOrthogonalSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const vertices = cloneVertices(connector.route?.vertices || []);
+  const full = getFullConnectorRoutePoints(start, end, { vertices });
+
+  const i = handle.segmentIndex;
+  if (i < 0 || i >= full.length - 1) return connector;
+
+  const a = full[i];
+  const b = full[i + 1];
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+
+  if (!isHorizontal && !isVertical) return connector;
+
+  const nextVertices = cloneVertices(vertices);
+
+  const leftVertexIndex = i - 1;
+  const rightVertexIndex = i;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+```
+
+---
+
+# Тепер важливий момент: split simple elbow
+
+Ти якраз хочеш, щоб при drag горизонтального сегмента простий elbow інколи перетворювався на складнішу ламану.
+
+Оце треба робити **явною логікою**, а не побічно.
+
+---
+
+## 9. split для simple elbow
+
+```js
+export function splitSimpleElbowIfNeeded(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const vertices = cloneVertices(connector.route?.vertices || []);
+
+  // split робимо тільки коли маршрут простий: одна вершина
+  if (vertices.length !== 1) {
+    return moveOrthogonalSegmentHandle(connector, handle, pos);
+  }
+
+  const bend = vertices[0];
+
+  // segment 0: start -> bend
+  // segment 1: bend -> end
+
+  // якщо рухаємо горизонтальний крайній сегмент,
+  // перетворюємо elbow на "П"-подібну ламану з 2 вершинами
+  if (handle.orientation === "horizontal") {
+    const newY = pos.y;
+
+    const nextVertices = [
+      createRoutePoint(start.x, newY),
+      createRoutePoint(end.x, newY),
+    ];
+
+    return {
+      ...connector,
+      route: {
+        ...connector.route,
+        vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+      },
+    };
+  }
+
+  // якщо рухаємо вертикальний сегмент — достатньо просто змістити bend.x
+  if (handle.orientation === "vertical") {
+    const nextVertices = [
+      {
+        ...bend,
+        x: pos.x,
+      },
+    ];
+
+    return {
+      ...connector,
+      route: {
+        ...connector.route,
+        vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+      },
+    };
+  }
+
+  return connector;
+}
+```
+
+---
+
+# Яку функцію викликати під час drag
+
+На етапі drag використовуй одну функцію-обгортку:
+
+```js
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const vertices = connector.route?.vertices || [];
+
+  if (vertices.length <= 1) {
+    return splitSimpleElbowIfNeeded(connector, handle, pos);
+  }
+
+  return moveOrthogonalSegmentHandle(connector, handle, pos);
+}
+```
+
+---
+
+# Контролер
+
+Тут у тебе в цілому логіка ок, але я б лишив один важливий нюанс:
+
+* на `onDragMove` можна оновлювати,
+* на `onDragEnd` теж оновлювати,
+* але бажано під час drag не змінювати “тип топології” десять разів підряд.
+
+Тобто split можна робити або:
+
+* відразу на першому move,
+* або тільки на drag start / first move через прапорець
+
+Але для початку можна так:
+
+```js
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+# Що важливо змінити в `rebuildConnectorGeometry`
+
+Вона не повинна:
+
+* сама вигадувати нові `baseOffset`
+* сама підміняти логіку vertices
+* сама “оптимізувати” маршрут так, що segmentIndex починає означати інший сегмент
+
+Вона має робити тільки таке:
+
+1. визначити `start/end`
+2. викликати `buildOrthogonalElbowPoints(start, end, connector.route)`
+3. зберегти `geometry.points`
+
+---
+
+# `Rect` можна лишити майже без змін
+
+Твій `Rect` в цілому нормальний. Єдине — тепер він працюватиме стабільно, бо handle-и будуть рахуватись по route, а не по нестабільній перебудованій геометрії. Це якраз і є те місце, де зараз проявляється хаос у твоєму варіанті. 
+
+---
+
+# Що я рекомендую впроваджувати поетапно
+
+## Етап 1
+
+Повністю прибери:
+
+* `route.baseOffset`
+* залежність синіх точок від `waypoints.length === 0`
+
+Замість цього:
+
+* завжди працюй через `route.vertices`
+
+## Етап 2
+
+Зроби стабільний simple elbow:
+
+* 1 вершина
+* 2 сегменти
+* 2 сині точки
+* drag без split
+
+## Етап 3
+
+Після того додай split тільки для простого elbow.
+
+## Етап 4
+
+Потім уже додавай жовті точки як окреме редагування самих `vertices`.
+
+---
+
+# Найважливіший висновок
+
+Твоя проблема не в одному `if`, а в архітектурі моделі маршруту. Поточний підхід з `baseOffset` не підтримує стабільне редагування ламаної з кількома сегментами, тому при drag горизонтального сегмента топологія починає змінюватись прямо під час руху, звідси й “перестрибування” handle-ів, додаткові злами та дригання. Це закладено прямо в поточній схемі `getConnectorSegmentHandles -> moveElbowSegmentHandle -> buildOrthogonalElbowPoints`. 
+
+Далі найкраще зробити так:
+спочатку я дам тобі **готовий повний набір функцій у фінальному вигляді**, вже узгоджений між собою:
+
+* `createInitialOrthogonalElbowRoute`
+* `buildOrthogonalElbowPoints`
+* `getConnectorSegmentHandles`
+* `moveElbowSegmentHandle`
+* `normalizeOrthogonalVertices`
+* приклад `rebuildConnectorGeometry`
+
+і ми вставимо їх у твою поточну структуру файлів один в один.

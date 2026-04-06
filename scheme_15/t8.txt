@@ -1,0 +1,233 @@
+Так, ти правий.
+**Синя не має зникати.** Мій попередній MVP з приховуванням синьої точки треба виправити.
+
+Для поведінки **як у draw.io** треба так:
+
+* `waypoint` лишається в даних як окрема сутність;
+* але **в UI він не повинен прибирати сині handles**;
+* краще взагалі **не рендерити жовту окремо постійно**;
+* waypoint треба показувати **тим же синім handle**, просто з `kind: "waypoint"`.
+
+Тобто:
+
+* **сині залишаються**;
+* один із синіх handle-ів може бути “waypoint-handle”;
+* drag цього handle рухає `waypoint`, а не звичайний segment.
+
+Це не ламає базову ідею, що path point є центром вставленого сегмента. 
+
+---
+
+# Що змінити
+
+## 1. `ConnectorsLayer.jsx`
+
+### Прибрати фільтр, який ховає синю точку
+
+**Видалити повністю:**
+
+```jsx id="fix-1"
+if (waypoints.length > 0) {
+  segmentHandles = segmentHandles.filter(
+    (handle) =>
+      !waypoints.some((wp) =>
+        samePoint({ x: handle.x, y: handle.y }, { x: wp.x, y: wp.y })
+      )
+  );
+}
+```
+
+---
+
+## 2. Не рендерити жовту точку окремим `Circle`
+
+**Прибрати поки весь блок:**
+
+```jsx id="fix-2"
+{connector.pathType === "orthogonal-elbow" &&
+  waypoints.map((wp) => (
+    <Circle ... />
+  ))}
+```
+
+---
+
+## 3. `getConnectorSegmentHandles()` — помітити handle, який є waypoint
+
+### `connectorGeometry.js`
+
+Замінити на таке:
+
+```js id="fix-3"
+function samePoint(a, b, eps = 0.5) {
+  return Math.abs(a.x - b.x) < eps && Math.abs(a.y - b.y) < eps;
+}
+
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") return [];
+  if (connector.pathType !== "orthogonal-elbow") return [];
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return [];
+
+  const segments = getOrthogonalRouteSegments(start, end, connector.route);
+  const waypoints = connector.route?.waypoints || [];
+
+  return segments.map((seg) => {
+    const wp = waypoints.find((w) =>
+      samePoint({ x: seg.cx, y: seg.cy }, { x: w.x, y: w.y })
+    );
+
+    return {
+      id: `seg-handle-${connector.id}-${seg.index}`,
+      connectorId: connector.id,
+      segmentIndex: seg.index,
+      orientation: seg.orientation,
+      x: seg.cx,
+      y: seg.cy,
+      isFirst: seg.isFirst,
+      isLast: seg.isLast,
+      kind: wp ? "waypoint" : "segment",
+      waypointId: wp?.id || null,
+      axis: wp?.axis || null,
+    };
+  });
+}
+```
+
+---
+
+## 4. У `ConnectorsLayer.jsx` всі handles лишаються синіми, але waypoint-handle окремо обробляється
+
+### Замінити рендер синіх точок на це:
+
+```jsx id="fix-4"
+{segmentHandles.map((handle) => (
+  <Rect
+    key={handle.id}
+    x={handle.x - 5}
+    y={handle.y - 5}
+    width={10}
+    height={10}
+    fill="#2D9CDB"
+    stroke={handle.kind === "waypoint" ? "#0B3D91" : "black"}
+    strokeWidth={handle.kind === "waypoint" ? 2 : 1}
+    draggable
+    dragBoundFunc={(pos) =>
+      (handle.kind === "waypoint"
+        ? handle.axis === "y"
+          ? { x: handle.x - 5, y: pos.y }
+          : { x: pos.x, y: handle.y - 5 }
+        : handle.orientation === "horizontal"
+        ? { x: handle.x - 5, y: pos.y }
+        : { x: pos.x, y: handle.y - 5 })
+    }
+    onDragMove={(e) => {
+      if (handle.kind === "waypoint") {
+        canvasController.handleConnectorWaypointDragMove?.(
+          connector.id,
+          { id: handle.waypointId, axis: handle.axis, x: handle.x, y: handle.y },
+          e
+        );
+        return;
+      }
+
+      canvasController.handleConnectorSegmentDragMove?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onDragEnd={(e) => {
+      if (handle.kind === "waypoint") {
+        canvasController.handleConnectorWaypointDragEnd?.(
+          connector.id,
+          { id: handle.waypointId, axis: handle.axis, x: handle.x, y: handle.y },
+          e
+        );
+        return;
+      }
+
+      canvasController.handleConnectorSegmentDragEnd?.(
+        connector.id,
+        handle,
+        e
+      );
+    }}
+    onMouseEnter={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        const axis =
+          handle.kind === "waypoint"
+            ? handle.axis
+            : handle.orientation === "horizontal"
+            ? "y"
+            : "x";
+
+        stage.container().style.cursor =
+          axis === "y" ? "ns-resize" : "ew-resize";
+      }
+    }}
+    onMouseLeave={(e) => {
+      const stage = e.target.getStage();
+      if (stage?.container()?.style) {
+        stage.container().style.cursor = "default";
+      }
+    }}
+    onContextMenu={(e) => {
+      if (handle.kind === "waypoint") {
+        canvasController.handleConnectorWaypointContextMenu?.(
+          e,
+          connector,
+          { id: handle.waypointId, axis: handle.axis, x: handle.x, y: handle.y }
+        );
+      }
+    }}
+  />
+))}
+```
+
+---
+
+## 5. `canvasController`
+
+`handleConnectorWaypointDragMove/End` можна лишити майже як є.
+Бо тепер вони будуть викликатись **через синій handle**, а не через окрему жовту точку.
+
+---
+
+# Що це дасть
+
+Після цього:
+
+* після `add waypoint` **синя точка не зникає**;
+* на вставленому сегменті буде handle, як у draw.io;
+* цей handle буде працювати як `waypoint`;
+* інші сині handles теж лишаться;
+* окрема жовта візуалізація більше не лізе в конфлікт.
+
+---
+
+# Правильна модель для MVP зараз
+
+Тобто тепер:
+
+* `waypoint` є в `route.waypoints`
+* геометрія будується через `insertPathHandleIntoSegment()`
+* **рендер — тільки сині handles**
+* різниця лише в тому, що частина синіх — `kind: "segment"`, а один може бути `kind: "waypoint"`
+
+---
+
+# Висновок
+
+Так, виправлення таке:
+
+* **не ховати синю**
+* **не рендерити жовту окремо**
+* waypoint зробити **спеціальним синім handle**
+
+Це найближче до draw.io MVP.
+
+Якщо хочеш, я наступним повідомленням дам тобі вже **цільний фінальний шматок `ConnectorsLayer.jsx` без жовтих точок**, щоб ти просто вставив.

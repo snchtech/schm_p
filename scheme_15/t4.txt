@@ -1,0 +1,457 @@
+Так. Нижче **готовий MVP** під твою поточну схему:
+`route.vertices` + `splitHorizontal` + `splitVertical` + один `moveElbowSegmentHandle`.
+
+Поточна проблема справді в старій моделі з `baseOffset`, де весь маршрут перебудовується як одна формула, а не як стабільний список вершин.  
+
+---
+
+## 1. `connectorGeometry.js`
+
+```js
+export function createRoutePoint(x, y, id = null) {
+  return {
+    id: id || `rp_${Math.random().toString(36).slice(2, 10)}`,
+    x,
+    y,
+  };
+}
+
+export function cloneRoutePoints(points = []) {
+  return points.map((p) => ({ ...p }));
+}
+
+export function createInitialOrthogonalElbowRoute(start, end) {
+  return {
+    vertices: [createRoutePoint(end.x, start.y)],
+  };
+}
+
+export function getFullOrthogonalRoutePoints(start, end, route = {}) {
+  const vertices = cloneRoutePoints(route?.vertices || []);
+  return [
+    { x: start.x, y: start.y, kind: "start" },
+    ...vertices.map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+}
+
+export function normalizeOrthogonalVertices(start, end, vertices = []) {
+  const full = [
+    { x: start.x, y: start.y, kind: "start" },
+    ...cloneRoutePoints(vertices).map((p) => ({ ...p, kind: "vertex" })),
+    { x: end.x, y: end.y, kind: "end" },
+  ];
+
+  const deduped = [];
+  for (const p of full) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.x === p.x && prev.y === p.y) continue;
+    deduped.push(p);
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+
+    for (let i = 1; i < deduped.length - 1; i++) {
+      const a = deduped[i - 1];
+      const b = deduped[i];
+      const c = deduped[i + 1];
+
+      const sameVertical = a.x === b.x && b.x === c.x;
+      const sameHorizontal = a.y === b.y && b.y === c.y;
+
+      if (sameVertical || sameHorizontal) {
+        deduped.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return deduped
+    .slice(1, -1)
+    .map((p) => createRoutePoint(p.x, p.y, p.id));
+}
+
+export function buildOrthogonalElbowPoints(start, end, route = {}) {
+  const full = getFullOrthogonalRoutePoints(start, end, route);
+  const points = [];
+
+  for (const p of full) {
+    points.push(p.x, p.y);
+  }
+
+  return normalizePoints(points);
+}
+
+export function getOrthogonalRouteSegments(start, end, route = {}) {
+  const pts = getFullOrthogonalRoutePoints(start, end, route);
+  const segments = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+
+    const isHorizontal = a.y === b.y;
+    const isVertical = a.x === b.x;
+
+    if (!isHorizontal && !isVertical) continue;
+
+    segments.push({
+      index: i,
+      a,
+      b,
+      orientation: isHorizontal ? "horizontal" : "vertical",
+      cx: (a.x + b.x) / 2,
+      cy: (a.y + b.y) / 2,
+      isFirst: i === 0,
+      isLast: i === pts.length - 2,
+    });
+  }
+
+  return segments;
+}
+
+export function getConnectorSegmentHandles(connector) {
+  if (!connector || connector.kind !== "connector") return [];
+  if (connector.pathType !== "orthogonal-elbow") return [];
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return [];
+
+  const segments = getOrthogonalRouteSegments(start, end, connector.route);
+
+  return segments.map((seg) => ({
+    id: `seg-handle-${connector.id}-${seg.index}`,
+    connectorId: connector.id,
+    segmentIndex: seg.index,
+    orientation: seg.orientation,
+    x: seg.cx,
+    y: seg.cy,
+    isFirst: seg.isFirst,
+    isLast: seg.isLast,
+  }));
+}
+```
+
+---
+
+## 2. `connectorEditing.js`
+
+```js
+import {
+  createRoutePoint,
+  cloneRoutePoints,
+  getFullOrthogonalRoutePoints,
+  normalizeOrthogonalVertices,
+} from "./connectorGeometry";
+
+// звичайний локальний рух уже існуючого сегмента
+export function moveOrthogonalSegment(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const full = getFullOrthogonalRoutePoints(start, end, { vertices });
+
+  const i = handle.segmentIndex;
+  if (i < 0 || i >= full.length - 1) return connector;
+
+  const a = full[i];
+  const b = full[i + 1];
+
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+  if (!isHorizontal && !isVertical) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+
+  const leftVertexIndex = i - 1;
+  const rightVertexIndex = i;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+// split horizontal для simple elbow
+export function splitSimpleElbowHorizontal(connector, pos) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const newY = pos.y;
+
+  const nextVertices = [
+    createRoutePoint(start.x, newY),
+    createRoutePoint(end.x, newY),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+// split vertical для simple elbow
+export function splitSimpleElbowVertical(connector, pos) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const newX = pos.x;
+
+  const nextVertices = [
+    createRoutePoint(newX, start.y),
+    createRoutePoint(newX, end.y),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+// simple elbow без split: просто рухаємо одну вершину
+export function moveSimpleElbow(connector, handle, pos) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  if (vertices.length !== 1) return connector;
+
+  const bend = { ...vertices[0] };
+
+  if (handle.orientation === "horizontal") {
+    bend.y = pos.y;
+  } else if (handle.orientation === "vertical") {
+    bend.x = pos.x;
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, [bend]),
+    },
+  };
+}
+
+// правило: коли simple elbow -> одразу split для обох орієнтацій
+export function splitSimpleElbowAndMove(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const vertices = connector.route?.vertices || [];
+  if (vertices.length !== 1) {
+    return moveOrthogonalSegment(connector, handle, pos);
+  }
+
+  if (handle.orientation === "horizontal") {
+    return splitSimpleElbowHorizontal(connector, pos);
+  }
+
+  if (handle.orientation === "vertical") {
+    return splitSimpleElbowVertical(connector, pos);
+  }
+
+  return connector;
+}
+
+// ГОЛОВНА ФУНКЦІЯ
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  if (!connector || connector.kind !== "connector") return connector;
+  if (connector.pathType !== "orthogonal-elbow") return connector;
+
+  const vertices = connector.route?.vertices || [];
+
+  // simple elbow -> робимо split і одразу далі працюємо як з polyline
+  if (vertices.length === 1) {
+    return splitSimpleElbowAndMove(connector, handle, pos);
+  }
+
+  // polyline
+  return moveOrthogonalSegment(connector, handle, pos);
+}
+```
+
+---
+
+## 3. `rebuildConnectorGeometry`
+
+```js
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  const start = resolveConnectorStartPoint(connector, nodes);
+  const end = resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) return connector;
+
+  const points =
+    connector.pathType === "orthogonal-elbow"
+      ? buildOrthogonalElbowPoints(start, end, connector.route)
+      : connector.geometry?.points || [];
+
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      start,
+      end,
+      points,
+    },
+  };
+}
+```
+
+---
+
+## 4. Контролер — лишаємо майже як є
+
+```js
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (connector.pathType !== "orthogonal-elbow") return;
+
+  const normalizedPos = {
+    x: pos.x + 5,
+    y: pos.y + 5,
+  };
+
+  let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+}
+```
+
+---
+
+## 5. Що отримаєш одразу
+
+### simple elbow
+
+було 2 сегменти:
+
+* horizontal
+* vertical
+
+### drag horizontal
+
+стане 3 сегменти:
+
+* ліва vertical
+* середня horizontal
+* права vertical
+
+### drag vertical
+
+стане 3 сегменти:
+
+* верхня horizontal
+* середня vertical
+* нижня horizontal
+
+Тобто буде вже близько до draw.io MVP.
+
+---
+
+## 6. Важливий нюанс
+
+Щоб під час drag не було повторного split на кожному русі, тут це вже не станеться, бо:
+
+* перший drag переводить `vertices.length` з `1` у `2`
+* далі працює `moveOrthogonalSegment`
+
+---
+
+## 7. Що треба прибрати зі старого коду
+
+Прибери:
+
+* `route.baseOffset`
+* всю логіку `waypoints.length === 0`
+* старий `buildOrthogonalElbowPoints`, де використовується `baseOffset`
+* старий `moveElbowSegmentHandle`, де зберігається `baseOffset`
+
+---
+
+## 8. Якщо хочеш ще ближче до draw.io
+
+Наступним кроком я дам тобі 2 маленькі доопрацювання:
+
+* `merge` зайвих вершин після drag
+* фіксацію `start/end anchor`, щоб конектор не перескакував між сторонами фігури під час руху
+
+Це вже дасть дуже схожу поведінку на draw.io.

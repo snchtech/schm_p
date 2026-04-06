@@ -1,0 +1,104 @@
+Так — **сильно переробляти кнопки не треба**.
+Твої напрацювання для панелі вже **добре лягають на новий підхід**, бо там кнопка **активує інструмент**, а не вставляє готову лінію: `canvasController.activateConnectorTool?.(tool.template)` уже викликається з кнопок, а активний інструмент береться зі store через `activeConnectorTool`.  
+
+Що я б **залишив як є**:
+
+* окремий `ConnectorsToolSection`
+* масив `tools`
+* підсвітку активної кнопки через `isSameTool(...)`
+* кнопку **Скасувати**  
+
+Що **треба доробити під новий MVP**:
+
+### 1. Прибрати будь-які старі direct-create виклики
+
+У кнопках не повинно лишитись:
+
+* `createTestConnector()`
+* `addEdge(...)`
+* вставки готової лінії в canvas
+
+Кнопка має тільки активувати tool. Це якраз і є правильний flow для нового режиму побудови.  
+
+### 2. `cancelDraftConnector()` має чистити все
+
+Кнопка **Скасувати** зараз уже очищає draft і вимикає tool — це правильно. Я б лишив саме так:
+
+* `clearDraftConnector()`
+* `clearConnectorAttachPreview()`
+* `clearActiveConnectorTool()`  
+
+### 3. Додати toggle по повторному кліку
+
+Зручно зробити так:
+
+* якщо натиснули **ту саму** активну кнопку ще раз — вимикаємо інструмент
+* якщо іншу — перемикаємо шаблон
+
+Приклад:
+
+```jsx id="toolbar-toggle"
+onClick={() => {
+  const store = useCanvasStore.getState();
+  const active = store.activeConnectorTool;
+
+  const same =
+    active &&
+    active.pathType === tool.template.pathType &&
+    active.endcaps?.start === tool.template.endcaps?.start &&
+    active.endcaps?.end === tool.template.endcaps?.end &&
+    active.behavior?.type === tool.template.behavior?.type;
+
+  if (same) {
+    canvasController.cancelDraftConnector?.();
+    store.clearActiveConnectorTool?.();
+    return;
+  }
+
+  canvasController.activateConnectorTool?.(tool.template);
+}}
+```
+
+### 4. Для нового route-формату шаблони кнопок міняти майже не треба
+
+Ті шаблони, які в тебе вже є:
+
+* `orthogonal-elbow`
+* `orthogonal-straight`
+* `free-straight`
+* `arrow`
+* `double-arrow`
+
+усі нормальні. Вони задають **тільки тип побудови**, а route (`vertices`, `pathHandles`) вже формується пізніше в `createConnector` / `rebuildConnectorGeometry`, не в кнопці.  
+
+### 5. Додай в UI маленький статус активного інструмента
+
+Це не обов’язково, але дуже корисно. У тебе вже був хороший варіант із `getToolName(tool)` і рядком `Активно: ...`. Я б це залишив. 
+
+---
+
+## Висновок
+
+**Ні, панель не треба переписувати з нуля.**
+**Так, її треба трохи підчистити під новий flow.**
+
+### Залишити:
+
+* `ConnectorsToolSection`
+* масив `tools`
+* `activateConnectorTool(template)`
+* активний стан кнопки
+* `Скасувати`
+
+### Доробити:
+
+* прибрати будь-яку стару логіку прямого створення edge
+* зробити toggle по повторному кліку
+* переконатись, що cancel чистить і draft, і attach preview, і active tool
+* підключити панель до нового flow:
+
+  * anchor click → `startDraftConnectorFromAnchor`
+  * stage move → `updateDraftConnector`
+  * stage up → `finishDraftConnector`  
+
+Якщо хочеш, я наступним повідомленням дам тобі вже **готовий фінальний `ConnectorsToolSection.jsx`** з toggle-логікою, без зайвих пояснень.

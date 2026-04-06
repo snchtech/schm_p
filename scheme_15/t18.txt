@@ -1,0 +1,513 @@
+Так. Ось **MVP migration patch саме для simple line + arrow**, без elbow-логіки.
+
+Ціль:
+
+* залишити **один `connector`**
+* перевести straight/arrow на:
+
+  * `pathType`
+  * `endcaps`
+  * `behavior`
+* не плодити окремі сутності для line/arrow/double-arrow. Це якраз той підхід, який краще масштабується.  
+
+---
+
+## 1. `connectorModel.js`
+
+Замінити створення connector-а на модель з `pathType + endcaps + behavior`.
+
+```js id="mvp-line-01"
+export function createConnector({
+  id = crypto.randomUUID(),
+  pathType = "orthogonal-straight",
+  start,
+  end,
+  endcaps,
+  behavior,
+  style,
+}) {
+  return {
+    id,
+    kind: "connector",
+
+    pathType, // free-straight | orthogonal-straight | orthogonal-elbow
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route: {
+      vertices: [],
+      pathHandles: [],
+      fixedAnchors: null,
+    },
+
+    endcaps: {
+      start: endcaps?.start ?? "none",
+      end: endcaps?.end ?? "none",
+    },
+
+    behavior: {
+      type: behavior?.type ?? "default",
+      link: behavior?.link ?? null,
+    },
+
+    geometry: {
+      start: { x: start?.x ?? 0, y: start?.y ?? 0 },
+      end: { x: end?.x ?? 120, y: end?.y ?? 0 },
+      points: [],
+      segmentsMeta: [],
+    },
+
+    style: {
+      stroke: style?.stroke ?? "black",
+      strokeWidth: style?.strokeWidth ?? 2,
+    },
+  };
+}
+```
+
+---
+
+## 2. `connectorGeometry.js`
+
+Додати `free-straight` і нормальний `orthogonal-straight`.
+
+```js id="mvp-line-02"
+export function buildFreeStraightPoints(start, end) {
+  return [start.x, start.y, end.x, end.y];
+}
+
+export function buildOrthogonalStraightPoints(start, end) {
+  const dx = Math.abs(end.x - start.x);
+  const dy = Math.abs(end.y - start.y);
+
+  if (dx >= dy) {
+    return [start.x, start.y, end.x, start.y];
+  }
+
+  return [start.x, start.y, start.x, end.y];
+}
+```
+
+Далі оновити rebuild для straight-типів:
+
+```js id="mvp-line-03"
+export function rebuildConnectorGeometry(connector, nodes) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  const fixed = connector.route?.fixedAnchors;
+
+  const start = fixed?.start || resolveConnectorStartPoint(connector, nodes);
+  const end = fixed?.end || resolveConnectorEndPoint(connector, nodes);
+
+  if (!start || !end) return connector;
+
+  if (connector.pathType === "free-straight") {
+    const points = buildFreeStraightPoints(start, end);
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points,
+        segmentsMeta: [
+          {
+            id: "seg_main",
+            orientation: "free",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+            kind: "base",
+            cx: (start.x + end.x) / 2,
+            cy: (start.y + end.y) / 2,
+          },
+        ],
+      },
+    };
+  }
+
+  if (connector.pathType === "orthogonal-straight") {
+    const points = buildOrthogonalStraightPoints(start, end);
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points,
+        segmentsMeta: [
+          {
+            id: "seg_main",
+            orientation: points[1] === points[3] ? "horizontal" : "vertical",
+            x1: points[0],
+            y1: points[1],
+            x2: points[2],
+            y2: points[3],
+            kind: "base",
+            cx: (points[0] + points[2]) / 2,
+            cy: (points[1] + points[3]) / 2,
+          },
+        ],
+      },
+    };
+  }
+
+  if (connector.pathType === "orthogonal-elbow") {
+    const built = buildOrthogonalElbowGeometry(start, end, connector.route);
+
+    return {
+      ...connector,
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points: built.points,
+        segmentsMeta: built.segmentsMeta,
+      },
+    };
+  }
+
+  return connector;
+}
+```
+
+Для straight цього вже достатньо: одна модель, різна геометрія. Це якраз той мінімальний шлях, який ти вже напрацьовував для straight connector-а.  
+
+---
+
+## 3. `connectorMarkers.js`
+
+Якщо файла ще нема — додай. Він потрібен для стрілок через `endcaps`.
+
+```js id="mvp-line-04"
+function normalize(dx, dy) {
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return {
+    x: dx / len,
+    y: dy / len,
+  };
+}
+
+export function getArrowHeadPoints(from, to, size = 12, width = 8) {
+  const dir = normalize(to.x - from.x, to.y - from.y);
+
+  const base = {
+    x: to.x - dir.x * size,
+    y: to.y - dir.y * size,
+  };
+
+  const perp = {
+    x: -dir.y,
+    y: dir.x,
+  };
+
+  const left = {
+    x: base.x + perp.x * (width / 2),
+    y: base.y + perp.y * (width / 2),
+  };
+
+  const right = {
+    x: base.x - perp.x * (width / 2),
+    y: base.y - perp.y * (width / 2),
+  };
+
+  return [
+    to.x, to.y,
+    left.x, left.y,
+    right.x, right.y,
+  ];
+}
+
+export function getConnectorStartSegment(points = []) {
+  if (!points || points.length < 4) return null;
+
+  return {
+    from: { x: points[2], y: points[3] },
+    to: { x: points[0], y: points[1] },
+  };
+}
+
+export function getConnectorEndSegment(points = []) {
+  if (!points || points.length < 4) return null;
+
+  const n = points.length;
+
+  return {
+    from: { x: points[n - 4], y: points[n - 3] },
+    to: { x: points[n - 2], y: points[n - 1] },
+  };
+}
+```
+
+---
+
+## 4. `ConnectorsLayer.jsx`
+
+Для straight/arrow мінімально треба:
+
+* `Line`
+* endpoint handles
+* arrowheads
+* **без** segment handles для straight
+
+Онови логіку handle-ів так:
+
+```jsx id="mvp-line-05"
+const segmentHandles =
+  isSelected && connector.pathType === "orthogonal-elbow"
+    ? getConnectorSegmentHandles(connector)
+    : [];
+```
+
+Додай рендер arrowheads:
+
+```jsx id="mvp-line-06"
+const startSegment = getConnectorStartSegment(pts);
+const endSegment = getConnectorEndSegment(pts);
+
+const startArrowPoints =
+  connector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+    : null;
+
+const endArrowPoints =
+  connector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+    : null;
+```
+
+Після основної `Line`:
+
+```jsx id="mvp-line-07"
+{startArrowPoints && (
+  <Line
+    points={startArrowPoints}
+    closed
+    fill={isSelected ? "#2F80ED" : stroke}
+    stroke={isSelected ? "#2F80ED" : stroke}
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+
+{endArrowPoints && (
+  <Line
+    points={endArrowPoints}
+    closed
+    fill={isSelected ? "#2F80ED" : stroke}
+    stroke={isSelected ? "#2F80ED" : stroke}
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+```
+
+Це відповідає твоєму ж напрямку: один рендер-пайплайн для всіх connector-ів, а стрілки — окремі маркери, не окрема сутність.  
+
+---
+
+## 5. `canvasController.js`
+
+Додай 4 простих test/helper-методи для перевірки нової моделі.
+
+```js id="mvp-line-08"
+createTestFreeLine() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 280,
+      y: 180,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "none",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+},
+
+createTestArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+},
+
+createTestDoubleArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "arrow",
+      end: "arrow",
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+},
+
+createTestNavigationArrow() {
+  const store = useCanvasStore.getState();
+
+  let connector = createConnector({
+    pathType: "free-straight",
+    start: {
+      x: 120,
+      y: 120,
+      attached: { type: "none" },
+    },
+    end: {
+      x: 320,
+      y: 120,
+      attached: { type: "none" },
+    },
+    endcaps: {
+      start: "none",
+      end: "arrow",
+    },
+    behavior: {
+      type: "navigation",
+      link: {
+        targetSchemeId: "scheme-2",
+        highlightParam: "element-15",
+      },
+    },
+  });
+
+  connector = rebuildConnectorGeometry(connector, store.nodes);
+
+  store.addEdge(connector);
+  store.setSelection?.({ type: "edge", id: connector.id });
+}
+```
+
+---
+
+## 6. Tool buttons / test buttons
+
+Якщо поки просто перевіряєш, додай кнопки:
+
+```jsx id="mvp-line-09"
+<Button onClick={() => canvasController.createTestFreeLine()}>
+  Додати лінію
+</Button>
+
+<Button onClick={() => canvasController.createTestArrow()}>
+  Додати стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestDoubleArrow()}>
+  Додати подвійну стрілку
+</Button>
+
+<Button onClick={() => canvasController.createTestNavigationArrow()}>
+  Додати стрілку переходу
+</Button>
+```
+
+---
+
+## 7. Що отримаєш після цього
+
+Після цього patch:
+
+* проста лінія і стрілки вже працюють у **новій архітектурі**
+* вони не окремі сутності, а той самий `connector` з:
+
+  * `pathType`
+  * `endcaps`
+  * `behavior` 
+* start/end drag лишається спільним
+* attach до фігур лишається спільним
+* `ConnectorsLayer` лишається один
+
+---
+
+## 8. Що ще можна не чіпати зараз
+
+Поки можна **не адаптувати** під simple line:
+
+* segment handles
+* path handles
+* smart reroute
+* body drag attached connector-ів
+
+Для straight/arrow MVP це не потрібно.
+
+---
+
+## 9. Висновок
+
+**Так, straight line і arrows треба адаптувати під новий підхід.**
+Але це легка адаптація:
+
+* не окрема система,
+* а приведення до єдиної моделі connector-а.
+
+Якщо хочеш, наступним повідомленням я дам тобі **готовий фінальний `ConnectorsToolSection.jsx`** вже з кнопками:
+
+* Лінія
+* Стрілка
+* Подвійна стрілка
+* Ламана
+* Ортогональна
+* Скасувати режим.
