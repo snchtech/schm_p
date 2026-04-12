@@ -1,0 +1,883 @@
+Добре, тоді дам тобі **самодостатній MVP-каркас**, який можна вставити у твій редактор і вже від нього рухатись далі.
+Я свідомо роблю не “повний draw.io”, а **правильне ядро**:
+
+* старт конектора з anchor
+* preview під час drag
+* attach до іншого anchor
+* якщо не попали в anchor — кінець лишається вільним
+* endpoint можна потім перетягнути і переприв’язати
+* маршрут поки orthogonal
+
+Нижче дам структуру так, ніби ти робиш це в Next.js + React + Zustand + Konva.
+
+---
+
+# 1. Модель даних
+
+Почни з того, що **конектор — це не масив points як істина**, а об’єкт із двома кінцями.
+
+## `types/connectors.ts`
+
+```ts
+export type AnchorSide = "top" | "right" | "bottom" | "left";
+
+export type AnchorRef = {
+  nodeId: string | null;
+  anchorId: string | null;
+  side: AnchorSide | null;
+  x: number;
+  y: number;
+  attached: boolean;
+};
+
+export type Waypoint = {
+  id: string;
+  x: number;
+  y: number;
+};
+
+export type ConnectorKind =
+  | "orthogonal"
+  | "straight"
+  | "arrow"
+  | "link";
+
+export type Connector = {
+  id: string;
+  kind: ConnectorKind;
+
+  from: AnchorRef;
+  to: AnchorRef;
+
+  waypoints: Waypoint[];
+
+  stroke: string;
+  strokeWidth: number;
+
+  arrowStart?: boolean;
+  arrowEnd?: boolean;
+};
+
+export type AnchorInfo = {
+  nodeId: string;
+  anchorId: string;
+  side: AnchorSide;
+  x: number;
+  y: number;
+};
+
+export type ConnectorDraft = {
+  active: boolean;
+  connectorId: string | null;
+  movingEnd: "from" | "to" | null;
+  hoverAnchor: AnchorInfo | null;
+};
+```
+
+---
+
+# 2. Утиліти для конектора
+
+## `lib/diagram/connectors/helpers.ts`
+
+```ts
+import { AnchorInfo, AnchorRef, Connector } from "@/types/connectors";
+
+export function makeId(prefix = "id") {
+  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function anchorInfoToRef(anchor: AnchorInfo): AnchorRef {
+  return {
+    nodeId: anchor.nodeId,
+    anchorId: anchor.anchorId,
+    side: anchor.side,
+    x: anchor.x,
+    y: anchor.y,
+    attached: true,
+  };
+}
+
+export function freePointRef(x: number, y: number): AnchorRef {
+  return {
+    nodeId: null,
+    anchorId: null,
+    side: null,
+    x,
+    y,
+    attached: false,
+  };
+}
+
+export function createConnectorFromAnchor(
+  anchor: AnchorInfo,
+  pointer: { x: number; y: number }
+): Connector {
+  return {
+    id: makeId("conn"),
+    kind: "orthogonal",
+    from: anchorInfoToRef(anchor),
+    to: freePointRef(pointer.x, pointer.y),
+    waypoints: [],
+    stroke: "#111",
+    strokeWidth: 2,
+    arrowStart: false,
+    arrowEnd: false,
+  };
+}
+```
+
+---
+
+# 3. Побудова orthogonal route
+
+Це головне ядро.
+Поки без складного уникання перетинів.
+
+## `lib/diagram/connectors/router.ts`
+
+```ts
+import { AnchorRef } from "@/types/connectors";
+
+function pushPoint(points: number[], x: number, y: number) {
+  const len = points.length;
+  if (len >= 2) {
+    const px = points[len - 2];
+    const py = points[len - 1];
+    if (px === x && py === y) return;
+  }
+  points.push(x, y);
+}
+
+export function buildOrthogonalPoints(from: AnchorRef, to: AnchorRef): number[] {
+  const x1 = from.x;
+  const y1 = from.y;
+  const x2 = to.x;
+  const y2 = to.y;
+
+  const points: number[] = [];
+  pushPoint(points, x1, y1);
+
+  const dx = Math.abs(x2 - x1);
+  const dy = Math.abs(y2 - y1);
+
+  const fromSide = from.side;
+  const toSide = to.side;
+
+  const horizontalPair =
+    (fromSide === "right" && toSide === "left") ||
+    (fromSide === "left" && toSide === "right");
+
+  const verticalPair =
+    (fromSide === "top" && toSide === "bottom") ||
+    (fromSide === "bottom" && toSide === "top");
+
+  if (horizontalPair) {
+    const midX = (x1 + x2) / 2;
+    pushPoint(points, midX, y1);
+    pushPoint(points, midX, y2);
+    pushPoint(points, x2, y2);
+    return points;
+  }
+
+  if (verticalPair) {
+    const midY = (y1 + y2) / 2;
+    pushPoint(points, x1, midY);
+    pushPoint(points, x2, midY);
+    pushPoint(points, x2, y2);
+    return points;
+  }
+
+  if (fromSide === "left" || fromSide === "right") {
+    if (dx > dy) {
+      pushPoint(points, x2, y1);
+    } else {
+      const midX = (x1 + x2) / 2;
+      pushPoint(points, midX, y1);
+      pushPoint(points, midX, y2);
+    }
+    pushPoint(points, x2, y2);
+    return points;
+  }
+
+  if (fromSide === "top" || fromSide === "bottom") {
+    if (dy > dx) {
+      pushPoint(points, x1, y2);
+    } else {
+      const midY = (y1 + y2) / 2;
+      pushPoint(points, x1, midY);
+      pushPoint(points, x2, midY);
+    }
+    pushPoint(points, x2, y2);
+    return points;
+  }
+
+  if (dx >= dy) {
+    pushPoint(points, x2, y1);
+  } else {
+    pushPoint(points, x1, y2);
+  }
+
+  pushPoint(points, x2, y2);
+  return points;
+}
+```
+
+---
+
+# 4. Zustand store
+
+Нижче store тільки для конекторів.
+Його можна вмонтувати в твій загальний `useCanvasStore`.
+
+## `store/useCanvasStore.ts`
+
+```ts
+"use client";
+
+import { create } from "zustand";
+import {
+  AnchorInfo,
+  Connector,
+  ConnectorDraft,
+} from "@/types/connectors";
+import {
+  anchorInfoToRef,
+  createConnectorFromAnchor,
+  freePointRef,
+} from "@/lib/diagram/connectors/helpers";
+
+type CanvasStore = {
+  connectors: Connector[];
+  connectorDraft: ConnectorDraft;
+
+  startConnectorFromAnchor: (
+    anchor: AnchorInfo,
+    pointer: { x: number; y: number }
+  ) => string;
+
+  updateDraftPointer: (pointer: { x: number; y: number }) => void;
+  setDraftHoverAnchor: (anchor: AnchorInfo | null) => void;
+  finishDraftConnector: () => void;
+  cancelDraftConnector: () => void;
+
+  reconnectEndpointStart: (
+    connectorId: string,
+    end: "from" | "to"
+  ) => void;
+
+  updateConnectorEndpointFree: (
+    connectorId: string,
+    end: "from" | "to",
+    pointer: { x: number; y: number }
+  ) => void;
+
+  attachConnectorEndpoint: (
+    connectorId: string,
+    end: "from" | "to",
+    anchor: AnchorInfo
+  ) => void;
+
+  detachConnectorEndpoint: (
+    connectorId: string,
+    end: "from" | "to"
+  ) => void;
+};
+
+const initialDraft: ConnectorDraft = {
+  active: false,
+  connectorId: null,
+  movingEnd: null,
+  hoverAnchor: null,
+};
+
+export const useCanvasStore = create<CanvasStore>((set, get) => ({
+  connectors: [],
+  connectorDraft: initialDraft,
+
+  startConnectorFromAnchor(anchor, pointer) {
+    const connector = createConnectorFromAnchor(anchor, pointer);
+
+    set((state) => ({
+      connectors: [...state.connectors, connector],
+      connectorDraft: {
+        active: true,
+        connectorId: connector.id,
+        movingEnd: "to",
+        hoverAnchor: null,
+      },
+    }));
+
+    return connector.id;
+  },
+
+  updateDraftPointer(pointer) {
+    const { connectorDraft } = get();
+    if (!connectorDraft.active || !connectorDraft.connectorId || !connectorDraft.movingEnd) {
+      return;
+    }
+
+    set((state) => ({
+      connectors: state.connectors.map((c) => {
+        if (c.id !== connectorDraft.connectorId) return c;
+
+        return {
+          ...c,
+          [connectorDraft.movingEnd]: {
+            ...c[connectorDraft.movingEnd],
+            x: pointer.x,
+            y: pointer.y,
+            attached: false,
+            nodeId: null,
+            anchorId: null,
+            side: null,
+          },
+        };
+      }),
+    }));
+  },
+
+  setDraftHoverAnchor(anchor) {
+    const { connectorDraft } = get();
+    if (!connectorDraft.active) return;
+
+    set((state) => ({
+      connectorDraft: {
+        ...state.connectorDraft,
+        hoverAnchor: anchor,
+      },
+      connectors: state.connectors.map((c) => {
+        if (c.id !== connectorDraft.connectorId || !connectorDraft.movingEnd) return c;
+        if (!anchor) return c;
+
+        return {
+          ...c,
+          [connectorDraft.movingEnd]: anchorInfoToRef(anchor),
+        };
+      }),
+    }));
+  },
+
+  finishDraftConnector() {
+    const { connectorDraft } = get();
+    if (!connectorDraft.active || !connectorDraft.connectorId || !connectorDraft.movingEnd) {
+      return;
+    }
+
+    set((state) => ({
+      connectorDraft: initialDraft,
+      connectors: state.connectors.filter((c) => {
+        if (c.id !== connectorDraft.connectorId) return true;
+
+        const fromOk = c.from.x !== c.to.x || c.from.y !== c.to.y;
+        return fromOk;
+      }),
+    }));
+  },
+
+  cancelDraftConnector() {
+    const { connectorDraft } = get();
+    if (!connectorDraft.connectorId) {
+      set({ connectorDraft: initialDraft });
+      return;
+    }
+
+    set((state) => ({
+      connectors: state.connectors.filter(
+        (c) => c.id !== connectorDraft.connectorId
+      ),
+      connectorDraft: initialDraft,
+    }));
+  },
+
+  reconnectEndpointStart(connectorId, end) {
+    set({
+      connectorDraft: {
+        active: true,
+        connectorId,
+        movingEnd: end,
+        hoverAnchor: null,
+      },
+    });
+  },
+
+  updateConnectorEndpointFree(connectorId, end, pointer) {
+    set((state) => ({
+      connectors: state.connectors.map((c) =>
+        c.id !== connectorId
+          ? c
+          : {
+              ...c,
+              [end]: freePointRef(pointer.x, pointer.y),
+            }
+      ),
+    }));
+  },
+
+  attachConnectorEndpoint(connectorId, end, anchor) {
+    set((state) => ({
+      connectors: state.connectors.map((c) =>
+        c.id !== connectorId
+          ? c
+          : {
+              ...c,
+              [end]: anchorInfoToRef(anchor),
+            }
+      ),
+    }));
+  },
+
+  detachConnectorEndpoint(connectorId, end) {
+    set((state) => ({
+      connectors: state.connectors.map((c) => {
+        if (c.id !== connectorId) return c;
+        return {
+          ...c,
+          [end]: freePointRef(c[end].x, c[end].y),
+        };
+      }),
+    }));
+  },
+}));
+```
+
+---
+
+# 5. Контролер для canvas
+
+Це шар, який з’єднує Konva mouse events зі store.
+
+## `controllers/canvasController.ts`
+
+```ts
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { AnchorInfo } from "@/types/connectors";
+
+export const canvasController = {
+  handleAnchorMouseDown(anchor: AnchorInfo) {
+    const store = useCanvasStore.getState();
+
+    store.startConnectorFromAnchor(anchor, { x: anchor.x, y: anchor.y });
+  },
+
+  handleAnchorMouseEnter(anchor: AnchorInfo) {
+    const store = useCanvasStore.getState();
+    if (!store.connectorDraft.active) return;
+
+    store.setDraftHoverAnchor(anchor);
+  },
+
+  handleAnchorMouseLeave(anchorId?: string) {
+    const store = useCanvasStore.getState();
+    if (!store.connectorDraft.active) return;
+
+    const current = store.connectorDraft.hoverAnchor;
+    if (!current) return;
+    if (anchorId && current.anchorId !== anchorId) return;
+
+    store.setDraftHoverAnchor(null);
+  },
+
+  handleStageMouseMove(e: any) {
+    const store = useCanvasStore.getState();
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    if (store.connectorDraft.active && store.connectorDraft.connectorId) {
+      if (!store.connectorDraft.hoverAnchor) {
+        store.updateDraftPointer(pointer);
+      }
+      return;
+    }
+  },
+
+  handleStageMouseUp() {
+    const store = useCanvasStore.getState();
+    if (store.connectorDraft.active) {
+      store.finishDraftConnector();
+    }
+  },
+
+  handleEndpointHandleMouseDown(
+    connectorId: string,
+    end: "from" | "to"
+  ) {
+    const store = useCanvasStore.getState();
+    store.reconnectEndpointStart(connectorId, end);
+  },
+
+  handleDetachEndpoint(
+    connectorId: string,
+    end: "from" | "to"
+  ) {
+    const store = useCanvasStore.getState();
+    store.detachConnectorEndpoint(connectorId, end);
+    store.reconnectEndpointStart(connectorId, end);
+  },
+};
+```
+
+---
+
+# 6. Компонент конектора
+
+Рендеримо `Konva.Line` на основі router-а.
+
+## `components/editor/connectors/ConnectorShape.tsx`
+
+```tsx
+"use client";
+
+import React from "react";
+import { Circle, Group, Line } from "react-konva";
+import { Connector } from "@/types/connectors";
+import { buildOrthogonalPoints } from "@/lib/diagram/connectors/router";
+import { canvasController } from "@/controllers/canvasController";
+
+type Props = {
+  connector: Connector;
+  selected?: boolean;
+};
+
+export default function ConnectorShape({
+  connector,
+  selected = true,
+}: Props) {
+  const points =
+    connector.kind === "orthogonal"
+      ? buildOrthogonalPoints(connector.from, connector.to)
+      : [
+          connector.from.x,
+          connector.from.y,
+          connector.to.x,
+          connector.to.y,
+        ];
+
+  return (
+    <Group>
+      <Line
+        points={points}
+        stroke={connector.stroke}
+        strokeWidth={connector.strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {selected && (
+        <>
+          <Circle
+            x={connector.from.x}
+            y={connector.from.y}
+            radius={5}
+            fill="#fff"
+            stroke="#1976d2"
+            strokeWidth={2}
+            onMouseDown={(e) => {
+              e.cancelBubble = true;
+              canvasController.handleEndpointHandleMouseDown(connector.id, "from");
+            }}
+            onDblClick={(e) => {
+              e.cancelBubble = true;
+              canvasController.handleDetachEndpoint(connector.id, "from");
+            }}
+          />
+
+          <Circle
+            x={connector.to.x}
+            y={connector.to.y}
+            radius={5}
+            fill="#fff"
+            stroke="#1976d2"
+            strokeWidth={2}
+            onMouseDown={(e) => {
+              e.cancelBubble = true;
+              canvasController.handleEndpointHandleMouseDown(connector.id, "to");
+            }}
+            onDblClick={(e) => {
+              e.cancelBubble = true;
+              canvasController.handleDetachEndpoint(connector.id, "to");
+            }}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+```
+
+---
+
+# 7. Anchor-и на shape
+
+Кожен shape має вміти віддати координати anchor.
+Нижче універсальний маленький anchor-компонент.
+
+## `components/editor/connectors/ShapeAnchor.tsx`
+
+```tsx
+"use client";
+
+import React from "react";
+import { Circle } from "react-konva";
+import { AnchorInfo } from "@/types/connectors";
+import { canvasController } from "@/controllers/canvasController";
+
+type Props = {
+  anchor: AnchorInfo;
+  visible?: boolean;
+};
+
+export default function ShapeAnchor({
+  anchor,
+  visible = true,
+}: Props) {
+  if (!visible) return null;
+
+  return (
+    <Circle
+      x={anchor.x}
+      y={anchor.y}
+      radius={4}
+      fill="#fff"
+      stroke="#1976d2"
+      strokeWidth={2}
+      onMouseDown={(e) => {
+        e.cancelBubble = true;
+        canvasController.handleAnchorMouseDown(anchor);
+      }}
+      onMouseEnter={() => {
+        canvasController.handleAnchorMouseEnter(anchor);
+      }}
+      onMouseLeave={() => {
+        canvasController.handleAnchorMouseLeave(anchor.anchorId);
+      }}
+    />
+  );
+}
+```
+
+---
+
+# 8. Приклад shape з 4 anchor-ами
+
+Ти потім адаптуєш це під свої об’єкти.
+
+## `components/editor/shapes/RectNode.tsx`
+
+```tsx
+"use client";
+
+import React from "react";
+import { Group, Rect } from "react-konva";
+import ShapeAnchor from "@/components/editor/connectors/ShapeAnchor";
+import { AnchorInfo } from "@/types/connectors";
+
+type Props = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  showAnchors?: boolean;
+};
+
+export default function RectNode({
+  id,
+  x,
+  y,
+  width,
+  height,
+  showAnchors = true,
+}: Props) {
+  const anchors: AnchorInfo[] = [
+    {
+      nodeId: id,
+      anchorId: `${id}_top`,
+      side: "top",
+      x: x + width / 2,
+      y,
+    },
+    {
+      nodeId: id,
+      anchorId: `${id}_right`,
+      side: "right",
+      x: x + width,
+      y: y + height / 2,
+    },
+    {
+      nodeId: id,
+      anchorId: `${id}_bottom`,
+      side: "bottom",
+      x: x + width / 2,
+      y: y + height,
+    },
+    {
+      nodeId: id,
+      anchorId: `${id}_left`,
+      side: "left",
+      x,
+      y: y + height / 2,
+    },
+  ];
+
+  return (
+    <Group>
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="#fafafa"
+        stroke="#222"
+        strokeWidth={2}
+        cornerRadius={6}
+      />
+
+      {showAnchors &&
+        anchors.map((anchor) => (
+          <ShapeAnchor key={anchor.anchorId} anchor={anchor} />
+        ))}
+    </Group>
+  );
+}
+```
+
+---
+
+# 9. EditorCanvas
+
+Тут головне:
+
+* `onMouseMove`
+* `onMouseUp`
+* рендер конекторів
+* рендер shape-ів
+
+## `components/editor/EditorCanvas.tsx`
+
+```tsx
+"use client";
+
+import React from "react";
+import { Layer, Stage } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import ConnectorShape from "@/components/editor/connectors/ConnectorShape";
+import RectNode from "@/components/editor/shapes/RectNode";
+
+export default function EditorCanvas() {
+  const connectors = useCanvasStore((s) => s.connectors);
+
+  return (
+    <Stage
+      width={1200}
+      height={800}
+      onMouseMove={canvasController.handleStageMouseMove}
+      onMouseUp={canvasController.handleStageMouseUp}
+    >
+      <Layer>
+        <RectNode id="node_1" x={120} y={120} width={120} height={70} />
+        <RectNode id="node_2" x={520} y={300} width={150} height={80} />
+
+        {connectors.map((connector) => (
+          <ConnectorShape key={connector.id} connector={connector} />
+        ))}
+      </Layer>
+    </Stage>
+  );
+}
+```
+
+---
+
+# 10. Що це вже дає
+
+Після вставки цього ядра ти вже матимеш:
+
+* натиснув на anchor першого блока
+* потягнув мишу
+* endpoint рухається
+* навівся на anchor другого блока
+* відпустив — зв’язок прикріпився
+* якщо відпустив на пустому місці — вийшов вільний кінець
+* подвійний клік по endpoint handle — від’єднав і знову тягнеш
+
+Тобто це вже **справжній життєвий цикл конектора**, а не просто лінія на canvas.
+
+---
+
+# 11. Що я б зробив одразу після цього
+
+Другий етап, уже без зламу архітектури:
+
+### а) прив’язати конектор до руху об’єкта
+
+Коли shape пересувається, треба оновлювати координати його anchor-ів, а конектор при рендері братиме нові координати.
+
+Є два підходи:
+
+* або endpoint зберігає `nodeId + anchorId`, а `x/y` перераховуються з shape
+* або при drag shape робиш `syncConnectorsForNode(nodeId)`
+
+Я б радив перший підхід.
+
+### б) додати waypoint-и
+
+Після того як базовий attach/detach працює, додаєш:
+
+* масив `waypoints`
+* рендер маленьких handle
+* при drag waypoint ламаєш один сегмент на два
+
+### в) draggable сегменти як у draw.io
+
+Це вже третій етап.
+Не починай із нього раніше, ніж буде стабільний attach/detach + endpoint reconnect.
+
+---
+
+# 12. Важливий момент, щоб не зламати все далі
+
+Не намагайся вже зараз робити:
+
+* автододавання складних зламів
+* редагування кожного сегмента
+* обтікання фігур
+* “розумний” router як у draw.io
+
+Спочатку потрібна стабільна база:
+
+**anchor → draft → attach/detach → orthogonal route**
+
+Без цього всі waypoint-и й segment drag потім будуть розсипатись.
+
+---
+
+# 13. Як спростити інтеграцію в твій поточний проект
+
+Якщо у тебе вже є свій store/controller, тоді перенеси тільки ці сутності:
+
+* `Connector`
+* `ConnectorDraft`
+* `buildOrthogonalPoints`
+* `startConnectorFromAnchor`
+* `updateDraftPointer`
+* `finishDraftConnector`
+* `detachConnectorEndpoint`
+
+І в shape-компоненти додай тільки передачу `AnchorInfo`.
+
+---
+
+# 14. Що я можу зробити наступним кроком
+
+Наступним повідомленням я можу вже дати тобі **версію 2** цього коду:
+
+* з урахуванням `selected connector`
+* з hover-підсвіткою anchor
+* з режимом інструмента `"connector"`
+* з окремим `ConnectorLayer`
+* з підтримкою стрілки на кінці через `Konva.Arrow` або `pointerLength/pointerWidth`
+
+Або можу одразу дати **етап 2: waypoint у центрі сегмента для orthogonal line**.

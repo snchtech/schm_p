@@ -1,0 +1,323 @@
+Так, і я би почав саме не з “повного draw.io”, а з **стабільного ядра конектора**.
+Інакше знову все впирається в редагування зламів, waypoint-и і перетягування сегментів ще до того, як сам зв’язок нормально живе між об’єктами.
+
+Я пропоную такий порядок.
+
+### 1. Перший MVP
+
+Робимо тільки це:
+
+* старт конектора з anchor одного об’єкта
+* preview під час drag
+* прив’язка до anchor іншого об’єкта
+* якщо відпустили не на anchor — кінець лінії лишається вільним
+* якщо потім тягнути endpoint — його можна переприв’язати або залишити вільним
+* маршрут поки **ортогональний**: `L` або `Z`-подібний, без ручного редагування сегментів
+
+Тобто спочатку будуємо **модель зв’язку між об’єктами**, а не редактор складних зламів.
+
+---
+
+## 2. Яка має бути модель конектора
+
+Найкраще тримати не “готовий масив points як єдина істина”, а окремо:
+
+* `from`
+* `to`
+* `waypoints` — поки можна пусто
+* `routing` / `kind`
+* `computedPoints` обчислювати з позицій вузлів
+
+Приклад:
+
+```ts
+type AnchorSide = "top" | "right" | "bottom" | "left";
+
+type ConnectorEndpoint = {
+  attached: boolean;
+  nodeId: string | null;
+  anchorId: string | null;
+  side: AnchorSide | null;
+
+  x: number;
+  y: number;
+};
+
+type ConnectorKind = "orthogonal" | "straight";
+
+type Connector = {
+  id: string;
+  kind: ConnectorKind;
+
+  from: ConnectorEndpoint;
+  to: ConnectorEndpoint;
+
+  waypoints: { x: number; y: number }[];
+
+  stroke?: string;
+  strokeWidth?: number;
+  arrowStart?: boolean;
+  arrowEnd?: boolean;
+};
+```
+
+---
+
+## 3. Який interaction state потрібен
+
+Окремий transient state у store:
+
+```ts
+type ConnectorDraft = {
+  active: boolean;
+  connectorId: string | null;
+
+  mode:
+    | "create-from-anchor"
+    | "drag-endpoint-from"
+    | "drag-endpoint-to";
+
+  movingEnd: "from" | "to" | null;
+
+  hoverAnchor: {
+    nodeId: string;
+    anchorId: string;
+    side: AnchorSide;
+    x: number;
+    y: number;
+  } | null;
+};
+```
+
+Суть:
+
+* натиснув anchor → створили draft connector
+* рухаєш мишу → оновлюємо координати активного кінця
+* навівся на інший anchor → підсвічуємо
+* mouseup:
+
+  * якщо є `hoverAnchor` → attach
+  * інакше endpoint лишається free
+
+---
+
+## 4. Головний принцип draw.io, який треба відтворити
+
+У draw.io конектор живе не як “намальована ламана”, а як:
+
+* два endpoint-и
+* правила маршрутизації між ними
+* окремо логіка редагування
+
+Тобто лінія — це наслідок стану, а не сама істина.
+
+Саме тому я б радив уже зараз будувати так:
+
+### Джерело істини:
+
+* до чого прикріплено початок
+* до чого прикріплено кінець
+* які є waypoint-и
+
+### Обчислюється:
+
+* масив `points` для `Konva.Line`
+
+---
+
+## 5. Найпростіший orthogonal router для старту
+
+Для першого кроку цього досить:
+
+### Випадок A: сторони сумісні
+
+Наприклад:
+
+* right → left
+* left → right
+* top → bottom
+* bottom → top
+
+Тоді можна робити простий маршрут через середину:
+
+```ts
+[x1, y1, midX, y1, midX, y2, x2, y2]
+```
+
+або
+
+```ts
+[x1, y1, x1, midY, x2, midY, x2, y2]
+```
+
+### Випадок B: інші комбінації
+
+Робимо `L`-подібний маршрут:
+
+```ts
+[x1, y1, x2, y1, x2, y2]
+```
+
+або
+
+```ts
+[x1, y1, x1, y2, x2, y2]
+```
+
+Вибір залежить від `from.side` та `to.side`.
+
+---
+
+## 6. Базова функція побудови points
+
+Ось хороший стартовий варіант:
+
+```ts
+export function buildOrthogonalPoints(from, to) {
+  const x1 = from.x;
+  const y1 = from.y;
+  const x2 = to.x;
+  const y2 = to.y;
+
+  const horizontalPair =
+    (from.side === "right" && to.side === "left") ||
+    (from.side === "left" && to.side === "right");
+
+  const verticalPair =
+    (from.side === "top" && to.side === "bottom") ||
+    (from.side === "bottom" && to.side === "top");
+
+  if (horizontalPair) {
+    const midX = (x1 + x2) / 2;
+    return [x1, y1, midX, y1, midX, y2, x2, y2];
+  }
+
+  if (verticalPair) {
+    const midY = (y1 + y2) / 2;
+    return [x1, y1, x1, midY, x2, midY, x2, y2];
+  }
+
+  // fallback L-shape
+  if (from.side === "left" || from.side === "right") {
+    return [x1, y1, x2, y1, x2, y2];
+  }
+
+  return [x1, y1, x1, y2, x2, y2];
+}
+```
+
+Потім уже можна ускладнити:
+
+* відступ від shape
+* уникнення перетину з прямокутником
+* waypoint-и
+* ручне редагування сегментів
+
+---
+
+## 7. Як має виглядати flow створення
+
+### Клік по anchor:
+
+```ts
+startConnectorFromAnchor(anchorInfo)
+```
+
+Що відбувається:
+
+* створюється connector
+* `from` одразу attached
+* `to` = вільна точка в позиції курсора
+* draft active
+
+### MouseMove:
+
+```ts
+updateDraftConnector(pointer, hoverAnchor)
+```
+
+Що відбувається:
+
+* якщо наведено на anchor, то `to` тимчасово прилипає до нього в preview
+* інакше `to.x/y = pointer`
+
+### MouseUp:
+
+```ts
+finishDraftConnector()
+```
+
+* є hoverAnchor → attach
+* нема → free endpoint
+
+---
+
+## 8. Важливий момент для Konva
+
+Anchor-и краще не шукати через DOM-подібну логіку, а передавати як нормальні дані:
+
+```ts
+{
+  nodeId,
+  anchorId,
+  side,
+  x,
+  y
+}
+```
+
+Тоді controller не залежить від конкретного shape-компонента.
+
+Тобто кожен shape має віддавати anchor metadata через callbacks:
+
+* `onAnchorMouseDown`
+* `onAnchorMouseEnter`
+* `onAnchorMouseLeave`
+
+---
+
+## 9. Що не треба робити зараз
+
+Поки не беремо:
+
+* перетягування внутрішніх вертикальних/горизонтальних сегментів
+* автододавання нових зламів
+* waypoint handle у центрі сегмента
+* avoidance routing навколо фігур
+* smart elbows як у draw.io
+
+Це другий етап.
+Спочатку має з’явитися **стабільний attach/detach lifecycle**.
+
+---
+
+## 10. На що я б розбив реалізацію у твоєму проекті
+
+Швидше за все тобі треба 4 частини:
+
+1. `store`
+   зберігати connectors + connectorDraft
+
+2. `canvasController`
+   start / move / finish / reconnect
+
+3. `router utils`
+   `buildOrthogonalPoints(...)`
+
+4. `shape anchors`
+   віддавати controller-у метадані anchor
+
+---
+
+## 11. Що я можу зробити наступним повідомленням
+
+Я можу вже дати **готовий код під твою архітектуру**, але для цього мені треба побачити конкретні файли:
+
+* `EditorCanvas` або компонент, де стоїть `Stage/Layer`
+* `useCanvasStore`
+* `canvasController`
+* компонент shape, де вже є anchor-и
+* компонент/рендерер, де малюються лінії або всі елементи canvas
+
+І тоді я не просто опишу підхід, а дам тобі **точкові вставки в наявні файли** для першого MVP:
+**створення orthogonal connector між двома anchor-ами з можливістю від’єднання кінця.**
