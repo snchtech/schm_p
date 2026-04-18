@@ -1,0 +1,83 @@
+"use client";
+
+import React from "react";
+import {
+  Menu,
+  MenuItem,
+  Divider,
+  ListItemIcon,
+  ListItemText,
+} from "@mui/material";
+
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  return (
+    <Menu
+      open={!!contextMenu}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "connector" && (
+        <>
+          {contextMenu.segmentId && (
+            <>
+              <MenuItem
+                onClick={() => {
+                  canvasController.addConnectorPathHandleFromContextMenu?.();
+                }}
+              >
+                <ListItemIcon>
+                  <AddCircleOutlineIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Додати точку шляху</ListItemText>
+              </MenuItem>
+
+              <Divider />
+            </>
+          )}
+
+          <MenuItem
+            onClick={() => {
+              canvasController.deleteConnectorFromContextMenu?.();
+            }}
+          >
+            <ListItemIcon>
+              <DeleteOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Видалити лінію</ListItemText>
+          </MenuItem>
+        </>
+      )}
+
+      {contextMenu?.type === "connector-path-handle" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.removeConnectorPathHandleFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <RemoveCircleOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Прибрати точку шляху</ListItemText>
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}

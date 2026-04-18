@@ -1,0 +1,50 @@
+function normalize(dx, dy) {
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  return {
+    x: dx / len,
+    y: dy / len,
+  };
+}
+
+export function getArrowHeadPoints(from, to, size = 12, width = 8) {
+  const dir = normalize(to.x - from.x, to.y - from.y);
+
+  const base = {
+    x: to.x - dir.x * size,
+    y: to.y - dir.y * size,
+  };
+
+  const perp = {
+    x: -dir.y,
+    y: dir.x,
+  };
+
+  const left = {
+    x: base.x + perp.x * (width / 2),
+    y: base.y + perp.y * (width / 2),
+  };
+
+  const right = {
+    x: base.x - perp.x * (width / 2),
+    y: base.y - perp.y * (width / 2),
+  };
+
+  return [to.x, to.y, left.x, left.y, right.x, right.y];
+}
+
+export function getConnectorStartSegment(points = []) {
+  if (!points || points.length < 4) return null;
+  return {
+    from: { x: points[2], y: points[3] },
+    to: { x: points[0], y: points[1] },
+  };
+}
+
+export function getConnectorEndSegment(points = []) {
+  if (!points || points.length < 4) return null;
+  const n = points.length;
+  return {
+    from: { x: points[n - 4], y: points[n - 3] },
+    to: { x: points[n - 2], y: points[n - 1] },
+  };
+}

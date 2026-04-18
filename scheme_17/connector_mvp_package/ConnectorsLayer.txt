@@ -1,0 +1,210 @@
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorGeometry";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+import { getConnectorPathType } from "@/lib/connectors/getConnectorPathType";
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const pts = connector.geometry?.points || [];
+        if (!pts || pts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const startPoint = { x: pts[0], y: pts[1] };
+        const endPoint = { x: pts[pts.length - 2], y: pts[pts.length - 1] };
+
+        const pathType = getConnectorPathType(connector);
+
+        const segmentHandles =
+          isSelected && pathType === "orthogonal-elbow"
+            ? getConnectorSegmentHandles(connector)
+            : [];
+
+        const pathHandles = isSelected ? connector.route?.pathHandles || [] : [];
+
+        const startSegment = getConnectorStartSegment(pts);
+        const endSegment = getConnectorEndSegment(pts);
+
+        const startArrowPoints =
+          connector.endcaps?.start === "arrow" && startSegment
+            ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+            : null;
+
+        const endArrowPoints =
+          connector.endcaps?.end === "arrow" && endSegment
+            ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+            : null;
+
+        const stroke = connector.style?.stroke || "black";
+        const strokeWidth = connector.style?.strokeWidth || 2;
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : stroke}
+              strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+                canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+              }}
+              onMouseMove={(e) => {
+                canvasController.handleConnectorBodyDragMove?.(connector.id, e);
+              }}
+              onMouseUp={() => {
+                canvasController.handleConnectorBodyDragEnd?.(connector.id);
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+              onMouseLeave={() => {
+                canvasController.handleConnectorBodyDragEnd?.(connector.id);
+              }}
+            />
+
+            {startArrowPoints && (
+              <Line
+                points={startArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {endArrowPoints && (
+              <Line
+                points={endArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {isSelected && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(connector.id, e);
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(connector.id, e);
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(connector.id, e);
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(connector.id, e);
+                  }}
+                />
+
+                {segmentHandles
+                  .filter((handle) => handle.kind === "segment")
+                  .map((handle) => (
+                    <Rect
+                      key={handle.id}
+                      x={handle.x - 5}
+                      y={handle.y - 5}
+                      width={10}
+                      height={10}
+                      fill="#2D9CDB"
+                      stroke="black"
+                      strokeWidth={1}
+                      draggable
+                      dragBoundFunc={(pos) =>
+                        handle.orientation === "horizontal"
+                          ? { x: handle.x - 5, y: pos.y }
+                          : { x: pos.x, y: handle.y - 5 }
+                      }
+                      onDragStart={() => {
+                        canvasController.handleConnectorSegmentDragStart?.(connector.id);
+                      }}
+                      onDragMove={(e) => {
+                        canvasController.handleConnectorSegmentDragMove?.(connector.id, handle, e);
+                      }}
+                      onDragEnd={(e) => {
+                        canvasController.handleConnectorSegmentDragEnd?.(connector.id, handle, e);
+                      }}
+                    />
+                  ))}
+
+                {pathHandles.map((ph) => (
+                  <Rect
+                    key={ph.id}
+                    x={ph.x - 5}
+                    y={ph.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="#0B3D91"
+                    strokeWidth={2}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      ph.axis === "y"
+                        ? { x: ph.x - 5, y: pos.y }
+                        : { x: pos.x, y: ph.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorPathHandleDragMove?.(connector.id, ph, e);
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorPathHandleDragEnd?.(connector.id, ph, e);
+                    }}
+                    onContextMenu={(e) => {
+                      canvasController.handleConnectorPathHandleContextMenu?.(e, connector, ph);
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}

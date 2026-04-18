@@ -1,0 +1,412 @@
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { createConnector } from "@/lib/connectors/connectorModel";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { getConnectorAttachPreview } from "@/lib/connectors/connectorAttach";
+import {
+  beginConnectorSegmentDrag,
+  endConnectorSegmentDrag,
+  moveElbowSegmentHandle,
+  createPathHandleAtSegment,
+  addConnectorPathHandle,
+  moveConnectorPathHandle,
+  removeConnectorPathHandle,
+  canDragWholeConnector,
+  translateConnector,
+} from "@/lib/connectors/connectorEditing";
+import { getConnectorPathType } from "@/lib/connectors/getConnectorPathType";
+
+function distToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(px - x1, py - y1);
+  }
+
+  const t = Math.max(
+    0,
+    Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy))
+  );
+
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+
+  return Math.hypot(px - projX, py - projY);
+}
+
+function pickClosestConnectorSegment(connector, point, maxDistance = 12) {
+  const segments = connector.geometry?.segmentsMeta || [];
+  if (!segments.length) return null;
+
+  let best = null;
+  let bestDist = Infinity;
+
+  for (const seg of segments) {
+    const d = distToSegment(point.x, point.y, seg.x1, seg.y1, seg.x2, seg.y2);
+    if (d < bestDist) {
+      bestDist = d;
+      best = seg;
+    }
+  }
+
+  if (!best || bestDist > maxDistance) return null;
+  return best;
+}
+
+function segmentLength(seg) {
+  return Math.abs(seg.x2 - seg.x1) + Math.abs(seg.y2 - seg.y1);
+}
+
+function canAddPathPointToSegment(seg) {
+  if (!seg) return false;
+  const len = segmentLength(seg);
+
+  if (seg.kind === "base" || seg.kind === "runtime") {
+    return len >= 24;
+  }
+
+  if (seg.kind === "path-inner") {
+    return len >= 48;
+  }
+
+  return false;
+}
+
+export const canvasController = {
+  activateConnectorTool(template) {
+    const store = useCanvasStore.getState();
+
+    store.setActiveConnectorTool?.({
+      pathType: template?.pathType || "orthogonal-elbow",
+      endcaps: template?.endcaps || { start: "none", end: "none" },
+      behavior: template?.behavior || { type: "default", link: null },
+    });
+
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+  },
+
+  cancelDraftConnector() {
+    const store = useCanvasStore.getState();
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+    store.clearActiveConnectorTool?.();
+  },
+
+  startDraftConnectorFromAnchor(anchor) {
+    const store = useCanvasStore.getState();
+    const tool = store.activeConnectorTool;
+    if (!tool) return;
+
+    let draft = createConnector({
+      pathType: tool.pathType,
+      endcaps: tool.endcaps,
+      behavior: tool.behavior,
+      start: {
+        x: anchor.x,
+        y: anchor.y,
+        attached: {
+          type: "node",
+          nodeId: anchor.nodeId,
+          anchor: anchor.direction,
+        },
+      },
+      end: {
+        x: anchor.x,
+        y: anchor.y,
+        attached: { type: "none" },
+      },
+    });
+
+    draft = rebuildConnectorGeometry(draft, store.nodes);
+    store.setDraftConnector?.(draft);
+  },
+
+  updateDraftConnector(pointer) {
+    const store = useCanvasStore.getState();
+    const draft = store.draftConnector;
+    if (!draft || !pointer) return;
+
+    const preview = getConnectorAttachPreview(store.nodes, pointer);
+
+    let next = {
+      ...draft,
+      end: {
+        ...draft.end,
+        x: pointer.x,
+        y: pointer.y,
+        attached: { type: "none" },
+      },
+    };
+
+    if (preview?.activeAnchor) {
+      next.end = {
+        ...next.end,
+        x: preview.activeAnchor.x,
+        y: preview.activeAnchor.y,
+        attached: {
+          type: "node",
+          nodeId: preview.activeAnchor.nodeId,
+          anchor: preview.activeAnchor.direction,
+        },
+      };
+
+      store.setConnectorAttachPreview?.({
+        nodeId: preview.nodeId,
+        anchors: preview.anchors,
+        activeAnchor: preview.activeAnchor,
+      });
+    } else {
+      store.clearConnectorAttachPreview?.();
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.setDraftConnector?.(next);
+  },
+
+  finishDraftConnector(anchorOrNull, pointerOrNull) {
+    const store = useCanvasStore.getState();
+    const draft = store.draftConnector;
+    if (!draft) return;
+
+    let next = {
+      ...draft,
+      end: { ...draft.end },
+    };
+
+    if (anchorOrNull) {
+      next.end = {
+        ...next.end,
+        x: anchorOrNull.x,
+        y: anchorOrNull.y,
+        attached: {
+          type: "node",
+          nodeId: anchorOrNull.nodeId,
+          anchor: anchorOrNull.direction,
+        },
+      };
+    } else if (pointerOrNull) {
+      next.end = {
+        ...next.end,
+        x: pointerOrNull.x,
+        y: pointerOrNull.y,
+        attached: { type: "none" },
+      };
+    }
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.addEdge?.(next);
+    store.setSelection?.({ type: "edge", id: next.id });
+
+    store.clearDraftConnector?.();
+    store.clearConnectorAttachPreview?.();
+    store.clearActiveConnectorTool?.();
+  },
+
+  handleConnectorBodyDragStart(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    if (!canDragWholeConnector(connector)) {
+      store.clearConnectorDragState?.();
+      return;
+    }
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    store.setSelection?.({ type: "edge", id: edgeId });
+    store.setConnectorDragState?.({
+      edgeId,
+      startPointer: { x: pointer.x, y: pointer.y },
+      lastPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (!canDragWholeConnector(connector)) return;
+
+    const dragState = store.connectorDragState;
+    if (!dragState || dragState.edgeId !== edgeId) return;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const dx = pointer.x - dragState.lastPointer.x;
+    const dy = pointer.y - dragState.lastPointer.y;
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return;
+
+    let next = translateConnector(connector, dx, dy);
+    next = rebuildConnectorGeometry(next, store.nodes);
+
+    store.replaceEdge?.(edgeId, next);
+    store.setConnectorDragState?.({
+      ...dragState,
+      lastPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragEnd() {
+    const store = useCanvasStore.getState();
+    store.clearConnectorDragState?.();
+  },
+
+  handleConnectorSegmentDragStart(edgeId) {
+    const store = useCanvasStore.getState();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    let next = beginConnectorSegmentDrag(connector);
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragMove(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    const normalizedPos = { x: pos.x + 5, y: pos.y + 5 };
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorSegmentDragEnd(edgeId, handle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    const normalizedPos = { x: pos.x + 5, y: pos.y + 5 };
+    let next = moveElbowSegmentHandle(connector, handle, normalizedPos);
+    next = endConnectorSegmentDrag(next);
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  addConnectorPathHandleFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+    if (!menu || menu.type !== "connector") return;
+
+    const connector = store.edges.find((e) => e.id === menu.edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+    if (!menu.segmentId) return;
+
+    const pathHandle = createPathHandleAtSegment(connector, menu.segmentId);
+    if (!pathHandle) {
+      store.clearContextMenu?.();
+      return;
+    }
+
+    let next = addConnectorPathHandle(connector, pathHandle);
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(connector.id, next);
+    store.clearContextMenu?.();
+  },
+
+  handleConnectorPathHandleDragMove(edgeId, pathHandle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    let next = moveConnectorPathHandle(connector, pathHandle.id, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  handleConnectorPathHandleDragEnd(edgeId, pathHandle, e) {
+    const store = useCanvasStore.getState();
+    const pos = e.target.position();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    let next = moveConnectorPathHandle(connector, pathHandle.id, {
+      x: pos.x,
+      y: pos.y,
+    });
+
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(edgeId, next);
+  },
+
+  removeConnectorPathHandleFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+    if (!menu || menu.type !== "connector-path-handle") return;
+
+    const connector = store.edges.find((e) => e.id === menu.edgeId);
+    if (!connector || connector.kind !== "connector") return;
+    if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+    let next = removeConnectorPathHandle(connector, menu.pathHandleId);
+    next = rebuildConnectorGeometry(next, store.nodes);
+    store.replaceEdge?.(connector.id, next);
+    store.clearContextMenu?.();
+  },
+
+  handleConnectorContextMenu(e, connector) {
+    e.evt.preventDefault();
+
+    const store = useCanvasStore.getState();
+    if (!connector || connector.kind !== "connector") return;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const clickedSegment = pickClosestConnectorSegment(connector, pointer, 12);
+    const allowAddPathPoint = canAddPathPointToSegment(clickedSegment);
+
+    store.setContextMenu?.({
+      type: "connector",
+      edgeId: connector.id,
+      segmentId: allowAddPathPoint ? clickedSegment.id : null,
+      x: pointer.x,
+      y: pointer.y,
+    });
+  },
+
+  handleConnectorPathHandleContextMenu(e, connector, pathHandle) {
+    e.evt.preventDefault();
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const store = useCanvasStore.getState();
+    store.setContextMenu?.({
+      type: "connector-path-handle",
+      edgeId: connector.id,
+      pathHandleId: pathHandle.id,
+      x: pointer.x,
+      y: pointer.y,
+    });
+  },
+
+  deleteConnectorFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const menu = store.contextMenu;
+    if (!menu?.edgeId) return;
+    store.removeEdge?.(menu.edgeId);
+    store.clearContextMenu?.();
+  },
+};

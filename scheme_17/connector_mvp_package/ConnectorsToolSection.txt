@@ -1,0 +1,139 @@
+"use client";
+
+import React from "react";
+import { Box, Button, Stack, Typography } from "@mui/material";
+
+import DeviceHubIcon from "@mui/icons-material/DeviceHub";
+import HorizontalRuleIcon from "@mui/icons-material/HorizontalRule";
+import TrendingFlatIcon from "@mui/icons-material/TrendingFlat";
+import ArrowRightAltIcon from "@mui/icons-material/ArrowRightAlt";
+import SyncAltIcon from "@mui/icons-material/SyncAlt";
+import CloseIcon from "@mui/icons-material/Close";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+function isSameTool(activeTool, expected) {
+  if (!activeTool) return false;
+
+  return (
+    activeTool.pathType === expected.pathType &&
+    activeTool.endcaps?.start === expected.endcaps?.start &&
+    activeTool.endcaps?.end === expected.endcaps?.end &&
+    activeTool.behavior?.type === expected.behavior?.type
+  );
+}
+
+export default function ConnectorsToolSection() {
+  const activeConnectorTool = useCanvasStore((s) => s.activeConnectorTool);
+
+  const tools = [
+    {
+      key: "orthogonal-elbow",
+      label: "Ламана",
+      icon: <DeviceHubIcon fontSize="small" />,
+      template: {
+        pathType: "orthogonal-elbow",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "orthogonal-straight",
+      label: "Ортогональна",
+      icon: <HorizontalRuleIcon fontSize="small" />,
+      template: {
+        pathType: "orthogonal-straight",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "free-line",
+      label: "Лінія",
+      icon: <TrendingFlatIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "none", end: "none" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "arrow",
+      label: "Стрілка",
+      icon: <ArrowRightAltIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "none", end: "arrow" },
+        behavior: { type: "default", link: null },
+      },
+    },
+    {
+      key: "double-arrow",
+      label: "Подвійна",
+      icon: <SyncAltIcon fontSize="small" />,
+      template: {
+        pathType: "free-straight",
+        endcaps: { start: "arrow", end: "arrow" },
+        behavior: { type: "default", link: null },
+      },
+    },
+  ];
+
+  return (
+    <Box>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Зв’язки
+      </Typography>
+
+      <Stack direction="column" spacing={1}>
+        {tools.map((tool) => {
+          const active = isSameTool(activeConnectorTool, tool.template);
+
+          return (
+            <Button
+              key={tool.key}
+              variant={active ? "contained" : "outlined"}
+              size="small"
+              startIcon={tool.icon}
+              onClick={() => {
+                const store = useCanvasStore.getState();
+                const current = store.activeConnectorTool;
+
+                const same =
+                  current &&
+                  current.pathType === tool.template.pathType &&
+                  current.endcaps?.start === tool.template.endcaps?.start &&
+                  current.endcaps?.end === tool.template.endcaps?.end &&
+                  current.behavior?.type === tool.template.behavior?.type;
+
+                if (same) {
+                  canvasController.cancelDraftConnector?.();
+                  return;
+                }
+
+                canvasController.activateConnectorTool?.(tool.template);
+              }}
+              sx={{ justifyContent: "flex-start" }}
+            >
+              {tool.label}
+            </Button>
+          );
+        })}
+
+        <Button
+          variant="text"
+          size="small"
+          color="inherit"
+          startIcon={<CloseIcon fontSize="small" />}
+          onClick={() => {
+            canvasController.cancelDraftConnector?.();
+          }}
+          sx={{ justifyContent: "flex-start" }}
+        >
+          Скасувати
+        </Button>
+      </Stack>
+    </Box>
+  );
+}

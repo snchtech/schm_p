@@ -1,0 +1,59 @@
+// Додати в EditorCanvas / Stage wrapper
+
+// 1. Stage hooks
+<Stage
+  ...
+  onMouseMove={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.updateDraftConnector(pointer);
+  }}
+  onMouseUp={(e) => {
+    const store = useCanvasStore.getState();
+    if (!store.draftConnector) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    canvasController.finishDraftConnector(null, pointer);
+  }}
+>
+
+// 2. Додати рендер draft layer
+<ConnectorsLayer />
+<DraftConnectorLayer />
+
+// 3. Anchor click logic
+function handleNodeAnchorClick(anchor) {
+  const store = useCanvasStore.getState();
+
+  if (store.activeConnectorTool && !store.draftConnector) {
+    canvasController.startDraftConnectorFromAnchor(anchor);
+    return;
+  }
+
+  if (store.activeConnectorTool && store.draftConnector) {
+    canvasController.finishDraftConnector(anchor, null);
+    return;
+  }
+
+  // інша логіка anchor click
+}
+
+// 4. Escape cancel
+useEffect(() => {
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") {
+      canvasController.cancelDraftConnector?.();
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown);
+  return () => window.removeEventListener("keydown", onKeyDown);
+}, []);

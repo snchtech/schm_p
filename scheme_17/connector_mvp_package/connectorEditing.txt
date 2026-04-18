@@ -1,0 +1,302 @@
+import {
+  createRoutePoint,
+  cloneRoutePoints,
+  getFullOrthogonalRoutePoints,
+  normalizeOrthogonalVertices,
+  getOrthogonalRouteSegments,
+} from "./connectorGeometry";
+import { getConnectorPathType } from "./getConnectorPathType";
+
+function ensureDragAnchorState(connector) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: {
+        start: { x: start.x, y: start.y },
+        end: { x: end.x, y: end.y },
+      },
+    },
+  };
+}
+
+export function beginConnectorSegmentDrag(connector) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+  return ensureDragAnchorState(connector);
+}
+
+export function endConnectorSegmentDrag(connector) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: null,
+    },
+  };
+}
+
+function getActiveAnchors(connector) {
+  const fixed = connector.route?.fixedAnchors;
+  if (fixed?.start && fixed?.end) {
+    return {
+      start: fixed.start,
+      end: fixed.end,
+    };
+  }
+
+  return {
+    start: connector.geometry?.start,
+    end: connector.geometry?.end,
+  };
+}
+
+export function moveOrthogonalSegment(connector, handle, pos) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const full = getFullOrthogonalRoutePoints(start, end, { vertices });
+
+  const segments = getOrthogonalRouteSegments(start, end, { vertices });
+  const segIndex = segments.findIndex((s) => s.id === handle.segmentId);
+  if (segIndex < 0 || segIndex >= full.length - 1) return connector;
+
+  const a = full[segIndex];
+  const b = full[segIndex + 1];
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+  if (!isHorizontal && !isVertical) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+  const leftVertexIndex = segIndex - 1;
+  const rightVertexIndex = segIndex;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function splitSimpleElbowHorizontal(connector, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const nextVertices = [
+    createRoutePoint(start.x, pos.y),
+    createRoutePoint(end.x, pos.y),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function splitSimpleElbowVertical(connector, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const nextVertices = [
+    createRoutePoint(pos.x, start.y),
+    createRoutePoint(pos.x, end.y),
+  ];
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  const vertices = connector.route?.vertices || [];
+
+  if (vertices.length === 1) {
+    if (handle.orientation === "horizontal") {
+      return splitSimpleElbowHorizontal(connector, pos);
+    }
+    if (handle.orientation === "vertical") {
+      return splitSimpleElbowVertical(connector, pos);
+    }
+  }
+
+  return moveOrthogonalSegment(connector, handle, pos);
+}
+
+export function createPathHandleAtSegment(connector, segmentId) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return null;
+  if (pathType !== "orthogonal-elbow") return null;
+
+  const segments = connector.geometry?.segmentsMeta || [];
+  const seg = segments.find((s) => s.id === segmentId);
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    parentSegmentId: segmentId,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+    x: (seg.x1 + seg.x2) / 2,
+    y: (seg.y1 + seg.y2) / 2,
+    halfSize: 20,
+  };
+}
+
+export function addConnectorPathHandle(connector, pathHandle) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: [...(connector.route?.pathHandles || []), pathHandle],
+    },
+  };
+}
+
+export function moveConnectorPathHandle(connector, pathHandleId, pos) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  const pathHandles = [...(connector.route?.pathHandles || [])];
+  const nextPathHandles = pathHandles.map((ph) => {
+    if (ph.id !== pathHandleId) return ph;
+
+    if (ph.axis === "y") {
+      return { ...ph, y: pos.y };
+    }
+
+    if (ph.axis === "x") {
+      return { ...ph, x: pos.x };
+    }
+
+    return ph;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: nextPathHandles,
+    },
+  };
+}
+
+export function removeConnectorPathHandle(connector, pathHandleId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: (connector.route?.pathHandles || []).filter(
+        (ph) => ph.id !== pathHandleId
+      ),
+    },
+  };
+}
+
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") return false;
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+    route: {
+      ...connector.route,
+      vertices: (connector.route?.vertices || []).map((v) => ({
+        ...v,
+        x: v.x + dx,
+        y: v.y + dy,
+      })),
+      pathHandles: (connector.route?.pathHandles || []).map((ph) => ({
+        ...ph,
+        x: ph.x + dx,
+        y: ph.y + dy,
+      })),
+      fixedAnchors: connector.route?.fixedAnchors
+        ? {
+            start: {
+              x: connector.route.fixedAnchors.start.x + dx,
+              y: connector.route.fixedAnchors.start.y + dy,
+            },
+            end: {
+              x: connector.route.fixedAnchors.end.x + dx,
+              y: connector.route.fixedAnchors.end.y + dy,
+            },
+          }
+        : null,
+    },
+  };
+}

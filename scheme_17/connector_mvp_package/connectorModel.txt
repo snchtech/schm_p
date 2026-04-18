@@ -1,0 +1,64 @@
+import { createInitialOrthogonalElbowRoute } from "./connectorGeometry";
+
+export function createConnector({
+  id = crypto.randomUUID(),
+  pathType = "orthogonal-elbow",
+  start,
+  end,
+  endcaps,
+  behavior,
+  style,
+}) {
+  let route = {
+    vertices: [],
+    pathHandles: [],
+    fixedAnchors: null,
+  };
+
+  if (pathType === "orthogonal-elbow") {
+    route = createInitialOrthogonalElbowRoute(start, end);
+  }
+
+  return {
+    id,
+    kind: "connector",
+    pathType,
+    connectorType: pathType,
+
+    start: {
+      x: start?.x ?? 0,
+      y: start?.y ?? 0,
+      attached: start?.attached ?? { type: "none" },
+    },
+
+    end: {
+      x: end?.x ?? 120,
+      y: end?.y ?? 0,
+      attached: end?.attached ?? { type: "none" },
+    },
+
+    route,
+
+    endcaps: {
+      start: endcaps?.start ?? "none",
+      end: endcaps?.end ?? "none",
+    },
+
+    behavior: {
+      type: behavior?.type ?? "default",
+      link: behavior?.link ?? null,
+    },
+
+    geometry: {
+      start: { x: start?.x ?? 0, y: start?.y ?? 0 },
+      end: { x: end?.x ?? 120, y: end?.y ?? 0 },
+      points: [],
+      segmentsMeta: [],
+    },
+
+    style: {
+      stroke: style?.stroke ?? "black",
+      strokeWidth: style?.strokeWidth ?? 2,
+    },
+  };
+}

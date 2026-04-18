@@ -1,0 +1,68 @@
+"use client";
+
+import React from "react";
+import { Group, Line } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+export default function DraftConnectorLayer() {
+  const draftConnector = useCanvasStore((s) => s.draftConnector);
+
+  if (!draftConnector) return null;
+
+  const pts = draftConnector.geometry?.points || [];
+  if (pts.length < 4) return null;
+
+  const stroke = draftConnector.style?.stroke || "black";
+  const strokeWidth = draftConnector.style?.strokeWidth || 2;
+
+  const startSegment = getConnectorStartSegment(pts);
+  const endSegment = getConnectorEndSegment(pts);
+
+  const startArrowPoints =
+    draftConnector.endcaps?.start === "arrow" && startSegment
+      ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+      : null;
+
+  const endArrowPoints =
+    draftConnector.endcaps?.end === "arrow" && endSegment
+      ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+      : null;
+
+  return (
+    <Group listening={false}>
+      <Line
+        points={pts}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineJoin="round"
+        lineCap="round"
+        dash={[6, 4]}
+      />
+
+      {startArrowPoints && (
+        <Line
+          points={startArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+
+      {endArrowPoints && (
+        <Line
+          points={endArrowPoints}
+          closed
+          fill={stroke}
+          stroke={stroke}
+          strokeWidth={1}
+        />
+      )}
+    </Group>
+  );
+}

@@ -1,0 +1,57 @@
+import { create } from "zustand";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+
+  selection: null,
+  contextMenu: null,
+
+  hoveredConnectorSegment: null,
+  connectorDragState: null,
+
+  activeConnectorTool: null,
+  draftConnector: null,
+  connectorAttachPreview: null,
+
+  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
+  addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((s) => ({
+      edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+      selection:
+        s.selection?.type === "edge" && s.selection?.id === id
+          ? null
+          : s.selection,
+      contextMenu: s.contextMenu?.edgeId === id ? null : s.contextMenu,
+    })),
+
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+
+  setHoveredConnectorSegment: (hoveredConnectorSegment) =>
+    set({ hoveredConnectorSegment }),
+  clearHoveredConnectorSegment: () => set({ hoveredConnectorSegment: null }),
+
+  setConnectorDragState: (connectorDragState) => set({ connectorDragState }),
+  clearConnectorDragState: () => set({ connectorDragState: null }),
+
+  setActiveConnectorTool: (activeConnectorTool) => set({ activeConnectorTool }),
+  clearActiveConnectorTool: () => set({ activeConnectorTool: null }),
+
+  setDraftConnector: (draftConnector) => set({ draftConnector }),
+  clearDraftConnector: () => set({ draftConnector: null }),
+
+  setConnectorAttachPreview: (connectorAttachPreview) =>
+    set({ connectorAttachPreview }),
+  clearConnectorAttachPreview: () => set({ connectorAttachPreview: null }),
+}));
