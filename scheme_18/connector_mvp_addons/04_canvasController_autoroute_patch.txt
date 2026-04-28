@@ -1,0 +1,104 @@
+// FILE: canvasController_autoroute_patch.txt
+// PURPOSE:
+// Додає команди для smart reroute / obstacle avoidance / автообходу фігур.
+//
+// КУДИ ДОДАВАТИ:
+// У canvasController.js -> в об'єкт canvasController.
+
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { getConnectorPathType } from "@/lib/connectors/getConnectorPathType";
+
+enableConnectorSmartRouting(edgeId) {
+  const store = useCanvasStore.getState();
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+
+  if (!connector || connector.kind !== "connector") return;
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+  let next = {
+    ...connector,
+    route: {
+      ...connector.route,
+      autoRouting: {
+        ...(connector.route?.autoRouting || {}),
+        enabled: true,
+        mode: "smart",
+      },
+    },
+  };
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+},
+
+disableConnectorSmartRouting(edgeId) {
+  const store = useCanvasStore.getState();
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+
+  if (!connector || connector.kind !== "connector") return;
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+  let next = {
+    ...connector,
+    route: {
+      ...connector.route,
+      autoRouting: {
+        ...(connector.route?.autoRouting || {}),
+        enabled: false,
+        mode: "smart",
+      },
+    },
+  };
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+},
+
+rerouteConnectorNow(edgeId) {
+  const store = useCanvasStore.getState();
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+
+  if (!connector || connector.kind !== "connector") return;
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+  // manual pathHandles мають пріоритет — якщо вони є, reroute не робимо
+  if ((connector.route?.pathHandles || []).length > 0) return;
+
+  let next = {
+    ...connector,
+    route: {
+      ...connector.route,
+      autoRouting: {
+        ...(connector.route?.autoRouting || {}),
+        enabled: true,
+        mode: "smart",
+      },
+    },
+  };
+
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+},
+
+// Викликати після переміщення node, якщо хочеш авто-перебудову
+rerouteAffectedConnectorsForNode(nodeId) {
+  const store = useCanvasStore.getState();
+
+  const affected = store.edges.filter((edge) => {
+    if (edge.kind !== "connector") return false;
+    if (getConnectorPathType(edge) !== "orthogonal-elbow") return false;
+    if (edge.route?.autoRouting?.enabled !== true) return false;
+    if ((edge.route?.pathHandles || []).length > 0) return false;
+
+    return (
+      edge.start?.attached?.nodeId === nodeId ||
+      edge.end?.attached?.nodeId === nodeId
+    );
+  });
+
+  for (const connector of affected) {
+    const next = rebuildConnectorGeometry(connector, store.nodes);
+    store.replaceEdge?.(connector.id, next);
+  }
+},

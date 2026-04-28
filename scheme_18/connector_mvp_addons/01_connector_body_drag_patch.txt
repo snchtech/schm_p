@@ -1,0 +1,212 @@
+// FILE: connectorBodyDrag_patch.txt
+// PURPOSE:
+// Додатковий комплект для перетягування ВСЬОГО конектора по canvas.
+// Цей patch сумісний з пакетом MVP 2.0:
+// - route.vertices
+// - route.pathHandles
+// - geometry.segmentsMeta
+//
+// КУДИ ДОДАВАТИ:
+// 1. Блок `connectorEditing.js` -> в кінець файла або поруч із canDragWholeConnector/translateConnector.
+// 2. Блок `canvasController.js` -> в об'єкт canvasController.
+// 3. Блок `ConnectorsLayer.jsx` -> у головний <Line /> конектора.
+//
+// ПРИМІТКА:
+// У твоєму поточному пакеті частина цього вже є.
+// Цей файл дає завершений і окремий комплект, щоб не шукати по різних txt.
+
+
+// ============================================================
+// 1) connectorEditing.js
+// ============================================================
+
+import { getConnectorPathType } from "./getConnectorPathType";
+
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") return false;
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+    route: {
+      ...connector.route,
+      vertices: (connector.route?.vertices || []).map((v) => ({
+        ...v,
+        x: v.x + dx,
+        y: v.y + dy,
+      })),
+      pathHandles: (connector.route?.pathHandles || []).map((ph) => ({
+        ...ph,
+        x: ph.x + dx,
+        y: ph.y + dy,
+      })),
+      fixedAnchors: connector.route?.fixedAnchors
+        ? {
+            start: {
+              x: connector.route.fixedAnchors.start.x + dx,
+              y: connector.route.fixedAnchors.start.y + dy,
+            },
+            end: {
+              x: connector.route.fixedAnchors.end.x + dx,
+              y: connector.route.fixedAnchors.end.y + dy,
+            },
+          }
+        : null,
+    },
+  };
+}
+
+
+// ============================================================
+// 2) canvasController.js
+// ============================================================
+
+import {
+  canDragWholeConnector,
+  translateConnector,
+} from "@/lib/connectors/connectorEditing";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+handleConnectorBodyDragStart(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  if (!canDragWholeConnector(connector)) {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  store.setSelection?.({ type: "edge", id: edgeId });
+  store.setConnectorDragState?.({
+    edgeId,
+    startPointer: { x: pointer.x, y: pointer.y },
+    lastPointer: { x: pointer.x, y: pointer.y },
+  });
+},
+
+handleConnectorBodyDragMove(edgeId, e) {
+  const store = useCanvasStore.getState();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (!canDragWholeConnector(connector)) return;
+
+  const dragState = store.connectorDragState;
+  if (!dragState || dragState.edgeId !== edgeId) return;
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const dx = pointer.x - dragState.lastPointer.x;
+  const dy = pointer.y - dragState.lastPointer.y;
+
+  if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return;
+
+  let next = translateConnector(connector, dx, dy);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.setConnectorDragState?.({
+    ...dragState,
+    lastPointer: { x: pointer.x, y: pointer.y },
+  });
+},
+
+handleConnectorBodyDragEnd(edgeId) {
+  const store = useCanvasStore.getState();
+
+  const dragState = store.connectorDragState;
+  if (!dragState || dragState.edgeId !== edgeId) {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  store.clearConnectorDragState?.();
+},
+
+
+// ============================================================
+// 3) ConnectorsLayer.jsx
+// ============================================================
+
+// Додай у файл імпортів (якщо ще нема):
+import { canDragWholeConnector } from "@/lib/connectors/connectorEditing";
+
+// Усередині map(connector):
+const canDragWhole = canDragWholeConnector(connector);
+
+// Оновлений головний <Line /> для тіла конектора:
+<Line
+  points={pts}
+  stroke={isSelected ? "#2F80ED" : stroke}
+  strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+  lineJoin="round"
+  lineCap="round"
+  onMouseDown={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+    canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+  }}
+  onMouseMove={(e) => {
+    canvasController.handleConnectorBodyDragMove?.(connector.id, e);
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = canDragWhole ? "move" : "pointer";
+    }
+  }}
+  onMouseUp={() => {
+    canvasController.handleConnectorBodyDragEnd?.(connector.id);
+  }}
+  onClick={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+  }}
+  onContextMenu={(e) => {
+    canvasController.handleConnectorContextMenu?.(e, connector);
+  }}
+  onMouseLeave={(e) => {
+    canvasController.handleConnectorBodyDragEnd?.(connector.id);
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = "default";
+    }
+  }}
+/>
+
+
+// ============================================================
+// 4) useCanvasStore.js
+// ============================================================
+
+// Переконайся, що в store вже є:
+connectorDragState: null,
+setConnectorDragState: (connectorDragState) => set({ connectorDragState }),
+clearConnectorDragState: () => set({ connectorDragState: null }),

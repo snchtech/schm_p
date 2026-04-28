@@ -1,0 +1,265 @@
+// FILE: connectorAutoRouting.txt
+// PURPOSE:
+// MVP add-on для:
+// - smart reroute
+// - obstacle avoidance
+// - автообхід фігур
+//
+// КУДИ ДОДАВАТИ:
+// Створи новий файл:
+//   src/lib/connectors/connectorAutoRouting.js
+// або
+//   @/lib/connectors/connectorAutoRouting.js
+//
+// ПРИМІТКА:
+// Це add-on ПОВЕРХ базового пакета MVP 2.0.
+// Він орієнтований насамперед на orthogonal-elbow.
+// Якщо pathHandles уже існують, розумний reroute краще НЕ вмикати автоматично.
+// Тобто: manual pathHandles мають пріоритет над auto-route.
+
+function inflateRect(rect, padding) {
+  return {
+    x: rect.x - padding,
+    y: rect.y - padding,
+    width: rect.width + padding * 2,
+    height: rect.height + padding * 2,
+  };
+}
+
+function pointInRect(pt, rect) {
+  return (
+    pt.x >= rect.x &&
+    pt.x <= rect.x + rect.width &&
+    pt.y >= rect.y &&
+    pt.y <= rect.y + rect.height
+  );
+}
+
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+function segmentIntersectsRect(a, b, rect) {
+  // orthogonal only
+  if (same(a.x, b.x)) {
+    const x = a.x;
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+
+    return (
+      x >= rect.x &&
+      x <= rect.x + rect.width &&
+      maxY >= rect.y &&
+      minY <= rect.y + rect.height
+    );
+  }
+
+  if (same(a.y, b.y)) {
+    const y = a.y;
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+
+    return (
+      y >= rect.y &&
+      y <= rect.y + rect.height &&
+      maxX >= rect.x &&
+      minX <= rect.x + rect.width
+    );
+  }
+
+  return false;
+}
+
+function orthogonalPathHitsObstacles(points, obstacles) {
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+
+    for (const rect of obstacles) {
+      if (segmentIntersectsRect(a, b, rect)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function getNodeBounds(node) {
+  // ПІДЛАШТУЙ під свій формат node, якщо треба.
+  const x = node?.position?.x ?? node?.x ?? 0;
+  const y = node?.position?.y ?? node?.y ?? 0;
+  const width = node?.size?.width ?? node?.width ?? 120;
+  const height = node?.size?.height ?? node?.height ?? 60;
+
+  return { x, y, width, height };
+}
+
+export function getConnectorObstacleRects(nodes, connector, padding = 20) {
+  const startNodeId = connector?.start?.attached?.nodeId || null;
+  const endNodeId = connector?.end?.attached?.nodeId || null;
+
+  return (nodes || [])
+    .filter((node) => node.id !== startNodeId && node.id !== endNodeId)
+    .map((node) => inflateRect(getNodeBounds(node), padding));
+}
+
+function snapToGrid(value, grid) {
+  return Math.round(value / grid) * grid;
+}
+
+function pointKey(x, y) {
+  return `${x}:${y}`;
+}
+
+function reconstructPath(cameFrom, endKey, nodesMap) {
+  const path = [];
+  let currentKey = endKey;
+
+  while (currentKey) {
+    path.push(nodesMap.get(currentKey));
+    currentKey = cameFrom.get(currentKey) || null;
+  }
+
+  path.reverse();
+  return path;
+}
+
+function heuristic(a, b) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+function simplifyOrthogonalPoints(points) {
+  if (points.length <= 2) return points;
+
+  const out = [points[0]];
+  for (let i = 1; i < points.length - 1; i++) {
+    const a = out[out.length - 1];
+    const b = points[i];
+    const c = points[i + 1];
+
+    const sameVertical = same(a.x, b.x) && same(b.x, c.x);
+    const sameHorizontal = same(a.y, b.y) && same(b.y, c.y);
+
+    if (sameVertical || sameHorizontal) continue;
+    out.push(b);
+  }
+
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+export function routeOrthogonalAStar({
+  start,
+  end,
+  nodes,
+  connector,
+  gridSize = 24,
+  obstaclePadding = 20,
+  searchPadding = 120,
+}) {
+  const obstacles = getConnectorObstacleRects(nodes, connector, obstaclePadding);
+
+  const startNode = {
+    x: snapToGrid(start.x, gridSize),
+    y: snapToGrid(start.y, gridSize),
+  };
+  const endNode = {
+    x: snapToGrid(end.x, gridSize),
+    y: snapToGrid(end.y, gridSize),
+  };
+
+  const minX = Math.min(startNode.x, endNode.x) - searchPadding;
+  const maxX = Math.max(startNode.x, endNode.x) + searchPadding;
+  const minY = Math.min(startNode.y, endNode.y) - searchPadding;
+  const maxY = Math.max(startNode.y, endNode.y) + searchPadding;
+
+  const open = [startNode];
+  const openSet = new Set([pointKey(startNode.x, startNode.y)]);
+  const cameFrom = new Map();
+  const gScore = new Map([[pointKey(startNode.x, startNode.y), 0]]);
+  const fScore = new Map([[pointKey(startNode.x, startNode.y), heuristic(startNode, endNode)]]);
+  const nodesMap = new Map([[pointKey(startNode.x, startNode.y), startNode]]);
+
+  function isBlockedPoint(pt) {
+    return obstacles.some((rect) => pointInRect(pt, rect));
+  }
+
+  function isBlockedMove(a, b) {
+    return obstacles.some((rect) => segmentIntersectsRect(a, b, rect));
+  }
+
+  const dirs = [
+    { x: gridSize, y: 0 },
+    { x: -gridSize, y: 0 },
+    { x: 0, y: gridSize },
+    { x: 0, y: -gridSize },
+  ];
+
+  while (open.length > 0) {
+    open.sort((p1, p2) => (fScore.get(pointKey(p1.x, p1.y)) || Infinity) - (fScore.get(pointKey(p2.x, p2.y)) || Infinity));
+    const current = open.shift();
+    const currentKey = pointKey(current.x, current.y);
+    openSet.delete(currentKey);
+
+    if (current.x === endNode.x && current.y === endNode.y) {
+      const path = reconstructPath(cameFrom, currentKey, nodesMap);
+      return simplifyOrthogonalPoints(path);
+    }
+
+    for (const d of dirs) {
+      const neighbor = { x: current.x + d.x, y: current.y + d.y };
+      if (neighbor.x < minX || neighbor.x > maxX || neighbor.y < minY || neighbor.y > maxY) continue;
+      if (isBlockedPoint(neighbor)) continue;
+      if (isBlockedMove(current, neighbor)) continue;
+
+      const nKey = pointKey(neighbor.x, neighbor.y);
+      const tentative = (gScore.get(currentKey) || Infinity) + gridSize;
+
+      if (tentative < (gScore.get(nKey) || Infinity)) {
+        cameFrom.set(nKey, currentKey);
+        gScore.set(nKey, tentative);
+        fScore.set(nKey, tentative + heuristic(neighbor, endNode));
+        nodesMap.set(nKey, neighbor);
+
+        if (!openSet.has(nKey)) {
+          open.push(neighbor);
+          openSet.add(nKey);
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function routeOrthogonalWithFallback({ start, end, nodes, connector }) {
+  // 1) simple L route candidates
+  const c1 = [
+    { x: start.x, y: start.y },
+    { x: end.x, y: start.y },
+    { x: end.x, y: end.y },
+  ];
+
+  const c2 = [
+    { x: start.x, y: start.y },
+    { x: start.x, y: end.y },
+    { x: end.x, y: end.y },
+  ];
+
+  const obstacles = getConnectorObstacleRects(nodes, connector, 20);
+
+  if (!orthogonalPathHitsObstacles(c1, obstacles)) return simplifyOrthogonalPoints(c1);
+  if (!orthogonalPathHitsObstacles(c2, obstacles)) return simplifyOrthogonalPoints(c2);
+
+  // 2) A*
+  const aStar = routeOrthogonalAStar({ start, end, nodes, connector });
+  if (aStar && aStar.length >= 2) {
+    aStar[0] = { x: start.x, y: start.y };
+    aStar[aStar.length - 1] = { x: end.x, y: end.y };
+    return simplifyOrthogonalPoints(aStar);
+  }
+
+  // 3) fallback to simple L
+  return c1;
+}

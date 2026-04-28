@@ -1,0 +1,145 @@
+// FILE: connectorGeometry_autoroute_patch.txt
+// PURPOSE:
+// Patch для smart reroute / obstacle avoidance / автообходу фігур.
+//
+// КУДИ ДОДАВАТИ:
+// 1. У connectorModel.js -> додай autoRouting в route.
+// 2. У connectorGeometry.js -> імпортуй routeOrthogonalWithFallback.
+// 3. У rebuildConnectorGeometry() -> додай гілку smart route.
+//
+// ОБМЕЖЕННЯ MVP:
+// - smart reroute краще вмикати для orthogonal-elbow БЕЗ pathHandles.
+// - якщо route.pathHandles уже є, manual path handles мають пріоритет.
+
+
+// ============================================================
+// 1) connectorModel.js
+// ============================================================
+
+// У createConnector() route має містити ще це:
+route: {
+  vertices: [],
+  pathHandles: [],
+  fixedAnchors: null,
+  autoRouting: {
+    enabled: false,
+    mode: "smart",
+  },
+},
+
+// І для createInitialOrthogonalElbowRoute(start, end):
+return {
+  vertices: [createRoutePoint(end.x, start.y)],
+  pathHandles: [],
+  fixedAnchors: null,
+  autoRouting: {
+    enabled: false,
+    mode: "smart",
+  },
+};
+
+
+// ============================================================
+// 2) connectorGeometry.js imports
+// ============================================================
+
+import { routeOrthogonalWithFallback } from "@/lib/connectors/connectorAutoRouting";
+import { getConnectorPathType } from "./getConnectorPathType";
+
+
+// ============================================================
+// 3) helper: convert routed points -> vertices
+// ============================================================
+
+export function orthogonalPointsToVertices(start, end, routedPoints = []) {
+  if (!routedPoints || routedPoints.length < 2) return [];
+
+  return routedPoints
+    .slice(1, -1)
+    .map((p) => ({
+      id: `rt_${Math.random().toString(36).slice(2, 10)}`,
+      x: p.x,
+      y: p.y,
+    }));
+}
+
+
+// ============================================================
+// 4) helper: build smart orthogonal route
+// ============================================================
+
+export function buildSmartOrthogonalElbowGeometry(start, end, route = {}, nodes = [], connector = null) {
+  const routedPoints = routeOrthogonalWithFallback({
+    start,
+    end,
+    nodes,
+    connector,
+  });
+
+  const nextRoute = {
+    ...route,
+    vertices: orthogonalPointsToVertices(start, end, routedPoints),
+  };
+
+  return buildBaseRouteWithMeta(start, end, nextRoute);
+}
+
+
+// ============================================================
+// 5) PATCH rebuildConnectorGeometry()
+// ============================================================
+
+// Усередині rebuildConnectorGeometry(connector, nodes), у гілці orthogonal-elbow:
+
+const pathType = getConnectorPathType(connector);
+
+if (pathType === "orthogonal-elbow") {
+  const autoEnabled = connector.route?.autoRouting?.enabled === true;
+  const hasManualPathHandles = (connector.route?.pathHandles || []).length > 0;
+
+  // якщо smart reroute увімкнений і немає ручних pathHandles,
+  // то будуємо маршрут через obstacle avoidance
+  if (autoEnabled && !hasManualPathHandles) {
+    const built = buildSmartOrthogonalElbowGeometry(
+      start,
+      end,
+      connector.route,
+      nodes,
+      connector
+    );
+
+    return {
+      ...connector,
+      route: {
+        ...connector.route,
+        vertices: orthogonalPointsToVertices(start, end, routeOrthogonalWithFallback({
+          start,
+          end,
+          nodes,
+          connector,
+        })),
+      },
+      geometry: {
+        ...connector.geometry,
+        start,
+        end,
+        points: built.points,
+        segmentsMeta: built.segmentsMeta,
+      },
+    };
+  }
+
+  // інакше стара manual-логіка
+  const built = buildOrthogonalElbowGeometry(start, end, connector.route);
+
+  return {
+    ...connector,
+    geometry: {
+      ...connector.geometry,
+      start,
+      end,
+      points: built.points,
+      segmentsMeta: built.segmentsMeta,
+    },
+  };
+}
