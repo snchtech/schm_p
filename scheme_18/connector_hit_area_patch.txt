@@ -1,0 +1,205 @@
+PATCH: Розширена зона кліку/drag для конектора без потовщення видимої лінії
+Куди додавати: ConnectorsLayer.jsx
+
+ІДЕЯ
+Замість того, щоб ловити клік і drag тільки на тонкій видимій Line,
+треба рендерити ДРУГУ невидиму Line поверх або під нею:
+- видима Line лишається тонкою і красивою
+- hit Line має великий strokeWidth (наприклад 14-20)
+- hit Line має opacity 0.001 або прозорий stroke
+- саме hit Line обробляє:
+  - onMouseDown
+  - onClick
+  - onContextMenu
+  - start drag body
+  - hover preview сегмента
+
+Це найкращий практичний підхід для Konva/SVG-подібних редакторів.
+Не треба збільшувати видиму товщину самої лінії.
+
+--------------------------------------------------
+1. УСЕРЕДИНІ map(connector) В ConnectorsLayer.jsx
+--------------------------------------------------
+
+Після того як уже пораховані:
+- pts
+- isSelected
+- stroke
+- strokeWidth
+- startArrowPoints
+- endArrowPoints
+
+додай helper-константу:
+
+```jsx
+const hitStrokeWidth = Math.max(14, (strokeWidth || 2) + 12);
+```
+
+--------------------------------------------------
+2. ДОДАЙ НЕВИДИМУ HIT-LINE
+--------------------------------------------------
+
+ВАЖЛИВО:
+- ЇЇ краще рендерити ПЕРЕД видимою лінією або одразу після неї
+- саме вона бере interaction
+- видима лінія може лишитися listening={false}, якщо хочеш повністю централізувати взаємодію
+
+Рекомендований варіант:
+
+```jsx
+<Line
+  points={pts}
+  stroke="rgba(0,0,0,0.001)"
+  strokeWidth={hitStrokeWidth}
+  lineJoin="round"
+  lineCap="round"
+  hitStrokeWidth={hitStrokeWidth}
+  onMouseDown={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+    canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+  }}
+  onClick={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "edge", id: connector.id });
+  }}
+  onContextMenu={(e) => {
+    canvasController.handleConnectorContextMenu?.(e, connector);
+  }}
+  onMouseMove={(e) => {
+    if (connector.pathType === "orthogonal-elbow") {
+      const stage = e.target.getStage();
+      const pointer = stage?.getPointerPosition();
+
+      if (pointer) {
+        const closest = findClosestConnectorSegment?.(connector, {
+          x: pointer.x,
+          y: pointer.y,
+        });
+
+        if (closest) {
+          setHoveredConnectorSegment?.({
+            edgeId: connector.id,
+            segmentId: closest.segmentId || closest.id || null,
+            orientation: closest.orientation,
+            x: closest.cx ?? closest.x,
+            y: closest.cy ?? closest.y,
+          });
+        } else {
+          clearHoveredConnectorSegment?.();
+        }
+      }
+    }
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = canDragWhole ? "move" : "pointer";
+    }
+  }}
+  onMouseLeave={(e) => {
+    clearHoveredConnectorSegment?.();
+
+    const stage = e.target.getStage();
+    if (stage?.container()?.style) {
+      stage.container().style.cursor = "default";
+    }
+  }}
+/>
+```
+
+--------------------------------------------------
+3. ВИДИМА ЛІНІЯ
+--------------------------------------------------
+
+Після цього рендериш звичайну видиму лінію.
+Я раджу зробити її без interaction, щоб усі кліки й drag були тільки на hit-line:
+
+```jsx
+<Line
+  points={pts}
+  stroke={isSelected ? "#2F80ED" : stroke}
+  strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+  lineJoin="round"
+  lineCap="round"
+  listening={false}
+/>
+```
+
+Це дуже стабільно:
+- видима лінія тільки малюється
+- interaction живе на invisible hit-line
+
+--------------------------------------------------
+4. ЯКЩО ХОЧЕШ ЩЕ КРАЩИЙ UX
+--------------------------------------------------
+
+Можна додати логіку різної товщини hit-area:
+
+```jsx
+const hitStrokeWidth = isSelected
+  ? Math.max(18, (strokeWidth || 2) + 14)
+  : Math.max(14, (strokeWidth || 2) + 10);
+```
+
+Тобто коли конектор виділений, його ще легше схопити мишкою.
+
+--------------------------------------------------
+5. ЯКЩО BODY DRAG ЗАРАЗ ПЕРЕНЕСЕНИЙ НА STAGE
+--------------------------------------------------
+
+Тоді на hit-line лишається тільки старт:
+
+```jsx
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  setSelection({ type: "edge", id: connector.id });
+  canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+}}
+```
+
+А move/end уже лишаються на Stage.
+Це навіть краще.
+
+--------------------------------------------------
+6. РЕКОМЕНДАЦІЯ ПО ПОРЯДКУ РОБОТИ
+--------------------------------------------------
+
+Найкращий підхід такий:
+
+- hit-line:
+  - select
+  - context menu
+  - start drag
+  - hover preview
+- visible line:
+  - тільки рендер
+- Stage:
+  - body drag move
+  - body drag end
+
+--------------------------------------------------
+7. ЧОМУ ЦЕ КРАЩЕ, НІЖ ПРОСТО ЗБІЛЬШИТИ strokeWidth
+--------------------------------------------------
+
+Бо якщо збільшити strokeWidth у самої видимої лінії:
+- вона стане візуально занадто товстою
+- може зіпсувати схему
+- стрілки й стики виглядатимуть грубіше
+
+А invisible hit-line дає:
+- легкий клік
+- легкий drag
+- нормальний UX
+- без зміни зовнішнього вигляду
+
+--------------------------------------------------
+8. МІНІМАЛЬНА ПРАКТИЧНА ПОРАДА
+--------------------------------------------------
+
+Якщо хочеш мінімум змін:
+- додай другу invisible Line
+- зроби їй strokeWidth 16
+- перенеси на неї всі interaction handlers
+- видимій лінії постав listening={false}
+
+Цього вже достатньо, щоб конектор стало легко виділяти й тягнути.

@@ -1,0 +1,87 @@
+`connectorDragState` активується в **`handleConnectorBodyDragStart`**, тобто в момент `onMouseDown` по самому конектору.
+
+Схема така:
+
+1. ти натискаєш на `Line`
+2. викликається `handleConnectorBodyDragStart(connector.id, e)`
+3. всередині цієї функції в store записується:
+
+```js
+store.setConnectorDragState?.({
+  edgeId,
+  startPointer: { x: pointer.x, y: pointer.y },
+  lastPointer: { x: pointer.x, y: pointer.y },
+});
+```
+
+4. після цього `Stage.onMouseMove` вже бачить, що `connectorDragState` існує
+5. і починає викликати `handleConnectorBodyDragMove(...)`
+
+Тобто коротко:
+
+* **активація** — у `Line.onMouseDown`
+* **рух** — у `Stage.onMouseMove`
+* **завершення** — у `Stage.onMouseUp`
+
+### Де саме це має бути
+
+#### На конекторі (`Line`)
+
+Тут стартує drag:
+
+```jsx id="py719j"
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  canvasController.handleConnectorBodyDragStart(connector.id, e);
+}}
+```
+
+#### У `handleConnectorBodyDragStart`
+
+Саме тут `connectorDragState` стає активним:
+
+```js id="1kd1x1"
+handleConnectorBodyDragStart(edgeId, e) {
+  const store = useCanvasStore.getState();
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+
+  if (!canDragWholeConnector(connector)) {
+    store.clearConnectorDragState?.();
+    return;
+  }
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  store.setSelection?.({ type: "edge", id: edgeId });
+
+  store.setConnectorDragState?.({
+    edgeId,
+    startPointer: { x: pointer.x, y: pointer.y },
+    lastPointer: { x: pointer.x, y: pointer.y },
+  });
+}
+```
+
+### Як зрозуміти, що все підключено правильно
+
+Після `mousedown` по лінії:
+
+* у store має з’явитися `connectorDragState`
+* поки кнопка миші затиснута, `Stage.onMouseMove` має бачити цей state
+* після `mouseup` `connectorDragState` має очищатися
+
+### Якщо зараз не працює
+
+Отже, перевір по черзі:
+
+1. Чи реально `Line.onMouseDown` викликається
+2. Чи заходить код у `handleConnectorBodyDragStart`
+3. Чи не блокує `canDragWholeConnector(connector)`
+4. Чи викликається `store.setConnectorDragState(...)`
+5. Чи `Stage.onMouseMove` читає `store.connectorDragState`
+
+Тобто відповідь пряма:
+**`connectorDragState` активується в `handleConnectorBodyDragStart`, який має викликатися з `onMouseDown` на самому конекторі (`Line`).**

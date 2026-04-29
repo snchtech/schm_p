@@ -1,0 +1,158 @@
+Прив’язувати треба **до самого компонента `<Stage />`**, тобто до верхнього canvas-рівня, де рендериться вся сцена Konva.
+
+Не до:
+
+* `Layer`
+* `Line`
+* `Group`
+* окремого конектора
+
+А саме до того місця, де в тебе щось типу:
+
+```jsx
+<Stage ...>
+  ...
+</Stage>
+```
+
+### Логіка правильного підключення
+
+#### 1. На самому конекторі лишаєш тільки старт drag
+
+На `Line` конектора:
+
+* `onMouseDown` → `handleConnectorBodyDragStart(connector.id, e)`
+
+І все.
+`onMouseMove` і `onMouseUp` з тіла конектора прибираєш.
+
+---
+
+#### 2. На `Stage` ставиш глобальні події
+
+На `<Stage />`:
+
+* `onMouseMove`
+  якщо в store є `connectorDragState`, тоді береш `edgeId` із цього state і викликаєш `handleConnectorBodyDragMove(edgeId, e)`
+
+* `onMouseUp`
+  якщо в store є `connectorDragState`, викликаєш `handleConnectorBodyDragEnd()`
+
+---
+
+### До чого саме “прив’язувати” на Stage
+
+Не до конкретного edge напряму.
+На Stage ти прив’язуєшся до **стану drag**, який уже збережений у store.
+
+Тобто схема така:
+
+* `Line.onMouseDown` записав у store:
+
+  * `edgeId`
+  * `startPointer`
+  * `lastPointer`
+
+* `Stage.onMouseMove` просто дивиться:
+
+  * чи є `connectorDragState`
+  * якщо так — бере `connectorDragState.edgeId`
+  * і рухає саме цей connector
+
+---
+
+### Практично це виглядає так
+
+#### На `Line`:
+
+```jsx
+onMouseDown={(e) => {
+  e.cancelBubble = true;
+  canvasController.handleConnectorBodyDragStart(connector.id, e);
+}}
+```
+
+---
+
+#### На `Stage`:
+
+```jsx
+onMouseMove={(e) => {
+  const store = useCanvasStore.getState();
+  const dragState = store.connectorDragState;
+
+  if (!dragState) return;
+
+  canvasController.handleConnectorBodyDragMove(dragState.edgeId, e);
+}}
+onMouseUp={() => {
+  const store = useCanvasStore.getState();
+  const dragState = store.connectorDragState;
+
+  if (!dragState) return;
+
+  canvasController.handleConnectorBodyDragEnd();
+}}
+```
+
+---
+
+### Чому саме так
+
+Бо Stage завжди продовжує отримувати рух миші, навіть якщо:
+
+* конектор уже пересунувся
+* курсор вийшов за межі старої лінії
+* сама геометрія `Line` змінилася після `replaceEdge`
+
+А от якщо тримати `onMouseMove` на `Line`, то після першого зміщення курсор часто вже не над тим самим shape, і drag “обривається”.
+
+---
+
+### Де це розміщати
+
+У тому компоненті, де в тебе головний canvas, наприклад:
+
+* `EditorCanvas`
+* `CanvasStage`
+* або інший wrapper, який рендерить `<Stage />`
+
+Тобто там, де вже стоять глобальні:
+
+* `onMouseMove`
+* `onMouseUp`
+* можливо `onMouseDown`
+
+і де ти вже обробляєш draft connector або інші загальні canvas-події.
+
+---
+
+### Важливий нюанс
+
+Якщо в тебе вже є на Stage:
+
+* `onMouseMove` для `draftConnector`
+* `onMouseUp` для завершення draft
+
+то просто додаєш туди ще одну гілку:
+
+* якщо є `draftConnector` → одна логіка
+* якщо є `connectorDragState` → інша логіка
+
+Тобто Stage стає єдиною точкою для глобальних drag-сценаріїв.
+
+---
+
+### Найкоротше
+
+Правильно так:
+
+* `Line` → тільки `onMouseDown`
+* `Stage` → `onMouseMove` і `onMouseUp`
+* `Stage` бере `edgeId` із `store.connectorDragState`
+
+Якщо хочеш, наступним повідомленням я можу показати тобі вже готовий цілісний блок для `Stage`, куди одночасно вставлені:
+
+* draft connector move
+* body drag move
+* body drag end
