@@ -1,0 +1,520 @@
+BODY DRAG PREVIEW-OFFSET PATCH
+=================================
+
+ЦІЛЬ
+----
+Виправити перетягування всього connector-а так, щоб:
+1) під час drag НЕ було replaceEdge(...) на кожному mousemove
+2) під час drag використовувався тільки preview offset
+3) реальний translateConnector(...) виконувався тільки на dragEnd
+
+Це прибирає ривки / зупинки drag, які виникають через безперервний rebuild та remount shape під час руху.
+
+==================================================
+1. useCanvasStore.js
+==================================================
+
+ДОДАЙ / ОНОВИ connectorDragState:
+
+// ADD / REPLACE in useCanvasStore.js
+
+connectorDragState: null,
+// {
+//   edgeId,
+//   startPointer: { x, y },
+//   currentPointer: { x, y },
+// }
+
+setConnectorDragState: (connectorDragState) =>
+  set({ connectorDragState }),
+
+clearConnectorDragState: () =>
+  set({ connectorDragState: null }),
+
+==================================================
+2. connectorEditing.js
+==================================================
+
+ПЕРЕКОНАЙСЯ, ЩО translateConnector ПРАЦЮЄ ПО НОВІЙ МОДЕЛІ
+
+// ADD / REPLACE in connectorEditing.js
+
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") return false;
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+    route: {
+      ...connector.route,
+      vertices: (connector.route?.vertices || []).map((v) => ({
+        ...v,
+        x: v.x + dx,
+        y: v.y + dy,
+      })),
+      pathHandles: (connector.route?.pathHandles || []).map((ph) => ({
+        ...ph,
+        x: ph.x + dx,
+        y: ph.y + dy,
+      })),
+      fixedAnchors: connector.route?.fixedAnchors
+        ? {
+            start: {
+              x: connector.route.fixedAnchors.start.x + dx,
+              y: connector.route.fixedAnchors.start.y + dy,
+            },
+            end: {
+              x: connector.route.fixedAnchors.end.x + dx,
+              y: connector.route.fixedAnchors.end.y + dy,
+            },
+          }
+        : null,
+    },
+  };
+}
+
+==================================================
+3. canvasController.js
+==================================================
+
+ВАЖЛИВО:
+- onMouseMove на Stage лише оновлює currentPointer у store
+- реальний translateConnector(...) + rebuildConnectorGeometry(...) лише на dragEnd
+
+// ADD / REPLACE in canvasController.js
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+import {
+  canDragWholeConnector,
+  translateConnector,
+} from "@/lib/connectors/connectorEditing";
+
+export const canvasController = {
+  handleConnectorBodyDragStart(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const connector = store.edges.find((edge) => edge.id === edgeId);
+    if (!connector || connector.kind !== "connector") return;
+
+    if (!canDragWholeConnector(connector)) {
+      store.clearConnectorDragState?.();
+      return;
+    }
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    store.setSelection?.({ type: "edge", id: edgeId });
+    store.setConnectorDragState?.({
+      edgeId,
+      startPointer: { x: pointer.x, y: pointer.y },
+      currentPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragMove(edgeId, e) {
+    const store = useCanvasStore.getState();
+    const dragState = store.connectorDragState;
+    if (!dragState || dragState.edgeId !== edgeId) return;
+
+    const stage = e.target.getStage?.() || e.target;
+    const pointer = stage?.getPointerPosition?.();
+    if (!pointer) return;
+
+    store.setConnectorDragState?.({
+      ...dragState,
+      currentPointer: { x: pointer.x, y: pointer.y },
+    });
+  },
+
+  handleConnectorBodyDragEnd() {
+    const store = useCanvasStore.getState();
+    const dragState = store.connectorDragState;
+    if (!dragState) return;
+
+    const connector = store.edges.find((edge) => edge.id === dragState.edgeId);
+    if (!connector || connector.kind !== "connector") {
+      store.clearConnectorDragState?.();
+      return;
+    }
+
+    const dx = dragState.currentPointer.x - dragState.startPointer.x;
+    const dy = dragState.currentPointer.y - dragState.startPointer.y;
+
+    if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
+      let next = translateConnector(connector, dx, dy);
+      next = rebuildConnectorGeometry(next, store.nodes);
+      store.replaceEdge?.(dragState.edgeId, next);
+    }
+
+    store.clearConnectorDragState?.();
+  },
+};
+
+==================================================
+4. ConnectorsLayer.jsx
+==================================================
+
+ІДЕЯ:
+- беремо connectorDragState зі store
+- якщо поточний connector тягнеться, тимчасово малюємо його зі зсувом dx/dy
+- ніякого replaceEdge під час mousemove не відбувається
+
+// ADD / REPLACE in ConnectorsLayer.jsx
+
+"use client";
+
+import React from "react";
+import { Group, Line, Circle, Rect } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getConnectorSegmentHandles } from "@/lib/connectors/connectorGeometry";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+import { canDragWholeConnector } from "@/lib/connectors/connectorEditing";
+
+function offsetPoints(points = [], dx = 0, dy = 0) {
+  const out = [];
+  for (let i = 0; i < points.length; i += 2) {
+    out.push(points[i] + dx, points[i + 1] + dy);
+  }
+  return out;
+}
+
+export default function ConnectorsLayer() {
+  const edges = useCanvasStore((s) => s.edges);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+  const connectorDragState = useCanvasStore((s) => s.connectorDragState);
+
+  const connectors = edges.filter((edge) => edge.kind === "connector");
+
+  return (
+    <>
+      {connectors.map((connector) => {
+        const rawPts = connector.geometry?.points || [];
+        if (!rawPts || rawPts.length < 4) return null;
+
+        const isSelected =
+          selection?.type === "edge" && selection?.id === connector.id;
+
+        const isBodyDragging =
+          connectorDragState?.edgeId === connector.id;
+
+        const previewDx = isBodyDragging
+          ? connectorDragState.currentPointer.x - connectorDragState.startPointer.x
+          : 0;
+
+        const previewDy = isBodyDragging
+          ? connectorDragState.currentPointer.y - connectorDragState.startPointer.y
+          : 0;
+
+        const pts = isBodyDragging
+          ? offsetPoints(rawPts, previewDx, previewDy)
+          : rawPts;
+
+        const startPoint = {
+          x: pts[0],
+          y: pts[1],
+        };
+
+        const endPoint = {
+          x: pts[pts.length - 2],
+          y: pts[pts.length - 1],
+        };
+
+        const segmentHandles =
+          isSelected && connector.pathType === "orthogonal-elbow" && !isBodyDragging
+            ? getConnectorSegmentHandles(connector)
+            : [];
+
+        const pathHandles =
+          isSelected && !isBodyDragging ? connector.route?.pathHandles || [] : [];
+
+        const startSegment = getConnectorStartSegment(pts);
+        const endSegment = getConnectorEndSegment(pts);
+
+        const startArrowPoints =
+          connector.endcaps?.start === "arrow" && startSegment
+            ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+            : null;
+
+        const endArrowPoints =
+          connector.endcaps?.end === "arrow" && endSegment
+            ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+            : null;
+
+        const stroke = connector.style?.stroke || "black";
+        const strokeWidth = connector.style?.strokeWidth || 2;
+        const canDragWhole = canDragWholeConnector(connector);
+
+        return (
+          <Group key={connector.id}>
+            <Line
+              points={pts}
+              stroke="rgba(0,0,0,0.001)"
+              strokeWidth={18}
+              lineJoin="round"
+              lineCap="round"
+              onMouseDown={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+                canvasController.handleConnectorBodyDragStart?.(connector.id, e);
+              }}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection({ type: "edge", id: connector.id });
+              }}
+              onContextMenu={(e) => {
+                canvasController.handleConnectorContextMenu?.(e, connector);
+              }}
+              onMouseEnter={(e) => {
+                const stage = e.target.getStage();
+                if (stage?.container()?.style) {
+                  stage.container().style.cursor = canDragWhole ? "move" : "pointer";
+                }
+              }}
+              onMouseLeave={(e) => {
+                const stage = e.target.getStage();
+                if (stage?.container()?.style) {
+                  stage.container().style.cursor = "default";
+                }
+              }}
+            />
+
+            <Line
+              points={pts}
+              stroke={isSelected ? "#2F80ED" : stroke}
+              strokeWidth={isSelected ? Math.max(strokeWidth + 1, 3) : strokeWidth}
+              lineJoin="round"
+              lineCap="round"
+              listening={false}
+            />
+
+            {startArrowPoints && (
+              <Line
+                points={startArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {endArrowPoints && (
+              <Line
+                points={endArrowPoints}
+                closed
+                fill={isSelected ? "#2F80ED" : stroke}
+                stroke={isSelected ? "#2F80ED" : stroke}
+                strokeWidth={1}
+                listening={false}
+              />
+            )}
+
+            {isSelected && !isBodyDragging && (
+              <>
+                <Circle
+                  x={startPoint.x}
+                  y={startPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorStartDragMove?.(connector.id, e);
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorStartDragEnd?.(connector.id, e);
+                  }}
+                />
+
+                <Circle
+                  x={endPoint.x}
+                  y={endPoint.y}
+                  radius={6}
+                  fill="white"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+                  onDragMove={(e) => {
+                    canvasController.handleConnectorEndDragMove?.(connector.id, e);
+                  }}
+                  onDragEnd={(e) => {
+                    canvasController.handleConnectorEndDragEnd?.(connector.id, e);
+                  }}
+                />
+
+                {segmentHandles
+                  .filter((handle) => handle.kind === "segment")
+                  .map((handle) => (
+                    <Rect
+                      key={handle.id}
+                      x={handle.x - 5}
+                      y={handle.y - 5}
+                      width={10}
+                      height={10}
+                      fill="#2D9CDB"
+                      stroke="black"
+                      strokeWidth={1}
+                      draggable
+                      dragBoundFunc={(pos) =>
+                        handle.orientation === "horizontal"
+                          ? { x: handle.x - 5, y: pos.y }
+                          : { x: pos.x, y: handle.y - 5 }
+                      }
+                      onDragStart={() => {
+                        canvasController.handleConnectorSegmentDragStart?.(
+                          connector.id
+                        );
+                      }}
+                      onDragMove={(e) => {
+                        canvasController.handleConnectorSegmentDragMove?.(
+                          connector.id,
+                          handle,
+                          e
+                        );
+                      }}
+                      onDragEnd={(e) => {
+                        canvasController.handleConnectorSegmentDragEnd?.(
+                          connector.id,
+                          handle,
+                          e
+                        );
+                      }}
+                    />
+                  ))}
+
+                {pathHandles.map((ph) => (
+                  <Rect
+                    key={ph.id}
+                    x={ph.x - 5}
+                    y={ph.y - 5}
+                    width={10}
+                    height={10}
+                    fill="#2D9CDB"
+                    stroke="#0B3D91"
+                    strokeWidth={2}
+                    draggable
+                    dragBoundFunc={(pos) =>
+                      ph.axis === "y"
+                        ? { x: ph.x - 5, y: pos.y }
+                        : { x: pos.x, y: ph.y - 5 }
+                    }
+                    onDragMove={(e) => {
+                      canvasController.handleConnectorPathHandleDragMove?.(
+                        connector.id,
+                        ph,
+                        e
+                      );
+                    }}
+                    onDragEnd={(e) => {
+                      canvasController.handleConnectorPathHandleDragEnd?.(
+                        connector.id,
+                        ph,
+                        e
+                      );
+                    }}
+                    onContextMenu={(e) => {
+                      canvasController.handleConnectorPathHandleContextMenu?.(
+                        e,
+                        connector,
+                        ph
+                      );
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+==================================================
+5. Stage / EditorCanvas
+==================================================
+
+ВАЖЛИВО:
+- body drag move / end тільки на Stage
+- якщо вже є draft connector logic, просто додаємо ще одну гілку
+
+// ADD / REPLACE in EditorCanvas or component with <Stage />
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+<Stage
+  ...
+  onMouseMove={(e) => {
+    const store = useCanvasStore.getState();
+
+    if (store.draftConnector) {
+      const stage = e.target.getStage?.() || e.target;
+      const pointer = stage?.getPointerPosition?.();
+      if (pointer) {
+        canvasController.updateDraftConnector(pointer);
+      }
+      return;
+    }
+
+    const dragState = store.connectorDragState;
+    if (dragState) {
+      canvasController.handleConnectorBodyDragMove(dragState.edgeId, e);
+    }
+  }}
+  onMouseUp={(e) => {
+    const store = useCanvasStore.getState();
+
+    if (store.draftConnector) {
+      const stage = e.target.getStage?.() || e.target;
+      const pointer = stage?.getPointerPosition?.();
+      if (pointer) {
+        canvasController.finishDraftConnector(null, pointer);
+      }
+      return;
+    }
+
+    if (store.connectorDragState) {
+      canvasController.handleConnectorBodyDragEnd();
+    }
+  }}
+/>
+
+==================================================
+6. ПІДСУМОК
+==================================================
+
+ЧОМУ ЦЕ ВИПРАВЛЯЄ ПРОБЛЕМУ:
+- під час drag НЕ відбувається replaceEdge(...)
+- shape НЕ пересоздається на кожному mousemove
+- hit-line НЕ "втікає" з-під курсора
+- commit в модель відбувається тільки один раз на mouseup
+
+САМЕ ДЛЯ body drag це правильніша стратегія, ніж безперервний translateConnector(...) на кожному русі.
