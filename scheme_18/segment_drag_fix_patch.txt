@@ -1,0 +1,553 @@
+SEGMENT DRAG FIX PATCH
+======================
+
+ЦІЛЬ
+----
+Виправити drag сегментів orthogonal-elbow так, щоб:
+1) внутрішні сегменти рухалися локально;
+2) крайні сегменти (біля attached start/end) не "притискалися" назад до фігури;
+3) при drag першого/останнього сегмента створювалася нова вершина, якщо потрібно;
+4) drag не ламався після першого split через застарілий segmentId;
+5) controller використовував окремий connectorSegmentDragState.
+
+==================================================
+1. useCanvasStore.js
+==================================================
+
+ДОДАЙ НОВИЙ STATE ДЛЯ DRAG СЕГМЕНТІВ
+
+// ADD in useCanvasStore.js
+
+connectorSegmentDragState: null,
+// {
+//   edgeId,
+//   originalSegmentId,
+//   orientation,
+//   edgePosition: "first" | "last" | "internal",
+// }
+
+setConnectorSegmentDragState: (connectorSegmentDragState) =>
+  set({ connectorSegmentDragState }),
+
+clearConnectorSegmentDragState: () =>
+  set({ connectorSegmentDragState: null }),
+
+==================================================
+2. connectorEditing.js
+==================================================
+
+ЗАМІНИ / ДОДАЙ НИЖЧЕВКАЗАНІ ФУНКЦІЇ
+
+// REPLACE in connectorEditing.js
+
+import {
+  createRoutePoint,
+  cloneRoutePoints,
+  getFullOrthogonalRoutePoints,
+  normalizeOrthogonalVertices,
+  getOrthogonalRouteSegments,
+} from "./connectorGeometry";
+import { getConnectorPathType } from "./getConnectorPathType";
+
+function ensureDragAnchorState(connector) {
+  const start = connector.geometry?.start;
+  const end = connector.geometry?.end;
+  if (!start || !end) return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: {
+        start: { x: start.x, y: start.y },
+        end: { x: end.x, y: end.y },
+      },
+    },
+  };
+}
+
+export function beginConnectorSegmentDrag(connector) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+  return ensureDragAnchorState(connector);
+}
+
+export function endConnectorSegmentDrag(connector) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      fixedAnchors: null,
+    },
+  };
+}
+
+function getActiveAnchors(connector) {
+  const fixed = connector.route?.fixedAnchors;
+  if (fixed?.start && fixed?.end) {
+    return {
+      start: fixed.start,
+      end: fixed.end,
+    };
+  }
+
+  return {
+    start: connector.geometry?.start,
+    end: connector.geometry?.end,
+  };
+}
+
+function getBaseSegments(start, end, vertices) {
+  return getOrthogonalRouteSegments(start, end, { vertices });
+}
+
+function moveInternalOrthogonalSegmentByIndex(connector, segIndex, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const full = getFullOrthogonalRoutePoints(start, end, { vertices });
+
+  if (segIndex < 0 || segIndex >= full.length - 1) return connector;
+
+  const a = full[segIndex];
+  const b = full[segIndex + 1];
+
+  const isHorizontal = a.y === b.y;
+  const isVertical = a.x === b.x;
+  if (!isHorizontal && !isVertical) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+
+  const leftVertexIndex = segIndex - 1;
+  const rightVertexIndex = segIndex;
+
+  if (isHorizontal) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        y: pos.y,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        y: pos.y,
+      };
+    }
+  }
+
+  if (isVertical) {
+    if (leftVertexIndex >= 0) {
+      nextVertices[leftVertexIndex] = {
+        ...nextVertices[leftVertexIndex],
+        x: pos.x,
+      };
+    }
+    if (rightVertexIndex < nextVertices.length) {
+      nextVertices[rightVertexIndex] = {
+        ...nextVertices[rightVertexIndex],
+        x: pos.x,
+      };
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+function moveFirstOrthogonalSegment(connector, orientation, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  if (vertices.length === 0) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+
+  if (orientation === "horizontal") {
+    const newY = pos.y;
+
+    const alreadyExtended =
+      nextVertices.length >= 2 &&
+      nextVertices[0].x === start.x &&
+      nextVertices[0].y === nextVertices[1].y;
+
+    if (alreadyExtended) {
+      nextVertices[0] = { ...nextVertices[0], y: newY };
+      nextVertices[1] = { ...nextVertices[1], y: newY };
+    } else {
+      nextVertices[0] = { ...nextVertices[0], y: newY };
+      nextVertices.unshift(createRoutePoint(start.x, newY));
+    }
+  }
+
+  if (orientation === "vertical") {
+    const newX = pos.x;
+
+    const alreadyExtended =
+      nextVertices.length >= 2 &&
+      nextVertices[0].y === start.y &&
+      nextVertices[0].x === nextVertices[1].x;
+
+    if (alreadyExtended) {
+      nextVertices[0] = { ...nextVertices[0], x: newX };
+      nextVertices[1] = { ...nextVertices[1], x: newX };
+    } else {
+      nextVertices[0] = { ...nextVertices[0], x: newX };
+      nextVertices.unshift(createRoutePoint(newX, start.y));
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+function moveLastOrthogonalSegment(connector, orientation, pos) {
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  if (vertices.length === 0) return connector;
+
+  const nextVertices = cloneRoutePoints(vertices);
+  const last = nextVertices.length - 1;
+
+  if (orientation === "horizontal") {
+    const newY = pos.y;
+
+    const alreadyExtended =
+      nextVertices.length >= 2 &&
+      nextVertices[last].x === end.x &&
+      nextVertices[last].y === nextVertices[last - 1].y;
+
+    if (alreadyExtended) {
+      nextVertices[last] = { ...nextVertices[last], y: newY };
+      nextVertices[last - 1] = { ...nextVertices[last - 1], y: newY };
+    } else {
+      nextVertices[last] = { ...nextVertices[last], y: newY };
+      nextVertices.push(createRoutePoint(end.x, newY));
+    }
+  }
+
+  if (orientation === "vertical") {
+    const newX = pos.x;
+
+    const alreadyExtended =
+      nextVertices.length >= 2 &&
+      nextVertices[last].y === end.y &&
+      nextVertices[last].x === nextVertices[last - 1].x;
+
+    if (alreadyExtended) {
+      nextVertices[last] = { ...nextVertices[last], x: newX };
+      nextVertices[last - 1] = { ...nextVertices[last - 1], x: newX };
+    } else {
+      nextVertices[last] = { ...nextVertices[last], x: newX };
+      nextVertices.push(createRoutePoint(newX, end.y));
+    }
+  }
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: normalizeOrthogonalVertices(start, end, nextVertices),
+    },
+  };
+}
+
+export function moveElbowSegmentHandle(connector, handle, pos) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  const { start, end } = getActiveAnchors(connector);
+  if (!start || !end) return connector;
+
+  const vertices = cloneRoutePoints(connector.route?.vertices || []);
+  const segments = getBaseSegments(start, end, vertices);
+
+  const segIndex = segments.findIndex((s) => s.id === handle.originalSegmentId);
+  const edgePosition =
+    handle.edgePosition ||
+    (segIndex === 0
+      ? "first"
+      : segIndex === segments.length - 1
+      ? "last"
+      : "internal");
+
+  if (edgePosition === "first") {
+    return moveFirstOrthogonalSegment(connector, handle.orientation, pos);
+  }
+
+  if (edgePosition === "last") {
+    return moveLastOrthogonalSegment(connector, handle.orientation, pos);
+  }
+
+  // internal segment: if original id disappeared after earlier transform,
+  // fallback to current nearest internal segment by orientation
+  let internalIndex = segIndex;
+  if (internalIndex < 0) {
+    internalIndex = segments.findIndex(
+      (s, idx) =>
+        idx > 0 &&
+        idx < segments.length - 1 &&
+        s.orientation === handle.orientation
+    );
+  }
+
+  if (internalIndex < 0) return connector;
+
+  return moveInternalOrthogonalSegmentByIndex(connector, internalIndex, pos);
+}
+
+export function createPathHandleAtSegment(connector, segmentId) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return null;
+  if (pathType !== "orthogonal-elbow") return null;
+
+  const segments = connector.geometry?.segmentsMeta || [];
+  const seg = segments.find((s) => s.id === segmentId);
+  if (!seg) return null;
+
+  return {
+    id: crypto.randomUUID(),
+    parentSegmentId: segmentId,
+    axis: seg.orientation === "horizontal" ? "y" : "x",
+    x: (seg.x1 + seg.x2) / 2,
+    y: (seg.y1 + seg.y2) / 2,
+    halfSize: 20,
+  };
+}
+
+export function addConnectorPathHandle(connector, pathHandle) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: [...(connector.route?.pathHandles || []), pathHandle],
+    },
+  };
+}
+
+export function moveConnectorPathHandle(connector, pathHandleId, pos) {
+  const pathType = getConnectorPathType(connector);
+  if (!connector || connector.kind !== "connector") return connector;
+  if (pathType !== "orthogonal-elbow") return connector;
+
+  const pathHandles = [...(connector.route?.pathHandles || [])];
+  const nextPathHandles = pathHandles.map((ph) => {
+    if (ph.id !== pathHandleId) return ph;
+
+    if (ph.axis === "y") {
+      return { ...ph, y: pos.y };
+    }
+
+    if (ph.axis === "x") {
+      return { ...ph, x: pos.x };
+    }
+
+    return ph;
+  });
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: nextPathHandles,
+    },
+  };
+}
+
+export function removeConnectorPathHandle(connector, pathHandleId) {
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      pathHandles: (connector.route?.pathHandles || []).filter(
+        (ph) => ph.id !== pathHandleId
+      ),
+    },
+  };
+}
+
+export function canDragWholeConnector(connector) {
+  if (!connector || connector.kind !== "connector") return false;
+
+  const startFree = connector.start?.attached?.type === "none";
+  const endFree = connector.end?.attached?.type === "none";
+
+  return startFree && endFree;
+}
+
+export function translateConnector(connector, dx, dy) {
+  if (!connector || connector.kind !== "connector") return connector;
+
+  return {
+    ...connector,
+    start: {
+      ...connector.start,
+      x: connector.start.x + dx,
+      y: connector.start.y + dy,
+    },
+    end: {
+      ...connector.end,
+      x: connector.end.x + dx,
+      y: connector.end.y + dy,
+    },
+    route: {
+      ...connector.route,
+      vertices: (connector.route?.vertices || []).map((v) => ({
+        ...v,
+        x: v.x + dx,
+        y: v.y + dy,
+      })),
+      pathHandles: (connector.route?.pathHandles || []).map((ph) => ({
+        ...ph,
+        x: ph.x + dx,
+        y: ph.y + dy,
+      })),
+      fixedAnchors: connector.route?.fixedAnchors
+        ? {
+            start: {
+              x: connector.route.fixedAnchors.start.x + dx,
+              y: connector.route.fixedAnchors.start.y + dy,
+            },
+            end: {
+              x: connector.route.fixedAnchors.end.x + dx,
+              y: connector.route.fixedAnchors.end.y + dy,
+            },
+          }
+        : null,
+    },
+  };
+}
+
+==================================================
+3. canvasController.js
+==================================================
+
+ОНОВИ start / move / end ДЛЯ DRAG СЕГМЕНТІВ
+
+// REPLACE in canvasController.js
+
+handleConnectorSegmentDragStart(edgeId, handle) {
+  const store = useCanvasStore.getState();
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+  const segments = connector.geometry?.segmentsMeta || [];
+  const segIndex = segments.findIndex((s) => s.id === handle.segmentId);
+
+  let edgePosition = "internal";
+  if (segIndex === 0) edgePosition = "first";
+  if (segIndex === segments.length - 1) edgePosition = "last";
+
+  let next = beginConnectorSegmentDrag(connector);
+  next = rebuildConnectorGeometry(next, store.nodes);
+  store.replaceEdge?.(edgeId, next);
+
+  store.setConnectorSegmentDragState?.({
+    edgeId,
+    originalSegmentId: handle.segmentId,
+    orientation: handle.orientation,
+    edgePosition,
+  });
+},
+
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") return;
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") return;
+
+  const dragState = store.connectorSegmentDragState;
+  if (!dragState || dragState.edgeId !== edgeId) return;
+
+  const normalizedPos = { x: pos.x + 5, y: pos.y + 5 };
+
+  let next = moveElbowSegmentHandle(connector, dragState, normalizedPos);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+},
+
+handleConnectorSegmentDragEnd(edgeId, handle, e) {
+  const store = useCanvasStore.getState();
+  const pos = e.target.position();
+
+  const connector = store.edges.find((edge) => edge.id === edgeId);
+  if (!connector || connector.kind !== "connector") {
+    store.clearConnectorSegmentDragState?.();
+    return;
+  }
+  if (getConnectorPathType(connector) !== "orthogonal-elbow") {
+    store.clearConnectorSegmentDragState?.();
+    return;
+  }
+
+  const dragState = store.connectorSegmentDragState;
+  if (!dragState || dragState.edgeId !== edgeId) {
+    store.clearConnectorSegmentDragState?.();
+    return;
+  }
+
+  const normalizedPos = { x: pos.x + 5, y: pos.y + 5 };
+
+  let next = moveElbowSegmentHandle(connector, dragState, normalizedPos);
+  next = endConnectorSegmentDrag(next);
+  next = rebuildConnectorGeometry(next, store.nodes);
+
+  store.replaceEdge?.(edgeId, next);
+  store.clearConnectorSegmentDragState?.();
+},
+
+==================================================
+4. ConnectorsLayer.jsx
+==================================================
+
+ОНОВИ onDragStart ДЛЯ segment handle
+
+// REPLACE only this part in ConnectorsLayer.jsx
+
+onDragStart={() => {
+  canvasController.handleConnectorSegmentDragStart?.(
+    connector.id,
+    handle
+  );
+}}
+
+==================================================
+5. ЩО ЦЕ ВИПРАВЛЯЄ
+==================================================
+
+1. Крайні сегменти більше не обробляються як внутрішні.
+2. Для first / last segment створюється нова вершина, коли це потрібно.
+3. Під час drag використовуються fixedAnchors, тому маршрут не "липне" назад до фігури.
+4. Після першого split drag не губиться, бо controller працює через connectorSegmentDragState, а не через "живий" handle із shape.
+5. Внутрішні сегменти далі рухаються через локальну зміну сусідніх вершин.
+
+==================================================
+6. ПРИМІТКА
+==================================================
+
+Якщо у тебе getConnectorSegmentHandles() не додає handle.isFirst / handle.isLast — це вже не критично,
+бо edgePosition тепер визначається в controller через connector.geometry.segmentsMeta.
