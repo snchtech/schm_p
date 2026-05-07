@@ -1,0 +1,377 @@
+
+ORTHOGONAL CONNECTOR TOPOLOGY PATCH
+==================================
+
+Мета
+----
+При переміщенні node/anchor не допускати діагональних сегментів біля endpoint.
+Останній сегмент завжди має залишатись orthogonal відносно сторони anchor.
+
+RULES
+-----
+
+top/bottom:
+    останній сегмент vertical
+
+left/right:
+    останній сегмент horizontal
+
+----------------------------------------------------------------------
+1. НОВИЙ ФАЙЛ
+----------------------------------------------------------------------
+
+src/features/scheme/ui/canvas/connectorTopologyRepair.js
+
+
+----------------------------------------------------------------------
+КОД
+----------------------------------------------------------------------
+
+function isVerticalAnchor(anchor) {
+  return anchor === 'top' || anchor === 'bottom'
+}
+
+function isHorizontalAnchor(anchor) {
+  return anchor === 'left' || anchor === 'right'
+}
+
+function same(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps
+}
+
+function clonePoint(p) {
+  return { ...p }
+}
+
+function insertBeforeEnd(points, point) {
+  const out = [...points]
+  out.splice(out.length - 1, 0, point)
+  return out
+}
+
+function insertAfterStart(points, point) {
+  const out = [...points]
+  out.splice(1, 0, point)
+  return out
+}
+
+function tryMoveLastBend(points, endAnchor) {
+  if (points.length < 3) return points
+
+  const out = points.map(clonePoint)
+
+  const end = out[out.length - 1]
+  const prev = out[out.length - 2]
+  const prevPrev = out[out.length - 3]
+
+  if (isVerticalAnchor(endAnchor)) {
+
+    // endpoint має vertical connection
+    if (same(prev.x, end.x)) {
+      return out
+    }
+
+    // якщо previous segment horizontal —
+    // можна просто змістити bend
+    if (same(prevPrev.y, prev.y)) {
+      prev.x = end.x
+      return out
+    }
+  }
+
+  if (isHorizontalAnchor(endAnchor)) {
+
+    // endpoint має horizontal connection
+    if (same(prev.y, end.y)) {
+      return out
+    }
+
+    // якщо previous segment vertical —
+    // можна просто змістити bend
+    if (same(prevPrev.x, prev.x)) {
+      prev.y = end.y
+      return out
+    }
+  }
+
+  return out
+}
+
+function repairEnd(points, endAnchor) {
+  if (points.length < 2) return points
+
+  let out = points.map(clonePoint)
+
+  out = tryMoveLastBend(out, endAnchor)
+
+  const end = out[out.length - 1]
+  const prev = out[out.length - 2]
+
+  if (isVerticalAnchor(endAnchor)) {
+
+    // має бути vertical
+    if (!same(prev.x, end.x)) {
+
+      out = insertBeforeEnd(out, {
+        x: end.x,
+        y: prev.y,
+        kind: 'repair',
+      })
+    }
+  }
+
+  if (isHorizontalAnchor(endAnchor)) {
+
+    // має бути horizontal
+    if (!same(prev.y, end.y)) {
+
+      out = insertBeforeEnd(out, {
+        x: prev.x,
+        y: end.y,
+        kind: 'repair',
+      })
+    }
+  }
+
+  return out
+}
+
+function tryMoveFirstBend(points, startAnchor) {
+  if (points.length < 3) return points
+
+  const out = points.map(clonePoint)
+
+  const start = out[0]
+  const next = out[1]
+  const nextNext = out[2]
+
+  if (isVerticalAnchor(startAnchor)) {
+
+    if (same(next.x, start.x)) {
+      return out
+    }
+
+    if (same(next.y, nextNext.y)) {
+      next.x = start.x
+      return out
+    }
+  }
+
+  if (isHorizontalAnchor(startAnchor)) {
+
+    if (same(next.y, start.y)) {
+      return out
+    }
+
+    if (same(next.x, nextNext.x)) {
+      next.y = start.y
+      return out
+    }
+  }
+
+  return out
+}
+
+function repairStart(points, startAnchor) {
+  if (points.length < 2) return points
+
+  let out = points.map(clonePoint)
+
+  out = tryMoveFirstBend(out, startAnchor)
+
+  const start = out[0]
+  const next = out[1]
+
+  if (isVerticalAnchor(startAnchor)) {
+
+    if (!same(next.x, start.x)) {
+
+      out = insertAfterStart(out, {
+        x: start.x,
+        y: next.y,
+        kind: 'repair',
+      })
+    }
+  }
+
+  if (isHorizontalAnchor(startAnchor)) {
+
+    if (!same(next.y, start.y)) {
+
+      out = insertAfterStart(out, {
+        x: next.x,
+        y: start.y,
+        kind: 'repair',
+      })
+    }
+  }
+
+  return out
+}
+
+export function repairTerminalOrthogonality(
+  points,
+  startAttached,
+  endAttached,
+) {
+
+  let out = points.map(clonePoint)
+
+  const startAnchor = startAttached?.anchor
+  const endAnchor = endAttached?.anchor
+
+  if (startAnchor) {
+    out = repairStart(out, startAnchor)
+  }
+
+  if (endAnchor) {
+    out = repairEnd(out, endAnchor)
+  }
+
+  return out
+}
+
+
+----------------------------------------------------------------------
+2. ІМПОРТ
+----------------------------------------------------------------------
+
+В connectorGeometry.js
+
+додати:
+
+import { repairTerminalOrthogonality }
+from './connectorTopologyRepair'
+
+
+----------------------------------------------------------------------
+3. PATCH ДЛЯ buildBaseRouteWithMeta
+----------------------------------------------------------------------
+
+Знайти:
+
+const pts = getFullOrthogonalRoutePoints(start, end, route)
+
+ПІСЛЯ цього вставити:
+
+let repaired = repairTerminalOrthogonality(
+  pts,
+  start?.attached,
+  end?.attached,
+)
+
+І ЗАМІНИТИ:
+
+for (let i = 0; i < pts.length; i++) {
+
+НА:
+
+for (let i = 0; i < repaired.length; i++) {
+
+І:
+
+points.push(pts[i].x, pts[i].y)
+
+НА:
+
+points.push(repaired[i].x, repaired[i].y)
+
+І:
+
+const a = pts[i]
+const b = pts[i + 1]
+
+НА:
+
+const a = repaired[i]
+const b = repaired[i + 1]
+
+
+----------------------------------------------------------------------
+4. PATCH normalizeOrthogonalVertices
+----------------------------------------------------------------------
+
+ПІСЛЯ dedup phase:
+
+додати:
+
+dedup = dedup.filter((p, i) => {
+
+  if (i === 0 || i === dedup.length - 1) {
+    return true
+  }
+
+  const prev = dedup[i - 1]
+  const next = dedup[i + 1]
+
+  const sameVertical =
+    prev.x === p.x &&
+    p.x === next.x
+
+  const sameHorizontal =
+    prev.y === p.y &&
+    p.y === next.y
+
+  return !(sameVertical || sameHorizontal)
+})
+
+Це прибере:
+- зайві repair bends
+- дублікати
+- collapsed elbows
+
+
+----------------------------------------------------------------------
+5. ВАЖЛИВО
+----------------------------------------------------------------------
+
+repairTerminalOrthogonality()
+ТРЕБА викликати:
+- після resolveConnectorStartPoint()
+- після resolveConnectorEndPoint()
+- ДО normalizePoints()
+
+ІНАКШЕ:
+normalize знову зламає topology.
+
+
+----------------------------------------------------------------------
+6. ЩО ЦЕ ДАСТЬ
+----------------------------------------------------------------------
+
+Після drag node:
+
+GOOD:
+
+------|
+      |
+      END
+
+BAD (зникне):
+
+------\
+       \
+        END
+
+Також:
+- draw.io-like rerouting
+- sticky orthogonal behavior
+- no diagonal artifacts
+- automatic elbow insertion
+- automatic bend repair
+
+
+----------------------------------------------------------------------
+7. НАСТУПНИЙ ЕТАП
+----------------------------------------------------------------------
+
+Після цього можна буде додати:
+
+- smart obstacle routing
+- segment collapsing
+- auto merge bends
+- minimal bend optimization
+- manhattan routing
+- preferred axis routing
+- port constraints
+- dynamic elbow preservation

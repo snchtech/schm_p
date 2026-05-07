@@ -1,0 +1,439 @@
+
+CONNECTOR DRAG PREVIEW PATCH
+============================
+
+МЕТА
+----
+
+Під час drag сегмента:
+- НЕ rebuild connector topology
+- НЕ rebuild handles
+- НЕ normalize route
+- НЕ rerender full connector tree
+
+Замість цього:
+- показувати lightweight preview line
+- commit geometry тільки на mouseup
+
+Це дасть:
+- smooth dragging
+- no freezes
+- no redraw storms
+- draw.io-like interaction
+
+
+======================================================================
+1. ПРОБЛЕМА ПОТОЧНОЇ АРХІТЕКТУРИ
+======================================================================
+
+Зараз:
+
+mousemove
+    -> rebuildConnectorGeometry()
+    -> normalizeOrthogonalVertices()
+    -> buildBaseRouteWithMeta()
+    -> rebuild segmentsMeta
+    -> rerender handles
+    -> rerender arrows
+    -> rerender labels
+
+Це дуже дорого.
+
+Особливо:
+- Konva diff
+- React reconciliation
+- hit graph rebuild
+- arrays recreation
+
+
+======================================================================
+2. НОВА АРХІТЕКТУРА
+======================================================================
+
+РОЗДІЛИТИ:
+
+1. REAL CONNECTOR
+2. DRAG PREVIEW
+
+----------------------------------------------------------------------
+REAL CONNECTOR
+----------------------------------------------------------------------
+
+Стабільні дані:
+
+connector.route.vertices
+
+НЕ змінюються під час drag.
+
+
+----------------------------------------------------------------------
+DRAG PREVIEW
+----------------------------------------------------------------------
+
+Тимчасові runtime дані:
+
+dragPreview.points
+
+які:
+- не зберігаються
+- не rebuild topology
+- не rebuild handles
+
+
+======================================================================
+3. НОВИЙ FILE
+======================================================================
+
+src/features/scheme/ui/canvas/runtime/connectorDragPreview.js
+
+
+======================================================================
+4. КОД
+======================================================================
+
+let framePending = false
+
+export function createPreviewDragState({
+  connectorId,
+  initialPoints,
+  segmentId,
+}) {
+
+  return {
+    connectorId,
+    segmentId,
+
+    points: initialPoints.map(p => ({ ...p })),
+
+    pendingMouse: null,
+
+    active: true,
+  }
+}
+
+export function updatePreviewMousePosition(
+  previewState,
+  pos,
+) {
+
+  previewState.pendingMouse = pos
+}
+
+export function schedulePreviewRender({
+  previewState,
+  render,
+}) {
+
+  if (framePending) return
+
+  framePending = true
+
+  requestAnimationFrame(() => {
+
+    framePending = false
+
+    if (!previewState.active) {
+      return
+    }
+
+    render(previewState)
+  })
+}
+
+export function applyPreviewSegmentMove({
+  previewState,
+  segmentMeta,
+}) {
+
+  const pos = previewState.pendingMouse
+
+  if (!pos) {
+    return previewState.points
+  }
+
+  const points = previewState.points.map(p => ({ ...p }))
+
+  const {
+    startIndex,
+    endIndex,
+    orientation,
+  } = segmentMeta
+
+  if (orientation === 'horizontal') {
+
+    const y = pos.y
+
+    points[startIndex].y = y
+    points[endIndex].y = y
+  }
+
+  if (orientation === 'vertical') {
+
+    const x = pos.x
+
+    points[startIndex].x = x
+    points[endIndex].x = x
+  }
+
+  previewState.points = points
+
+  return points
+}
+
+export function destroyPreviewState(previewState) {
+
+  previewState.active = false
+}
+
+
+======================================================================
+5. REACT STATE
+======================================================================
+
+ДОДАТИ:
+
+const previewRef = useRef(null)
+
+const [previewPoints, setPreviewPoints] = useState(null)
+
+
+======================================================================
+6. START DRAG PATCH
+======================================================================
+
+ЗАМІСТЬ:
+
+rebuildConnectorGeometry()
+
+НА drag start:
+
+previewRef.current = createPreviewDragState({
+   connectorId,
+   initialPoints: connector.pointsMeta,
+   segmentId,
+})
+
+setPreviewPoints(connector.pointsMeta)
+
+
+======================================================================
+7. MOUSEMOVE PATCH
+======================================================================
+
+ЗАРАЗ У ТЕБЕ ЙМОВІРНО:
+
+mousemove
+   -> rebuildConnectorGeometry()
+
+ЦЕ ТРЕБА ВИДАЛИТИ.
+
+
+----------------------------------------------------------------------
+НОВА ЛОГІКА
+----------------------------------------------------------------------
+
+function onSegmentDragMove(e) {
+
+  const preview = previewRef.current
+
+  if (!preview) return
+
+  const pos = getRelativePointerPosition(e)
+
+  updatePreviewMousePosition(preview, pos)
+
+  schedulePreviewRender({
+
+    previewState: preview,
+
+    render: (state) => {
+
+      const nextPoints = applyPreviewSegmentMove({
+
+        previewState: state,
+
+        segmentMeta,
+      })
+
+      setPreviewPoints(nextPoints)
+    }
+  })
+}
+
+
+======================================================================
+8. PREVIEW LINE
+======================================================================
+
+У connector layer:
+
+{previewPoints && (
+
+  <Line
+      points={previewPoints.flatMap(p => [p.x, p.y])}
+
+      stroke="#4C8DFF"
+
+      strokeWidth={2}
+
+      listening={false}
+
+      perfectDrawEnabled={false}
+
+      shadowForStrokeEnabled={false}
+
+      hitStrokeWidth={0}
+
+      dash={[6, 4]}
+  />
+)}
+
+ВАЖЛИВО:
+
+listening={false}
+дуже важливо для performance.
+
+
+======================================================================
+9. HIDE REAL CONNECTOR DURING DRAG
+======================================================================
+
+ПІД ЧАС DRAG:
+
+НЕ рендерити:
+- handles
+- labels
+- arrows
+- hover overlays
+
+ПРИКЛАД:
+
+const isPreviewDragging =
+   previewRef.current?.connectorId === connector.id
+
+if (isPreviewDragging) {
+   return null
+}
+
+
+======================================================================
+10. MOUSEUP PATCH
+======================================================================
+
+ЛИШЕ ТУТ:
+
+function onSegmentDragEnd() {
+
+  const preview = previewRef.current
+
+  if (!preview) return
+
+  commitConnectorSegmentMove({
+
+      connectorId: preview.connectorId,
+
+      finalPoints: preview.points,
+  })
+
+  destroyPreviewState(preview)
+
+  previewRef.current = null
+
+  setPreviewPoints(null)
+}
+
+
+======================================================================
+11. COMMIT FUNCTION
+======================================================================
+
+ТІЛЬКИ ПІСЛЯ mouseup:
+
+commitConnectorSegmentMove()
+
+робить:
+
+- rebuildConnectorGeometry()
+- normalizeOrthogonalVertices()
+- repairTerminalOrthogonality()
+- rebuild segmentsMeta
+- save route.vertices
+
+Тобто:
+FULL rebuild ONLY ONCE.
+
+
+======================================================================
+12. CRITICAL PERFORMANCE FLAGS
+======================================================================
+
+ДЛЯ PREVIEW LINE:
+
+<Line
+   perfectDrawEnabled={false}
+   shadowForStrokeEnabled={false}
+   listening={false}
+   hitStrokeWidth={0}
+/>
+
+Це дуже сильно зменшує lag у Konva.
+
+
+======================================================================
+13. ЩО ЩЕ НЕ МОЖНА РОБИТИ ПІД ЧАС DRAG
+======================================================================
+
+НЕ:
+- update redux
+- update Zustand global store
+- rebuild connector collection
+- recompute hover
+- recompute snapping
+- recompute labels
+- recompute arrows
+
+ONLY:
+- preview line
+
+
+======================================================================
+14. ЩО ДАСТЬ ЦЕЙ PATCH
+======================================================================
+
+До:
+
+mousemove
+   -> 20-100 rerenders/sec
+   -> freezes
+   -> topology rebuild storm
+
+Після:
+
+mousemove
+   -> only preview line update
+
+mouseup
+   -> single topology rebuild
+
+Результат:
+- draw.io feeling
+- smooth interaction
+- stable FPS
+- no first-drag freeze
+- minimal CPU usage
+
+
+======================================================================
+15. НАСТУПНИЙ ЕТАП ОПТИМІЗАЦІЇ
+======================================================================
+
+Після цього можна додати:
+
+- snapping preview
+- smart guide lines
+- magnetic routing
+- obstacle preview
+- topology ghosting
+- segment collapse preview
+- dynamic elbow preview
+- GPU layer caching
