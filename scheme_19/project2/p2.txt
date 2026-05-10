@@ -1,0 +1,326 @@
+```sql
+-- =========================================
+-- 1. Таблиця джерел NFC
+-- =========================================
+CREATE TABLE NFC_SOURCE (
+    ID        NUMBER PRIMARY KEY,
+    NAME      VARCHAR2(100) NOT NULL,
+    PRIORITY  NUMBER
+);
+
+-- Приклад наповнення
+INSERT INTO NFC_SOURCE (ID, NAME, PRIORITY) VALUES (1, 'VIEW1', 1);
+INSERT INTO NFC_SOURCE (ID, NAME, PRIORITY) VALUES (2, 'VIEW2', 2);
+INSERT INTO NFC_SOURCE (ID, NAME, PRIORITY) VALUES (3, 'OLD_DATA', 0);
+
+COMMIT;
+```
+
+---
+
+## Оновлення таблиці USER_NFC
+
+Рекомендую додати:
+
+```sql
+ALTER TABLE USER_NFC ADD (
+    DATE_UPDATE     DATE,
+    NFC_SOURCE_ID   NUMBER
+);
+
+ALTER TABLE USER_NFC
+ADD CONSTRAINT FK_USER_NFC_SOURCE
+FOREIGN KEY (NFC_SOURCE_ID)
+REFERENCES NFC_SOURCE(ID);
+```
+
+---
+
+# Оновлення старих записів
+
+Щоб усім існуючим записам поставити `nfc_source_id = 3`:
+
+```sql
+UPDATE USER_NFC
+SET NFC_SOURCE_ID = 3
+WHERE NFC_SOURCE_ID IS NULL;
+
+COMMIT;
+```
+
+---
+
+# Основна логіка
+
+Тобі потрібна історичність записів:
+
+* старий запис закривається:
+
+  * `DATE_END = SYSDATE`
+  * `DEACTIVATED_BY = 0`
+
+* створюється новий запис
+
+Також:
+
+* якщо новий source має нижчий пріоритет → НЕ оновлюємо
+* якщо рівний або вищий → оновлюємо
+
+---
+
+# Процедура
+
+```sql
+CREATE OR REPLACE PROCEDURE SYNC_USER_NFC
+IS
+
+    ----------------------------------------------------------------
+    -- Отримання пріоритету джерела
+    ----------------------------------------------------------------
+    FUNCTION GET_SOURCE_PRIORITY(
+        P_SOURCE_ID NUMBER
+    ) RETURN NUMBER
+    IS
+        V_PRIORITY NUMBER;
+    BEGIN
+
+        IF P_SOURCE_ID IS NULL THEN
+            RETURN -999;
+        END IF;
+
+        SELECT PRIORITY
+          INTO V_PRIORITY
+          FROM NFC_SOURCE
+         WHERE ID = P_SOURCE_ID;
+
+        RETURN NVL(V_PRIORITY, -999);
+
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN -999;
+    END;
+
+
+    ----------------------------------------------------------------
+    -- Обробка одного запису
+    ----------------------------------------------------------------
+    PROCEDURE PROCESS_NFC(
+        P_USER_ID       NUMBER,
+        P_NFC_CODE      VARCHAR2,
+        P_SOURCE_ID     NUMBER
+    )
+    IS
+
+        V_EXIST_ID              USER_NFC.ID%TYPE;
+        V_EXIST_NFC             USER_NFC.NFC_CODE%TYPE;
+        V_EXIST_SOURCE_ID       USER_NFC.NFC_SOURCE_ID%TYPE;
+
+        V_OLD_PRIORITY          NUMBER;
+        V_NEW_PRIORITY          NUMBER;
+
+    BEGIN
+
+        ----------------------------------------------------------------
+        -- Шукаємо активний запис користувача
+        ----------------------------------------------------------------
+        BEGIN
+
+            SELECT ID,
+                   NFC_CODE,
+                   NFC_SOURCE_ID
+              INTO V_EXIST_ID,
+                   V_EXIST_NFC,
+                   V_EXIST_SOURCE_ID
+              FROM USER_NFC
+             WHERE USER_ID = P_USER_ID
+               AND DATE_END IS NULL
+             FETCH FIRST 1 ROWS ONLY;
+
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+
+                ----------------------------------------------------------------
+                -- Якщо запису нема → створюємо
+                ----------------------------------------------------------------
+                INSERT INTO USER_NFC (
+                    ID,
+                    USER_ID,
+                    NFC_CODE,
+                    DATE_CREATE,
+                    NFC_SOURCE_ID
+                )
+                VALUES (
+                    USER_NFC_SEQ.NEXTVAL,
+                    P_USER_ID,
+                    P_NFC_CODE,
+                    SYSDATE,
+                    P_SOURCE_ID
+                );
+
+                RETURN;
+        END;
+
+        ----------------------------------------------------------------
+        -- Якщо NFC співпадає → нічого не робимо
+        ----------------------------------------------------------------
+        IF V_EXIST_NFC = P_NFC_CODE THEN
+            RETURN;
+        END IF;
+
+        ----------------------------------------------------------------
+        -- Перевірка пріоритетів
+        ----------------------------------------------------------------
+        V_OLD_PRIORITY := GET_SOURCE_PRIORITY(V_EXIST_SOURCE_ID);
+        V_NEW_PRIORITY := GET_SOURCE_PRIORITY(P_SOURCE_ID);
+
+        ----------------------------------------------------------------
+        -- Якщо новий пріоритет нижчий → не оновлюємо
+        ----------------------------------------------------------------
+        IF V_NEW_PRIORITY < V_OLD_PRIORITY THEN
+            RETURN;
+        END IF;
+
+        ----------------------------------------------------------------
+        -- Закриваємо старий запис
+        ----------------------------------------------------------------
+        UPDATE USER_NFC
+           SET DATE_END        = SYSDATE,
+               DEACTIVATED_BY  = 0,
+               DATE_UPDATE     = SYSDATE
+         WHERE ID = V_EXIST_ID;
+
+        ----------------------------------------------------------------
+        -- Створюємо новий запис
+        ----------------------------------------------------------------
+        INSERT INTO USER_NFC (
+            ID,
+            USER_ID,
+            NFC_CODE,
+            DATE_CREATE,
+            DATE_UPDATE,
+            NFC_SOURCE_ID
+        )
+        VALUES (
+            USER_NFC_SEQ.NEXTVAL,
+            P_USER_ID,
+            P_NFC_CODE,
+            SYSDATE,
+            SYSDATE,
+            P_SOURCE_ID
+        );
+
+    END;
+
+
+BEGIN
+
+    ----------------------------------------------------------------
+    -- VIEW1
+    ----------------------------------------------------------------
+    FOR R IN (
+        SELECT USER_ID,
+               NFC_CODE
+          FROM VIEW1
+         WHERE NFC_CODE IS NOT NULL
+    )
+    LOOP
+
+        PROCESS_NFC(
+            P_USER_ID   => R.USER_ID,
+            P_NFC_CODE  => R.NFC_CODE,
+            P_SOURCE_ID => 1
+        );
+
+    END LOOP;
+
+
+    ----------------------------------------------------------------
+    -- VIEW2
+    ----------------------------------------------------------------
+    FOR R IN (
+        SELECT USER_ID,
+               NFC_CODE
+          FROM VIEW2
+         WHERE NFC_CODE IS NOT NULL
+    )
+    LOOP
+
+        PROCESS_NFC(
+            P_USER_ID   => R.USER_ID,
+            P_NFC_CODE  => R.NFC_CODE,
+            P_SOURCE_ID => 2
+        );
+
+    END LOOP;
+
+    COMMIT;
+
+END;
+/
+```
+
+---
+
+# Як працює логіка
+
+## Приклад
+
+### Поточний запис
+
+| USER_ID | NFC_CODE | SOURCE | PRIORITY |
+| ------- | -------- | ------ | -------- |
+| 10      | ABC123   | 2      | 5        |
+
+---
+
+### VIEW1 дає
+
+```text
+ABC999
+SOURCE_ID = 1
+PRIORITY = 1
+```
+
+→ НЕ оновлюємо
+бо `1 < 5`
+
+---
+
+### VIEW2 дає
+
+```text
+ABC999
+SOURCE_ID = 2
+PRIORITY = 5
+```
+
+→ ОНОВЛЮЄМО
+бо `5 >= 5`
+
+---
+
+# Рекомендація
+
+Дуже бажано додати індекс:
+
+```sql
+CREATE INDEX IDX_USER_NFC_ACTIVE
+ON USER_NFC(USER_ID, DATE_END);
+```
+
+---
+
+# Ще одна важлива рекомендація
+
+Краще зробити унікальність активного NFC:
+
+```sql
+CREATE UNIQUE INDEX UX_USER_NFC_ACTIVE
+ON USER_NFC (
+    CASE WHEN DATE_END IS NULL THEN USER_ID END
+);
+```
+
+Це гарантує:
+
+* лише один активний NFC на користувача.
