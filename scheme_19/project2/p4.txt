@@ -1,0 +1,489 @@
+Так, тепер зрозумів вашу ціль точніше.
+Ви хочете саме:
+
+```text
+event-driven architecture
+```
+
+без:
+
+* polling
+* scheduler/job
+* постійних SELECT
+* background loops
+
+І це абсолютно правильний напрямок.
+
+Ідея з:
+
+```text
+main_table
+   ↓ trigger
+event_queue
+   ↓ trigger
+remote signal/webhook
+```
+
+— вже значно краща та безпечніша архітектура.
+
+---
+
+# Найкраща схема для вашого кейсу
+
+# Oracle 10g
+
+## 1. Trigger на бізнес-таблицю
+
+тільки:
+
+```sql
+INSERT INTO EVENT_QUEUE
+```
+
+---
+
+# Чому це правильно
+
+Бо:
+
+✅ мінімальний код у critical transaction
+✅ insert у локальну таблицю — дуже швидко
+✅ без network
+✅ без distributed transaction
+✅ без ризику зависання UPDATE/INSERT
+
+---
+
+# Далі
+
+# EVENT_QUEUE trigger
+
+І вже тут:
+
+* DB_LINK
+* HTTP
+* SIGNAL
+* anything async-like
+
+---
+
+# Чому це краще
+
+Бо queue — це вже технічна таблиця.
+
+Навіть якщо:
+
+* webhook впаде
+* DB_LINK зависне
+* remote Oracle недоступний
+
+ви не ламаєте бізнес-транзакцію.
+
+---
+
+# Тобто архітектура:
+
+```text
+BUSINESS_TABLE
+    ↓
+TRIGGER_1
+    ↓
+EVENT_QUEUE
+    ↓
+TRIGGER_2
+    ↓
+Oracle21/APEX/Webhook
+```
+
+---
+
+# Це вже дуже хороша production схема.
+
+---
+
+# Я б рекомендував саме так:
+
+---
+
+# Oracle 10g
+
+## BUSINESS TABLE
+
+```sql
+AFTER INSERT OR UPDATE
+```
+
+тільки:
+
+```sql
+INSERT INTO EVENT_QUEUE
+(
+    TABLE_NAME,
+    RECORD_ID,
+    EVENT_TYPE,
+    CREATED_AT
+)
+```
+
+---
+
+# EVENT_QUEUE
+
+## Trigger:
+
+```sql
+AFTER INSERT
+```
+
+і тут уже:
+
+```sql
+event_pkg.notify_change@DB21(...)
+```
+
+---
+
+# Чому це набагато безпечніше
+
+Бо:
+
+## навіть якщо remote signal впаде
+
+ви все одно маєте EVENT_QUEUE record.
+
+---
+
+# Далі дуже важливий момент
+
+# Autonomous transaction
+
+Для EVENT_QUEUE trigger.
+
+---
+
+# Чому
+
+Щоб:
+
+```text
+remote notify
+```
+
+не впливав на головний INSERT.
+
+---
+
+# Приклад
+
+```sql
+CREATE OR REPLACE TRIGGER trg_event_queue
+AFTER INSERT ON EVENT_QUEUE
+FOR EACH ROW
+DECLARE
+    PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+
+    event_pkg.notify_change@DB21(
+        :NEW.TABLE_NAME,
+        :NEW.RECORD_ID,
+        :NEW.EVENT_TYPE
+    );
+
+    COMMIT;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
+```
+
+---
+
+# Оце вже дуже хороша схема.
+
+---
+
+# Що відбувається
+
+## BUSINESS INSERT
+
+не чекає remote transaction.
+
+---
+
+# Якщо Oracle 21 недоступний
+
+queue запис лишається.
+
+---
+
+# Тобто:
+
+```text
+main transaction protected
+```
+
+---
+
+# Далі Oracle 21 / APEX
+
+Тут уже набагато цікавіше.
+
+---
+
+# Oracle 21 може реально робити HTTP/Webhook нормально
+
+Бо:
+
+* APEX_WEB_SERVICE
+* UTL_HTTP
+* ORDS REST
+* modern ACL/network
+
+працюють значно краще ніж у 10g.
+
+---
+
+# Ідеальна схема
+
+```text
+Oracle10
+   ↓
+EVENT_QUEUE
+   ↓
+DB_LINK
+   ↓
+Oracle21 EVENT_LOG
+   ↓
+TRIGGER/APEX PROCESS
+   ↓
+HTTP/WebSocket signal
+```
+
+---
+
+# На Oracle 21
+
+можна вже нормально:
+
+## APEX_WEB_SERVICE.make_rest_request
+
+---
+
+# Наприклад
+
+```sql
+DECLARE
+    l_response CLOB;
+BEGIN
+
+    l_response := apex_web_service.make_rest_request(
+        p_url => 'http://nodejs-server:3000/event',
+        p_http_method => 'POST',
+        p_body => '{"id":123}'
+    );
+
+END;
+/
+```
+
+---
+
+# Або UTL_HTTP
+
+але APEX_WEB_SERVICE краще.
+
+---
+
+# І це вже нормально
+
+Бо Oracle 21:
+
+* сучасні ACL
+* стабільні HTTP calls
+* ORDS integration
+* JSON support
+
+---
+
+# І далі Node.js
+
+отримує webhook:
+
+```text
+POST /event
+{
+   id: 123
+}
+```
+
+і пушить через websocket.
+
+---
+
+# Це дуже хороша архітектура.
+
+---
+
+# Найважливіше
+
+# Де чистити queue
+
+---
+
+# Oracle10 EVENT_QUEUE
+
+Після успішної доставки в Oracle21:
+
+```sql
+DELETE FROM EVENT_QUEUE
+WHERE id = :id
+```
+
+---
+
+# Oracle21 EVENT_LOG
+
+Після webhook:
+
+```sql
+DELETE
+WHERE processed = 1
+AND created_at < sysdate - 1/24
+```
+
+---
+
+# Або краще
+
+Retention:
+
+```text
+1-24 години
+```
+
+для audit/debug.
+
+---
+
+# Ще краще
+
+Не DELETE.
+
+---
+
+# Використати partitioning / archive
+
+але в 10g це вже складніше.
+
+---
+
+# Важливий момент
+
+# Не робіть trigger → HTTP напряму
+
+Навіть на 21.
+
+---
+
+# Краще:
+
+## trigger → event_log
+
+---
+
+# а далі:
+
+* ORDS handler
+* APEX automation
+* DBMS_SCHEDULER
+* websocket layer
+
+---
+
+# Але якщо вам треба literally realtime
+
+тоді:
+
+## Trigger на EVENT_LOG
+
+→ HTTP POST
+
+на 21 — уже допустимо.
+
+---
+
+# Чому на 21 це вже нормально
+
+Бо це вже:
+
+* не бізнес таблиця
+* не критична транзакція
+* окрема event layer
+
+---
+
+# Фактично у вас вийде mini event bus
+
+```text
+Oracle10
+   ↓
+Queue
+   ↓
+Oracle21
+   ↓
+Webhook
+   ↓
+WebSocket
+   ↓
+APEX realtime
+```
+
+---
+
+# І це реально хороша архітектура.
+
+---
+
+# Я б особисто для вас зробив саме так
+
+## 1. Мінімальний trigger на бізнес-таблиці
+
+---
+
+## 2. EVENT_QUEUE
+
+---
+
+## 3. Autonomous trigger на EVENT_QUEUE
+
+---
+
+## 4. DB_LINK → Oracle21
+
+---
+
+## 5. Oracle21 trigger/process
+
+---
+
+## 6. Webhook → Node.js websocket server
+
+---
+
+## 7. Cleanup retention
+
+---
+
+# Це:
+
+✅ realtime
+✅ без polling
+✅ без scheduler
+✅ без heavy jobs
+✅ без навантаження
+✅ без scan queue
+✅ event-driven
+✅ production-safe
+✅ дуже добре масштабується

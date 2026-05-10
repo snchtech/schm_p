@@ -1,0 +1,388 @@
+Так, можна. І у вашій архітектурі це вже буде значно безпечніше, ніж робити webhook прямо з бізнес-таблиці.
+
+Тобто:
+
+```text
+BUSINESS_TABLE
+    ↓
+trigger
+    ↓
+EVENT_QUEUE
+    ↓
+trigger
+    ↓
+UTL_HTTP webhook
+```
+
+— це вже цілком робочий варіант для Oracle 10g.
+
+Але тут є кілька критично важливих моментів.
+
+---
+
+# Як це реалізувати на Oracle 10g
+
+# 1. EVENT_QUEUE
+
+```sql
+CREATE TABLE EVENT_QUEUE (
+    ID            NUMBER,
+    TABLE_NAME    VARCHAR2(100),
+    RECORD_ID     NUMBER,
+    EVENT_TYPE    VARCHAR2(20),
+    CREATED_AT    DATE DEFAULT SYSDATE
+);
+```
+
+---
+
+# 2. Trigger на бізнес-таблицю
+
+Мінімальний:
+
+```sql
+CREATE OR REPLACE TRIGGER trg_main_table
+AFTER INSERT OR UPDATE ON MY_TABLE
+FOR EACH ROW
+BEGIN
+
+    INSERT INTO EVENT_QUEUE (
+        ID,
+        TABLE_NAME,
+        RECORD_ID,
+        EVENT_TYPE,
+        CREATED_AT
+    )
+    VALUES (
+        EVENT_QUEUE_SEQ.NEXTVAL,
+        'MY_TABLE',
+        :NEW.ID,
+        CASE
+            WHEN INSERTING THEN 'INSERT'
+            ELSE 'UPDATE'
+        END,
+        SYSDATE
+    );
+
+END;
+/
+```
+
+---
+
+# 3. Trigger на EVENT_QUEUE
+
+І тут уже webhook.
+
+---
+
+# Найважливіше:
+
+# ОБОВ'ЯЗКОВО AUTONOMOUS_TRANSACTION
+
+Інакше webhook буде частиною головної транзакції.
+
+---
+
+# Приклад
+
+```sql
+CREATE OR REPLACE TRIGGER trg_event_queue_webhook
+AFTER INSERT ON EVENT_QUEUE
+FOR EACH ROW
+DECLARE
+
+    PRAGMA AUTONOMOUS_TRANSACTION;
+
+    req   UTL_HTTP.req;
+    resp  UTL_HTTP.resp;
+
+    v_url VARCHAR2(500);
+
+BEGIN
+
+    v_url := 'http://your-node-server:3000/webhook';
+
+    req := UTL_HTTP.begin_request(
+        v_url,
+        'POST',
+        'HTTP/1.1'
+    );
+
+    UTL_HTTP.set_header(req, 'Content-Type', 'application/json');
+
+    UTL_HTTP.write_text(
+        req,
+        '{"table":"' || :NEW.TABLE_NAME ||
+        '","id":"' || :NEW.RECORD_ID ||
+        '","event":"' || :NEW.EVENT_TYPE || '"}'
+    );
+
+    resp := UTL_HTTP.get_response(req);
+
+    UTL_HTTP.end_response(resp);
+
+    COMMIT;
+
+EXCEPTION
+    WHEN OTHERS THEN
+
+        ROLLBACK;
+
+END;
+/
+```
+
+---
+
+# Чому це вже нормально
+
+Бо:
+
+## webhook НЕ впливає на основний INSERT/UPDATE
+
+через:
+
+```sql
+PRAGMA AUTONOMOUS_TRANSACTION;
+```
+
+---
+
+# Це ключовий момент
+
+Без autonomous transaction:
+
+```text
+HTTP timeout
+↓
+INSERT INTO BUSINESS_TABLE fails
+```
+
+---
+
+# А з autonomous:
+
+```text
+INSERT OK
+webhook failed separately
+```
+
+---
+
+# Що реально відбувається
+
+```text
+INSERT business_table
+    ↓
+insert event_queue
+    ↓
+separate autonomous trigger
+    ↓
+HTTP POST
+```
+
+---
+
+# Це вже дуже хороша lightweight event architecture.
+
+---
+
+# Але є важливі ризики
+
+# 1. Oracle 10g UTL_HTTP нестабільний
+
+Особливо:
+
+* timeout
+* DNS
+* SSL
+* HTTPS
+* keepalive
+
+---
+
+# 2. HTTPS може бути проблемою
+
+Oracle 10g дуже погано дружить із сучасним TLS.
+
+---
+
+# Тому:
+
+# КРАЩЕ webhook слати на локальний Node.js
+
+Наприклад:
+
+```text
+Oracle10
+   ↓
+http://192.168.x.x:3000/webhook
+```
+
+НЕ HTTPS.
+
+---
+
+# 3. Timeout обов’язково
+
+Інакше hanging session.
+
+---
+
+# Додайте:
+
+```sql
+UTL_HTTP.set_transfer_timeout(2);
+```
+
+---
+
+# Наприклад
+
+```sql
+req := UTL_HTTP.begin_request(...);
+
+UTL_HTTP.set_transfer_timeout(2);
+```
+
+---
+
+# 4. Не робіть heavy logic
+
+Webhook має бути:
+
+```text
+fire-and-forget
+```
+
+---
+
+# Node.js endpoint
+
+тільки:
+
+```js
+app.post('/webhook', (req, res) => {
+
+   websocketBroadcast(req.body);
+
+   res.sendStatus(200);
+
+});
+```
+
+---
+
+# Без важких DB operations
+
+---
+
+# Ідеальна схема
+
+```text
+Oracle10
+    ↓
+EVENT_QUEUE
+    ↓
+autonomous trigger
+    ↓
+Node.js webhook
+    ↓
+WebSocket broadcast
+    ↓
+APEX frontend
+```
+
+---
+
+# Це вже реально event-driven
+
+І:
+
+✅ без polling
+✅ без scheduler
+✅ без jobs
+✅ майже realtime
+✅ мінімальне навантаження
+
+---
+
+# Але я б ще додав fallback
+
+Наприклад:
+
+```sql
+WEBHOOK_STATUS
+LAST_ERROR
+RETRY_COUNT
+```
+
+---
+
+# Бо якщо Node.js був offline
+
+подія втратиться.
+
+---
+
+# Найкращий компроміс
+
+# EVENT_QUEUE не видаляти одразу
+
+Наприклад:
+
+```sql
+STATUS = 0/1
+```
+
+---
+
+# Node.js після успішного webhook
+
+може викликати:
+
+```sql
+UPDATE EVENT_QUEUE
+SET STATUS = 1
+```
+
+---
+
+# А cleanup:
+
+```sql
+DELETE
+WHERE STATUS = 1
+AND CREATED_AT < SYSDATE - 1
+```
+
+---
+
+# Це вже production-safe.
+
+---
+
+# Найголовніше
+
+# Ваша ідея правильна:
+
+## НЕ робити webhook у trigger бізнес-таблиці
+
+---
+
+# А робити:
+
+```text
+business table
+    ↓
+event_queue
+    ↓
+event trigger
+    ↓
+webhook
+```
+
+---
+
+# Це значно правильніше архітектурно.
