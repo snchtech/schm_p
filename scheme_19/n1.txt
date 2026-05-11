@@ -1,0 +1,372 @@
+Так, бачу проблему. Я помилково просто віддав тобі TXT із загальною концепцією preview, а не адаптацію під твою архітектуру (`canvasController + Zustand + centralized connector store`).
+У тебе preview не працює саме через конфлікт архітектур:
+
+* preview state створюється окремо
+* але render бере дані із Zustand
+* при цьому `segmentMeta` у store не існує або не той
+* плюс ти під час drag все ще викликаєш:
+
+  * `rebuildConnectorGeometry`
+  * `replaceEdge`
+  * rerender connector tree
+
+Тобто в тебе зараз змішано:
+
+* old immediate rebuild flow
+* і новий preview flow
+
+Через це preview фактично не ізольований.
+
+Головна проблема у твоєму коді тут:
+
+```js
+const segmentDrag = useCanvasStore.getState().connectorSegmentDragState
+
+const updatedPoints = applyPreviewSegmentMove({
+   previewState: state,
+   segmentMeta: segmentDrag.segmentMeta,
+})
+```
+
+Але в `handleConnectorSegmentDragStart` ти НЕ кладеш `segmentMeta`.
+
+Ти кладеш:
+
+```js
+store.setConnectorSegmentDragState({
+   edgeId,
+   originalSegmentId: handle.segmentId,
+   orientation: handle.orientation,
+   edgePosition,
+})
+```
+
+Тому:
+
+```js
+segmentDrag.segmentMeta === undefined
+```
+
+і preview silently падає.
+
+---
+
+# ЩО ТРЕБА ЗРОБИТИ
+
+У тебе не треба робити окремий local React state.
+
+У тебе вже є centralized architecture.
+
+Тому preview треба зробити так:
+
+* runtime preview state → в controller
+* lightweight preview points → в Zustand
+* real connector geometry НЕ чіпати
+
+---
+
+# КРИТИЧНИЙ PATCH
+
+## 1. START DRAG
+
+У `handleConnectorSegmentDragStart`
+
+ЗАМІНИ:
+
+```js
+store.setConnectorSegmentDragState({
+   edgeId,
+   originalSegmentId: handle.segmentId,
+   orientation: handle.orientation,
+   edgePosition,
+})
+```
+
+НА:
+
+```js
+store.setConnectorSegmentDragState({
+   edgeId,
+
+   segmentMeta: {
+      ...segments[segIndex],
+
+      startIndex: segIndex,
+      endIndex: segIndex + 1,
+
+      orientation:
+         handle.orientation ||
+         segments[segIndex].orientation,
+   },
+})
+```
+
+---
+
+# 2. ВИДАЛИ З DRAG MOVE
+
+ОЦЕ:
+
+```js
+let next = moveElbowSegmentHandle(
+   connector,
+   dragState,
+   normalizedPos
+)
+
+next = rebuildConnectorGeometry(next, store.nodes)
+
+store.replaceEdge?.(edgeId, next)
+```
+
+ЦЕ НЕ МОЖНА РОБИТИ ПІД ЧАС PREVIEW.
+
+---
+
+# 3. НОВИЙ DRAG MOVE
+
+Твій `handleConnectorSegmentDragMove`
+має виглядати так:
+
+```js
+handleConnectorSegmentDragMove(edgeId, handle, e) {
+
+   const previewState = this.currentPreviewState
+
+   if (!previewState || !previewState.active) {
+      return
+   }
+
+   const stage = e.target.getStage()
+
+   const pos = stage.getPointerPosition()
+
+   updatePreviewMousePosition(previewState, pos)
+
+   schedulePreviewRender({
+
+      previewState,
+
+      render: (state) => {
+
+         const segmentDrag =
+            useCanvasStore
+               .getState()
+               .connectorSegmentDragState
+
+         if (!segmentDrag) return
+
+         const updatedPoints =
+            applyPreviewSegmentMove({
+
+               previewState: state,
+
+               segmentMeta:
+                  segmentDrag.segmentMeta,
+            })
+
+         const flatPoints =
+            updatedPoints.flatMap(p => [p.x, p.y])
+
+         useCanvasStore
+            .getState()
+            .updateConnectorSegmentPreview(
+               edgeId,
+               flatPoints
+            )
+      }
+   })
+}
+```
+
+---
+
+# 4. ZUSTAND STORE
+
+ДОДАЙ:
+
+```js
+connectorSegmentPreview: {},
+```
+
+---
+
+# 5. STORE ACTION
+
+```js
+updateConnectorSegmentPreview(edgeId, points) {
+
+   set(state => ({
+
+      connectorSegmentPreview: {
+
+         ...state.connectorSegmentPreview,
+
+         [edgeId]: points,
+      }
+   }))
+},
+```
+
+---
+
+# 6. CLEAR PREVIEW
+
+```js
+clearConnectorSegmentPreview(edgeId) {
+
+   set(state => {
+
+      const next = {
+         ...state.connectorSegmentPreview
+      }
+
+      delete next[edgeId]
+
+      return {
+         connectorSegmentPreview: next
+      }
+   })
+},
+```
+
+---
+
+# 7. CONNECTORSLAYER PATCH
+
+Оце:
+
+```js
+points={pts}
+```
+
+ЗАМІНИ:
+
+```js
+const previewPoints =
+   connectorSegmentPreview?.[connector.id]
+
+const renderPoints =
+   previewPoints || pts
+```
+
+І:
+
+```js
+points={renderPoints}
+```
+
+---
+
+# 8. КРИТИЧНО
+
+ПІД ЧАС PREVIEW
+НЕ МОЖНА РЕНДЕРИТИ:
+
+```js
+segmentHandles
+pathHandles
+hover overlays
+```
+
+---
+
+# 9. ТОМУ ДОДАЙ
+
+```js
+const isSegmentPreviewDragging =
+   !!connectorSegmentPreview?.[connector.id]
+```
+
+---
+
+# 10. І ОБГОРНИ
+
+```js
+{!isSegmentPreviewDragging && (
+   ...
+)}
+```
+
+для:
+
+* handles
+* pathHandles
+* arrows interaction
+* hover
+
+---
+
+# 11. DRAG END
+
+ЛИШЕ ТУТ:
+
+```js
+let next = moveElbowSegmentHandle(
+   connector,
+   dragState,
+   normalizedPos
+)
+
+next = endConnectorSegmentDrag(next)
+
+next = rebuildConnectorGeometry(
+   next,
+   store.nodes
+)
+
+store.replaceEdge?.(edgeId, next)
+```
+
+---
+
+# 12. ПІСЛЯ commit
+
+```js
+store.clearConnectorSegmentPreview(edgeId)
+```
+
+---
+
+# ЧОМУ В ТЕБЕ НЕ ПРАЦЮВАЛО
+
+Бо preview flow у тебе:
+
+```txt
+mousemove
+  -> preview
+  -> rebuild geometry
+  -> replaceEdge
+  -> rerender handles
+  -> rerender arrows
+```
+
+тобто preview одразу затирався real rebuild'ом.
+
+---
+
+# У ТВОЇЙ АРХІТЕКТУРІ ПРАВИЛЬНО ТАК
+
+```txt
+mousemove
+   -> update lightweight preview points only
+
+mouseup
+   -> rebuild geometry ONCE
+```
+
+---
+
+# НАЙВАЖЛИВІШЕ
+
+У тебе centralized architecture.
+
+Тому:
+
+* НЕ local React state
+* НЕ useRef в component
+* preview runtime state → controller
+* preview render points → Zustand
+* real geometry → тільки на mouseup
+
+Оце ідеально лягає на твою архітектуру.

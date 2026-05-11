@@ -1,0 +1,338 @@
+Так, це вже інша проблема — і вона логічна після того, як ти дозволив detached endpoint.
+
+Зараз твій patch працює тільки коли endpoint attached:
+
+```js
+const endAnchor = endAttached?.anchor
+```
+
+
+
+А коли ти відриваєш endpoint:
+
+```js
+attached.type === "none"
+```
+
+то:
+
+```js
+endAnchor === undefined
+```
+
+і repair layer просто не знає:
+
+* який orientation треба тримати.
+
+---
+
+# Що робить draw.io
+
+Навіть коли endpoint detached:
+
+```text
+остання orientation ЗБЕРІГАЄТЬСЯ
+```
+
+Тобто:
+
+* якщо endpoint був vertical → він залишається vertical
+* якщо horizontal → залишається horizontal
+
+---
+
+# У тебе зараз цього немає
+
+Бо orientation endpoint-а береться лише з:
+
+```js
+attached.anchor
+```
+
+---
+
+# Правильне рішення
+
+Треба додати:
+
+# terminal orientation memory
+
+---
+
+# Нова структура
+
+У connector.route:
+
+```js
+route: {
+   ...
+   terminalDirections: {
+      start: 'horizontal',
+      end: 'vertical'
+   }
+}
+```
+
+---
+
+# Ідея
+
+---
+
+# Якщо attached
+
+```js
+top/bottom => vertical
+left/right => horizontal
+```
+
+---
+
+# Якщо detached
+
+Використовувати:
+
+```js
+route.terminalDirections
+```
+
+---
+
+# Тобто
+
+endpoint orientation має жити:
+
+# незалежно від attachment.
+
+---
+
+# Що треба зробити
+
+---
+
+# 1. Helper
+
+```js
+function getTerminalOrientation(attached, fallback) {
+
+   if (attached?.anchor === 'top') return 'vertical'
+   if (attached?.anchor === 'bottom') return 'vertical'
+
+   if (attached?.anchor === 'left') return 'horizontal'
+   if (attached?.anchor === 'right') return 'horizontal'
+
+   return fallback || null
+}
+```
+
+---
+
+# 2. Під час detach
+
+НЕ втрачати orientation.
+
+---
+
+# Наприклад
+
+Було:
+
+```text
+anchor = top
+```
+
+endpoint orientation:
+
+```text
+vertical
+```
+
+Після detach:
+
+```text
+still vertical
+```
+
+---
+
+# 3. Зберігати в route
+
+Наприклад у:
+
+```js
+handleConnectorEndDragEnd()
+```
+
+---
+
+# 4. repair layer
+
+Зараз:
+
+```js
+repairTerminalOrthogonality(
+   pts,
+   start?.attached,
+   end?.attached,
+)
+```
+
+Треба:
+
+```js
+repairTerminalOrthogonality(
+   pts,
+   startOrientation,
+   endOrientation,
+)
+```
+
+---
+
+# І це НАБАГАТО правильніше
+
+Бо:
+
+# topology не повинна залежати від attachment.
+
+---
+
+# Чому зараз виникає діагональ
+
+Після detach:
+
+```text
+last segment free
+```
+
+і:
+
+```js
+normalizeOrthogonalVertices()
+```
+
+не знає:
+
+* що треба vertical/horizontal terminal.
+
+---
+
+# Найкраща архітектура
+
+---
+
+# Endpoint має:
+
+```js
+endpoint: {
+   x,
+   y,
+
+   attached,
+
+   preferredOrientation,
+}
+```
+
+---
+
+# А НЕ
+
+```js
+orientation derives only from attached
+```
+
+---
+
+# Що ще важливо
+
+Коли endpoint detached:
+
+* orientation має мінятись тільки:
+
+  * explicit user drag
+  * topology repair
+  * rerouting.
+
+А НЕ:
+
+```text
+автоматично втрачатися
+```
+
+---
+
+# Тобто
+
+Було:
+
+```text
+------|
+      |
+      END
+```
+
+Після detach:
+
+# має залишитись:
+
+```text
+------|
+      |
+      END
+```
+
+А не:
+
+```text
+------\
+       \
+        END
+```
+
+---
+
+# Що я б радив
+
+---
+
+# Додати в connector model
+
+```js
+route: {
+   ...
+   terminalDirections: {
+      start: 'horizontal',
+      end: 'vertical'
+   }
+}
+```
+
+---
+
+# Це стане foundation для:
+
+* smart rerouting
+* obstacle routing
+* sticky terminals
+* port constraints
+* preferred routing axis
+* draw.io behavior
+
+---
+
+# Найважливіше
+
+У draw.io:
+
+# endpoint direction != anchor side
+
+anchor side:
+
+```text
+source of initial constraint
+```
+
+але потім:
+
+# topology живе окремо.

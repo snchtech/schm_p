@@ -1,0 +1,472 @@
+
+DETACHED TERMINAL ORIENTATION PATCH
+===================================
+
+МЕТА
+----
+
+Після від'єднання endpoint від node:
+- terminal segment НЕ повинен ставати diagonal
+- orientation terminal segment повинна зберігатись
+- behavior має бути як у draw.io
+
+ПРИКЛАД
+-------
+
+Було:
+
+------|
+      |
+      END
+
+Після detach:
+orientation повинна залишитись vertical.
+
+НЕ:
+
+------\
+       \
+        END
+
+
+======================================================================
+1. ПРОБЛЕМА ПОТОЧНОЇ АРХІТЕКТУРИ
+======================================================================
+
+Зараз terminal orientation визначається лише через:
+
+attached.anchor
+
+тобто:
+
+top/bottom  -> vertical
+left/right  -> horizontal
+
+Але після detach:
+
+attached.type === "none"
+
+і repair system більше не знає:
+- який orientation тримати.
+
+
+======================================================================
+2. НОВА АРХІТЕКТУРА
+======================================================================
+
+ДОДАТИ:
+
+route.terminalDirections
+
+ПРИКЛАД:
+
+route: {
+   vertices: [],
+   pathHandles: [],
+
+   terminalDirections: {
+      start: "horizontal",
+      end: "vertical",
+   }
+}
+
+
+======================================================================
+3. PATCH connectorModel.js
+======================================================================
+
+ЗНАЙТИ:
+
+route = {
+  vertices: [],
+  pathHandles: [],
+  fixedAnchors: null,
+};
+
+І ЗАМІНИТИ НА:
+
+route = {
+  vertices: [],
+  pathHandles: [],
+  fixedAnchors: null,
+
+  terminalDirections: {
+    start: "horizontal",
+    end: "horizontal",
+  },
+};
+
+
+======================================================================
+4. НОВИЙ HELPER
+======================================================================
+
+СТВОРИТИ FILE:
+
+src/lib/connectors/connectorTerminalOrientation.js
+
+
+======================================================================
+5. КОД
+======================================================================
+
+export function anchorToOrientation(anchor) {
+
+  if (anchor === "top") {
+    return "vertical"
+  }
+
+  if (anchor === "bottom") {
+    return "vertical"
+  }
+
+  if (anchor === "left") {
+    return "horizontal"
+  }
+
+  if (anchor === "right") {
+    return "horizontal"
+  }
+
+  return null
+}
+
+export function resolveTerminalOrientation(
+  attached,
+  fallback,
+) {
+
+  const derived = anchorToOrientation(attached?.anchor)
+
+  if (derived) {
+    return derived
+  }
+
+  return fallback || "horizontal"
+}
+
+export function updateConnectorTerminalDirections(connector) {
+
+  if (!connector || connector.kind !== "connector") {
+    return connector
+  }
+
+  const current = connector.route?.terminalDirections || {}
+
+  const startDirection = resolveTerminalOrientation(
+    connector.start?.attached,
+    current.start,
+  )
+
+  const endDirection = resolveTerminalOrientation(
+    connector.end?.attached,
+    current.end,
+  )
+
+  return {
+    ...connector,
+
+    route: {
+      ...connector.route,
+
+      terminalDirections: {
+        start: startDirection,
+        end: endDirection,
+      },
+    },
+  }
+}
+
+
+======================================================================
+6. PATCH rebuildConnectorGeometry()
+======================================================================
+
+В connectorGeometry.js
+
+ДОДАТИ IMPORT:
+
+import {
+  updateConnectorTerminalDirections,
+} from "./connectorTerminalOrientation"
+
+
+----------------------------------------------------------------------
+ЗНАЙТИ
+----------------------------------------------------------------------
+
+export function rebuildConnectorGeometry(connector, nodes) {
+
+----------------------------------------------------------------------
+І НА ПОЧАТКУ FUNCTION ДОДАТИ:
+----------------------------------------------------------------------
+
+connector = updateConnectorTerminalDirections(connector)
+
+
+======================================================================
+7. PATCH connectorTopologyRepair.js
+======================================================================
+
+ЗАРАЗ:
+
+repairTerminalOrthogonality(
+   points,
+   startAttached,
+   endAttached,
+)
+
+ТРЕБА ЗАМІНИТИ НА:
+
+repairTerminalOrthogonality(
+   points,
+   startOrientation,
+   endOrientation,
+)
+
+
+======================================================================
+8. PATCH repair layer
+======================================================================
+
+ЗАМІНИТИ:
+
+function isVerticalAnchor(anchor)
+
+НА:
+
+function isVerticalOrientation(orientation)
+
+І:
+
+return orientation === 'vertical'
+
+
+----------------------------------------------------------------------
+ТЕ САМЕ:
+----------------------------------------------------------------------
+
+function isHorizontalOrientation(orientation)
+
+return orientation === 'horizontal'
+
+
+======================================================================
+9. PATCH repairEnd()
+======================================================================
+
+ЗАМІНИТИ:
+
+function repairEnd(points, endAnchor)
+
+НА:
+
+function repairEnd(points, endOrientation)
+
+
+----------------------------------------------------------------------
+І ВСЕРЕДИНІ:
+----------------------------------------------------------------------
+
+isVerticalAnchor(endAnchor)
+
+НА:
+
+isVerticalOrientation(endOrientation)
+
+
+----------------------------------------------------------------------
+І:
+----------------------------------------------------------------------
+
+isHorizontalAnchor(endAnchor)
+
+НА:
+
+isHorizontalOrientation(endOrientation)
+
+
+======================================================================
+10. PATCH repairStart()
+======================================================================
+
+ЗАМІНИТИ:
+
+function repairStart(points, startAnchor)
+
+НА:
+
+function repairStart(points, startOrientation)
+
+
+----------------------------------------------------------------------
+І ВСЕРЕДИНІ:
+----------------------------------------------------------------------
+
+isVerticalAnchor(startAnchor)
+
+НА:
+
+isVerticalOrientation(startOrientation)
+
+
+----------------------------------------------------------------------
+І:
+----------------------------------------------------------------------
+
+isHorizontalAnchor(startAnchor)
+
+НА:
+
+isHorizontalOrientation(startOrientation)
+
+
+======================================================================
+11. PATCH MAIN FUNCTION
+======================================================================
+
+ЗАРАЗ:
+
+export function repairTerminalOrthogonality(
+  points,
+  startAttached,
+  endAttached,
+)
+
+----------------------------------------------------------------------
+ЗАМІНИТИ НА:
+----------------------------------------------------------------------
+
+export function repairTerminalOrthogonality(
+  points,
+  startOrientation,
+  endOrientation,
+)
+
+
+----------------------------------------------------------------------
+І ВСЕРЕДИНІ:
+----------------------------------------------------------------------
+
+if (startAnchor) {
+   out = repairStart(out, startAnchor)
+}
+
+----------------------------------------------------------------------
+ЗАМІНИТИ НА:
+----------------------------------------------------------------------
+
+if (startOrientation) {
+   out = repairStart(out, startOrientation)
+}
+
+
+----------------------------------------------------------------------
+І:
+----------------------------------------------------------------------
+
+if (endAnchor) {
+   out = repairEnd(out, endAnchor)
+}
+
+----------------------------------------------------------------------
+ЗАМІНИТИ НА:
+----------------------------------------------------------------------
+
+if (endOrientation) {
+   out = repairEnd(out, endOrientation)
+}
+
+
+======================================================================
+12. PATCH buildBaseRouteWithMeta()
+======================================================================
+
+ЗАРАЗ:
+
+let repaired = repairTerminalOrthogonality(
+   pts,
+   start?.attached,
+   end?.attached,
+)
+
+----------------------------------------------------------------------
+ЗАМІНИТИ НА:
+----------------------------------------------------------------------
+
+let repaired = repairTerminalOrthogonality(
+
+   pts,
+
+   route?.terminalDirections?.start,
+
+   route?.terminalDirections?.end,
+)
+
+
+======================================================================
+13. ЩО ВІДБУДЕТЬСЯ ТЕПЕР
+======================================================================
+
+SCENARIO:
+
+1. endpoint attached to TOP anchor
+
+terminalDirections.end:
+    "vertical"
+
+2. user detaches endpoint
+
+attached.type:
+    "none"
+
+АЛЕ:
+
+terminalDirections.end:
+    "vertical"
+
+залишається.
+
+3. repair layer продовжує підтримувати:
+
+prev.x === end.x
+
+тобто:
+vertical terminal.
+
+
+======================================================================
+14. ЩО ЦЕ ДАСТЬ
+======================================================================
+
+ПІСЛЯ DETACH:
+
+GOOD:
+
+------|
+      |
+      END
+
+BAD (ЗНИКНЕ):
+
+------\
+       \
+        END
+
+
+======================================================================
+15. ЧОМУ ЦЕ ПРАВИЛЬНА АРХІТЕКТУРА
+======================================================================
+
+У draw.io:
+
+endpoint orientation
+НЕ залежить від:
+- current attachment
+
+orientation — це topology state.
+
+Саме тому:
+- routing stable
+- no diagonal artifacts
+- sticky orthogonal behavior

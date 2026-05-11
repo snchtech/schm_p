@@ -1,0 +1,430 @@
+```txt
+========================================================
+PATCH: CONNECTOR SEGMENT PREVIEW
+FOR CENTRALIZED canvasController + Zustand
+========================================================
+
+
+########################################################
+1. ПРОБЛЕМА
+########################################################
+
+Зараз у тебе during drag викликається:
+
+- moveElbowSegmentHandle()
+- rebuildConnectorGeometry()
+- replaceEdge()
+
+на КОЖЕН mousemove.
+
+Через це:
+- React rerender storm
+- Konva hit graph rebuild
+- rebuild handles
+- rebuild arrows
+- preview фактично не видно
+
+
+########################################################
+2. ІДЕЯ PATCH
+########################################################
+
+mousemove:
+    ONLY preview points update
+
+mouseup:
+    FULL rebuildConnectorGeometry()
+
+
+========================================================
+3. PATCH STORE (useCanvasStore.js)
+========================================================
+
+
+--------------------------------------------------------
+3.1 STATE
+--------------------------------------------------------
+
+ДОДАТИ В STATE:
+
+connectorSegmentPreview: {},
+
+
+--------------------------------------------------------
+3.2 ACTION
+--------------------------------------------------------
+
+ДОДАТИ:
+
+updateConnectorSegmentPreview(edgeId, points) {
+
+   set(state => ({
+
+      connectorSegmentPreview: {
+
+         ...state.connectorSegmentPreview,
+
+         [edgeId]: points,
+      }
+   }))
+},
+
+
+--------------------------------------------------------
+3.3 CLEAR ACTION
+--------------------------------------------------------
+
+ДОДАТИ:
+
+clearConnectorSegmentPreview(edgeId) {
+
+   set(state => {
+
+      const next = {
+         ...state.connectorSegmentPreview
+      }
+
+      delete next[edgeId]
+
+      return {
+         connectorSegmentPreview: next
+      }
+   })
+},
+
+
+
+========================================================
+4. PATCH handleConnectorSegmentDragStart
+========================================================
+
+FILE:
+canvasController.js
+
+
+--------------------------------------------------------
+4.1 ЗНАЙТИ
+--------------------------------------------------------
+
+store.setConnectorSegmentDragState({
+
+   edgeId,
+   originalSegmentId: handle.segmentId,
+   orientation: handle.orientation,
+   edgePosition,
+})
+
+
+--------------------------------------------------------
+4.2 ЗАМІНИТИ НА
+--------------------------------------------------------
+
+store.setConnectorSegmentDragState({
+
+   edgeId,
+
+   segmentMeta: {
+
+      ...segments[segIndex],
+
+      startIndex: segIndex,
+
+      endIndex: segIndex + 1,
+
+      orientation:
+         handle.orientation ||
+         segments[segIndex].orientation,
+   },
+})
+
+
+========================================================
+5. PATCH handleConnectorSegmentDragMove
+========================================================
+
+FILE:
+canvasController.js
+
+
+--------------------------------------------------------
+5.1 ВИДАЛИТИ
+--------------------------------------------------------
+
+let next = moveElbowSegmentHandle(
+   connector,
+   dragState,
+   normalizedPos
+)
+
+next = rebuildConnectorGeometry(
+   next,
+   store.nodes
+)
+
+store.replaceEdge?.(edgeId, next)
+
+
+--------------------------------------------------------
+5.2 ЗАМІНИТИ НА
+--------------------------------------------------------
+
+const previewState = this.currentPreviewState
+
+if (!previewState || !previewState.active) {
+   return
+}
+
+const stage = e.target.getStage()
+
+const pos = stage.getPointerPosition()
+
+updatePreviewMousePosition(
+   previewState,
+   pos
+)
+
+schedulePreviewRender({
+
+   previewState,
+
+   render: (state) => {
+
+      const segmentDrag =
+         useCanvasStore
+            .getState()
+            .connectorSegmentDragState
+
+      if (!segmentDrag) {
+         return
+      }
+
+      const updatedPoints =
+         applyPreviewSegmentMove({
+
+            previewState: state,
+
+            segmentMeta:
+               segmentDrag.segmentMeta,
+         })
+
+      const flatPoints =
+         updatedPoints.flatMap(
+            p => [p.x, p.y]
+         )
+
+      useCanvasStore
+         .getState()
+         .updateConnectorSegmentPreview(
+            edgeId,
+            flatPoints
+         )
+   }
+})
+
+
+========================================================
+6. PATCH handleConnectorSegmentDragEnd
+========================================================
+
+FILE:
+canvasController.js
+
+
+--------------------------------------------------------
+6.1 ПІСЛЯ
+--------------------------------------------------------
+
+store.replaceEdge?.(edgeId, next)
+
+
+--------------------------------------------------------
+6.2 ДОДАТИ
+--------------------------------------------------------
+
+store.clearConnectorSegmentPreview(edgeId)
+
+
+
+========================================================
+7. PATCH CONNECTORSLAYER
+========================================================
+
+FILE:
+ConnectorsLayer.js
+
+
+########################################################
+ВАЖЛИВО
+########################################################
+
+ОСЬ ТУТ ТИ ЗАПЛУТАВСЯ.
+
+
+--------------------------------------------------------
+7.1 ЗНАЙТИ
+--------------------------------------------------------
+
+<Line
+   points={pts}
+
+
+--------------------------------------------------------
+7.2 ПЕРЕД return (
+--------------------------------------------------------
+
+ДОДАТИ:
+
+const previewPoints =
+   connectorSegmentPreview?.[connector.id]
+
+const renderPoints =
+   previewPoints || pts
+
+
+########################################################
+ПРИКЛАД
+########################################################
+
+
+const pts =
+   connector.geometry.points
+
+
+ДОДАТИ ПІСЛЯ ЦЬОГО:
+
+
+const previewPoints =
+   connectorSegmentPreview?.[connector.id]
+
+const renderPoints =
+   previewPoints || pts
+
+
+
+--------------------------------------------------------
+7.3 ТЕПЕР
+--------------------------------------------------------
+
+ЗАМІСТЬ:
+
+points={pts}
+
+
+ПОСТАВИТИ:
+
+points={renderPoints}
+
+
+
+########################################################
+ПОВНИЙ ПРИКЛАД
+########################################################
+
+БУЛО:
+
+<Line
+   points={pts}
+   stroke={stroke}
+/>
+
+
+СТАНЕ:
+
+const previewPoints =
+   connectorSegmentPreview?.[connector.id]
+
+const renderPoints =
+   previewPoints || pts
+
+
+<Line
+   points={renderPoints}
+   stroke={stroke}
+/>
+
+
+
+========================================================
+8. PATCH CONNECTORSLAYER (store selector)
+========================================================
+
+У ConnectorsLayer.js
+
+ДОДАТИ:
+
+const connectorSegmentPreview =
+   useCanvasStore(
+      state => state.connectorSegmentPreview
+   )
+
+
+
+========================================================
+9. HIDE HANDLES DURING PREVIEW
+========================================================
+
+ДОДАТИ:
+
+const isSegmentPreviewDragging =
+   !!connectorSegmentPreview?.[connector.id]
+
+
+
+--------------------------------------------------------
+9.1 ОБГОРНУТИ
+--------------------------------------------------------
+
+segmentHandles
+
+У:
+
+{!isSegmentPreviewDragging && (
+   ...
+)}
+
+
+--------------------------------------------------------
+9.2 ОБГОРНУТИ
+--------------------------------------------------------
+
+pathHandles
+
+У:
+
+{!isSegmentPreviewDragging && (
+   ...
+)}
+
+
+========================================================
+10. PREVIEW FLAGS
+========================================================
+
+У <Line />
+
+ДОДАТИ:
+
+perfectDrawEnabled={false}
+shadowForStrokeEnabled={false}
+listening={false}
+hitStrokeWidth={0}
+
+
+
+========================================================
+11. RESULT
+========================================================
+
+mousemove:
+   ONLY lightweight preview line
+
+mouseup:
+   ONE rebuildConnectorGeometry()
+
+RESULT:
+- smooth drag
+- no lag
+- no redraw storm
+- draw.io behavior
+========================================================
+```
