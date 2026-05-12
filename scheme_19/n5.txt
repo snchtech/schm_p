@@ -1,0 +1,580 @@
+Добре. Тоді дам тобі повний refactor текстом.
+Це буде вже правильна topology-based модель для `pathHandles`, яка:
+
+* НЕ буде ламатись після normalize
+* НЕ буде залежати від runtime segment ids
+* буде стабільно працювати з drag/rebuild
+* сумісна з твоєю новою архітектурою internal vertices.
+
+---
+
+# 1. ГОЛОВНА ПРОБЛЕМА ЗАРАЗ
+
+Зараз у тебе:
+
+```js
+pathHandle.parentSegmentId
+```
+
+але `segmentId`:
+
+* runtime
+* rebuild-иться
+* normalize-иться
+* змінюється після drag.
+
+Тому:
+
+* handles "відвалюються"
+* segment match ламається
+* topology стає нестабільною.
+
+---
+
+# 2. ПРАВИЛЬНА МОДЕЛЬ
+
+---
+
+## ЗАРАЗ
+
+```js
+{
+   id,
+   parentSegmentId,
+   axis,
+   x,
+   y,
+}
+```
+
+---
+
+## ТРЕБА
+
+```js
+{
+   id,
+
+   beforeVertexId,
+   afterVertexId,
+
+   axis,
+
+   offset,
+   depth,
+
+   x,
+   y,
+}
+```
+
+---
+
+# 3. ЩО ЦЕ ОЗНАЧАЄ
+
+---
+
+## beforeVertexId
+
+id вершини ДО segment.
+
+---
+
+## afterVertexId
+
+id вершини ПІСЛЯ segment.
+
+---
+
+# ПРИКЛАД
+
+---
+
+## FULL ROUTE
+
+```txt
+start ---- v1 ---- v2 ---- end
+```
+
+---
+
+## HANDLE НА segment start -> v1
+
+```js
+{
+   beforeVertexId: "start",
+   afterVertexId: v1.id,
+}
+```
+
+---
+
+# 4. ЧОМУ ЦЕ СТАБІЛЬНО
+
+Бо:
+
+* topology vertices стабільні
+* runtime geometry ні.
+
+---
+
+# 5. createPathHandleAtSegment()
+
+---
+
+## ЗАРАЗ
+
+```js
+parentSegmentId: segmentId
+```
+
+---
+
+## ТРЕБА ПЕРЕПИСАТИ
+
+---
+
+# НОВА ВЕРСІЯ
+
+```js
+export function createPathHandleAtSegment(
+  connector,
+  segmentId,
+) {
+  const segments = connector.geometry?.segmentsMeta || []
+
+  const seg = segments.find(
+    (s) => s.id === segmentId
+  )
+
+  if (!seg) return null
+
+  return {
+    id: crypto.randomUUID(),
+
+    beforeVertexId: seg.sourceFrom,
+    afterVertexId: seg.sourceTo,
+
+    axis:
+      seg.orientation === "horizontal"
+        ? "y"
+        : "x",
+
+    offset: 0,
+    depth: 20,
+
+    x: seg.cx,
+    y: seg.cy,
+  }
+}
+```
+
+---
+
+# 6. ВАЖЛИВО
+
+Оце:
+
+```js
+sourceFrom
+sourceTo
+```
+
+у тебе ВЖЕ Є. 
+
+І це дуже добре.
+
+---
+
+# 7. ТЕПЕР ПЕРЕПИСУЄМО BUILD
+
+---
+
+# ЗАРАЗ
+
+```js
+insertPathHandleIntoSegmentById()
+```
+
+---
+
+# ПРОБЛЕМА
+
+Воно шукає:
+
+* runtime segment.
+
+---
+
+# ТРЕБА
+
+Шукати:
+
+* topology pair.
+
+---
+
+# 8. НОВИЙ HELPER
+
+---
+
+## ДОДАЙ
+
+```js
+function findSegmentIndexByVertexPair(
+  fullRoute,
+  beforeId,
+  afterId,
+) {
+  for (let i = 0; i < fullRoute.length - 1; i++) {
+
+    const a = fullRoute[i]
+    const b = fullRoute[i + 1]
+
+    if (
+      a.id === beforeId &&
+      b.id === afterId
+    ) {
+      return i
+    }
+  }
+
+  return -1
+}
+```
+
+---
+
+# 9. ПЕРЕПИСУЄМО insertPathHandleIntoSegmentById
+
+---
+
+# ЗАМІНИ НА:
+
+```js
+export function insertPathHandleIntoRoute(
+  routeBuild,
+  pathHandle,
+) {
+  if (!routeBuild || !pathHandle) {
+    return routeBuild
+  }
+
+  const full = []
+
+  for (let i = 0; i < routeBuild.points.length; i += 2) {
+    full.push({
+      x: routeBuild.points[i],
+      y: routeBuild.points[i + 1],
+    })
+  }
+
+  const topology =
+    routeBuild.topologyPoints || []
+
+  const segmentIndex =
+    findSegmentIndexByVertexPair(
+      topology,
+      pathHandle.beforeVertexId,
+      pathHandle.afterVertexId,
+    )
+
+  if (segmentIndex < 0) {
+    return routeBuild
+  }
+
+  const flatIndex = segmentIndex * 2
+
+  const x1 = full[segmentIndex].x
+  const y1 = full[segmentIndex].y
+
+  const x2 = full[segmentIndex + 1].x
+  const y2 = full[segmentIndex + 1].y
+
+  const before =
+    routeBuild.points.slice(
+      0,
+      flatIndex + 2,
+    )
+
+  const after =
+    routeBuild.points.slice(
+      flatIndex + 2,
+    )
+
+  let inserted = []
+
+  const half = pathHandle.depth || 20
+
+  if (pathHandle.axis === "y") {
+
+    const leftX =
+      pathHandle.x - half
+
+    const rightX =
+      pathHandle.x + half
+
+    inserted = [
+      leftX, y1,
+      leftX, pathHandle.y,
+
+      rightX, pathHandle.y,
+      rightX, y1,
+    ]
+  }
+
+  if (pathHandle.axis === "x") {
+
+    const topY =
+      pathHandle.y - half
+
+    const bottomY =
+      pathHandle.y + half
+
+    inserted = [
+      x1, topY,
+      pathHandle.x, topY,
+
+      pathHandle.x, bottomY,
+      x1, bottomY,
+    ]
+  }
+
+  const nextPoints =
+    normalizePoints([
+      ...before,
+      ...inserted,
+      ...after,
+    ])
+
+  return {
+    ...routeBuild,
+
+    points: nextPoints,
+  }
+}
+```
+
+---
+
+# 10. ДОДАЙ topologyPoints
+
+---
+
+# В buildBaseRouteWithMeta
+
+---
+
+## ДОДАЙ:
+
+```js
+topologyPoints: pts,
+```
+
+---
+
+# БУЛО
+
+```js
+return {
+   points,
+   segmentsMeta,
+}
+```
+
+---
+
+# СТАЛО
+
+```js
+return {
+   points,
+   segmentsMeta,
+   topologyPoints: pts,
+}
+```
+
+---
+
+# 11. buildOrthogonalElbowGeometry()
+
+---
+
+# ЗАРАЗ
+
+```js
+insertPathHandleIntoSegmentById()
+```
+
+---
+
+# ЗАМІНИ НА
+
+```js
+insertPathHandleIntoRoute()
+```
+
+---
+
+# 12. ЩО ТЕПЕР ВАЖЛИВО
+
+---
+
+# pathHandles НЕ створюють topology
+
+вони:
+
+* лише deform geometry.
+
+---
+
+# ТОМУ
+
+НЕ:
+
+* додавай їх у vertices
+* не normalize їх як topology
+* не rebuild через них topology.
+
+---
+
+# 13. moveConnectorPathHandle()
+
+---
+
+# МАЙЖЕ ПРАВИЛЬНИЙ
+
+ТІЛЬКИ:
+
+* не чіпай topology
+* не rebuild vertices.
+
+---
+
+# ПРАВИЛЬНО
+
+```js
+return {
+   ...connector,
+
+   route: {
+      ...connector.route,
+
+      pathHandles: nextPathHandles,
+   },
+}
+```
+
+У тебе це вже є. 
+
+---
+
+# 14. НЕ ДОЗВОЛЯЙ NESTED HANDLES
+
+---
+
+# ЗАРАЗ
+
+У тебе є:
+
+```js
+kind: "path-inner"
+```
+
+---
+
+# Я РЕКОМЕНДУЮ
+
+---
+
+# У getConnectorSegmentHandles()
+
+---
+
+## ДОДАЙ
+
+```js
+.filter(seg => seg.kind === "base")
+```
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* deformation of deformation
+* дуже швидко перетворюється на routing hell.
+
+---
+
+# 15. ПРАВИЛЬНА АРХІТЕКТУРА ПІСЛЯ PATCH
+
+---
+
+# TOPOLOGY
+
+```js
+route.vertices
+```
+
+---
+
+# MODIFIERS
+
+```js
+route.pathHandles
+```
+
+---
+
+# RUNTIME
+
+```js
+geometry.points
+geometry.segmentsMeta
+```
+
+---
+
+# 16. ГОЛОВНЕ ПРАВИЛО
+
+---
+
+# НЕ РОБИ
+
+```txt
+pathHandle -> topology vertex
+```
+
+ніколи.
+
+---
+
+# ІНАКШЕ ЗНОВУ БУДУТЬ:
+
+* exploding routes
+* duplicate bends
+* normalize conflicts
+* recursive rebuild issues
+
+---
+
+# 17. РЕЗУЛЬТАТ
+
+Після цього:
+
+* path handles стабільні
+* rebuild безпечний
+* normalize не ламає handles
+* segment drag працює
+* topology repair працює
+* detached terminals працюють
+* preview system сумісний
+
+І твоя архітектура вже стане дуже близькою до:
+
+* draw.io
+* mxGraph
+* JointJS
+* GoJS orthogonal routing.

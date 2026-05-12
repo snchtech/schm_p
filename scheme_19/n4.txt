@@ -1,0 +1,400 @@
+Я тобі підготував архітектурно правильне рішення саме під твою поточну систему (`route.vertices`, `geometry.points`, `segmentsMeta`, `pathHandles`, preview/render lifecycle), без повного переписування редактора.
+
+Головна ідея:
+
+* `route.vertices` = ТІЛЬКИ internal bend points
+* `full route` = `[start, ...vertices, end]`
+* terminal segments не повинні мутувати `vertices` напряму як повний маршрут
+* preview не викликає normalize
+* dragEnd завжди викликає normalize + rebuild
+
+Нижче готовий план + кодові вставки.
+
+---
+
+# 1. ДОДАЙ НОВИЙ HELPER
+
+Файл:
+
+```txt
+src/features/scheme/ui/canvas/connectorEditing.js
+```
+
+ДОДАЙ:
+
+```js
+export function buildFullRoute(start, end, vertices = []) {
+  return [
+    createRoutePoint(start.x, start.y),
+    ...cloneRoutePoints(vertices),
+    createRoutePoint(end.x, end.y),
+  ]
+}
+
+export function extractInternalVertices(fullRoute) {
+  if (fullRoute.length <= 2) return []
+
+  return fullRoute.slice(1, fullRoute.length - 1)
+}
+```
+
+---
+
+# 2. ПЕРЕПИШИ moveFirstOrthogonalSegment
+
+ЗАМІСТЬ поточної логіки.
+
+---
+
+## НОВА ВЕРСІЯ
+
+```js
+export function moveFirstOrthogonalSegment(
+  connector,
+  orientation,
+  pos,
+) {
+  const { start, end } = getActiveAnchors(connector)
+
+  if (!start || !end) return connector
+
+  const vertices = cloneRoutePoints(
+    connector.route?.vertices || [],
+  )
+
+  // FULL ROUTE
+  const full = buildFullRoute(start, end, vertices)
+
+  if (full.length < 3) return connector
+
+  const nextFull = cloneRoutePoints(full)
+
+  // first segment:
+  // full[0] -> full[1]
+
+  if (orientation === 'horizontal') {
+    const newY = pos.y
+
+    const alreadyExtended =
+      nextFull.length >= 4 &&
+      nextFull[0].x === nextFull[1].x &&
+      nextFull[1].y === nextFull[2].y
+
+    if (alreadyExtended) {
+      nextFull[1] = {
+        ...nextFull[1],
+        y: newY,
+      }
+
+      nextFull[2] = {
+        ...nextFull[2],
+        y: newY,
+      }
+    } else {
+      // insert new elbow
+      nextFull.splice(
+        1,
+        0,
+        createRoutePoint(start.x, newY),
+      )
+
+      nextFull.splice(
+        2,
+        0,
+        createRoutePoint(nextFull[3].x, newY),
+      )
+    }
+  }
+
+  if (orientation === 'vertical') {
+    const newX = pos.x
+
+    const alreadyExtended =
+      nextFull.length >= 4 &&
+      nextFull[0].y === nextFull[1].y &&
+      nextFull[1].x === nextFull[2].x
+
+    if (alreadyExtended) {
+      nextFull[1] = {
+        ...nextFull[1],
+        x: newX,
+      }
+
+      nextFull[2] = {
+        ...nextFull[2],
+        x: newX,
+      }
+    } else {
+      nextFull.splice(
+        1,
+        0,
+        createRoutePoint(newX, start.y),
+      )
+
+      nextFull.splice(
+        2,
+        0,
+        createRoutePoint(newX, nextFull[3].y),
+      )
+    }
+  }
+
+  // REMOVE start/end before save
+  const internalVertices =
+    extractInternalVertices(nextFull)
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: internalVertices,
+    },
+  }
+}
+```
+
+---
+
+# 3. ПЕРЕПИШИ moveLastOrthogonalSegment
+
+Аналогічно.
+
+---
+
+## НОВА ВЕРСІЯ
+
+```js
+export function moveLastOrthogonalSegment(
+  connector,
+  orientation,
+  pos,
+) {
+  const { start, end } = getActiveAnchors(connector)
+
+  if (!start || !end) return connector
+
+  const vertices = cloneRoutePoints(
+    connector.route?.vertices || [],
+  )
+
+  const full = buildFullRoute(start, end, vertices)
+
+  if (full.length < 3) return connector
+
+  const nextFull = cloneRoutePoints(full)
+
+  const last = nextFull.length - 1
+
+  // segment:
+  // full[last - 1] -> full[last]
+
+  if (orientation === 'horizontal') {
+    const newY = pos.y
+
+    const alreadyExtended =
+      nextFull.length >= 4 &&
+      nextFull[last].x === nextFull[last - 1].x &&
+      nextFull[last - 1].y === nextFull[last - 2].y
+
+    if (alreadyExtended) {
+      nextFull[last - 1] = {
+        ...nextFull[last - 1],
+        y: newY,
+      }
+
+      nextFull[last - 2] = {
+        ...nextFull[last - 2],
+        y: newY,
+      }
+    } else {
+      nextFull.splice(
+        last,
+        0,
+        createRoutePoint(end.x, newY),
+      )
+
+      nextFull.splice(
+        last,
+        0,
+        createRoutePoint(nextFull[last - 1].x, newY),
+      )
+    }
+  }
+
+  if (orientation === 'vertical') {
+    const newX = pos.x
+
+    const alreadyExtended =
+      nextFull.length >= 4 &&
+      nextFull[last].y === nextFull[last - 1].y &&
+      nextFull[last - 1].x === nextFull[last - 2].x
+
+    if (alreadyExtended) {
+      nextFull[last - 1] = {
+        ...nextFull[last - 1],
+        x: newX,
+      }
+
+      nextFull[last - 2] = {
+        ...nextFull[last - 2],
+        x: newX,
+      }
+    } else {
+      nextFull.splice(
+        last,
+        0,
+        createRoutePoint(newX, end.y),
+      )
+
+      nextFull.splice(
+        last,
+        0,
+        createRoutePoint(newX, nextFull[last - 1].y),
+      )
+    }
+  }
+
+  const internalVertices =
+    extractInternalVertices(nextFull)
+
+  return {
+    ...connector,
+    route: {
+      ...connector.route,
+      vertices: internalVertices,
+    },
+  }
+}
+```
+
+---
+
+# 4. НЕ ВИКЛИКАЙ normalize ПІД ЧАС PREVIEW
+
+У тебе це вже майже правильно зроблено.
+
+Ось тут:
+
+```js
+handleConnectorSegmentDragMove
+```
+
+залишай:
+
+```js
+vertices: internalVertices
+```
+
+БЕЗ:
+
+```js
+normalizeOrthogonalVertices()
+```
+
+---
+
+# 5. ОБОВ'ЯЗКОВО NORMALIZE НА DragEnd
+
+Оце КРИТИЧНО.
+
+У:
+
+```js
+handleConnectorSegmentDragEnd
+```
+
+ПЕРЕД:
+
+```js
+rebuildConnectorGeometry()
+```
+
+додай:
+
+```js
+next.route.vertices =
+  normalizeOrthogonalVertices(
+    next.geometry.start,
+    next.geometry.end,
+    next.route.vertices,
+  )
+```
+
+---
+
+# 6. ЩО ПОВИНЕН РОБИТИ normalizeOrthogonalVertices
+
+Він має:
+
+* видаляти duplicate points
+* видаляти zero-length segments
+* видаляти collinear bends
+* гарантувати orthogonal chain
+
+---
+
+# 7. ЧОМУ ТЕПЕР PATH HANDLES НЕ ЗЛАМАЮТЬСЯ
+
+Бо:
+
+* path handles працюють тільки з internal vertices
+* start/end більше не мутуються
+* topology стабільна
+* fullRoute існує тільки тимчасово
+* geometry.points rebuild-яться тільки на DragEnd
+
+---
+
+# 8. ГОЛОВНИЙ ФІКС
+
+ОСЬ ЦЕ БУЛО ПРОБЛЕМОЮ:
+
+```js
+nextVertices.unshift(createRoutePoint())
+```
+
+Ти мутував:
+
+* internal vertices
+  наче:
+* full route
+
+Тепер:
+
+* full route тимчасовий
+* vertices чисті
+* topology стабільна
+
+---
+
+# 9. ЩО ТИ ОТРИМАЄШ ПІСЛЯ ФІКСУ
+
+✅ більше не буде:
+
+* duplicate points
+* exploding connectors
+* broken elbows
+* random diagonals
+
+✅ стабільно працюватимуть:
+
+* first segment drag
+* last segment drag
+* internal segment drag
+* path handles
+* preview rendering
+* rebuild geometry
+
+---
+
+# 10. ВАЖЛИВО
+
+Тобі треба всюди дотримуватись правила:
+
+```txt
+route.vertices != full route
+```
+
+Це головне.
+
+Бо саме через це тебе весь день ламало.

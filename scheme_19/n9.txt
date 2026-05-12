@@ -1,0 +1,540 @@
+Добре. Тепер дам тобі вже ПРАВИЛЬНУ persistence architecture під:
+
+* schema versions
+* router versions
+* future migrations
+* rebuild compatibility
+* topology-first model.
+
+І це вже буде близько до того, як працюють:
+
+* draw.io
+* Excalidraw
+* Figma scenes
+* mxGraph.
+
+---
+
+# 1. СТРУКТУРА SAVE FILE
+
+---
+
+# lib/schemePersistence.js
+
+---
+
+## СТВОРИ FILE
+
+```js id="1w2a92"
+export const CURRENT_SCHEMA_VERSION = 1
+
+export const CURRENT_ROUTER_VERSION = 1
+```
+
+---
+
+# 2. SERIALIZE
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm99"
+export function serializeCanvas({
+   nodes,
+   edges,
+}) {
+
+   return JSON.stringify({
+
+      schemaVersion:
+         CURRENT_SCHEMA_VERSION,
+
+      meta: {
+
+         savedAt:
+            new Date().toISOString(),
+
+         app: "etls-scheme-editor",
+
+         routerVersion:
+            CURRENT_ROUTER_VERSION,
+      },
+
+      nodes: nodes.map(serializeNode),
+
+      edges: edges.map(serializeEdge),
+   })
+}
+```
+
+---
+
+# 3. SERIALIZE NODE
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm91"
+function serializeNode(node) {
+
+   return {
+
+      id: node.id,
+
+      type: node.type,
+
+      x: node.x,
+      y: node.y,
+
+      width: node.width,
+      height: node.height,
+
+      rotation: node.rotation || 0,
+
+      style: node.style || {},
+
+      data: node.data || {},
+   }
+}
+```
+
+---
+
+# 4. SERIALIZE EDGE
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm92"
+function serializeEdge(edge) {
+
+   return {
+
+      id: edge.id,
+
+      kind: edge.kind,
+
+      connectorType:
+         edge.connectorType,
+
+      pathType:
+         edge.pathType,
+
+      start: edge.start,
+
+      end: edge.end,
+
+      route: {
+
+         vertices:
+            edge.route?.vertices || [],
+
+         pathHandles:
+            edge.route?.pathHandles || [],
+
+         terminalDirections:
+            edge.route
+               ?.terminalDirections || {
+
+                  start: "horizontal",
+                  end: "horizontal",
+               },
+
+         routing: {
+
+            routerVersion:
+               CURRENT_ROUTER_VERSION,
+
+            preserveTopology: true,
+
+            preserveElbows: true,
+         },
+      },
+
+      style: edge.style || {},
+
+      endcaps:
+         edge.endcaps || {},
+   }
+}
+```
+
+---
+
+# 5. ЩО ВАЖЛИВО
+
+---
+
+# НЕ ЗБЕРІГАЙ:
+
+```js id="jlwm93"
+geometry.points
+geometry.segmentsMeta
+preview state
+hover state
+```
+
+---
+
+# ЧОМУ
+
+Бо:
+
+# runtime != persistence.
+
+---
+
+# 6. MIGRATION SYSTEM
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm94"
+export const migrations = {
+
+   1: migrateV1,
+}
+```
+
+---
+
+# 7. MIGRATE V1
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm95"
+function migrateV1(data) {
+
+   return data
+}
+```
+
+---
+
+# 8. DESERIALIZE
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm96"
+import {
+   rebuildConnectorGeometry,
+}
+from "@/lib/connectors/connectorGeometry"
+```
+
+---
+
+## І
+
+```js id="jlwm97"
+export function deserializeCanvas(
+   json,
+) {
+
+   let data =
+      JSON.parse(json)
+
+   const version =
+      data.schemaVersion || 1
+
+   const migration =
+      migrations[version]
+
+   if (migration) {
+      data = migration(data)
+   }
+
+   const rebuiltEdges =
+      data.edges.map(edge => {
+
+         if (edge.kind !== "connector") {
+            return edge
+         }
+
+         return rebuildConnectorGeometry(
+            edge,
+            data.nodes,
+         )
+      })
+
+   return {
+
+      nodes: data.nodes,
+
+      edges: rebuiltEdges,
+   }
+}
+```
+
+---
+
+# 9. STORE PATCH
+
+---
+
+# useCanvasStore.js
+
+---
+
+## ДОДАЙ
+
+```js id="jlwm98"
+setCanvasData:
+   ({ nodes, edges }) =>
+
+      set({
+         nodes,
+         edges,
+      }),
+```
+
+---
+
+# 10. SAVE BUTTON
+
+---
+
+# components/SaveCanvasButton.jsx
+
+---
+
+## СТВОРИ
+
+```jsx id="jlwm101"
+"use client"
+
+import Button
+from "@mui/material/Button"
+
+import { useCanvasStore }
+from "@/store/useCanvasStore"
+
+import {
+   serializeCanvas,
+}
+from "@/lib/schemePersistence"
+
+export default function SaveCanvasButton() {
+
+   const nodes =
+      useCanvasStore(s => s.nodes)
+
+   const edges =
+      useCanvasStore(s => s.edges)
+
+   function handleSave() {
+
+      const json =
+         serializeCanvas({
+            nodes,
+            edges,
+         })
+
+      localStorage.setItem(
+         "scheme_v1",
+         json,
+      )
+
+      console.log(
+         "SCHEME SAVED"
+      )
+   }
+
+   return (
+
+      <Button
+         variant="contained"
+         onClick={handleSave}
+      >
+         Save Scheme
+      </Button>
+   )
+}
+```
+
+---
+
+# 11. LOAD BUTTON
+
+---
+
+# components/LoadCanvasButton.jsx
+
+---
+
+## СТВОРИ
+
+```jsx id="jlwm102"
+"use client"
+
+import Button
+from "@mui/material/Button"
+
+import { useCanvasStore }
+from "@/store/useCanvasStore"
+
+import {
+   deserializeCanvas,
+}
+from "@/lib/schemePersistence"
+
+export default function LoadCanvasButton() {
+
+   const setCanvasData =
+      useCanvasStore(
+         s => s.setCanvasData
+      )
+
+   function handleLoad() {
+
+      const raw =
+         localStorage.getItem(
+            "scheme_v1"
+         )
+
+      if (!raw) {
+         return
+      }
+
+      const data =
+         deserializeCanvas(raw)
+
+      setCanvasData(data)
+
+      console.log(
+         "SCHEME LOADED"
+      )
+   }
+
+   return (
+
+      <Button
+         variant="outlined"
+         onClick={handleLoad}
+      >
+         Load Scheme
+      </Button>
+   )
+}
+```
+
+---
+
+# 12. ДОДАЙ BUTTONS В TOOLBAR
+
+---
+
+# EditorToolbar.jsx
+
+---
+
+## ДОДАЙ
+
+```jsx id="jlwm103"
+<SaveCanvasButton />
+
+<LoadCanvasButton />
+```
+
+---
+
+# 13. НАЙВАЖЛИВІШЕ
+
+---
+
+# ТЕПЕР У ТЕБЕ Є:
+
+---
+
+# SCHEMA VERSION
+
+```js id="jlwm104"
+schemaVersion
+```
+
+---
+
+# ROUTER VERSION
+
+```js id="jlwm105"
+routerVersion
+```
+
+---
+
+# MIGRATION PIPELINE
+
+```js id="jlwm106"
+migrateV1()
+```
+
+---
+
+# REBUILD PIPELINE
+
+```js id="jlwm107"
+rebuildConnectorGeometry()
+```
+
+---
+
+# І ЦЕ ВЖЕ ПРАВИЛЬНА ENTERPRISE АРХІТЕКТУРА
+
+---
+
+# 14. КОЛИ ТИ ЗМІНИШ ROUTER
+
+---
+
+# НАПРИКЛАД
+
+```txt id="jlwm108"
+orthogonal-v2
+```
+
+---
+
+# ТИ РОБИШ:
+
+```js id="jlwm109"
+CURRENT_ROUTER_VERSION = 2
+```
+
+---
+
+# І ДОДАЄШ
+
+```js id="jlwm110"
+migrateV1toV2()
+```
+
+---
+
+# СТАРІ СХЕМИ:
+
+```txt id="jlwm111"
+still load correctly
+```
+
+---
+
+# 15. ЧОМУ DRAW.IO НЕ ЛАМАЄТЬСЯ
+
+Бо там:
+
+* old schemas
+* old edge styles
+* old routers
+* old geometry hints
+
+живуть роками.
+
+І тепер твоя архітектура теж до цього готова.

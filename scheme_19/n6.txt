@@ -1,0 +1,422 @@
+Добре. В тебе вже майже все для цього є:
+
+* `removeEdge()` у store 
+* `createPathHandleAtSegment()`
+* `addConnectorPathHandle()` 
+* `handleConnectorContextMenu()` вже викликається у `ConnectorsLayer` 
+
+Тому зараз треба:
+
+1. правильно відкривати context menu
+2. передавати connector + segment
+3. зробити actions
+4. додати MUI Menu.
+
+---
+
+# 1. РОЗШИР CONTEXT MENU STATE
+
+---
+
+# store/useCanvasStore.js
+
+---
+
+## ЗАРАЗ
+
+```js id="z5g8k2"
+contextMenu: null,
+```
+
+---
+
+## БУДЕ
+
+```js id="xk6w5f"
+contextMenu: {
+   mouseX: null,
+   mouseY: null,
+
+   connectorId: null,
+   segmentId: null,
+
+   type: null,
+},
+```
+
+---
+
+# 2. ДОДАЙ HELPER В canvasController
+
+---
+
+# controllers/canvasController.js
+
+---
+
+## ДОДАЙ
+
+```js id="8mptkj"
+handleConnectorContextMenu(e, connector) {
+
+   e.evt.preventDefault()
+
+   const store = useCanvasStore.getState()
+
+   const hovered =
+      store.hoveredConnectorSegment
+
+   store.setContextMenu({
+
+      mouseX: e.evt.clientX,
+      mouseY: e.evt.clientY,
+
+      connectorId: connector.id,
+
+      segmentId:
+         hovered?.connectorId === connector.id
+            ? hovered.segmentId
+            : null,
+
+      type: "connector",
+   })
+}
+```
+
+---
+
+# 3. ДОДАЙ REMOVE ACTION
+
+---
+
+# canvasController.js
+
+---
+
+## ДОДАЙ
+
+```js id="81s3v6"
+deleteConnector(connectorId) {
+
+   const store = useCanvasStore.getState()
+
+   store.removeEdge(connectorId)
+
+   store.clearContextMenu()
+}
+```
+
+---
+
+# 4. ДОДАЙ CREATE PATH HANDLE ACTION
+
+---
+
+## ДОДАЙ
+
+```js id="9bjlwm"
+addPathHandleToConnector(
+   connectorId,
+   segmentId,
+) {
+
+   const store = useCanvasStore.getState()
+
+   const connector =
+      store.edges.find(
+         e => e.id === connectorId
+      )
+
+   if (!connector) return
+
+   if (!segmentId) return
+
+   const handle =
+      createPathHandleAtSegment(
+         connector,
+         segmentId,
+      )
+
+   if (!handle) return
+
+   const next =
+      addConnectorPathHandle(
+         connector,
+         handle,
+      )
+
+   store.replaceEdge(
+      connector.id,
+      rebuildConnectorGeometry(
+         next,
+         store.nodes,
+      )
+   )
+
+   store.clearContextMenu()
+}
+```
+
+---
+
+# 5. ВАЖЛИВО
+
+---
+
+# IMPORTS
+
+У canvasController.js
+
+---
+
+## ДОДАЙ
+
+```js id="n1vz9r"
+import {
+   createPathHandleAtSegment,
+   addConnectorPathHandle,
+   rebuildConnectorGeometry,
+} from "@/lib/connectors/..."
+```
+
+---
+
+# 6. ТЕПЕР MUI MENU
+
+---
+
+# components/ConnectorContextMenu.jsx
+
+---
+
+## СТВОРИ НОВИЙ COMPONENT
+
+```jsx id="hfef3f"
+"use client"
+
+import React from "react"
+
+import {
+   Menu,
+   MenuItem,
+   Divider,
+} from "@mui/material"
+
+import { useCanvasStore }
+from "@/store/useCanvasStore"
+
+import { canvasController }
+from "@/controllers/canvasController"
+
+export default function ConnectorContextMenu() {
+
+   const contextMenu =
+      useCanvasStore(
+         s => s.contextMenu
+      )
+
+   const clearContextMenu =
+      useCanvasStore(
+         s => s.clearContextMenu
+      )
+
+   const open =
+      contextMenu?.type === "connector"
+
+   return (
+      <Menu
+         open={open}
+
+         onClose={() => {
+            clearContextMenu()
+         }}
+
+         anchorReference="anchorPosition"
+
+         anchorPosition={
+            open
+               ? {
+                    top: contextMenu.mouseY,
+                    left: contextMenu.mouseX,
+                 }
+               : undefined
+         }
+      >
+
+         <MenuItem
+            onClick={() => {
+
+               canvasController
+                  .addPathHandleToConnector(
+
+                     contextMenu.connectorId,
+                     contextMenu.segmentId,
+                  )
+            }}
+         >
+            Додати точку шляху
+         </MenuItem>
+
+         <Divider />
+
+         <MenuItem
+            sx={{ color: "error.main" }}
+
+            onClick={() => {
+
+               canvasController
+                  .deleteConnector(
+                     contextMenu.connectorId
+                  )
+            }}
+         >
+            Видалити конектор
+         </MenuItem>
+
+      </Menu>
+   )
+}
+```
+
+---
+
+# 7. ДОДАЙ MENU В CANVAS
+
+---
+
+# EditorCanvas.jsx
+
+---
+
+## ДОДАЙ
+
+```jsx id="jz4f2e"
+<ConnectorContextMenu />
+```
+
+---
+
+# 8. ВАЖЛИВО
+
+---
+
+# ДОДАВАННЯ POINT ТІЛЬКИ НА BASE SEGMENTS
+
+---
+
+# У ConnectorsLayer.jsx
+
+---
+
+## ЗАРАЗ
+
+```js id="m3jlwm"
+segmentHandles.map(...)
+```
+
+---
+
+## ЗАМІНИ НА
+
+```js id="2a8n1o"
+segmentHandles
+   .filter(
+      h => h.kind === "segment"
+   )
+   .map(...)
+```
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* не можна вставляти pathHandle в pathHandle
+* nested deformation = routing hell.
+
+---
+
+# 9. ДОДАЙ HOVER SEGMENT UPDATE
+
+Бо зараз context menu не завжди знає segment.
+
+---
+
+# У Rect segment handle
+
+---
+
+## ДОДАЙ
+
+```jsx id="04t7ud"
+onMouseEnter={() => {
+
+   useCanvasStore
+      .getState()
+      .setHoveredConnectorSegment({
+
+         connectorId: connector.id,
+         segmentId: handle.segmentId,
+      })
+}}
+```
+
+---
+
+## І
+
+```jsx id="w9k86n"
+onMouseLeave={() => {
+
+   useCanvasStore
+      .getState()
+      .clearHoveredConnectorSegment()
+}}
+```
+
+---
+
+# 10. РЕЗУЛЬТАТ
+
+---
+
+# ТЕПЕР:
+
+## Right click connector
+
+відкриває:
+
+```txt id="ahsk0q"
+Додати точку шляху
+Видалити конектор
+```
+
+---
+
+# Add path point
+
+створює:
+
+```txt id="02s03r"
+stable topology-linked pathHandle
+```
+
+---
+
+# Delete connector
+
+повністю видаляє edge.
+
+---
+
+# 11. НАЙВАЖЛИВІШЕ
+
+Тепер path handles:
+
+* НЕ залежать від runtime segment ids
+* НЕ ламаються після normalize
+* НЕ ламаються після rebuild
+* сумісні з topology repair.
+
+І твоя система вже стає реально дуже близькою до draw.io internal architecture.

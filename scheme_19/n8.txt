@@ -1,0 +1,544 @@
+Оце вже дуже правильне питання.
+І це якраз одна з найскладніших проблем будь-якого diagram editor.
+
+Тому що:
+
+# rebuild engine змінюється з часом.
+
+І якщо просто:
+
+```txt id="n5h5pn"
+save topology
+→ rebuild by latest engine
+```
+
+то старі схеми можуть:
+
+* “поплисти”
+* змінити bends
+* втратити routing
+* зламати handles
+* змінити orthogonal behavior.
+
+---
+
+# Як це вирішують draw.io / Figma / Excalidraw
+
+Вони:
+
+# НЕ покладаються лише на rebuild.
+
+---
+
+# ГОЛОВНЕ ПРАВИЛО ENTERPRISE EDITORS
+
+# SAVE = semantic model + render snapshot
+
+а не тільки topology.
+
+---
+
+# DRAW.IO
+
+Зберігає:
+
+* topology
+* geometry
+* control points
+* edge style
+* routing hints
+* explicit bends.
+
+Тобто:
+
+# rebuild НЕ deterministic.
+
+---
+
+# У draw.io edge має:
+
+```txt id="8lccal"
+source
+target
+waypoints
+routing style
+entry/exit constraints
+edgeStyle
+geometry
+```
+
+І це дозволяє:
+
+* старі схеми відкривати однаково навіть через роки.
+
+---
+
+# ТВОЯ ПОТОЧНА ПРОБЛЕМА
+
+Зараз у тебе:
+
+```txt id="v3l5r4"
+save topology only
+```
+
+А rebuild engine:
+
+* evolve
+* optimize
+* repair differently.
+
+Тому:
+
+# same topology != same visual result.
+
+---
+
+# ПРАВИЛЬНЕ РІШЕННЯ
+
+Тобі треба:
+
+# versioned persistence model.
+
+---
+
+# 1. SAVE VERSION
+
+---
+
+## ЗАМІСТЬ
+
+```js id="jlwm0y"
+{
+   nodes,
+   edges
+}
+```
+
+---
+
+## РОБИ
+
+```js id="9z00w0"
+{
+   schemaVersion: 1,
+
+   nodes,
+   edges,
+}
+```
+
+---
+
+# 2. VERSIONED REBUILD
+
+---
+
+# КРИТИЧНО
+
+Ти не повинен мати:
+
+```js id="7uj42j"
+rebuildConnectorGeometry()
+```
+
+одну назавжди.
+
+---
+
+# ТРЕБА
+
+```js id="56u6rx"
+rebuildConnectorGeometryV1()
+rebuildConnectorGeometryV2()
+rebuildConnectorGeometryV3()
+```
+
+---
+
+# DRAW.IO ФАКТИЧНО ТАК І РОБИТЬ
+
+Там:
+
+* старі edge styles
+* старі routing engines
+* legacy compatibility layers
+
+живуть роками.
+
+---
+
+# 3. LOAD PIPELINE
+
+---
+
+## LOAD
+
+```txt id="pnwmr9"
+JSON
+   ↓
+schemaVersion
+   ↓
+select rebuild engine
+   ↓
+migrate if needed
+```
+
+---
+
+# 4. ПРАВИЛЬНА АРХІТЕКТУРА
+
+---
+
+# НЕ:
+
+```txt id="ps1eql"
+load → latest rebuild
+```
+
+---
+
+# А:
+
+```txt id="h59a1p"
+load
+   ↓
+migrate old schema
+   ↓
+legacy rebuild
+   ↓
+optional upgrade
+```
+
+---
+
+# 5. ЩО ТРЕБА ЗБЕРІГАТИ
+
+---
+
+# ТОПОЛОГІЮ
+
+```js id="48k6vw"
+route.vertices
+pathHandles
+```
+
+---
+
+# І
+
+# VISUAL HINTS
+
+---
+
+## Наприклад
+
+```js id="q39s1f"
+route: {
+
+   vertices: [...],
+
+   pathHandles: [...],
+
+   routing: {
+
+      terminalDirections,
+
+      preferredOrientation,
+
+      preserveElbows: true,
+
+      routerVersion: 2,
+   }
+}
+```
+
+---
+
+# 6. НАЙВАЖЛИВІШЕ
+
+---
+
+# НЕ РОБИ:
+
+```txt id="sn0a17"
+full geometry snapshot only
+```
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* zoom
+* scaling
+* snapping
+* node resize
+* obstacle routing
+
+ламають static geometry.
+
+---
+
+# АЛЕ
+
+# І topology only теж недостатньо.
+
+---
+
+# ПРАВИЛЬНИЙ BALANCE
+
+---
+
+# SAVE
+
+## semantic topology
+
+*
+
+## routing hints
+
+*
+
+## optional cached geometry
+
+---
+
+# 7. САМА ПРАВИЛЬНА МОДЕЛЬ ДЛЯ ТЕБЕ
+
+---
+
+# EDGE SAVE MODEL
+
+```js id="d7b2xg"
+{
+   id,
+
+   pathType,
+
+   start,
+   end,
+
+   route: {
+
+      vertices: [...],
+
+      pathHandles: [...],
+
+      terminalDirections: {...},
+
+      routing: {
+
+         version: 2,
+
+         preserveTopology: true,
+
+         preserveElbows: true,
+
+         preferredAxes: {...},
+
+         router: "orthogonal-v2",
+      },
+   },
+
+   style,
+}
+```
+
+---
+
+# 8. І ТОДІ
+
+---
+
+# rebuild engine
+
+може змінюватись:
+
+```txt id="j6kr25"
+v1
+v2
+v3
+```
+
+але:
+
+* old schemes still work.
+
+---
+
+# 9. ENTERPRISE ПІДХІД
+
+---
+
+# MIGRATIONS
+
+Так само як DB migrations.
+
+---
+
+# ПРИКЛАД
+
+```js id="zotvzw"
+migrateSchemaV1toV2()
+```
+
+---
+
+# Наприклад
+
+У V1:
+
+```txt id="7c6e1k"
+parentSegmentId
+```
+
+У V2:
+
+```txt id="p1u9ca"
+beforeVertexId
+afterVertexId
+```
+
+---
+
+# ПРИ LOAD
+
+```txt id="zt4s9t"
+detect V1
+→ migrate
+→ save as V2
+```
+
+---
+
+# 10. DRAW.IO ТАК І РОБИТЬ
+
+В них:
+
+* старі XML schemas
+* legacy edge styles
+* old routing engines
+* compatibility layers
+
+живуть десятиліттями.
+
+---
+
+# 11. ЩО Я Б РЕКОМЕНДУВАВ ТОБІ ЗАРАЗ
+
+---
+
+# ОБОВ'ЯЗКОВО ДОДАТИ
+
+```js id="h0k91x"
+schemaVersion
+routerVersion
+```
+
+---
+
+# ВЖЕ ЗАРАЗ
+
+навіть якщо:
+
+```txt id="4qug7q"
+schemaVersion: 1
+```
+
+---
+
+# 12. ДУЖЕ ВАЖЛИВО
+
+---
+
+# НЕ ЗБЕРІГАЙ
+
+```js id="jlwm7l"
+geometry.points
+```
+
+як source of truth.
+
+---
+
+# АЛЕ МОЖНА CACHE
+
+---
+
+## Наприклад
+
+```js id="y7rq3w"
+cachedGeometry
+```
+
+---
+
+# ДЛЯ:
+
+* faster load
+* preview
+* thumbnails
+
+---
+
+# АЛЕ
+
+Topology завжди primary.
+
+---
+
+# 13. ІНАКШЕ
+
+Ти дуже швидко прийдеш до:
+
+```txt id="uwpq6x"
+geometry desync hell
+```
+
+---
+
+# 14. ПРАВИЛЬНА ІЄРАРХІЯ
+
+---
+
+# SOURCE OF TRUTH
+
+```txt id="9n4jwa"
+topology
+```
+
+---
+
+# ROUTING RULES
+
+```txt id="o42a7n"
+routing metadata
+```
+
+---
+
+# DERIVED
+
+```txt id="91m74e"
+geometry.points
+segmentsMeta
+```
+
+---
+
+# 15. І ТОДІ
+
+Ти зможеш:
+
+* міняти rebuild engine
+* робити migrations
+* оптимізувати routing
+* додавати obstacle routing
+* додавати smart elbows
+
+без поломки старих схем.
+
+---
+
+# І САМЕ ЦЕ РОБИТЬ DRAW.IO “СТАБІЛЬНИМ” РОКАМИ.

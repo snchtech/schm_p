@@ -1,0 +1,472 @@
+Так, це абсолютно реальний і правильний підхід.
+І саме так працюють:
+
+* draw.io
+* Excalidraw
+* tldraw
+* Figma nodes
+* більшість diagram editors.
+
+У тебе вже архітектура готова для цього, бо:
+
+* canvas state вже normalized
+* nodes/edges separated
+* connector topology окремо
+* geometry rebuildable.
+
+І це дуже важливо:
+
+# тобі НЕ треба зберігати geometry.points
+
+Треба зберігати:
+
+* topology
+* semantic state.
+
+---
+
+# 1. ЩО ТРЕБА ЗБЕРІГАТИ
+
+---
+
+# NODES
+
+```js
+{
+   id,
+   type,
+
+   x,
+   y,
+
+   width,
+   height,
+
+   rotation,
+
+   data,
+   style,
+}
+```
+
+---
+
+# CONNECTORS
+
+```js
+{
+   id,
+
+   kind: "connector",
+
+   start,
+   end,
+
+   route: {
+      vertices,
+      pathHandles,
+      terminalDirections,
+   },
+
+   connectorType,
+   pathType,
+
+   style,
+   endcaps,
+}
+```
+
+---
+
+# НЕ ЗБЕРІГАТИ
+
+❌ geometry.points
+❌ segmentsMeta
+❌ runtime preview
+❌ hovered state
+❌ selection
+❌ drag state.
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* geometry = derived state
+* її можна rebuild.
+
+---
+
+# 2. ІДЕАЛЬНА СХЕМА
+
+---
+
+# SAVE
+
+```txt
+zustand state
+   ↓
+serialize
+   ↓
+JSON
+```
+
+---
+
+# LOAD
+
+```txt
+JSON
+   ↓
+restore nodes/edges
+   ↓
+rebuild geometry
+   ↓
+render canvas
+```
+
+---
+
+# 3. СТВОРИ HELPER
+
+---
+
+# lib/schemePersistence.js
+
+```js
+export function serializeCanvas(store) {
+
+   return JSON.stringify({
+
+      version: 1,
+
+      nodes: store.nodes,
+
+      edges: store.edges,
+   })
+}
+```
+
+---
+
+# 4. LOAD HELPER
+
+---
+
+```js
+import { rebuildConnectorGeometry }
+from "@/lib/connectors/connectorGeometry"
+
+export function deserializeCanvas(
+   json,
+   nodes,
+) {
+
+   const parsed =
+      JSON.parse(json)
+
+   const rebuiltEdges =
+      parsed.edges.map(edge => {
+
+         if (edge.kind !== "connector") {
+            return edge
+         }
+
+         return rebuildConnectorGeometry(
+            edge,
+            parsed.nodes,
+         )
+      })
+
+   return {
+      nodes: parsed.nodes,
+      edges: rebuiltEdges,
+   }
+}
+```
+
+---
+
+# 5. STORE METHODS
+
+---
+
+# useCanvasStore.js
+
+---
+
+## ДОДАЙ
+
+```js
+setCanvasData: ({ nodes, edges }) =>
+   set({
+      nodes,
+      edges,
+   }),
+```
+
+---
+
+# 6. SAVE BUTTON
+
+---
+
+# components/SaveCanvasButton.jsx
+
+```jsx
+"use client"
+
+import Button from "@mui/material/Button"
+
+import { useCanvasStore }
+from "@/store/useCanvasStore"
+
+import {
+   serializeCanvas,
+}
+from "@/lib/schemePersistence"
+
+export default function SaveCanvasButton() {
+
+   const nodes =
+      useCanvasStore(s => s.nodes)
+
+   const edges =
+      useCanvasStore(s => s.edges)
+
+   function handleSave() {
+
+      const json =
+         serializeCanvas({
+            nodes,
+            edges,
+         })
+
+      console.log(json)
+
+      localStorage.setItem(
+         "saved_scheme",
+         json,
+      )
+   }
+
+   return (
+      <Button
+         variant="contained"
+         onClick={handleSave}
+      >
+         Save JSON
+      </Button>
+   )
+}
+```
+
+---
+
+# 7. LOAD BUTTON
+
+---
+
+# components/LoadCanvasButton.jsx
+
+```jsx
+"use client"
+
+import Button from "@mui/material/Button"
+
+import { useCanvasStore }
+from "@/store/useCanvasStore"
+
+import {
+   deserializeCanvas,
+}
+from "@/lib/schemePersistence"
+
+export default function LoadCanvasButton() {
+
+   const setCanvasData =
+      useCanvasStore(
+         s => s.setCanvasData
+      )
+
+   function handleLoad() {
+
+      const raw =
+         localStorage.getItem(
+            "saved_scheme"
+         )
+
+      if (!raw) return
+
+      const data =
+         deserializeCanvas(raw)
+
+      setCanvasData(data)
+   }
+
+   return (
+      <Button
+         variant="outlined"
+         onClick={handleLoad}
+      >
+         Load JSON
+      </Button>
+   )
+}
+```
+
+---
+
+# 8. ВАЖЛИВО
+
+---
+
+# ПІСЛЯ LOAD
+
+ОБОВ'ЯЗКОВО:
+
+```js
+rebuildConnectorGeometry()
+```
+
+для всіх connectors.
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* geometry.points не зберігаються
+* вони derived.
+
+---
+
+# 9. ЩО ТИ ОТРИМАЄШ
+
+---
+
+# SAVE
+
+```txt
+nodes
+edges
+topology
+styles
+handles
+routing
+```
+
+---
+
+# LOAD
+
+```txt
+full canvas restore
+```
+
+---
+
+# 10. ДУЖЕ ВАЖЛИВО
+
+---
+
+# НЕ ЗБЕРІГАЙ:
+
+```js
+geometry: {
+   points,
+   segmentsMeta,
+}
+```
+
+---
+
+# ЗБЕРІГАЙ:
+
+```js
+route: {
+   vertices,
+   pathHandles,
+}
+```
+
+---
+
+# ЧОМУ
+
+Бо:
+
+* runtime geometry unstable
+* topology stable.
+
+---
+
+# 11. НАСТУПНИЙ КРОК
+
+Після JSON storage
+ти дуже легко перейдеш на:
+
+---
+
+# NEXT API SAVE
+
+```txt
+POST /api/schemes/save
+```
+
+---
+
+# DATABASE
+
+```txt
+SCHEME_JSON CLOB
+```
+
+---
+
+# VERSIONING
+
+```txt
+SCHEME_VERSION
+```
+
+---
+
+# COLLABORATION
+
+```txt
+websocket patches
+```
+
+---
+
+# AUTOSAVE
+
+```txt
+debounced serialization
+```
+
+---
+
+# 12. І ЦЕ ВЖЕ СЕРЙОЗНА АРХІТЕКТУРА
+
+Твоя поточна структура вже дуже правильна для:
+
+* persistence
+* undo/redo
+* realtime collaboration
+* versioning
+* export/import
+* autosave.
+
+Бо ти вже відділив:
+
+# topology
+
+від:
+
+# runtime geometry.
+
+І це найважливіше рішення для diagram editors.

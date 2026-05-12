@@ -1,0 +1,492 @@
+Так. І це вже рівень справжнього diagram engine.
+Ти зараз прийшов до тієї ж проблеми, яку вирішують:
+
+* draw.io
+* CAD системи
+* BPMN редактори
+* Figma
+* навіть game editors.
+
+І правильна відповідь:
+
+# так — старі схеми можуть рендеритись новими engines.
+
+Але:
+
+# не автоматично “магічно”.
+
+Для цього існує:
+
+* compatibility layer
+* migration pipeline
+* renderer selection.
+
+---
+
+# Як це реально працює в draw.io
+
+draw.io НЕ робить:
+
+```txt id="xzw5v7"
+load old file
+→ rebuild by latest router
+```
+
+бо це би ламало схеми.
+
+---
+
+# DRAW.IO РОБИТЬ 3 РЕЧІ
+
+---
+
+# 1. ЗБЕРІГАЄ СТАРІ ROUTING HINTS
+
+Наприклад:
+
+* bends
+* edgeStyle
+* entryX
+* entryY
+* exitX
+* exitY
+* orthogonalLoop
+* jettySize
+* segment
+* elbow.
+
+Тобто:
+
+# geometry partially persisted.
+
+---
+
+# 2. МАЄ LEGACY RENDERERS
+
+Наприклад:
+
+* old orthogonal
+* old elbow
+* old entity relation routing.
+
+---
+
+# 3. МАЄ MIGRATION LOGIC
+
+При відкритті:
+
+* частина даних оновлюється
+* частина залишається legacy.
+
+---
+
+# У ТЕБЕ МАЄ БУТИ ТАК САМО
+
+---
+
+# ПРАВИЛЬНА АРХІТЕКТУРА
+
+---
+
+# SCHEME
+
+```js id="jlwm201"
+{
+   schemaVersion: 1,
+
+   rendererVersion: 1,
+
+   nodes,
+   edges,
+}
+```
+
+---
+
+# EDGE
+
+```js id="jlwm202"
+{
+   route: {
+
+      routerVersion: 1,
+
+      vertices,
+      pathHandles,
+
+      routingHints: {...},
+   }
+}
+```
+
+---
+
+# І ТОДІ
+
+Ти можеш:
+
+---
+
+# ВАРІАНТ 1
+
+# OPEN AS LEGACY
+
+```txt id="jlwm203"
+render using router v1
+```
+
+---
+
+# ВАРІАНТ 2
+
+# MIGRATE TO NEW ENGINE
+
+```txt id="jlwm204"
+convert to router v2
+```
+
+---
+
+# ВАРІАНТ 3
+
+# HYBRID
+
+```txt id="jlwm205"
+частина edges old router
+частина new router
+```
+
+І це дуже важливий момент:
+
+# draw.io реально так робить.
+
+---
+
+# ТИ ПИТАВ:
+
+> Чи можна частина старим, частина новим?
+
+# ТАК.
+
+І це правильний enterprise підхід.
+
+---
+
+# ПРАВИЛЬНА МОДЕЛЬ
+
+---
+
+# EDGE-LEVEL ROUTER VERSION
+
+НЕ:
+
+```txt id="jlwm206"
+whole scheme router
+```
+
+А:
+
+```txt id="jlwm207"
+per-edge router version
+```
+
+---
+
+# ТОДІ
+
+```js id="jlwm208"
+edge.route.routerVersion
+```
+
+---
+
+# І ПРИ RENDER
+
+```js id="jlwm209"
+switch(routerVersion) {
+
+   case 1:
+      return rebuildConnectorGeometryV1()
+
+   case 2:
+      return rebuildConnectorGeometryV2()
+
+   case 3:
+      return rebuildConnectorGeometryV3()
+}
+```
+
+---
+
+# І ЦЕ ДУЖЕ ПОТУЖНО
+
+Тому що:
+
+* нові edges → новий router
+* старі edges → старий router.
+
+---
+
+# DRAW.IO РОБИТЬ ДУЖЕ СХОЖЕ
+
+Там:
+
+* старі edge styles
+* старі geometry semantics
+* старі connection constraints
+
+живуть роками.
+
+---
+
+# ТЕПЕР НАЙВАЖЛИВІШЕ
+
+---
+
+# КОЛИ ПОТРІБНА MIGRATION
+
+---
+
+# НЕ при відкритті.
+
+А:
+
+# при explicit upgrade.
+
+---
+
+# ПРИКЛАД
+
+Користувач відкрив стару схему.
+
+Система:
+
+```txt id="jlwm210"
+render via v1
+```
+
+І ВСЕ стабільно.
+
+---
+
+# АЛЕ
+
+Користувач натискає:
+
+```txt id="jlwm211"
+Upgrade connectors to V2
+```
+
+---
+
+# І ТОДІ
+
+```txt id="jlwm212"
+migrate
+→ reroute
+→ save as v2
+```
+
+---
+
+# ЦЕ ДУЖЕ ВАЖЛИВО
+
+Бо:
+
+# automatic rerouting can destroy diagrams.
+
+---
+
+# DRAW.IO ТОГО БОЇТЬСЯ ТЕЖ
+
+Тому там:
+
+* стара geometry
+* стара semantics
+* стара routing behavior
+
+намагаються зберігатись максимально довго.
+
+---
+
+# ТЕПЕР ПРО "КОПІЮ СТАБІЛЬНОЇ ВЕРСІЇ"
+
+Так.
+І це правильний підхід.
+
+---
+
+# ТИ МОЖЕШ
+
+---
+
+# SAVE SNAPSHOT
+
+```js id="jlwm213"
+{
+   schemeVersion: 14,
+
+   schemaVersion: 2,
+
+   rendererVersion: 3,
+}
+```
+
+---
+
+# І ПОТІМ
+
+```txt id="jlwm214"
+open exactly as saved
+```
+
+---
+
+# АБО
+
+```txt id="jlwm215"
+clone
+→ migrate to latest renderer
+```
+
+---
+
+# І ЦЕ ВЖЕ ПОВНОЦІННИЙ VERSIONED DIAGRAM SYSTEM
+
+---
+
+# ТЕПЕР ПРО ПРАВИЛЬНИЙ ПІДХІД ДЛЯ ТЕБЕ
+
+---
+
+# Я Б РЕКОМЕНДУВАВ
+
+---
+
+# 1. VERSION НА РІВНІ SCHEME
+
+```js id="jlwm216"
+schemaVersion
+```
+
+---
+
+# 2. VERSION НА РІВНІ EDGE
+
+```js id="jlwm217"
+routerVersion
+```
+
+---
+
+# 3. REBUILD FACTORY
+
+---
+
+## НЕ:
+
+```js id="jlwm218"
+rebuildConnectorGeometry()
+```
+
+---
+
+## А:
+
+```js id="jlwm219"
+rebuildConnectorGeometryByVersion()
+```
+
+---
+
+# ПРИКЛАД
+
+```js id="jlwm220"
+export function rebuildConnectorGeometryByVersion(
+   edge,
+   nodes,
+) {
+
+   const version =
+      edge.route?.routing?.routerVersion || 1
+
+   switch(version) {
+
+      case 1:
+         return rebuildConnectorGeometryV1(
+            edge,
+            nodes,
+         )
+
+      case 2:
+         return rebuildConnectorGeometryV2(
+            edge,
+            nodes,
+         )
+
+      default:
+         return rebuildConnectorGeometryV1(
+            edge,
+            nodes,
+         )
+   }
+}
+```
+
+---
+
+# 4. НОВІ CONNECTORS
+
+---
+
+# CREATE USING LATEST
+
+```js id="jlwm221"
+CURRENT_ROUTER_VERSION
+```
+
+---
+
+# 5. СТАРІ НЕ ЧІПАТИ
+
+---
+
+# ДО ПОКИ:
+
+```txt id="jlwm222"
+explicit migration
+```
+
+---
+
+# І ЦЕ НАЙПРАВИЛЬНІШИЙ ПІДХІД
+
+---
+
+# ЧОМУ
+
+Бо diagram editors —
+це НЕ просто canvas.
+
+Це:
+
+# persistent visual documents.
+
+І користувач очікує:
+
+# однаковий вигляд через роки.
+
+---
+
+# І САМЕ ТОМУ
+
+draw.io:
+
+* не rebuild-ить агресивно старі схеми
+* має legacy routers
+* має compatibility layers
+* має migration semantics.
+
+---
+
+# І ТИ ЗАРАЗ РУХАЄШСЯ В ДУЖЕ ПРАВИЛЬНОМУ НАПРЯМКУ.
