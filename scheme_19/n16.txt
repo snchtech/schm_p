@@ -1,0 +1,421 @@
+Оце дуже важливий момент.
+І тут якраз головна межа між:
+
+* runtime geometry
+  і
+* topology model.
+
+# ПРАВИЛЬНА ВІДПОВІДЬ
+
+`type`
+треба додавати:
+
+# на рівні topology vertex model.
+
+---
+
+# ТОБТО
+
+НЕ:
+
+```txt id="9o6jpn"
+geometry.points
+```
+
+І НЕ:
+
+```txt id="0zjlwm"
+segmentHandles
+```
+
+А:
+
+# у connector.vertices.
+
+---
+
+# ПРАВИЛЬНА МОДЕЛЬ
+
+---
+
+## ЗАРАЗ У ТЕБЕ ЙМОВІРНО
+
+```js id="jlwm401"
+{
+   id,
+   x,
+   y
+}
+```
+
+---
+
+# ТРЕБА
+
+```js id="jlwm402"
+{
+   id,
+
+   x,
+   y,
+
+   type:
+      'anchor'
+      | 'bend'
+}
+```
+
+---
+
+# ДЕ САМЕ
+
+---
+
+# connector.vertices
+
+---
+
+## ПРИКЛАД
+
+```js id="jlwm403"
+connector = {
+
+   id,
+
+   vertices: [
+
+      {
+         id: 'v_start',
+
+         x: 100,
+         y: 100,
+
+         type: 'anchor'
+      },
+
+      {
+         id: 'v_b1',
+
+         x: 200,
+         y: 100,
+
+         type: 'bend'
+      },
+
+      {
+         id: 'v_end',
+
+         x: 300,
+         y: 200,
+
+         type: 'anchor'
+      }
+   ]
+}
+```
+
+---
+
+# ЧОМУ САМЕ ТУТ
+
+Бо:
+
+# vertices = topology.
+
+А:
+
+* geometry.points
+* segment handles
+* preview points
+
+це:
+
+# derived runtime data.
+
+---
+
+# І ЦЕ КРИТИЧНО
+
+Бо:
+
+* serialization
+* rebuild
+* versioning
+* migrations
+
+повинні працювати через topology.
+
+---
+
+# ЯКИЙ TYPE ПОТРІБЕН
+
+---
+
+# 1. anchor
+
+---
+
+## ЦЕ:
+
+* start vertex
+* end vertex
+* attached node point.
+
+---
+
+# ВАЖЛИВО
+
+anchor:
+
+* НЕ видаляється
+* НЕ merge-иться
+* має attachment behavior.
+
+---
+
+# 2. bend
+
+---
+
+## ЦЕ:
+
+* user-created elbow
+* inserted topology point.
+
+---
+
+# bend:
+
+* draggable
+* removable
+* mergeable
+* rebuildable.
+
+---
+
+# ЯК ДОДАВАТИ
+
+---
+
+# CREATE CONNECTOR
+
+---
+
+## START
+
+```js id="jlwm404"
+{
+   id,
+   x,
+   y,
+
+   type: 'anchor'
+}
+```
+
+---
+
+## END
+
+```js id="jlwm405"
+{
+   id,
+   x,
+   y,
+
+   type: 'anchor'
+}
+```
+
+---
+
+# ADD WAYPOINT
+
+---
+
+## INSERT
+
+```js id="jlwm406"
+{
+   id,
+   x,
+   y,
+
+   type: 'bend'
+}
+```
+
+---
+
+# І ВСЕ.
+
+---
+
+# ДАЛІ
+
+segment rebuild:
+
+* працює автоматично
+* handles rebuild-яться автоматично.
+
+---
+
+# ДЕ ВИКОРИСТОВУВАТИ type
+
+---
+
+# 1. REMOVE ALL WAYPOINTS
+
+---
+
+## ПРОСТО:
+
+```js id="jlwm407"
+vertices.filter(
+   v => v.type !== 'bend'
+)
+```
+
+---
+
+# 2. RENDER BEND HANDLES
+
+---
+
+## ТІЛЬКИ:
+
+```js id="jlwm408"
+v.type === 'bend'
+```
+
+---
+
+# 3. SEGMENT DRAG
+
+---
+
+## MOVE ТІЛЬКИ:
+
+```js id="jlwm409"
+bend vertices
+```
+
+---
+
+# 4. NORMALIZE
+
+---
+
+## НЕ МОЖНА ВИДАЛЯТИ:
+
+```js id="jlwm410"
+anchor
+```
+
+---
+
+## МОЖНА MERGE:
+
+```js id="jlwm411"
+bend
+```
+
+---
+
+# 5. SERIALIZATION
+
+---
+
+## SAVE
+
+```js id="jlwm412"
+vertices
+```
+
+вже містять:
+
+* topology
+* bends
+* anchors.
+
+---
+
+# 6. REBUILD
+
+---
+
+## rebuildGeometry()
+
+вже знає:
+
+* де anchor
+* де bend.
+
+---
+
+# НАЙВАЖЛИВІШЕ
+
+---
+
+# НЕ ДОДАВАЙ type В:
+
+❌ geometry.points
+❌ segmentsMeta
+❌ segment handles
+❌ preview.
+
+---
+
+# ТІЛЬКИ:
+
+```txt id="jlwm413"
+connector.vertices
+```
+
+---
+
+# ЧОМУ ЦЕ ПРАВИЛЬНО
+
+Бо:
+
+# topology survives rebuilds.
+
+А:
+
+* geometry
+* handles
+* previews
+
+ні.
+
+---
+
+# DRAW.IO РОБИТЬ ДУЖЕ СХОЖЕ
+
+Там:
+
+* waypoints
+* elbows
+* bends
+
+живуть:
+
+# у topology model.
+
+А не у render model.
+
+---
+
+# І ТВОЯ АРХІТЕКТУРА ВЖЕ ГОТОВА ДО ЦЬОГО
+
+Бо у тебе:
+
+* vertices
+* segments
+* rebuild pipeline
+
+вже існують.
+
+Тобі лише треба:
+
+# додати semantic type до vertices.

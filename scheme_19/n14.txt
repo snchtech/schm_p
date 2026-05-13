@@ -1,0 +1,790 @@
+```txt
+========================================================
+PATCH V2
+VERTICES + SEGMENTS ARCHITECTURE
+(DRAW.IO STYLE)
+========================================================
+
+ВАЖЛИВА ЗМІНА
+========================================================
+
+ПІСЛЯ УТОЧНЕННЯ СТРУКТУРИ:
+- у тебе вже є vertices
+- у тебе вже є segments
+
+ТОМУ:
+--------------------------------------------------------
+
+WAYPOINTS НЕ ПОТРІБНІ.
+
+--------------------------------------------------------
+
+PATH HANDLES НЕ ПОТРІБНІ.
+
+--------------------------------------------------------
+
+ADD WAYPOINT
+=
+INSERT BEND VERTEX
+
+========================================================
+ПРАВИЛЬНА АРХІТЕКТУРА
+========================================================
+
+connector
+ ├── vertices
+ ├── segments
+ └── geometry.points
+
+--------------------------------------------------------
+
+geometry.points
+=
+derived render cache
+
+--------------------------------------------------------
+
+SOURCE OF TRUTH:
+========================================================
+
+vertices + segments
+
+========================================================
+НОВА МОДЕЛЬ VERTEX
+========================================================
+
+vertex = {
+   id,
+   x,
+   y,
+
+   type: 'anchor' | 'bend'
+}
+
+========================================================
+ТИПИ
+========================================================
+
+anchor
+=
+точка прив'язки до node
+
+--------------------------------------------------------
+
+bend
+=
+користувацький злам конектора
+
+========================================================
+ПРИКЛАД
+========================================================
+
+Було:
+--------------------------------------------------------
+
+vertices:
+[
+   A(anchor),
+   B(anchor)
+]
+
+segments:
+[
+   S1
+]
+
+--------------------------------------------------------
+
+Після add waypoint:
+--------------------------------------------------------
+
+vertices:
+[
+   A(anchor),
+   C(bend),
+   B(anchor)
+]
+
+segments:
+[
+   S1,
+   S2,
+   S3
+]
+
+========================================================
+ЩО ТРЕБА ПРИБРАТИ
+========================================================
+
+========================================================
+1. ПРИБРАТИ pathHandles
+========================================================
+
+ФАЙЛ:
+ConnectorsLayer.jsx
+
+--------------------------------------------------------
+ВИДАЛИТИ:
+--------------------------------------------------------
+
+connector.route.pathHandles
+
+--------------------------------------------------------
+
+ВИДАЛИТИ:
+--------------------------------------------------------
+
+{pathHandles.map(...)}
+
+--------------------------------------------------------
+
+БІЛЬШЕ pathHandles НЕ ІСНУЄ.
+
+========================================================
+2. ПРИБРАТИ route.waypoints
+========================================================
+
+ФАЙЛ:
+connector model
+
+--------------------------------------------------------
+
+ВИДАЛИТИ:
+--------------------------------------------------------
+
+route: {
+   waypoints: [...]
+}
+
+--------------------------------------------------------
+
+БІЛЬШЕ waypoints НЕ ІСНУЄ.
+
+========================================================
+НОВА ЛОГІКА:
+VERTEX INSERTION
+========================================================
+
+========================================================
+1. СТВОРЕННЯ BEND VERTEX
+========================================================
+
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function createBendVertexAtSegment(
+   connector,
+   segment,
+   pointer
+) {
+   if (!connector) return null
+   if (!segment) return null
+
+   if (segment.orientation === 'horizontal') {
+      return {
+         id: crypto.randomUUID(),
+
+         x: pointer.x,
+         y: segment.y,
+
+         type: 'bend'
+      }
+   }
+
+   if (segment.orientation === 'vertical') {
+      return {
+         id: crypto.randomUUID(),
+
+         x: segment.x,
+         y: pointer.y,
+
+         type: 'bend'
+      }
+   }
+
+   return null
+}
+
+========================================================
+ВАЖЛИВО
+========================================================
+
+ТУТ:
+--------------------------------------------------------
+
+НЕ center segment.
+
+--------------------------------------------------------
+
+А actual mouse position.
+
+--------------------------------------------------------
+
+Саме так працює draw.io.
+
+========================================================
+2. INSERT BEND VERTEX
+========================================================
+
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function insertBendVertex(
+   connector,
+   segmentId,
+   vertex
+) {
+   if (!connector) return connector
+
+   const vertices = [...connector.vertices]
+   const segments = [...connector.segments]
+
+   const segmentIndex = segments.findIndex(
+      (s) => s.id === segmentId
+   )
+
+   if (segmentIndex === -1) {
+      return connector
+   }
+
+   //----------------------------------------------------
+   // ВСТАВЛЯЄМО VERTEX МІЖ SEGMENT VERTICES
+   //----------------------------------------------------
+
+   vertices.splice(segmentIndex + 1, 0, vertex)
+
+   return {
+      ...connector,
+      vertices
+   }
+}
+
+========================================================
+ЧОМУ segmentIndex + 1
+========================================================
+
+Було:
+--------------------------------------------------------
+
+V0 ---- S0 ---- V1
+
+--------------------------------------------------------
+
+insert after S0:
+--------------------------------------------------------
+
+V0 ---- VNEW ---- V1
+
+========================================================
+3. rebuildConnectorSegments()
+========================================================
+
+ФАЙЛ:
+connectorTopologyRepair.js
+
+========================================================
+
+export function rebuildConnectorSegments(
+   connector
+) {
+   if (!connector) return connector
+
+   const vertices = connector.vertices || []
+
+   const segments = []
+
+   for (let i = 0; i < vertices.length - 1; i++) {
+
+      const from = vertices[i]
+      const to = vertices[i + 1]
+
+      const dx = Math.abs(to.x - from.x)
+      const dy = Math.abs(to.y - from.y)
+
+      let orientation = 'horizontal'
+
+      if (dy > dx) {
+         orientation = 'vertical'
+      }
+
+      segments.push({
+         id: crypto.randomUUID(),
+
+         fromVertexId: from.id,
+         toVertexId: to.id,
+
+         orientation
+      })
+   }
+
+   return {
+      ...connector,
+      segments
+   }
+}
+
+========================================================
+4. rebuildConnectorGeometry()
+========================================================
+
+ФАЙЛ:
+connectorTopologyRepair.js
+
+========================================================
+
+export function rebuildConnectorGeometry(
+   connector
+) {
+   if (!connector) return connector
+
+   const points = []
+
+   const vertices = connector.vertices || []
+
+   vertices.forEach((v) => {
+      points.push(v.x)
+      points.push(v.y)
+   })
+
+   return {
+      ...connector,
+
+      geometry: {
+         ...connector.geometry,
+         points
+      }
+   }
+}
+
+========================================================
+ВАЖЛИВО
+========================================================
+
+geometry.points
+=
+тільки render cache.
+
+--------------------------------------------------------
+
+НЕ topology source.
+
+========================================================
+5. ADD BEND FROM CONTEXT MENU
+========================================================
+
+ФАЙЛ:
+canvasController.js
+
+========================================================
+
+addConnectorBendFromContextMenu() {
+
+   const store = useCanvasStore.getState()
+
+   const menu = store.contextMenu
+
+   if (!menu) return
+
+   const connector = store.edges.find(
+      (e) => e.id === menu.target.edgeId
+   )
+
+   if (!connector) return
+
+   //----------------------------------------------------
+   // ЗНАХОДИМО SEGMENT
+   //----------------------------------------------------
+
+   const segment = connector.segments.find(
+      (s) => s.id === menu.target.segmentId
+   )
+
+   if (!segment) return
+
+   //----------------------------------------------------
+   // CREATE BEND VERTEX
+   //----------------------------------------------------
+
+   const bendVertex =
+      createBendVertexAtSegment(
+         connector,
+         segment,
+         menu.target.pointer
+      )
+
+   if (!bendVertex) return
+
+   //----------------------------------------------------
+   // INSERT VERTEX
+   //----------------------------------------------------
+
+   let next = insertBendVertex(
+      connector,
+      segment.id,
+      bendVertex
+   )
+
+   //----------------------------------------------------
+   // REBUILD SEGMENTS
+   //----------------------------------------------------
+
+   next = rebuildConnectorSegments(next)
+
+   //----------------------------------------------------
+   // REBUILD GEOMETRY
+   //----------------------------------------------------
+
+   next = rebuildConnectorGeometry(next)
+
+   //----------------------------------------------------
+   // SAVE
+   //----------------------------------------------------
+
+   store.replaceEdge(next.id, next)
+
+   store.clearContextMenu()
+}
+
+========================================================
+ЩО ВІДБУВАЄТЬСЯ ТЕПЕР
+========================================================
+
+Було:
+--------------------------------------------------------
+
+A ------------- B
+
+--------------------------------------------------------
+
+Після insert:
+--------------------------------------------------------
+
+A ------+
+        |
+        |
+        +------ B
+
+========================================================
+І ГОЛОВНЕ
+========================================================
+
+ТЕПЕР:
+--------------------------------------------------------
+
+segment topology РЕАЛЬНО міняється.
+
+--------------------------------------------------------
+
+НЕ просто helper point.
+
+========================================================
+6. REMOVE ALL WAYPOINTS
+========================================================
+
+ВАЖЛИВО:
+========================================================
+
+Ти уточнив:
+--------------------------------------------------------
+
+remove waypoint
+=
+remove ALL bends
+
+--------------------------------------------------------
+
+Саме так у draw.io.
+
+========================================================
+НОВА ЛОГІКА
+========================================================
+
+Ми НЕ видаляємо waypoint.
+
+--------------------------------------------------------
+
+Ми:
+--------------------------------------------------------
+
+видаляємо всі vertices
+де:
+--------------------------------------------------------
+
+type === 'bend'
+
+========================================================
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function clearAllBendVertices(
+   connector
+) {
+   if (!connector) return connector
+
+   const vertices =
+      (connector.vertices || []).filter(
+         (v) => v.type !== 'bend'
+      )
+
+   return {
+      ...connector,
+      vertices
+   }
+}
+
+========================================================
+7. CONTROLLER REMOVE
+========================================================
+
+ФАЙЛ:
+canvasController.js
+
+========================================================
+
+removeConnectorWaypointFromContextMenu() {
+
+   const store = useCanvasStore.getState()
+
+   const menu = store.contextMenu
+
+   if (!menu) return
+
+   const connector = store.edges.find(
+      (e) => e.id === menu.target.edgeId
+   )
+
+   if (!connector) return
+
+   //----------------------------------------------------
+   // REMOVE ALL BENDS
+   //----------------------------------------------------
+
+   let next = clearAllBendVertices(
+      connector
+   )
+
+   //----------------------------------------------------
+   // REBUILD SEGMENTS
+   //----------------------------------------------------
+
+   next = rebuildConnectorSegments(next)
+
+   //----------------------------------------------------
+   // REBUILD GEOMETRY
+   //----------------------------------------------------
+
+   next = rebuildConnectorGeometry(next)
+
+   //----------------------------------------------------
+   // SAVE
+   //----------------------------------------------------
+
+   store.replaceEdge(next.id, next)
+
+   store.clearContextMenu()
+}
+
+========================================================
+8. РЕНДЕР BEND HANDLES
+========================================================
+
+ФАЙЛ:
+ConnectorsLayer.jsx
+
+========================================================
+
+const bendVertices =
+   isSelected
+      ? connector.vertices.filter(
+           (v) => v.type === 'bend'
+        )
+      : []
+
+========================================================
+РЕНДЕР:
+========================================================
+
+{bendVertices.map((vertex) => (
+
+   <Rect
+      key={vertex.id}
+
+      x={vertex.x - 5}
+      y={vertex.y - 5}
+
+      width={10}
+      height={10}
+
+      fill="#29GCDB"
+      stroke="#0B3D91"
+
+      strokeWidth={2}
+
+      draggable
+
+      onDragMove={(e) => {
+
+         canvasController.moveBendVertex(
+            connector.id,
+            vertex.id,
+            {
+               x: e.target.x() + 5,
+               y: e.target.y() + 5
+            }
+         )
+      }}
+
+      onContextMenu={(e) => {
+
+         canvasController.handleBendVertexContextMenu(
+            e,
+            connector,
+            vertex
+         )
+      }}
+   />
+))}
+
+========================================================
+9. MOVE BEND VERTEX
+========================================================
+
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function moveBendVertex(
+   connector,
+   vertexId,
+   position
+) {
+   if (!connector) return connector
+
+   const vertices =
+      (connector.vertices || []).map((v) => {
+
+         if (v.id !== vertexId) {
+            return v
+         }
+
+         return {
+            ...v,
+            x: position.x,
+            y: position.y
+         }
+      })
+
+   return {
+      ...connector,
+      vertices
+   }
+}
+
+========================================================
+10. CONTROLLER MOVE BEND
+========================================================
+
+ФАЙЛ:
+canvasController.js
+
+========================================================
+
+moveBendVertex(
+   connectorId,
+   vertexId,
+   position
+) {
+
+   const store = useCanvasStore.getState()
+
+   const connector = store.edges.find(
+      (e) => e.id === connectorId
+   )
+
+   if (!connector) return
+
+   let next = moveBendVertex(
+      connector,
+      vertexId,
+      position
+   )
+
+   next = rebuildConnectorSegments(next)
+
+   next = rebuildConnectorGeometry(next)
+
+   store.replaceEdge(next.id, next)
+}
+
+========================================================
+ТЕПЕР НАЙВАЖЛИВІШЕ
+========================================================
+
+ПІСЛЯ ADD BEND:
+========================================================
+
+segment dragging
+буде працювати ПРАВИЛЬНО.
+
+========================================================
+ЧОМУ
+========================================================
+
+Бо:
+--------------------------------------------------------
+
+segments
+=
+реальні topology segments.
+
+--------------------------------------------------------
+
+А НЕ geometry artifacts.
+
+========================================================
+ТЕПЕР DRAG SEGMENT
+========================================================
+
+рухає:
+--------------------------------------------------------
+
+related bend vertices
+
+--------------------------------------------------------
+
+і rebuild автоматично
+оновлює geometry.
+
+========================================================
+РЕЗУЛЬТАТ
+========================================================
+
+✅ draw.io behavior
+
+✅ no pathHandles
+
+✅ real bend vertices
+
+✅ topology-driven
+
+✅ stable rebuild
+
+✅ proper segment drag
+
+✅ proper bend insertion
+
+✅ proper bend removal
+
+✅ serialization stable
+
+✅ versioning safe
+
+========================================================
+```

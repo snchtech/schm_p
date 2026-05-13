@@ -1,0 +1,444 @@
+Так.
+І це якраз НАЙПРАВИЛЬНІШЕ рішення для твоєї архітектури.
+
+Тобто:
+
+# тобі НЕ треба окремий moveBendVertex engine.
+
+Бо після insertion bend:
+
+* segments автоматично rebuild-яться
+* segmentHandles автоматично rebuild-яться
+* далі existing drag logic вже працює.
+
+І це дуже близько до draw.io internal behavior.
+
+---
+
+# ПРАВИЛЬНА МОДЕЛЬ
+
+Після:
+
+```txt id="vq8wmd"
+insert bend vertex
+```
+
+конектор стає:
+
+# звичайним orthogonal connector.
+
+---
+
+# Тобто
+
+ОСЬ ЦЕ:
+
+```txt id="y0e4h6"
+A -------- B
+```
+
+після add bend:
+
+```txt id="y7pwmx"
+A ----+
+      |
+      +----- B
+```
+
+це вже:
+
+* 3 звичайні segments
+* 1 звичайний bend vertex.
+
+---
+
+# І ДАЛІ
+
+твій existing:
+
+```txt id="xhz7dw"
+move segment
+```
+
+має працювати без нової логіки.
+
+---
+
+# АЛЕ Є КРИТИЧНА УМОВА
+
+Segment drag
+повинен працювати:
+
+# через vertices.
+
+А НЕ:
+
+```txt id="kg53l2"
+через geometry.points
+```
+
+---
+
+# ТЕПЕР ГОЛОВНА ІДЕЯ
+
+Тобі треба:
+
+# позначити vertex.type
+
+---
+
+# НОВА МОДЕЛЬ
+
+```js id="q4i8yx"
+{
+   id,
+   x,
+   y,
+
+   type:
+      'anchor'
+      | 'bend'
+}
+```
+
+---
+
+# anchor
+
+це:
+
+* start/end
+* attached node points.
+
+---
+
+# bend
+
+це:
+
+* user-created elbow
+* inserted topology vertex.
+
+---
+
+# І ОСЬ ТОДІ
+
+твоя existing segment logic
+може працювати БЕЗ ЗМІН.
+
+---
+
+# ЧОМУ
+
+Бо:
+
+```txt id="f3s12y"
+segment
+```
+
+завжди знає:
+
+```js id="qfjlwm"
+fromVertexId
+toVertexId
+```
+
+---
+
+# І moveSegment()
+
+може:
+
+* рухати відповідні vertices
+* rebuild geometry.
+
+---
+
+# ПРИКЛАД
+
+---
+
+# БУЛО
+
+```txt id="3ex0gg"
+V0 -------- V1
+```
+
+---
+
+# ADD BEND
+
+```txt id="r9sj26"
+V0 ---- V2 ---- V1
+```
+
+де:
+
+```js id="jlwm301"
+V2.type = 'bend'
+```
+
+---
+
+# rebuildSegments()
+
+створює:
+
+```txt id="jlwm302"
+S1
+S2
+S3
+```
+
+---
+
+# ТЕПЕР
+
+твій existing:
+
+```txt id="jlwm303"
+moveMiddleSegment()
+```
+
+вже працює.
+
+---
+
+# БО
+
+segment topology тепер валідна.
+
+---
+
+# І ЦЕ ДУЖЕ ВАЖЛИВО
+
+Тобі НЕ треба:
+
+❌ waypoint engine
+❌ pathHandle engine
+❌ temporary deformation engine.
+
+---
+
+# ТВОЯ АРХІТЕКТУРА ВЖЕ КРАЩА
+
+Бо:
+
+# topology explicit.
+
+---
+
+# ТЕПЕР КЛЮЧОВИЙ МОМЕНТ
+
+Ти запитав:
+
+> можливо додати type і далі existing logic?
+
+# ТАК.
+
+І це НАЙКРАЩЕ рішення.
+
+---
+
+# ЩО ПОТРІБНО ЗРОБИТИ
+
+---
+
+# 1. VERTEX TYPE
+
+---
+
+## НОВА МОДЕЛЬ
+
+```js id="jlwm304"
+vertex = {
+   id,
+   x,
+   y,
+
+   type:
+      'anchor'
+      | 'bend'
+}
+```
+
+---
+
+# 2. SEGMENTS
+
+---
+
+## SEGMENT МАЄ:
+
+```js id="jlwm305"
+{
+   id,
+
+   fromVertexId,
+   toVertexId,
+
+   orientation,
+}
+```
+
+---
+
+# 3. EXISTING DRAG
+
+---
+
+## moveSegment()
+
+замість:
+
+```txt id="jlwm306"
+geometry.points mutation
+```
+
+робить:
+
+```txt id="jlwm307"
+vertex mutation
+```
+
+---
+
+# ПРИКЛАД
+
+Було:
+
+```txt id="jlwm308"
+V0 ---- V2 ---- V1
+```
+
+drag vertical segment:
+
+```js id="jlwm309"
+V2.x += dx
+```
+
+---
+
+# rebuildGeometry()
+
+перебудовує:
+
+* segments
+* geometry.points.
+
+---
+
+# І ВСЕ.
+
+---
+
+# 4. ТОДІ moveBendVertex()
+
+ВЗАГАЛІ НЕ ПОТРІБЕН.
+
+---
+
+# ЧОМУ
+
+Бо:
+
+# bend vertex
+
+=
+звичайний topology vertex.
+
+---
+
+# А drag segment
+
+вже:
+
+* рухає vertices
+* rebuild-ить connector.
+
+---
+
+# DRAW.IO РОБИТЬ СХОЖЕ
+
+Там:
+
+* bends
+* waypoints
+* elbows
+
+це:
+
+# topology points.
+
+---
+
+# НЕ helper objects.
+
+---
+
+# І ТИ ЗАРАЗ РУХАЄШСЯ САМЕ ТУДИ.
+
+---
+
+# ЩЕ ОДНА ВАЖЛИВА РІЧ
+
+Тобі треба:
+
+# segment handles будувати через vertices.
+
+---
+
+# А НЕ geometry.points.
+
+---
+
+# ПРАВИЛЬНО
+
+```txt id="jlwm310"
+vertices
+   ↓
+segments
+   ↓
+geometry.points
+```
+
+---
+
+# НЕ НАВПАКИ.
+
+---
+
+# І ТОДІ
+
+після insertion bend:
+
+* segment handles автоматично rebuild-яться
+* drag автоматично працює
+* topology стабільна
+* serialization проста
+* rebuild deterministic.
+
+---
+
+# ВИСНОВОК
+
+# moveBendVertex НЕ ПОТРІБЕН.
+
+Правильний підхід:
+
+```txt id="jlwm311"
+insert bend vertex
+   ↓
+rebuild segments
+   ↓
+existing segment drag logic
+```
+
+Але:
+
+# existing segment drag
+
+має працювати через vertices,
+а НЕ geometry.points.
+
+І тоді в тебе буде реально draw.io-like architecture.

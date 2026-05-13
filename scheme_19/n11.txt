@@ -1,0 +1,650 @@
+========================================================
+PATCH: WAYPOINT / PATH HANDLE LOGIC (DRAW.IO STYLE)
+========================================================
+
+ПРОБЛЕМА ПОТОЧНОЇ РЕАЛІЗАЦІЇ
+========================================================
+
+Зараз у тебе:
+
+1. createWaypointAtSegment()
+   створює лише point/pathHandle.
+
+2. Segment НЕ розривається.
+
+3. geometry.points не перебудовується.
+
+4. pathHandle рендериться по центру сегмента.
+
+5. segmentHandle і pathHandle накладаються.
+
+Це НЕ draw.io behavior.
+
+--------------------------------------------------------
+
+В DRAW.IO LOGIC:
+
+"Add waypoint" НЕ створює окремий floating handle.
+
+Воно:
+
+1. створює НОВИЙ VERTEX
+2. розриває segment
+3. додає новий orthogonal bend
+4. geometry.points перебудовується
+5. waypoint стає звичайною elbow-вершиною
+
+Тобто:
+pathHandle -> temporary insertion operation
+
+Після insertion:
+ніякого окремого pathHandle вже нема.
+
+========================================================
+ВАЖЛИВА ЗМІНА АРХІТЕКТУРИ
+========================================================
+
+ТРЕБА ПРИБРАТИ:
+
+connector.route.pathHandles
+
+І перейти повністю на:
+
+connector.route.waypoints
+
+Саме waypoints = source of truth.
+
+--------------------------------------------------------
+
+Тобто:
+
+route: {
+   waypoints: [...]
+}
+
+І rebuildGeometry()
+будує geometry.points виключно з waypoints.
+
+========================================================
+НОВА МОДЕЛЬ
+========================================================
+
+connector = {
+   id,
+   kind: 'connector',
+
+   route: {
+      waypoints: [
+         {
+            id,
+            x,
+            y
+         }
+      ]
+   },
+
+   geometry: {
+      points: [...]
+   }
+}
+
+========================================================
+ЩО Є WAYPOINT
+========================================================
+
+Waypoint = реальний bend/vertex.
+
+НЕ UI HANDLE.
+
+НЕ preview point.
+
+НЕ helper.
+
+А справжня topology vertex.
+
+========================================================
+ПРАВИЛЬНА ЛОГІКА ADD WAYPOINT
+========================================================
+
+КОЛИ USER:
+
+1. right click on segment
+2. add waypoint
+
+ТРЕБА:
+
+--------------------------------------------------------
+STEP 1
+========================================================
+
+Знайти segment.
+
+--------------------------------------------------------
+STEP 2
+========================================================
+
+Взяти actual click position.
+
+НЕ center segment.
+
+А mouse position.
+
+--------------------------------------------------------
+STEP 3
+========================================================
+
+Створити НОВИЙ WAYPOINT.
+
+--------------------------------------------------------
+STEP 4
+========================================================
+
+Вставити його в route.waypoints
+в правильну позицію.
+
+--------------------------------------------------------
+STEP 5
+========================================================
+
+rebuildConnectorGeometry()
+
+--------------------------------------------------------
+STEP 6
+========================================================
+
+geometry.points автоматично створить:
+
+OLD:
+---------
+A ---- B
+
+NEW:
+---------
+A ---- WP
+       |
+       B
+
+або
+
+A
+|
+WP ---- B
+
+========================================================
+ЩО ТРЕБА ЗМІНИТИ
+========================================================
+
+========================================================
+1. ПРИБРАТИ PATH HANDLES
+========================================================
+
+ФАЙЛ:
+ConnectorsLayer.jsx
+
+ПРИБРАТИ:
+--------------------------------------------------------
+
+const rawPathHandles =
+   isSelected
+      ? connector.route?.pathHandles || []
+      : []
+
+--------------------------------------------------------
+
+ПРИБРАТИ:
+--------------------------------------------------------
+
+{pathHandles.map(...)}
+
+--------------------------------------------------------
+
+БІЛЬШЕ pathHandles НЕ ІСНУЄ.
+
+========================================================
+2. РЕНДЕРИТИ WAYPOINTS ЯК VERTEX HANDLES
+========================================================
+
+ДОДАТИ:
+--------------------------------------------------------
+
+const waypointHandles =
+   isSelected
+      ? connector.route?.waypoints || []
+      : []
+
+--------------------------------------------------------
+
+РЕНДЕР:
+--------------------------------------------------------
+
+{waypointHandles.map((wp) => (
+   <Rect
+      key={wp.id}
+      x={wp.x - 5}
+      y={wp.y - 5}
+      width={10}
+      height={10}
+      fill="#29GCDB"
+      stroke="#0B3D91"
+      strokeWidth={2}
+      draggable
+
+      onDragMove={(e) => {
+         canvasController.moveConnectorWaypoint(
+            connector.id,
+            wp.id,
+            {
+               x: e.target.x() + 5,
+               y: e.target.y() + 5
+            }
+         )
+      }}
+
+      onContextMenu={(e) => {
+         canvasController.handleWaypointContextMenu(
+            e,
+            connector,
+            wp
+         )
+      }}
+   />
+))}
+
+--------------------------------------------------------
+
+ТЕПЕР:
+waypoint = actual bend handle.
+
+========================================================
+3. ПЕРЕПИСАТИ createWaypointAtSegment()
+========================================================
+
+ФАЙЛ:
+connectorEditing.js
+
+ЗАМІНИ ПОВНІСТЮ
+========================================================
+
+export function createWaypointAtSegment(
+   connector,
+   segment,
+   pointer
+) {
+   if (!connector) return null
+
+   const x = pointer.x
+   const y = pointer.y
+
+   if (segment.orientation === 'horizontal') {
+      return {
+         id: crypto.randomUUID(),
+         x,
+         y: segment.y
+      }
+   }
+
+   if (segment.orientation === 'vertical') {
+      return {
+         id: crypto.randomUUID(),
+         x: segment.x,
+         y
+      }
+   }
+
+   return null
+}
+
+========================================================
+ЧОМУ ТАК
+========================================================
+
+КРИТИЧНО:
+
+Ти маєш брати mouse position.
+
+НЕ segment center.
+
+Саме це робить draw.io.
+
+========================================================
+4. ПЕРЕПИСАТИ addConnectorWaypoint()
+========================================================
+
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function addConnectorWaypoint(
+   connector,
+   waypoint,
+   segmentId
+) {
+   if (!connector) return connector
+
+   const waypoints = [
+      ...(connector.route?.waypoints || [])
+   ]
+
+   const segments = getOrthogonalRouteSegments(
+      connector.geometry.start,
+      connector.geometry.end,
+      connector.route
+   )
+
+   const segmentIndex = segments.findIndex(
+      (s) => s.id === segmentId
+   )
+
+   if (segmentIndex === -1) return connector
+
+   waypoints.splice(segmentIndex, 0, waypoint)
+
+   return {
+      ...connector,
+      route: {
+         ...connector.route,
+         waypoints
+      }
+   }
+}
+
+========================================================
+5. ПЕРЕПИСАТИ removeConnectorWaypoint()
+========================================================
+
+ВАЖЛИВО:
+========================================================
+
+Ти уточнив:
+
+clear waypoint
+має видаляти ВСІ waypoint.
+
+Так і є в draw.io.
+
+--------------------------------------------------------
+Тобто:
+--------------------------------------------------------
+
+Remove waypoint
+=
+clear bends
+
+========================================================
+ФАЙЛ:
+connectorEditing.js
+
+========================================================
+
+export function clearConnectorWaypoints(connector) {
+   if (!connector) return connector
+
+   return {
+      ...connector,
+      route: {
+         ...connector.route,
+         waypoints: []
+      }
+   }
+}
+
+========================================================
+6. ПЕРЕПИСАТИ CONTROLLER
+========================================================
+
+ФАЙЛ:
+canvasController.js
+
+========================================================
+
+removeConnectorWaypointFromContextMenu() {
+   const store = useCanvasStore.getState()
+
+   const menu = store.contextMenu
+
+   if (!menu) return
+
+   const connector = store.edges.find(
+      (e) => e.id === menu.target.edgeId
+   )
+
+   if (!connector) return
+
+   let next = clearConnectorWaypoints(connector)
+
+   next = rebuildConnectorGeometry(
+      next,
+      store.nodes
+   )
+
+   store.replaceEdge(next.id, next)
+
+   store.clearContextMenu()
+}
+
+========================================================
+7. ADD WAYPOINT З MOUSE POSITION
+========================================================
+
+ЗАРАЗ У ТЕБЕ:
+========================================================
+
+createWaypointAtSegment(
+   connector,
+   segmentId
+)
+
+НЕМА POINTER POSITION.
+
+--------------------------------------------------------
+
+ТРЕБА:
+========================================================
+
+В contextMenu.target
+зберігати:
+
+{
+   pointer: {
+      x,
+      y
+   }
+}
+
+========================================================
+8. ОНОВИТИ CONTEXT MENU TARGET
+========================================================
+
+ФАЙЛ:
+handleConnectorContextMenu
+
+========================================================
+
+store.setContextMenu({
+   mouseX: e.evt.clientX,
+   mouseY: e.evt.clientY,
+
+   target: {
+      type: 'connector',
+      edgeId: connector.id,
+      segmentId,
+
+      pointer: {
+         x: stagePointer.x,
+         y: stagePointer.y
+      }
+   }
+})
+
+========================================================
+9. ПЕРЕПИСАТИ addConnectorWaypointFromContextMenu
+========================================================
+
+========================================================
+
+addConnectorWaypointFromContextMenu() {
+
+   const store = useCanvasStore.getState()
+
+   const menu = store.contextMenu
+
+   if (!menu) return
+
+   const connector = store.edges.find(
+      (e) => e.id === menu.target.edgeId
+   )
+
+   if (!connector) return
+
+   const segments = getOrthogonalRouteSegments(
+      connector.geometry.start,
+      connector.geometry.end,
+      connector.route
+   )
+
+   const seg = segments.find(
+      (s) => s.id === menu.target.segmentId
+   )
+
+   if (!seg) return
+
+   const waypoint = createWaypointAtSegment(
+      connector,
+      seg,
+      menu.target.pointer
+   )
+
+   if (!waypoint) return
+
+   let next = addConnectorWaypoint(
+      connector,
+      waypoint,
+      seg.id
+   )
+
+   next = rebuildConnectorGeometry(
+      next,
+      store.nodes
+   )
+
+   store.replaceEdge(next.id, next)
+
+   store.clearContextMenu()
+}
+
+========================================================
+ЩО ТЕПЕР БУДЕ
+========================================================
+
+ПІСЛЯ ADD WAYPOINT:
+
+Було:
+--------------------------------------------------------
+
+A ---------- B
+
+--------------------------------------------------------
+
+Стало:
+--------------------------------------------------------
+
+A -------+
+         |
+         |
+         +------ B
+
+========================================================
+ПІСЛЯ DRAG WAYPOINT
+========================================================
+
+bend рухається як у draw.io.
+
+========================================================
+ПІСЛЯ REMOVE WAYPOINT
+========================================================
+
+ВСІ bends очищаються.
+
+--------------------------------------------------------
+
+Було:
+--------------------------------------------------------
+
+A ----+
+      |
+      +-----+
+            |
+            B
+
+--------------------------------------------------------
+
+Стало:
+--------------------------------------------------------
+
+A ------------ B
+
+========================================================
+ГОЛОВНА ПОМИЛКА ПОТОЧНОЇ АРХІТЕКТУРИ
+========================================================
+
+Ти зараз трактуєш:
+
+pathHandle
+=
+UI helper.
+
+АЛЕ В DRAW.IO:
+
+waypoint
+=
+actual topology vertex.
+
+Це принципово інша модель.
+
+========================================================
+ПРАВИЛЬНА АРХІТЕКТУРА
+========================================================
+
+SOURCE OF TRUTH:
+--------------------------------------------------------
+
+route.waypoints
+
+--------------------------------------------------------
+
+НЕ:
+--------------------------------------------------------
+
+geometry.points
+
+і НЕ:
+--------------------------------------------------------
+
+pathHandles
+
+========================================================
+РЕЗУЛЬТАТ
+========================================================
+
+Після цього:
+
+✅ segment handles не накладаються
+
+✅ bends працюють як draw.io
+
+✅ topology стабільна
+
+✅ rebuildGeometry контрольований
+
+✅ serialization проста
+
+✅ versioning працює нормально
+
+✅ old схемы не ламаються
+
+✅ waypoint insertion predictable
+
+✅ remove waypoint behaves like draw.io
+
+========================================================

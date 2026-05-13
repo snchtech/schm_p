@@ -1,0 +1,438 @@
+Тепер зрозумів твою поточну архітектуру значно краще.
+І тут дуже важливий момент:
+
+Ти вже фактично маєш architecture ближчу до draw.io, ніж думаєш.
+
+Бо в тебе:
+
+* connector
+
+  * segments
+  * vertices
+* geometry.points — лише render representation
+
+І ЦЕ ПРАВИЛЬНО.
+
+Тобто тобі НЕ треба переходити на pure waypoint architecture як у React Flow.
+
+---
+
+## У ТЕБЕ ВЖЕ:
+
+topology-driven model.
+
+І це добре.
+
+# ТОДІ ГОЛОВНЕ УТОЧНЕННЯ
+
+У твоїй архітектурі:
+
+```txt
+WAYPOINT
+=
+VERTICE
+```
+
+Тобто:
+
+* НЕ окремий helper
+* НЕ pathHandle
+* НЕ UI object
+
+А справжня topology vertex.
+
+# ТВОЯ ПОМИЛКА ЗАРАЗ
+
+Зараз у тебе:
+
+```txt
+pathHandle
+-> render point
+```
+
+але НЕ:
+
+```txt
+vertice insertion
+```
+
+І тому:
+
+* segment не розривається
+* topology не міняється
+* geometry не rebuild-иться правильно
+
+# ЯК ЦЕ ПОВИННО ПРАЦЮВАТИ У ТВОЇЙ АРХІТЕКТУРІ
+
+У тебе має бути:
+
+```txt
+connector
+ ├── vertices
+ ├── segments
+ └── geometry.points
+```
+
+І:
+
+```txt
+geometry.points
+=
+derived data
+```
+
+# ТОБТО ADD WAYPOINT = ADD VERTICE
+
+Не окремий entity.
+
+А:
+
+```txt
+insert vertice into topology
+```
+
+# ПРАВИЛЬНА ЛОГІКА
+
+Було:
+
+```txt
+V1 -------- V2
+```
+
+segments:
+
+```txt
+S1
+```
+
+vertices:
+
+```js
+[
+   startVertex,
+   endVertex
+]
+```
+
+---
+
+User:
+right click on segment
+
+---
+
+Add waypoint:
+
+```txt
+V1 ---- VNEW
+          |
+          |
+          V2
+```
+
+Тепер:
+
+segments:
+
+```txt
+S1
+S2
+S3
+```
+
+vertices:
+
+```js
+[
+   startVertex,
+   insertedVertex,
+   endVertex
+]
+```
+
+# І ОСЬ ТУТ КРИТИЧНА ІДЕЯ
+
+У тебе waypoint НЕ існує окремо.
+
+Взагалі.
+
+Тобто:
+
+```txt
+waypoint
+=
+new vertice
+```
+
+# ТОБІ ТРЕБА ПЕРЕЙМЕНУВАТИ
+
+Замість:
+
+```txt
+waypoint
+```
+
+використовуй:
+
+```txt
+connector vertex
+```
+
+або:
+
+```txt
+bend vertex
+```
+
+Бо це реальна topology vertex.
+
+# ЯК ПРАЦЮЄ DRAW.IO
+
+У draw.io:
+
+```txt
+waypoint
+```
+
+це теж по факту:
+
+* bend vertex
+* routing vertex
+
+Просто вони називають це waypoints.
+
+# У ТВОЄМУ ВИПАДКУ
+
+У тебе вже є:
+
+* vertices
+* segments
+
+ТОМУ:
+тобі НЕ треба route.waypoints окремо.
+
+Це було б дублювання.
+
+# ПРАВИЛЬНА МОДЕЛЬ ДЛЯ ТЕБЕ
+
+```js
+connector = {
+   id,
+
+   vertices: [
+      {
+         id,
+         x,
+         y,
+         type: 'anchor'
+      },
+
+      {
+         id,
+         x,
+         y,
+         type: 'bend'
+      },
+
+      {
+         id,
+         x,
+         y,
+         type: 'anchor'
+      }
+   ],
+
+   segments: [
+      ...
+   ]
+}
+```
+
+# І ОСЬ ГОЛОВНЕ
+
+КОЛИ USER:
+"add waypoint"
+
+Ти:
+
+1. знаходиш segment
+2. створюєш NEW BEND VERTEX
+3. insert vertex between segment vertices
+4. rebuild segments
+5. rebuild geometry.points
+
+# ТЕПЕР ВСЕ СТАЄ ЛОГІЧНО
+
+Бо:
+
+```txt
+segmentHandle
+```
+
+працює через:
+
+* segments
+
+а:
+
+```txt
+pathHandle
+```
+
+взагалі більше не потрібен.
+
+# ОТЖЕ ПРАВИЛЬНА АРХІТЕКТУРА ДЛЯ ТЕБЕ
+
+```txt
+connector
+ ├── vertices
+ │    ├── anchor
+ │    ├── bend
+ │    └── anchor
+ │
+ ├── segments
+ │
+ └── geometry.points
+```
+
+# geometry.points
+
+лише render cache.
+
+# ТОБІ ТРЕБА ЗРОБИТИ
+
+## 1. ПРИБРАТИ
+
+```txt
+pathHandles
+```
+
+повністю.
+
+# 2. ДОДАТИ TYPE
+
+```js
+vertex.type = 'bend'
+```
+
+# 3. РЕНДЕРИТИ BEND VERTICES
+
+як draggable handles.
+
+# 4. rebuildSegments()
+
+повинен автоматично:
+
+* split segments
+* merge segments
+* orthogonalize path
+
+# 5. geometry.points
+
+будуються виключно через:
+
+* vertices
+* segments
+
+# ТЕПЕР НАЙВАЖЛИВІШЕ
+
+> чи буде після додавання waypoint поведінка перетягування сегмента як в звичайному конекторі
+
+ТАК.
+І навіть КРАЩЕ.
+
+Бо тепер:
+
+```txt
+segment
+=
+реальний topology segment
+```
+
+а не geometry artifact.
+
+# ПРИКЛАД
+
+Було:
+
+```txt
+A -------- B
+```
+
+1 segment.
+
+---
+
+Add bend.
+
+Стало:
+
+```txt
+A ----+
+      |
+      +----- B
+```
+
+Тепер:
+
+* horizontal segment
+* vertical segment
+* horizontal segment
+
+Кожен має:
+
+* own segment handle
+* own drag
+* own topology behavior
+
+# І DRAG SEGMENT ТЕПЕР ПРОСТИЙ
+
+Бо segment знає:
+
+```js
+segment.fromVertexId
+segment.toVertexId
+```
+
+І move segment:
+
+* рухає bend vertices
+* rebuild topology
+
+# ЧОМУ В ТЕБЕ ЗАРАЗ ВСЕ ЛАМАЄТЬСЯ
+
+Бо зараз:
+
+* pathHandle окремо
+* segment topology окремо
+* geometry окремо
+
+І вони НЕ синхронні.
+
+# ПРАВИЛЬНА МОДЕЛЬ
+
+```txt
+VERTEX
+   ↓
+SEGMENTS
+   ↓
+GEOMETRY
+```
+
+І НІКОЛИ НАВПАКИ.
+
+# НАСПРАВДІ
+
+Ти зараз дуже близько до правильної архітектури draw.io.
+
+Тобі треба:
+
+* не додавати waypoint system,
+* а перетворити waypoint operation
+  у:
+
+```txt
+insert bend vertex
+```
+
+І все стане на свої місця.
