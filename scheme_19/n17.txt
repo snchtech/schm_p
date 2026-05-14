@@ -1,0 +1,503 @@
+Ти зараз видаляєш:
+
+```js
+type === 'bend'
+```
+
+але:
+
+# не виконуєш reroute topology.
+
+Тому після видалення bend vertices у тебе залишаються:
+
+```txt
+старі geometry segments
+старі repaired points
+старі offsets
+```
+
+і rebuild використовує вже:
+
+# пошкоджену геометрію.
+
+Тому й з’являються:
+
+# діагоналі.
+
+---
+
+# ЩО ВІДБУВАЄТЬСЯ ЗАРАЗ
+
+У тебе pipeline приблизно такий:
+
+```txt
+vertices
+   ↓
+getFullOrthogonalRoutePoints()
+   ↓
+repairTerminalOrthogonality()
+   ↓
+segmentsMeta
+```
+
+---
+
+# АЛЕ
+
+Після clear:
+
+```js
+vertices.filter(v => v.type !== 'bend')
+```
+
+ти отримуєш:
+
+```txt
+anchor -> anchor
+```
+
+без проміжних orthogonal points.
+
+---
+
+# І ДАЛІ
+
+buildBaseRouteWithMeta()
+бачить:
+
+```txt
+лише 2 точки
+```
+
+і будує:
+
+# пряму лінію.
+
+---
+
+# ТОМУ ГОЛОВНА ПРОБЛЕМА
+
+---
+
+# bends ≠ orthogonal route.
+
+---
+
+# bends
+
+це:
+
+```txt
+user topology hints
+```
+
+А orthogonal path:
+це:
+
+```txt
+generated routing geometry
+```
+
+---
+
+# ПРАВИЛЬНА АРХІТЕКТУРА
+
+Після видалення bends треба:
+
+# повністю заново побудувати orthogonal route.
+
+---
+
+# ТИ ВЖЕ МАЙЖЕ ЦЕ РОБИШ
+
+Оце:
+
+```js
+next = rebuildConnectorGeometry(next, store.nodes)
+```
+
+це правильно.
+
+---
+
+# АЛЕ
+
+Проблема у:
+
+```js
+getFullOrthogonalRoutePoints()
+```
+
+або:
+
+```js
+repairTerminalOrthogonality()
+```
+
+---
+
+# БО ЗАРАЗ
+
+вони працюють від:
+
+```txt
+старих repaired points
+```
+
+а не від:
+
+```txt
+чистого route.vertices
+```
+
+---
+
+# ЯК ПОВИННО БУТИ
+
+---
+
+# ПІСЛЯ clear bends
+
+route.vertices повинні містити:
+
+# ТІЛЬКИ anchor точки.
+
+---
+
+## ПРИКЛАД
+
+Було:
+
+```js
+[
+  start(anchor),
+  bend,
+  bend,
+  end(anchor)
+]
+```
+
+---
+
+Після clear:
+
+```js
+[
+  start(anchor),
+  end(anchor)
+]
+```
+
+---
+
+# ДАЛІ
+
+rebuildConnectorGeometry()
+має:
+
+# НЕ repair старий шлях
+
+а:
+
+# ПОВНІСТЮ ЗАНОВО ГЕНЕРУВАТИ ROUTE.
+
+---
+
+# ТЕБІ ПОТРІБЕН РЕЖИМ
+
+---
+
+# AUTO ORTHOGONAL REBUILD
+
+---
+
+# ТОБТО
+
+---
+
+## якщо:
+
+```js
+vertices.filter(v => v.type === 'bend').length === 0
+```
+
+---
+
+## ТО:
+
+не використовуй:
+
+```txt
+старі pts
+старі repaired
+старі segments
+```
+
+---
+
+# А ЗАНОВО ПОБУДУЙ:
+
+```txt
+start → orthogonal auto route → end
+```
+
+---
+
+# ЩО ТРЕБА ЗМІНИТИ
+
+---
+
+# buildBaseRouteWithMeta()
+
+---
+
+## ЗАРАЗ У ТЕБЕ
+
+```js
+const pts = getFullOrthogonalRoutePoints(start, end, route)
+```
+
+---
+
+# АЛЕ route
+
+ще містить:
+
+```txt
+старий routing state
+```
+
+---
+
+# ТРЕБА
+
+---
+
+## ЯКЩО НЕМАЄ bend:
+
+```js
+const bends = route.vertices?.filter(
+   v => v.type === 'bend'
+)
+
+const hasBends = bends?.length > 0
+```
+
+---
+
+# IF NO BENDS
+
+---
+
+## використовувати:
+
+```js
+buildSimpleOrthogonalRoute(start, end)
+```
+
+---
+
+# А НЕ
+
+```js
+repair old geometry
+```
+
+---
+
+# І ЦЕ КЛЮЧ.
+
+---
+
+# ЩО ПОВИНЕН РОБИТИ buildSimpleOrthogonalRoute
+
+---
+
+## ПОВЕРТАТИ
+
+---
+
+### HORIZONTAL-FIRST
+
+```txt
+start
+↓
+(start.x, end.y)
+↓
+end
+```
+
+---
+
+### або VERTICAL-FIRST
+
+```txt
+start
+↓
+(end.x, start.y)
+↓
+end
+```
+
+---
+
+# ТОДІ
+
+після clear bends:
+
+```txt
+коннектор повертається
+в чистий orthogonal state.
+```
+
+---
+
+# ЧОМУ ЗАРАЗ ДІАГОНАЛІ
+
+Бо:
+
+```txt
+repairTerminalOrthogonality()
+```
+
+не створює:
+
+```txt
+новий elbow
+```
+
+коли vertices спорожніли.
+
+---
+
+# ВІН ЛИШЕ
+
+намагається repair-ити:
+
+```txt
+старий broken path
+```
+
+---
+
+# ПРАВИЛЬНИЙ FLOW
+
+---
+
+# NORMAL CONNECTOR
+
+```txt
+anchors only
+↓
+auto orthogonal router
+↓
+segments
+```
+
+---
+
+# WITH BENDS
+
+```txt
+anchors + bends
+↓
+route builder
+↓
+segments
+```
+
+---
+
+# ПІСЛЯ CLEAR
+
+ти повинен перейти:
+
+```txt
+WITH BENDS
+↓
+NORMAL CONNECTOR
+```
+
+---
+
+# А НЕ
+
+```txt
+WITH BENDS
+↓
+remove vertices
+↓
+repair corrupted geometry
+```
+
+---
+
+# КОНКРЕТНО ДЛЯ ТВОГО КОДУ
+
+---
+
+# ОЦЕ:
+
+```js
+const updatedVertices = repaired.slice(1, -1)
+```
+
+неправильно після clear.
+
+---
+
+# БО repaired
+
+вже містить:
+
+```txt
+діагональний path
+```
+
+---
+
+# ТРЕБА
+
+---
+
+## ДО repair:
+
+```js
+const bendVertices =
+   route.vertices?.filter(v => v.type === 'bend') || []
+```
+
+---
+
+# IF EMPTY
+
+---
+
+## НЕ ВИКЛИКАТИ:
+
+```js
+repairTerminalOrthogonality()
+```
+
+---
+
+## А:
+
+```js
+const repaired =
+   buildSimpleOrthogonalRoute(start, end)
+```
+
+---
+
+# САМЕ ЦЕ ВИРІШИТЬ ПРОБЛЕМУ.
+
+---
+
+# DRAW.IO РОБИТЬ ТАК САМО
+
+Після remove waypoint:
+
+# connector reroute-иться заново.
+
+Він НЕ repair-ить старий path.

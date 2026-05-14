@@ -1,0 +1,345 @@
+Так, це абсолютно нормальна практика для diagram editors.
+Так працює:
+
+* draw.io
+* Figma
+* Excalidraw
+* Visio
+* Miro
+
+І це досить просто реалізується у твоїй архітектурі.
+
+---
+
+# ІДЕЯ
+
+Поки користувач:
+
+* малює free line
+* тримає Shift
+
+ти:
+
+* НЕ дозволяєш довільний кут
+* а снапиш preview point:
+
+  * або по X
+  * або по Y
+
+---
+
+# ПОВЕДІНКА
+
+---
+
+# Без Shift
+
+```txt
+start -------- current mouse
+```
+
+будь-який кут.
+
+---
+
+# Із Shift
+
+Якщо рух:
+
+* більше по X → горизонталь
+* більше по Y → вертикаль
+
+---
+
+# ПРИКЛАД
+
+---
+
+## START
+
+```js
+start = { x: 100, y: 100 }
+```
+
+---
+
+## POINTER
+
+```js
+pointer = { x: 180, y: 120 }
+```
+
+---
+
+## DELTA
+
+```js
+dx = 80
+dy = 20
+```
+
+---
+
+## RESULT
+
+горизонтальна лінія:
+
+```js
+preview = {
+   x: 180,
+   y: 100
+}
+```
+
+---
+
+# АБО
+
+```js
+dx = 20
+dy = 100
+```
+
+→ вертикальна:
+
+```js
+preview = {
+   x: 100,
+   y: 200
+}
+```
+
+---
+
+# АРХІТЕКТУРА
+
+Тобі НЕ треба окремий connector type.
+
+Це:
+
+```txt
+тимчасовий snapping mode
+```
+
+тільки на preview + creation.
+
+---
+
+# РЕАЛІЗАЦІЯ
+
+---
+
+# 1. TRACK SHIFT
+
+---
+
+# canvas keyboard state
+
+```js
+const [isShiftPressed, setIsShiftPressed] = useState(false)
+```
+
+---
+
+# useEffect
+
+```js
+useEffect(() => {
+   const down = (e) => {
+      if (e.key === 'Shift') {
+         setIsShiftPressed(true)
+      }
+   }
+
+   const up = (e) => {
+      if (e.key === 'Shift') {
+         setIsShiftPressed(false)
+      }
+   }
+
+   window.addEventListener('keydown', down)
+   window.addEventListener('keyup', up)
+
+   return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+   }
+}, [])
+```
+
+---
+
+# 2. SNAP POINTER
+
+Створи helper:
+
+```js
+function getOrthogonalPoint(start, pointer) {
+   const dx = pointer.x - start.x
+   const dy = pointer.y - start.y
+
+   if (Math.abs(dx) > Math.abs(dy)) {
+      return {
+         x: pointer.x,
+         y: start.y,
+         orientation: 'horizontal',
+      }
+   }
+
+   return {
+      x: start.x,
+      y: pointer.y,
+      orientation: 'vertical',
+   }
+}
+```
+
+---
+
+# 3. В PREVIEW
+
+Було:
+
+```js
+previewEnd = pointer
+```
+
+стане:
+
+```js
+previewEnd = isShiftPressed
+   ? getOrthogonalPoint(startPoint, pointer)
+   : pointer
+```
+
+---
+
+# 4. ПРИ СТВОРЕННІ LINE
+
+Те саме.
+
+---
+
+# ВАЖЛИВО
+
+Shift має впливати:
+
+* preview
+* actual connector geometry
+
+---
+
+# РЕЗУЛЬТАТ
+
+---
+
+# Без Shift
+
+```txt
+\
+ \
+  \
+```
+
+---
+
+# Із Shift
+
+```txt
+-------
+```
+
+або:
+
+```txt
+|
+|
+|
+```
+
+---
+
+# НАЙКРАЩИЙ UX
+
+---
+
+# ДОДАЙ THRESHOLD
+
+Щоб не flicker між vertical/horizontal.
+
+---
+
+# НАПРИКЛАД
+
+```js
+const SNAP_THRESHOLD = 8
+```
+
+---
+
+# АБО LOCK ORIENTATION
+
+Після першого dominant direction.
+
+---
+
+# ЯК У FIGMA
+
+Після:
+
+* рухнув трохи більше по X
+
+весь drag locked horizontal.
+
+---
+
+# МОЖНА ТАК
+
+```js
+dragState.lockedAxis
+```
+
+---
+
+# АЛЕ
+
+На старті тобі достатньо простого:
+
+```js
+abs(dx) > abs(dy)
+```
+
+---
+
+# ЩЕ КРАЩЕ
+
+Можна зробити:
+
+* Shift = orthogonal
+* Alt = 45°
+* Ctrl = grid snap
+
+як у професійних editors.
+
+---
+
+# ДЛЯ ТВОЄЇ АРХІТЕКТУРИ
+
+Тобі міняти треба лише:
+
+* preview calculation
+* connector end point calculation
+
+ВСЯ інша логіка:
+
+* segments
+* vertices
+* geometry
+
+не змінюється.
+
+---
+
+# ТВОЄ РІШЕННЯ БУДЕ ВИГЛЯДАТИ ПРОФЕСІЙНО
+
+Бо це стандарт UX для CAD/diagram systems.

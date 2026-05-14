@@ -1,0 +1,395 @@
+Ось готовий patch під твою архітектуру `vertices + rebuildConnectorGeometry`, щоб після видалення bend vertices конектор автоматично повертався в нормальний orthogonal state без діагоналей.
+
+---
+
+# PATCH 1
+
+# connectorGeometry.js
+
+---
+
+# ЗНАЙДИ
+
+```js
+export function buildBaseRouteWithMeta(start, end, route = {}) {
+```
+
+---
+
+# І ДОДАЙ НА ПОЧАТОК ФУНКЦІЇ
+
+```js
+const vertices = route.vertices || []
+
+const bendVertices = vertices.filter(
+  (v) => v.type === 'bend'
+)
+
+const hasBends = bendVertices.length > 0
+```
+
+---
+
+# ТЕПЕР ЗНАЙДИ
+
+```js
+const pts = getFullOrthogonalRoutePoints(start, end, route)
+```
+
+---
+
+# І ЗАМІНИ НА
+
+```js
+let pts
+
+// ----------------------------------------------------
+// AUTO ORTHOGONAL MODE
+// Якщо немає bend vertices — будуємо
+// чистий orthogonal route заново
+// ----------------------------------------------------
+
+if (!hasBends) {
+  const dx = Math.abs(end.x - start.x)
+  const dy = Math.abs(end.y - start.y)
+
+  // simple elbow route
+  if (dx >= dy) {
+    pts = [
+      start,
+      { x: end.x, y: start.y },
+      end,
+    ]
+  } else {
+    pts = [
+      start,
+      { x: start.x, y: end.y },
+      end,
+    ]
+  }
+} else {
+  // ----------------------------------------------------
+  // CUSTOM BEND ROUTE
+  // ----------------------------------------------------
+  pts = getFullOrthogonalRoutePoints(start, end, route)
+}
+```
+
+---
+
+# ЩО ЦЕ РОБИТЬ
+
+---
+
+## БЕЗ bends
+
+конектор:
+
+```txt
+будується заново
+```
+
+як чистий orthogonal connector.
+
+---
+
+## З bends
+
+все працює як зараз:
+
+```txt
+через vertices
+```
+
+---
+
+# PATCH 2
+
+# connectorGeometry.js
+
+---
+
+# ЗНАЙДИ
+
+```js
+let repaired = repairTerminalOrthogonality(
+   pts,
+   start?.attached,
+   end?.attached
+)
+```
+
+---
+
+# ЗАМІНИ НА
+
+```js
+let repaired = pts
+
+// repair only for custom bend routes
+if (hasBends) {
+  repaired = repairTerminalOrthogonality(
+    pts,
+    start?.attached,
+    end?.attached
+  )
+}
+```
+
+---
+
+# ЧОМУ ЦЕ ВАЖЛИВО
+
+---
+
+Після clear bends:
+
+```txt
+pts вже правильні
+```
+
+і repair:
+
+```txt
+не повинен втручатись
+```
+
+---
+
+# ІНАКШЕ
+
+repair:
+
+```txt
+ламає auto orthogonal route
+```
+
+і знову дає:
+
+```txt
+діагоналі
+```
+
+---
+
+# PATCH 3
+
+# connectorEditing.js
+
+---
+
+# clearAllBendVertices
+
+---
+
+# ЗАМІНИ НА
+
+```js
+export function clearAllBendVertices(connector) {
+  if (!connector) return connector
+
+  const currentVertices =
+    connector.route?.vertices ||
+    connector.vertices ||
+    []
+
+  const vertices = currentVertices.filter(
+    (v) => v.type !== 'bend'
+  )
+
+  return {
+    ...connector,
+
+    route: {
+      ...(connector.route || {}),
+      vertices,
+    },
+  }
+}
+```
+
+---
+
+# PATCH 4
+
+# canvasController.js
+
+---
+
+# removeConnectorWaypointFromContextMenu
+
+---
+
+# ЗАМІНИ НА
+
+```js
+removeConnectorWaypointFromContextMenu() {
+  const store = useCanvasStore.getState()
+
+  const menu = store.contextMenu
+
+  if (!menu) return
+
+  const connector = store.edges.find(
+    (e) => e.id === menu.target.edgeId
+  )
+
+  if (!connector) return
+
+  // ----------------------------------------------------
+  // REMOVE ALL BEND VERTICES
+  // ----------------------------------------------------
+
+  let next = clearAllBendVertices(connector)
+
+  // ----------------------------------------------------
+  // FULL GEOMETRY REBUILD
+  // ----------------------------------------------------
+
+  next = rebuildConnectorGeometry(
+    next,
+    store.nodes
+  )
+
+  // ----------------------------------------------------
+  // SAVE
+  // ----------------------------------------------------
+
+  store.replaceEdge(next.id, next)
+
+  store.clearContextMenu()
+}
+```
+
+---
+
+# РЕЗУЛЬТАТ
+
+---
+
+# БУЛО
+
+```txt
+видалили bends
+↓
+старий repaired path
+↓
+діагоналі
+```
+
+---
+
+# СТАЛО
+
+```txt
+видалили bends
+↓
+немає bend vertices
+↓
+buildSimpleOrthogonalRoute
+↓
+новий clean elbow
+↓
+нормальний connector
+```
+
+---
+
+# ПОВЕДІНКА ЯК DRAW.IO
+
+---
+
+# ДО ДОДАВАННЯ BEND
+
+```txt
+звичайний orthogonal connector
+```
+
+---
+
+# ПІСЛЯ ADD WAYPOINT
+
+```txt
+custom routed connector
+```
+
+---
+
+# ПІСЛЯ REMOVE WAYPOINT
+
+```txt
+повний reroute
+```
+
+---
+
+# ВАЖЛИВО
+
+Тепер:
+
+# bend vertices = лише topology hints.
+
+А:
+
+# geometry = завжди rebuild.
+
+Це саме та архітектура, яку використовують:
+
+* draw.io
+* yEd
+* mxGraph
+* GoJS
+* JointJS
+* ReactFlow Pro routing
+
+---
+
+# ДАЛІ Я Б РАДИВ
+
+наступним кроком:
+
+---
+
+# 1
+
+додати:
+
+```js
+route.mode = 'auto' | 'manual'
+```
+
+---
+
+# 2
+
+при add bend:
+
+```js
+mode = 'manual'
+```
+
+---
+
+# 3
+
+при clear bends:
+
+```js
+mode = 'auto'
+```
+
+---
+
+# тоді логіка стане ще чистішою,
+
+бо rebuild буде працювати не через:
+
+```js
+hasBends
+```
+
+а через:
+
+```js
+route.mode
+```

@@ -1,0 +1,310 @@
+Так, але не всюди.
+У твоїй архітектурі (`canvasController + zustand/useCanvasStore + Konva`) `useEffect` треба використовувати дуже обережно.
+
+У тебе вже зараз логіка більше схожа на:
+
+```txt
+editor engine / CAD editor
+```
+
+а не на звичайний React UI.
+
+І це правильно.
+
+---
+
+# В ТВОЄМУ ВИПАДКУ
+
+keyboard state:
+
+```txt
+це глобальний editor state
+```
+
+а не локальний UI state.
+
+Тому:
+
+```txt
+useEffect всередині component
+=
+не найкраще рішення
+```
+
+---
+
+# ПРАВИЛЬНІШЕ ДЛЯ ТЕБЕ
+
+---
+
+# 1. Store keyboard state у zustand
+
+Наприклад:
+
+```js
+keyboard: {
+   shift: false,
+   ctrl: false,
+   alt: false,
+},
+```
+
+---
+
+# 2. Реєстрація keyboard listeners
+
+один раз:
+
+* на canvas init
+* або editor bootstrap
+
+---
+
+# 3. Controller читає keyboard state
+
+```js
+const shift = useCanvasStore.getState().keyboard.shift
+```
+
+---
+
+# ЧОМУ ЦЕ КРАЩЕ
+
+Бо:
+
+* не буде rerender storm
+* не буде stale closures
+* controller працює незалежно від React lifecycle
+* Konva logic стає стабільною
+
+---
+
+# В ТЕБЕ ВЖЕ АРХІТЕКТУРА НЕ "REACT APP"
+
+А:
+
+```txt
+React = UI shell
+CanvasController = engine
+```
+
+і це дуже правильний підхід для diagram editor.
+
+---
+
+# ЯК ЗРОБИТИ ПРАВИЛЬНО
+
+---
+
+# useCanvasStore.js
+
+```js
+keyboard: {
+   shift: false,
+   ctrl: false,
+   alt: false,
+},
+
+setKeyboardState: (payload) =>
+   set((state) => ({
+      keyboard: {
+         ...state.keyboard,
+         ...payload,
+      },
+   })),
+```
+
+---
+
+# keyboardManager.js
+
+```js
+import { useCanvasStore } from './useCanvasStore'
+
+export function initKeyboardManager() {
+   const down = (e) => {
+      const store = useCanvasStore.getState()
+
+      if (e.key === 'Shift') {
+         store.setKeyboardState({ shift: true })
+      }
+
+      if (e.key === 'Control') {
+         store.setKeyboardState({ ctrl: true })
+      }
+
+      if (e.key === 'Alt') {
+         store.setKeyboardState({ alt: true })
+      }
+   }
+
+   const up = (e) => {
+      const store = useCanvasStore.getState()
+
+      if (e.key === 'Shift') {
+         store.setKeyboardState({ shift: false })
+      }
+
+      if (e.key === 'Control') {
+         store.setKeyboardState({ ctrl: false })
+      }
+
+      if (e.key === 'Alt') {
+         store.setKeyboardState({ alt: false })
+      }
+   }
+
+   window.addEventListener('keydown', down)
+   window.addEventListener('keyup', up)
+
+   return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+   }
+}
+```
+
+---
+
+# ІНІЦІАЛІЗАЦІЯ
+
+Наприклад у:
+
+```txt
+CanvasRoot
+```
+
+---
+
+# CanvasRoot.jsx
+
+```js
+useEffect(() => {
+   const destroy = initKeyboardManager()
+
+   return destroy
+}, [])
+```
+
+---
+
+# ЦЕ НОРМАЛЬНЕ ВИКОРИСТАННЯ useEffect
+
+Бо:
+
+```txt
+це lifecycle init
+```
+
+а не editor logic.
+
+---
+
+# ДАЛІ У CONTROLLER
+
+```js
+const { keyboard } = useCanvasStore.getState()
+
+if (keyboard.shift) {
+   ...
+}
+```
+
+---
+
+# ЦЕ ДУЖЕ ВАЖЛИВО
+
+НЕ роби:
+
+```js
+const shift = useCanvasStore((s) => s.keyboard.shift)
+```
+
+в controller файлах.
+
+---
+
+# ЧОМУ
+
+Бо controller:
+
+```txt
+не React component
+```
+
+---
+
+# В ТЕБЕ ПРАВИЛЬНА МОДЕЛЬ
+
+---
+
+# UI
+
+```txt
+React Components
+```
+
+---
+
+# ENGINE
+
+```txt
+CanvasController
+Geometry
+Topology
+Routing
+Selection
+Dragging
+```
+
+---
+
+# STATE
+
+```txt
+Zustand
+```
+
+---
+
+# DRAW.IO / FIGMA
+
+працюють аналогічно.
+
+---
+
+# КОРОТКО
+
+---
+
+# useEffect
+
+✅ для:
+
+* init keyboard listeners
+* init resize listeners
+* init canvas listeners
+
+---
+
+# НЕ useEffect
+
+❌ для:
+
+* drag logic
+* geometry logic
+* connector logic
+* snapping
+* topology
+
+---
+
+# У ТЕБЕ ВЖЕ ХОРОША АРХІТЕКТУРА
+
+і keyboard manager краще вписується як:
+
+```txt
+global editor subsystem
+```
+
+а не React local state.

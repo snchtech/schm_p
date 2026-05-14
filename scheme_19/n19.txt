@@ -1,0 +1,393 @@
+Це класична проблема coordinate spaces при zoom/pan в Konva.
+
+У тебе segmentHandle зараз, швидше за все, позиціонується:
+
+```js
+x = (x1 + x2) / 2
+y = (y1 + y2) / 2
+```
+
+але:
+
+```txt
+segment coordinates
+≠
+screen coordinates
+```
+
+після zoom.
+
+---
+
+# ЩО ВІДБУВАЄТЬСЯ
+
+Після zoom:
+
+```txt
+stage.scaleX()
+stage.scaleY()
+```
+
+міняються.
+
+А segmentHandle:
+
+* або рендериться в іншому layer/group
+* або позиція рахується без scale transform
+* або ти використовуєш absolutePosition/localPosition впереміш.
+
+---
+
+# НАЙЧАСТІША ПРИЧИНА
+
+Ти рендериш:
+
+```js
+<Group scale={zoom}>
+```
+
+але handle position:
+
+```js
+midX = (x1 + x2) / 2
+```
+
+залишається unscaled.
+
+---
+
+# ПРАВИЛЬНА АРХІТЕКТУРА
+
+segmentHandle має жити:
+
+```txt
+в тих самих координатах
+що і connector
+```
+
+і НЕ враховувати zoom вручну.
+
+---
+
+# ПРАВИЛЬНО
+
+```js
+<Circle
+   x={segment.midX}
+   y={segment.midY}
+/>
+```
+
+де:
+
+```js
+midX = (x1 + x2) / 2
+midY = (y1 + y2) / 2
+```
+
+А zoom:
+
+```txt
+робить Stage або Layer
+```
+
+---
+
+# НЕПРАВИЛЬНО
+
+Ось це:
+
+```js
+x = midX * scale
+```
+
+або:
+
+```js
+x = stage.toScreen(midX)
+```
+
+---
+
+# ТЕБЕ ЛАМАЄ ЙМОВІРНО ОСЬ ЩО
+
+Ти:
+
+* connector рендериш у world coords
+* а handle у screen coords
+
+---
+
+# ЯК ПЕРЕВІРИТИ
+
+Виведи:
+
+```js
+console.log(
+   stage.scaleX(),
+   handle.x(),
+   connector.points()
+)
+```
+
+і zoom.
+
+Якщо handle drift:
+значить координати в різних systems.
+
+---
+
+# ПРАВИЛЬНЕ РІШЕННЯ
+
+---
+
+# ВАРІАНТ 1 (РЕКОМЕНДОВАНИЙ)
+
+ВСЕ:
+
+* connectors
+* vertices
+* handles
+* previews
+
+мають бути:
+
+```txt
+в одному Layer
+```
+
+який масштабується.
+
+---
+
+# ТОДІ
+
+handle position:
+
+```js
+const midX = (segment.x1 + segment.x2) / 2
+const midY = (segment.y1 + segment.y2) / 2
+```
+
+і ВСЕ.
+
+---
+
+# ВАРІАНТ 2
+
+Якщо handles в overlay layer:
+
+тоді треба компенсувати zoom:
+
+```js
+const scale = stage.scaleX()
+
+const screenX = worldX * scale + stage.x()
+const screenY = worldY * scale + stage.y()
+```
+
+---
+
+# АЛЕ
+
+це погана архітектура для editor.
+
+---
+
+# У DRAW.IO / FIGMA / MIRO
+
+handles:
+
+```txt
+живуть в world space
+```
+
+НЕ screen space.
+
+---
+
+# ЩО Я БАЧУ ПО ТВОЄМУ КОДУ
+
+У тебе вже є:
+
+```js
+segmentsMeta
+```
+
+тобто:
+
+```js
+segment.midX
+segment.midY
+```
+
+можна зберігати одразу там.
+
+---
+
+# РЕКОМЕНДУЮ
+
+---
+
+# buildBaseRouteWithMeta
+
+додати:
+
+```js
+segmentsMeta.push({
+   id,
+   x1,
+   y1,
+   x2,
+   y2,
+
+   midX: (x1 + x2) / 2,
+   midY: (y1 + y2) / 2,
+})
+```
+
+---
+
+# А В UI
+
+```js
+<SegmentHandle
+   x={segment.midX}
+   y={segment.midY}
+/>
+```
+
+---
+
+# ЩЕ ОДНА ДУЖЕ ЧАСТА ПРОБЛЕМА
+
+Якщо:
+
+```js
+strokeScaleEnabled={false}
+```
+
+або:
+
+```js
+listening={false}
+```
+
+або custom transforms
+
+то handle може візуально drift.
+
+---
+
+# ДЛЯ HANDLE
+
+краще:
+
+```js
+scaleX={1 / zoom}
+scaleY={1 / zoom}
+```
+
+---
+
+# ЦЕ ДАЄ
+
+constant screen size.
+
+---
+
+# ТОДІ
+
+позиція:
+
+```txt
+world coords
+```
+
+а розмір:
+
+```txt
+screen constant
+```
+
+---
+
+# ПРИКЛАД
+
+```js
+const zoom = stage.scaleX()
+
+<Circle
+   x={segment.midX}
+   y={segment.midY}
+   radius={6 / zoom}
+/>
+```
+
+---
+
+# ЦЕ НАЙКРАЩИЙ ВАРІАНТ
+
+Бо:
+
+* position stable
+* size stable
+* no drift
+
+---
+
+# КОРОТКО
+
+Проблема не в midpoint.
+
+Проблема в тому що:
+
+```txt
+handle coordinates
+і
+connector coordinates
+в різних coordinate spaces
+```
+
+---
+
+# ТВОЄ РІШЕННЯ
+
+---
+
+# 1
+
+Handle position:
+
+```js
+midX = (x1 + x2)/2
+midY = (y1 + y2)/2
+```
+
+---
+
+# 2
+
+НЕ множити на zoom.
+
+---
+
+# 3
+
+Рендерити handle в тому ж Layer що і connector.
+
+---
+
+# 4
+
+Для constant size:
+
+```js
+radius={6 / zoom}
+```
+
+а не:
+
+```js
+x * zoom
+```
