@@ -1,0 +1,528 @@
+```txt
+========================================
+TEXT ELEMENT MVP PATCH
+React Konva + Zustand + canvasController
+========================================
+
+========================================
+1. TYPES
+========================================
+
+FILE:
+types/canvasTypes.ts
+
+----------------------------------------
+ADD:
+----------------------------------------
+
+export type TextElement = {
+  id: string
+
+  type: 'text'
+
+  x: number
+  y: number
+
+  text: string
+
+  attachedTo?: string | null
+
+  offsetX?: number
+  offsetY?: number
+
+  draggable?: boolean
+
+  hidden?: boolean
+}
+
+----------------------------------------
+ADD TO UNION:
+----------------------------------------
+
+export type CanvasElement =
+  | ShapeElement
+  | ConnectorElement
+  | TextElement
+
+
+========================================
+2. ZUSTAND STORE
+========================================
+
+FILE:
+store/canvasStore.ts
+
+----------------------------------------
+ADD STATE:
+----------------------------------------
+
+texts: [],
+
+activeTool: null,
+
+editingTextId: null,
+
+showTexts: true,
+
+----------------------------------------
+ADD ACTIONS:
+----------------------------------------
+
+createTextElement: (text) =>
+  set((state) => ({
+    texts: [...state.texts, text]
+  })),
+
+updateTextElement: (id, patch) =>
+  set((state) => ({
+    texts: state.texts.map((t) =>
+      t.id === id
+        ? { ...t, ...patch }
+        : t
+    )
+  })),
+
+deleteTextElement: (id) =>
+  set((state) => ({
+    texts: state.texts.filter((t) => t.id !== id)
+  })),
+
+setEditingTextId: (id) =>
+  set({
+    editingTextId: id
+  }),
+
+setActiveTool: (tool) =>
+  set({
+    activeTool: tool
+  }),
+
+toggleTextsVisibility: () =>
+  set((state) => ({
+    showTexts: !state.showTexts
+  })),
+
+
+
+========================================
+3. TOOLBAR BUTTONS
+========================================
+
+FILE:
+components/Toolbar.jsx
+
+----------------------------------------
+ADD BUTTON:
+----------------------------------------
+
+<Button
+  onClick={() => setActiveTool('text')}
+>
+  Text
+</Button>
+
+----------------------------------------
+OPTIONAL LABEL BUTTON:
+----------------------------------------
+
+<Button
+  onClick={() => setActiveTool('label')}
+>
+  Label
+</Button>
+
+
+========================================
+4. CANVAS CLICK HANDLER
+========================================
+
+FILE:
+canvasController.js
+(or handleStageClick)
+
+----------------------------------------
+IMPORT:
+----------------------------------------
+
+import { nanoid } from 'nanoid'
+
+----------------------------------------
+ADD:
+----------------------------------------
+
+const {
+  activeTool,
+  createTextElement,
+  setEditingTextId
+} = useCanvasStore.getState()
+
+----------------------------------------
+INSIDE handleStageClick:
+----------------------------------------
+
+if (activeTool === 'text') {
+
+  const pos = stage.getPointerPosition()
+
+  const newText = {
+    id: nanoid(),
+
+    type: 'text',
+
+    x: pos.x,
+    y: pos.y,
+
+    text: 'Text',
+
+    attachedTo: null,
+
+    draggable: true
+  }
+
+  createTextElement(newText)
+
+  setEditingTextId(newText.id)
+
+  return
+}
+
+----------------------------------------
+LABEL MODE
+----------------------------------------
+
+if (
+  activeTool === 'label' &&
+  clickedShape
+) {
+
+  const newText = {
+    id: nanoid(),
+
+    type: 'text',
+
+    x: clickedShape.x,
+    y: clickedShape.y + 40,
+
+    text: 'Label',
+
+    attachedTo: clickedShape.id,
+
+    offsetX: 0,
+    offsetY: 40,
+
+    draggable: true
+  }
+
+  createTextElement(newText)
+
+  setEditingTextId(newText.id)
+
+  return
+}
+
+
+========================================
+5. TEXT LAYER
+========================================
+
+FILE:
+components/layers/TextLayer.jsx
+
+----------------------------------------
+CREATE FILE:
+----------------------------------------
+
+import React from 'react'
+
+import { Text } from 'react-konva'
+
+import { useCanvasStore } from '@/store/canvasStore'
+
+export default function TextLayer() {
+
+  const {
+    texts,
+    showTexts
+  } = useCanvasStore()
+
+  if (!showTexts) {
+    return null
+  }
+
+  return (
+    <>
+      {texts.map((text) => {
+
+        let finalX = text.x
+        let finalY = text.y
+
+        if (text.attachedTo) {
+
+          const shape =
+            useCanvasStore
+              .getState()
+              .elements
+              .find(
+                (el) =>
+                  el.id === text.attachedTo
+              )
+
+          if (shape) {
+
+            finalX =
+              shape.x + (text.offsetX || 0)
+
+            finalY =
+              shape.y + (text.offsetY || 0)
+          }
+        }
+
+        return (
+          <Text
+            key={text.id}
+
+            x={finalX}
+            y={finalY}
+
+            text={text.text}
+
+            fontSize={18}
+
+            draggable
+
+            onDblClick={() => {
+              useCanvasStore
+                .getState()
+                .setEditingTextId(text.id)
+            }}
+
+            onDragEnd={(e) => {
+
+              const pos =
+                e.target.position()
+
+              useCanvasStore
+                .getState()
+                .updateTextElement(
+                  text.id,
+                  {
+                    x: pos.x,
+                    y: pos.y
+                  }
+                )
+            }}
+          />
+        )
+      })}
+    </>
+  )
+}
+
+
+========================================
+6. ADD LAYER TO STAGE
+========================================
+
+FILE:
+CanvasStage.jsx
+
+----------------------------------------
+IMPORT:
+----------------------------------------
+
+import TextLayer from './layers/TextLayer'
+
+----------------------------------------
+ADD:
+----------------------------------------
+
+<TextLayer />
+
+
+========================================
+7. HTML TEXT EDITOR
+========================================
+
+FILE:
+components/TextEditor.jsx
+
+----------------------------------------
+CREATE FILE:
+----------------------------------------
+
+import React, {
+  useEffect,
+  useRef,
+  useState
+} from 'react'
+
+import { useCanvasStore }
+from '@/store/canvasStore'
+
+export default function TextEditor() {
+
+  const textareaRef = useRef()
+
+  const {
+    editingTextId,
+    texts,
+    updateTextElement,
+    setEditingTextId
+  } = useCanvasStore()
+
+  const textElement =
+    texts.find(
+      (t) => t.id === editingTextId
+    )
+
+  const [value, setValue] =
+    useState('')
+
+  useEffect(() => {
+
+    if (textElement) {
+      setValue(textElement.text)
+    }
+
+  }, [textElement])
+
+  useEffect(() => {
+
+    if (textareaRef.current) {
+      textareaRef.current.focus()
+    }
+
+  }, [editingTextId])
+
+  if (!textElement) {
+    return null
+  }
+
+  return (
+    <textarea
+      ref={textareaRef}
+
+      value={value}
+
+      onChange={(e) =>
+        setValue(e.target.value)
+      }
+
+      onBlur={() => {
+
+        updateTextElement(
+          textElement.id,
+          {
+            text: value
+          }
+        )
+
+        setEditingTextId(null)
+      }}
+
+      style={{
+        position: 'absolute',
+
+        left: textElement.x,
+        top: textElement.y,
+
+        fontSize: '18px',
+
+        zIndex: 9999,
+
+        border: '1px solid #999',
+
+        padding: '4px',
+
+        resize: 'none'
+      }}
+    />
+  )
+}
+
+
+========================================
+8. ADD EDITOR OVER CANVAS
+========================================
+
+FILE:
+pages/editor.jsx
+(or main editor page)
+
+----------------------------------------
+IMPORT:
+----------------------------------------
+
+import TextEditor from '@/components/TextEditor'
+
+----------------------------------------
+ADD:
+----------------------------------------
+
+<TextEditor />
+
+
+========================================
+9. OPTIONAL:
+EXIT TEXT TOOL AFTER INSERT
+========================================
+
+AFTER createTextElement:
+
+setActiveTool(null)
+
+
+========================================
+10. OPTIONAL:
+HIDE ALL TEXTS BUTTON
+========================================
+
+<Button
+  onClick={() =>
+    toggleTextsVisibility()
+  }
+>
+  Toggle Texts
+</Button>
+
+
+========================================
+11. WHAT YOU GET
+========================================
+
+✅ standalone text
+
+✅ label mode
+
+✅ double click edit
+
+✅ HTML textarea editor
+
+✅ drag text
+
+✅ text visibility toggle
+
+✅ attached labels
+
+✅ automatic label movement
+with shapes
+
+✅ centralized Zustand state
+
+✅ compatible with
+canvasController architecture
+
+
+========================================
+12. IMPORTANT
+========================================
+
+DO NOT:
+- add Transformer yet
+- add rich text yet
+- add font styles yet
+- add resize yet
+
+FIRST:
+make this architecture stable.
+```

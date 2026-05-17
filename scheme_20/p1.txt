@@ -1,0 +1,564 @@
+Для твого редактора (Next.js + React Konva + Zustand + централізований canvasController) текстові елементи краще робити не як “просто текст”, а як **повноціний тип canvas-об’єкта**, аналогічно до connector, shape, icon тощо.
+
+Тобто:
+
+```ts
+type CanvasElement =
+  | ShapeElement
+  | ConnectorElement
+  | TextElement
+```
+
+І це правильний шлях для:
+
+* редагування,
+* прив’язки,
+* layer visibility,
+* selection,
+* history/undo,
+* serialization,
+* export/import.
+
+---
+
+# 1. Як це реалізовано в draw.io
+
+В draw.io текст буває двох типів:
+
+## A) Label прив’язаний до елемента
+
+Наприклад:
+
+* текст всередині rectangle
+* назва connector
+* підпис до shape
+
+Текст:
+
+* рухається разом з елементом
+* масштабується
+* має offset
+* може бути hidden
+
+Це найкращий варіант для “позначення” елементів схеми.
+
+---
+
+## B) Independent Text
+
+Окремий текстовий елемент:
+
+* коментар
+* пояснення
+* примітка
+* технологічний текст
+
+Він незалежний.
+
+---
+
+# 2. Як тобі краще зробити
+
+Я б рекомендував підтримувати ОБИДВА режими.
+
+# Варіант 1 — standalone text element
+
+```ts
+{
+  id,
+  type: 'text',
+  x,
+  y,
+
+  text: 'Pump #1',
+
+  fontSize: 16,
+  fontFamily: 'Arial',
+  fontStyle: {
+    bold: false,
+    italic: false,
+  },
+
+  fill: '#000',
+
+  width: 200,
+  height: 40,
+
+  rotation: 0,
+
+  attachedTo: null,
+
+  visible: true,
+}
+```
+
+---
+
+# Варіант 2 — label attached to object
+
+```ts
+{
+  id,
+  type: 'text',
+
+  attachedTo: 'shape_123',
+
+  anchor: 'bottom',
+  offsetX: 0,
+  offsetY: 12,
+
+  text: 'Valve #4'
+}
+```
+
+Тоді:
+
+* shape рухається → label також
+* scale/zoom працює автоматично
+* можна зробити auto positioning
+
+---
+
+# 3. Що я рекомендую для твого проекту
+
+## Роби text element як окремий тип
+
+Але додай:
+
+```ts
+attachedTo?: string | null
+```
+
+Це дасть:
+
+* незалежний текст
+* або прив’язаний label
+
+без створення двох систем.
+
+---
+
+# 4. Архітектура для тебе
+
+Я б зробив так:
+
+# Store
+
+```ts
+elements.texts
+```
+
+або загальний:
+
+```ts
+elements[]
+```
+
+---
+
+# Text Tool
+
+```ts
+activeTool = 'text'
+```
+
+---
+
+# Flow
+
+## STEP 1
+
+Натискаємо кнопку:
+
+```ts
+setActiveTool('text')
+```
+
+---
+
+## STEP 2
+
+Клік по canvas
+
+```ts
+handleStageClick()
+```
+
+створює:
+
+```ts
+createTextElement({
+  x,
+  y,
+  text: 'Text'
+})
+```
+
+---
+
+## STEP 3
+
+Одразу відкривається inline editor
+
+---
+
+# 5. Важливий момент — редагування тексту в Konva
+
+Ось тут найважливіше.
+
+# НЕ треба редагувати Text прямо в Konva
+
+У Konva немає нормального rich text editor.
+
+Практично всі редактори:
+
+* drawio
+* Excalidraw
+* Figma
+* tldraw
+
+роблять:
+
+# HTML textarea поверх canvas
+
+---
+
+# Як працює
+
+При double click:
+
+1. Ховаємо Konva.Text
+2. Показуємо HTML textarea поверх
+3. Після blur:
+
+   * зберігаємо текст
+   * textarea remove
+   * показуємо Konva.Text
+
+---
+
+# Це стандарт де-факто
+
+І це тобі теж треба робити.
+
+---
+
+# 6. Як рендерити текст
+
+```tsx
+<Text
+  x={text.x}
+  y={text.y}
+  text={text.text}
+  fontSize={text.fontSize}
+  fontStyle={
+     `${text.bold ? 'bold' : ''} ${text.italic ? 'italic' : ''}`
+  }
+  draggable
+/>
+```
+
+---
+
+# 7. Як робити toolbar
+
+Коли selected text:
+
+```ts
+selectedElement.type === 'text'
+```
+
+показуєш toolbar:
+
+* font size
+* bold
+* italic
+* color
+* align
+* rotate
+
+---
+
+# 8. Дуже важлива річ — width
+
+Якщо не задати width:
+
+* text буде “пливти”
+* wrapping буде дивний
+
+Тому краще:
+
+```ts
+width: 200
+```
+
+І:
+
+```tsx
+<Text
+  width={text.width}
+  wrap="word"
+/>
+```
+
+---
+
+# 9. Як прив’язувати текст до елемента
+
+# Найкращий варіант
+
+При drag text:
+
+* перевіряємо nearest shape
+* якщо distance < threshold:
+
+  * attachedTo = shape.id
+
+---
+
+# Координати
+
+Тоді текст краще зберігати НЕ абсолютними координатами.
+
+А:
+
+```ts
+offsetX
+offsetY
+```
+
+відносно shape.
+
+---
+
+# При render
+
+```ts
+finalX = shape.x + offsetX
+finalY = shape.y + offsetY
+```
+
+---
+
+# 10. Як приховувати всі тексти
+
+Ти правильно думаєш:
+текст має бути окремим типом.
+
+Тоді:
+
+```ts
+showTexts: boolean
+```
+
+і:
+
+```tsx
+if (!showTexts) return null
+```
+
+---
+
+# 11. Що ще тобі знадобиться
+
+# A) Transformer
+
+```tsx
+<Transformer />
+```
+
+для resize text box.
+
+---
+
+# B) Auto resize
+
+Після зміни тексту:
+
+```ts
+textNode.width()
+```
+
+---
+
+# C) Z-index
+
+Тексти зазвичай:
+
+* поверх shapes
+* але під selection overlay
+
+---
+
+# D) Hit area
+
+Текст важко клікати.
+
+Тому:
+
+* invisible rect behind text
+* padding
+
+---
+
+# 12. Рекомендована модель для тебе
+
+Я б робив так:
+
+```ts
+type TextElement = {
+  id: string
+
+  type: 'text'
+
+  x: number
+  y: number
+
+  width: number
+  height: number
+
+  text: string
+
+  fontSize: number
+  fontFamily: string
+
+  bold: boolean
+  italic: boolean
+
+  fill: string
+
+  rotation: number
+
+  attachedTo?: string | null
+
+  offsetX?: number
+  offsetY?: number
+
+  locked?: boolean
+  hidden?: boolean
+}
+```
+
+---
+
+# 13. Що я б НЕ робив
+
+❌ Не робив би text як property shape.
+
+Типу:
+
+```ts
+shape.label = 'text'
+```
+
+Це дуже обмежить:
+
+* reposition
+* multiple labels
+* independent editing
+* future annotations
+
+---
+
+# 14. Ідеальна модель для твоєї системи
+
+Тобі потрібні 3 типи:
+
+# A) Shape
+
+```ts
+type: 'rect'
+```
+
+---
+
+# B) Connector
+
+```ts
+type: 'connector'
+```
+
+---
+
+# C) Annotation/Text
+
+```ts
+type: 'text'
+```
+
+з optional:
+
+```ts
+attachedTo
+```
+
+Це майже 1 в 1 як у професійних diagram editors.
+
+---
+
+# 15. Моя рекомендація по етапах
+
+# Спочатку
+
+✅ standalone text
+✅ edit text
+✅ bold/italic/fontSize
+✅ drag
+✅ select
+✅ hide/show
+
+---
+
+# Потім
+
+✅ attach to shapes
+✅ auto positioning
+✅ connector labels
+✅ multiline
+✅ rich text
+✅ markdown/html
+
+---
+
+# 16. Для твого canvasController
+
+Я б зробив окремий controller:
+
+```ts
+textController.ts
+```
+
+де:
+
+* createText
+* updateText
+* startTextEdit
+* finishTextEdit
+* attachTextToShape
+* calculateAttachedPosition
+
+---
+
+# 17. Ще одна дуже важлива порада
+
+НЕ роби rich text зараз.
+
+Тобто:
+
+* різні font size всередині одного text
+* mixed bold
+* html spans
+
+Це різко ускладнює:
+
+* serialization
+* measuring
+* editing
+* selection
+
+Спочатку:
+
+* plain text
+* один стиль на весь блок.
+
+Це правильний MVP для diagram editor.

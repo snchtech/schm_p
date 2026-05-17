@@ -1,0 +1,417 @@
+Так, треба уточнити і трохи адаптувати під твою архітектуру.
+Те що я дав вище — це скоріше “універсальний React-Konva приклад”, але в тебе вже сформована правильна архітектура:
+
+* один `canvasController`
+* один Zustand store (`useCanvasState`)
+* централізована обробка pointer events
+* layers окремо
+* selection system
+* connector system
+* preview system
+
+І для твого проекту це дуже важливо не ламати.
+
+Тому текст треба інтегрувати як ще один canvas entity у твою поточну систему, а не як окрему react-логіку.
+
+---
+
+# ЩО ТРЕБА ЗМІНИТИ В МОЄМУ PATCH
+
+# 1. НЕ створювати окремий texts store
+
+❌ НЕ ТАК:
+
+```ts
+texts: []
+```
+
+---
+
+# У ТЕБЕ МАЄ БУТИ:
+
+```ts
+elements: []
+```
+
+або:
+
+```ts
+canvasElements: []
+```
+
+де text — це ще один тип елемента.
+
+---
+
+# Правильно:
+
+```ts
+{
+   id,
+   type: 'text'
+}
+```
+
+аналогічно:
+
+* connector
+* rect
+* image
+
+---
+
+# 2. НЕ useCanvasStore.getState() всередині render
+
+Я це написав як швидкий приклад.
+
+У тебе:
+
+* centralized controller
+* centralized selectors
+
+Тому треба:
+
+```tsx
+const texts = useCanvasState(
+   state => state.elements.filter(...)
+)
+```
+
+---
+
+# 3. ВЕСЬ input logic має йти через canvasController
+
+У тебе вже так побудовано:
+
+* pointer down
+* pointer move
+* drag
+* selection
+* preview
+
+Текст треба вписати ТАК САМО.
+
+---
+
+# Тобто:
+
+# НЕ ТАК
+
+```tsx
+onDblClick={() => ...}
+```
+
+---
+
+# А ТАК
+
+```tsx
+onDblClick={(e) =>
+   canvasController.handleTextDoubleClick(
+      e,
+      text.id
+   )
+}
+```
+
+---
+
+# 4. activeTool також централізований
+
+У тебе вже скоріш за все є:
+
+```ts
+activeTool
+```
+
+типу:
+
+* select
+* connector
+* rect
+
+---
+
+# Просто додаємо:
+
+```ts
+'text'
+'label'
+```
+
+---
+
+# 5. TextEditor НЕ має жити окремо від controller
+
+Це важливо.
+
+У тебе controller already controls:
+
+* interaction lifecycle
+* preview
+* selection
+
+Тому:
+
+---
+
+# ПРАВИЛЬНО:
+
+```ts
+canvasController.startTextEditing(id)
+canvasController.finishTextEditing()
+```
+
+---
+
+# А НЕ:
+
+```ts
+setEditingTextId()
+```
+
+напряму з React component.
+
+---
+
+# 6. attached labels
+
+Оце дуже важливий момент.
+
+У тебе вже є:
+
+* connectors
+* segment drag
+* normalized geometry
+
+Тому labels краще будувати через reference.
+
+---
+
+# Текст НЕ має сам шукати shape
+
+❌ НЕ ТАК:
+
+```ts
+find(el => el.id === attachedTo)
+```
+
+в render component.
+
+---
+
+# А ТАК:
+
+controller/service:
+
+```ts
+calculateTextPosition(textElement)
+```
+
+---
+
+# Бо потім буде:
+
+* zoom
+* rotation
+* groups
+* snapping
+* nested transforms
+
+і логіка explode-иться.
+
+---
+
+# 7. TextLayer має бути dumb layer
+
+Тобто:
+
+---
+
+# Layer:
+
+```tsx
+<Text
+   x={finalX}
+   y={finalY}
+```
+
+---
+
+# Вся логіка:
+
+* attachedTo
+* offsets
+* selection
+* editing
+* snapping
+
+в controller.
+
+---
+
+# 8. HTML textarea
+
+Оце залишаємо.
+
+Бо це industry standard.
+
+Але:
+
+* controller відкриває editor
+* editor лише UI
+
+---
+
+# 9. Як це має виглядати у твоїй архітектурі
+
+# Store
+
+```ts
+elements[]
+selectedIds[]
+activeTool
+editingTextId
+```
+
+---
+
+# canvasController
+
+```ts
+handleStageClick()
+handleTextDoubleClick()
+startTextEditing()
+finishTextEditing()
+createTextElement()
+createLabelElement()
+calculateTextPosition()
+```
+
+---
+
+# TextLayer
+
+ТІЛЬКИ render.
+
+---
+
+# TextEditor
+
+ТІЛЬКИ textarea overlay.
+
+---
+
+# 10. Найважливіше для тебе
+
+У тебе вже дуже правильна архітектура для diagram editor.
+
+І головне зараз:
+НЕ почати робити “React-style local state spaghetti”.
+
+---
+
+# Тому правило:
+
+# ВСЯ canvas logic:
+
+✅ controller
+
+---
+
+# ВСЯ state:
+
+✅ Zustand
+
+---
+
+# React components:
+
+✅ dumb render only
+
+---
+
+# 11. Як би я робив у твоєму проекті
+
+# canvasController:
+
+```ts
+createTextElement()
+createLabelElement()
+
+startTextEditing()
+finishTextEditing()
+
+updateText()
+
+calculateAttachedTextPosition()
+```
+
+---
+
+# store:
+
+```ts
+elements[]
+editingTextId
+activeTool
+```
+
+---
+
+# Layer:
+
+```tsx
+<Text />
+```
+
+---
+
+# overlay:
+
+```tsx
+<textarea />
+```
+
+---
+
+# 12. Ще одна ВАЖЛИВА порада
+
+Текст НЕ треба робити як окрему систему.
+
+Він має бути:
+
+* canvas entity
+* selectable
+* draggable
+* serializable
+* undoable
+
+точно як connector.
+
+---
+
+# 13. Тобі зараз НЕ треба
+
+❌ rich text
+❌ font families
+❌ transformer resize
+❌ rotation
+❌ multiline auto-layout
+❌ HTML text
+
+---
+
+# Зараз тобі треба:
+
+✅ insertion
+✅ editing
+✅ labels
+✅ attachment
+✅ render
+✅ serialization
+✅ selection integration
+
+---
+
+І це вже буде дуже сильна база для diagram editor рівня draw.io/tldraw.
