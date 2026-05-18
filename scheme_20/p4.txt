@@ -1,0 +1,521 @@
+В тебе вже зараз дуже хороша архітектура для такого функціоналу.
+Ти фактично вже підготував основу через:
+
+* `behavior`
+* `pathType`
+* `attached`
+* централізований `canvasController`
+* централізований Zustand store
+* окрему модель connector-а 
+
+Тому я б НЕ робив окремий "тип лінії".
+Я б робив саме **behavior типу "link"**.
+
+---
+
+# 1. Головна ідея
+
+Зараз у тебе є:
+
+```js
+behavior: {
+   type: "default",
+   link: null,
+}
+```
+
+
+
+Оце і є правильне місце.
+
+Тобто:
+
+```js
+behavior: {
+   type: "link",
+   link: {
+      ...
+   }
+}
+```
+
+---
+
+# 2. Що таке connector-link архітектурно
+
+Я б трактував його так:
+
+> "Цей connector не просто графічна лінія, а semantic navigation edge"
+
+Тобто:
+
+* він візуально такий самий connector
+* але має metadata
+* при click/doubleClick/context menu:
+
+  * відкриває іншу схему
+  * або фокусує елемент
+  * або показує список схем
+
+---
+
+# 3. Найважливіше питання — як зберігати link
+
+Оце ключова частина.
+
+Ти написав:
+
+> Один і той же id може бути на декількох схемах
+
+І це абсолютно нормально.
+
+Тому НЕ МОЖНА робити:
+
+```js
+targetSchemeId
+```
+
+бо це зламається.
+
+---
+
+# 4. Правильна архітектура — link by entity
+
+Тобто link має бути не:
+
+```js
+schemeId
+```
+
+а:
+
+```js
+entityId
+```
+
+Наприклад:
+
+```js
+behavior: {
+   type: "link",
+   link: {
+      entityType: "equipment",
+      entityId: "pump_120",
+
+      preferredSchemeId: null,
+
+      openMode: "chooser"
+   }
+}
+```
+
+---
+
+# 5. Чому це правильний підхід
+
+Бо тоді:
+
+## одна сутність:
+
+```txt
+pump_120
+```
+
+може бути:
+
+* на overview схемі
+* на детальній схемі
+* на технологічній схемі
+* на electrical схемі
+* на аварійній схемі
+
+---
+
+# 6. Тоді navigation працює так
+
+## connector click:
+
+```txt
+find schemes where entityId = pump_120
+```
+
+і:
+
+* якщо 1 схема → відкриваємо
+* якщо декілька → modal chooser
+
+---
+
+# 7. Як це виглядає для користувача
+
+Оце найважливіше.
+
+---
+
+# Варіант 1 (найкращий)
+
+# "Link connector tool"
+
+У toolbar:
+
+```txt
+[ Лінія-посилання ]
+```
+
+аналогічно твоїм tools: 
+
+---
+
+## User flow
+
+### Крок 1
+
+Користувач:
+
+* вибирає connector-link tool
+
+### Крок 2
+
+Малює лінію
+
+### Крок 3
+
+Після finishDraftConnector:
+відкривається modal:
+
+```txt
+Оберіть сутність
+[ search input ]
+```
+
+або:
+
+```txt
+Вкажіть ID
+```
+
+---
+
+# 8. ЯК НЕ ТРЕБА РОБИТИ
+
+НЕ треба:
+
+```txt
+вручну вибирати схему
+```
+
+це поганий UX.
+
+Бо:
+
+* схема може змінитись
+* з’являться нові схеми
+* одна сутність є в кількох схемах
+
+---
+
+# 9. Правильна модель
+
+# Connector → entity
+
+а не:
+
+# Connector → scheme
+
+---
+
+# 10. Яку metadata я б додав
+
+Я б розширив:
+
+```js
+behavior.link
+```
+
+до:
+
+```js
+behavior: {
+   type: "link",
+
+   link: {
+      entityType: "equipment",
+      entityId: "pump_120",
+
+      preferredSchemeId: null,
+
+      openMode: "chooser",
+
+      highlightTarget: true,
+
+      label: "Насос 120"
+   }
+}
+```
+
+---
+
+# 11. preferredSchemeId
+
+Це дуже важлива штука.
+
+Наприклад:
+
+* є 10 схем
+* але користувач хоче відкривати конкретну
+
+Тоді:
+
+```js
+preferredSchemeId
+```
+
+як soft reference.
+
+---
+
+# 12. Як відкривати
+
+При click:
+
+```js
+handleConnectorOpenLink(connector)
+```
+
+---
+
+## алгоритм:
+
+### 1
+
+беремо:
+
+```js
+connector.behavior.link.entityId
+```
+
+### 2
+
+робимо API:
+
+```sql
+SELECT scheme_id
+FROM scheme_entities
+WHERE entity_id = :entityId
+```
+
+---
+
+### 3
+
+if:
+
+* 0 → повідомлення
+* 1 → open
+* many:
+
+  * якщо preferredSchemeId → open it
+  * else chooser modal
+
+---
+
+# 13. Я б ще додав link marker
+
+Наприклад:
+
+* маленька іконка
+* dashed style
+* інший color
+
+через:
+
+```js
+style
+```
+
+або:
+
+```js
+behavior.type === "link"
+```
+
+---
+
+# 14. Як це вписується в твою архітектуру
+
+ІДЕАЛЬНО.
+
+Бо в тебе вже є:
+
+```js
+pathType
+behavior
+geometry
+route
+```
+
+
+
+Тому:
+
+* geometry не чіпаємо
+* editing не чіпаємо
+* orthogonal logic не чіпаємо
+
+Тільки:
+
+* додаємо semantic layer
+
+---
+
+# 15. Я б ще додав окремий registry table
+
+Наприклад:
+
+```sql
+SCHEME_ENTITY_MAP
+```
+
+---
+
+## Структура
+
+```sql
+SCHEME_ID
+ENTITY_ID
+ENTITY_TYPE
+NODE_ID
+```
+
+---
+
+# 16. Чому NODE_ID важливий
+
+Бо тоді після open scheme:
+
+можна:
+
+* zoom
+* focus
+* highlight
+
+на конкретний node.
+
+---
+
+# 17. Тоді navigation стає дуже крутим
+
+```txt
+connector
+  -> entity
+      -> all schemes
+          -> конкретний node
+```
+
+---
+
+# 18. ЯК Я Б РЕАЛІЗУВАВ У ТВОЄМУ КОДІ
+
+## Новий tool
+
+У `ConnectorsToolSection`:
+
+```js
+{
+   key: "link-line",
+   label: "Посилання",
+   template: {
+      pathType: "orthogonal-elbow",
+      endcaps: { start: "none", end: "arrow" },
+
+      behavior: {
+         type: "link",
+         link: null
+      }
+   }
+}
+```
+
+по аналогії з існуючими tools 
+
+---
+
+# 19. finishDraftConnector()
+
+Після:
+
+```js
+store.addEdge?.(next);
+```
+
+
+
+робити:
+
+```js
+if (tool.behavior.type === "link") {
+   openLinkSetupModal(next.id)
+}
+```
+
+---
+
+# 20. І ще дуже важлива порада
+
+НЕ роби:
+
+* link через start/end attached node
+* link через connector geometry
+
+це semantic layer.
+
+Тобто:
+
+```txt
+visual connector
++
+semantic navigation
+```
+
+мають бути окремими.
+
+---
+
+# 21. Найкращий UX
+
+Я б зробив:
+
+## Подвійний click:
+
+```txt
+відкрити linked scheme
+```
+
+## Right click:
+
+```txt
+редагувати link
+```
+
+через твій existing context menu architecture: 
+
+---
+
+# 22. Головна порада
+
+Твоя найбільша помилка зараз була б:
+
+```txt
+connector -> scheme
+```
+
+Правильна модель:
+
+```txt
+connector
+   -> entity
+      -> scheme(s)
+         -> node
+```
+
+Саме так роблять великі SCADA/CAD/navigation systems.

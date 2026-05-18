@@ -1,0 +1,486 @@
+Ти зараз описав вже не просто "лінію", а механіку типу:
+
+```txt
+smart alignment / smart guides / snapping system
+```
+
+І це абсолютно правильний напрямок.
+
+І головне:
+це треба реалізовувати НЕ в connector layer, а як окрему систему canvas snapping/alignment.
+
+Бо:
+
+* це буде працювати не тільки для ліній
+* а для всіх node
+* і для layout
+* і для move
+* і для resize
+* і для connectors
+
+---
+
+# 1. Головна ідея
+
+Твоя проблема:
+
+```txt
+free-line
+```
+
+не може автоматично стати:
+
+* строго горизонтальною
+* строго вертикальною
+
+бо:
+
+* фігури не вирівняні
+
+І це нормально.
+
+Тому правильне рішення:
+НЕ constrain line.
+
+А:
+
+# align nodes.
+
+---
+
+# 2. Як це працює в draw.io / Figma
+
+Коли рухаєш node:
+
+система:
+
+* перевіряє alignment
+* показує guide lines
+* робить snapping
+
+І тоді:
+
+* центри збігаються
+* edges збігаються
+* connector автоматично стає рівним
+
+---
+
+# 3. Архітектурно це має бути ОКРЕМА subsystem
+
+Я б зробив:
+
+```txt
+/lib/snapping
+```
+
+---
+
+# 4. Нова архітектура
+
+```txt
+snapping/
+   alignmentEngine.js
+   snappingGuides.js
+   snappingMath.js
+   snappingRenderer.js
+```
+
+---
+
+# 5. Store state
+
+В `useCanvasStore`
+
+додати:
+
+```js
+alignmentGuides: [],
+snapPreview: null,
+```
+
+---
+
+# 6. Що таке alignment guide
+
+Наприклад:
+
+```js
+{
+   type: "vertical-center",
+
+   x: 520,
+
+   fromY: 120,
+   toY: 900,
+
+   sourceNodeId: "node1",
+   targetNodeId: "node2",
+}
+```
+
+---
+
+# 7. Які alignments перевіряти
+
+# По X:
+
+* left-left
+* center-center
+* right-right
+
+# По Y:
+
+* top-top
+* center-center
+* bottom-bottom
+
+---
+
+# 8. Головне правило
+
+Snap НЕ робиться по connector.
+
+Snap робиться:
+
+# між node bounds.
+
+---
+
+# 9. Як це вписується у твою архітектуру
+
+У тебе вже є:
+
+* centralized canvasController
+* centralized Zustand
+* drag handlers
+
+Тому це ідеально вписується.
+
+---
+
+# 10. Де викликати
+
+При:
+
+```txt
+handleNodeDragMove
+```
+
+---
+
+# 11. Алгоритм
+
+При drag node:
+
+---
+
+## КРОК 1
+
+Беремо bounds node:
+
+```js
+movingBox
+```
+
+---
+
+## КРОК 2
+
+Перебираємо всі інші nodes:
+
+```js
+otherBoxes
+```
+
+---
+
+## КРОК 3
+
+Шукаємо:
+
+```txt
+abs(centerX1 - centerX2) < SNAP_THRESHOLD
+```
+
+---
+
+## КРОК 4
+
+Якщо знайдено:
+
+* додаємо guide
+* робимо snap
+
+---
+
+# 12. SNAP_THRESHOLD
+
+Наприклад:
+
+```js
+const SNAP_THRESHOLD = 6;
+```
+
+---
+
+# 13. Що snap-ити
+
+Не pointer.
+
+А:
+
+# node position.
+
+---
+
+# 14. Приклад
+
+Було:
+
+```txt
+centerX = 517
+```
+
+target:
+
+```txt
+centerX = 520
+```
+
+delta:
+
+```txt
+3 px
+```
+
+робимо:
+
+```txt
+node.x += 3
+```
+
+---
+
+# 15. Чому це вирішує проблему connector-а
+
+Бо connector already attached.
+
+У тебе вже є:
+
+```js
+attached: {
+   type: "node"
+}
+```
+
+
+
+і:
+
+```js
+rebuildConnectorGeometry()
+```
+
+Тому:
+
+* node вирівнявся
+* connector автоматично перебудувався
+* line стала рівною
+
+---
+
+# 16. Це НАБАГАТО краще ніж shift
+
+Бо:
+
+* UX як у Figma
+* UX як у draw.io
+* UX як у Miro
+
+---
+
+# 17. Я б ще зробив temporary orthogonal preview
+
+Для free-line.
+
+---
+
+# 18. Як це виглядає
+
+Коли:
+
+* dx дуже малий
+
+показати:
+
+```txt
+vertical snap preview
+```
+
+---
+
+# 19. Але НЕ змінювати line geometry
+
+тільки preview.
+
+---
+
+# 20. Найкращий UX
+
+# Комбінувати:
+
+## A
+
+node snapping
+
+## B
+
+line guide preview
+
+---
+
+# 21. Я б зробив 3 рівні snapping
+
+# LEVEL 1
+
+Node alignment.
+
+ОБОВʼЯЗКОВО.
+
+---
+
+# LEVEL 2
+
+Grid snapping.
+
+Опціонально.
+
+---
+
+# LEVEL 3
+
+Connector angle preview.
+
+Опціонально.
+
+---
+
+# 22. Візуалізація guides
+
+Окремий layer:
+
+```txt
+<AlignmentGuidesLayer />
+```
+
+---
+
+# 23. Це НЕ має бути всередині ConnectorsLayer
+
+Бо:
+
+* guides глобальні
+* не connector-specific
+
+---
+
+# 24. Як рендерити
+
+```jsx
+<Line
+   points={[x1, y1, x2, y2]}
+   stroke="#4DA3FF"
+   dash={[4, 4]}
+/>
+```
+
+---
+
+# 25. Які guide-и показувати
+
+Я б почав тільки з:
+
+## Vertical:
+
+* center-center
+
+## Horizontal:
+
+* center-center
+
+---
+
+# 26. Потім додати:
+
+* left-left
+* right-right
+* equal spacing
+* distribution
+
+---
+
+# 27. Найважливіше
+
+НЕ роби:
+
+```txt
+connector snapping system
+```
+
+це помилка.
+
+Правильно:
+
+```txt
+global alignment system
+```
+
+---
+
+# 28. Ідеальна інтеграція у твою архітектуру
+
+```txt
+Node Drag
+   ->
+Alignment Engine
+   ->
+Snap Result
+   ->
+Update Node Position
+   ->
+rebuildConnectorGeometry()
+   ->
+connector auto-updates
+```
+
+---
+
+# 29. Додатково дуже рекомендую
+
+Додати:
+
+```js
+node.geometry.bounds
+```
+
+кешований.
+
+Бо alignment calculations будуть дуже частими.
+
+---
+
+# 30. В майбутньому
+
+Ця ж система дозволить:
+
+* auto-layout
+* magnetic guides
+* smart distribution
+* connector auto-routing
+* docking
+* snap to anchors
+* snap to grid
+* swimlane alignment
+
+Тобто це дуже правильний фундамент.

@@ -1,0 +1,749 @@
+
+SMART ALIGNMENT + SNAP GUIDES PACKAGE
+====================================
+
+МЕТА
+-----
+Реалізувати:
+- smart alignment guides
+- node snapping
+- automatic connector straightening
+- center alignment
+- edge alignment
+- visual guide lines
+
+В РАМКАХ:
+- centralized canvasController
+- Zustand store
+- Konva Stage
+- rebuildConnectorGeometry()
+
+ВАЖЛИВО
+--------
+НЕ реалізовувати snapping для connector.
+
+Правильна архітектура:
+
+node drag
+   ->
+alignment engine
+   ->
+node snapping
+   ->
+connector auto rebuild
+
+========================================================
+1. STORE EXTENSIONS
+========================================================
+
+ФАЙЛ:
+useCanvasStore.js
+
+ДОДАТИ:
+
+alignmentGuides: [],
+
+setAlignmentGuides: (alignmentGuides) =>
+   set({ alignmentGuides }),
+
+clearAlignmentGuides: () =>
+   set({ alignmentGuides: [] }),
+
+--------------------------------------------------------
+2. STRUCTURE OF GUIDE
+--------------------------------------------------------
+
+guide object:
+
+{
+   type: "vertical-center",
+
+   x: 520,
+
+   fromY: 120,
+   toY: 900,
+
+   sourceNodeId: "node1",
+   targetNodeId: "node2",
+}
+
+або:
+
+{
+   type: "horizontal-center",
+
+   y: 300,
+
+   fromX: 100,
+   toX: 900,
+}
+
+========================================================
+3. NEW DIRECTORY
+========================================================
+
+СТВОРИТИ:
+
+/lib/snapping
+
+========================================================
+4. snappingMath.js
+========================================================
+
+СТВОРИТИ:
+snappingMath.js
+
+========================================================
+КОД
+========================================================
+
+export const SNAP_THRESHOLD = 6;
+
+export function near(a, b, threshold = SNAP_THRESHOLD) {
+   return Math.abs(a - b) <= threshold;
+}
+
+export function getNodeBounds(node) {
+
+   const width =
+      node.width || 0;
+
+   const height =
+      node.height || 0;
+
+   return {
+      left: node.x,
+      right: node.x + width,
+
+      top: node.y,
+      bottom: node.y + height,
+
+      centerX: node.x + width / 2,
+      centerY: node.y + height / 2,
+   };
+}
+
+========================================================
+5. alignmentEngine.js
+========================================================
+
+СТВОРИТИ:
+alignmentEngine.js
+
+========================================================
+КОД
+========================================================
+
+import {
+   getNodeBounds,
+   near,
+} from "./snappingMath";
+
+export function buildAlignmentResult({
+   movingNode,
+   allNodes,
+}) {
+
+   if (!movingNode) {
+      return {
+         snappedPosition: null,
+         guides: [],
+      };
+   }
+
+   const moving =
+      getNodeBounds(movingNode);
+
+   const guides = [];
+
+   let snapX = null;
+   let snapY = null;
+
+   for (const node of allNodes) {
+
+      if (node.id === movingNode.id) {
+         continue;
+      }
+
+      const target =
+         getNodeBounds(node);
+
+      //--------------------------------------------------
+      // CENTER X
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.centerX,
+            target.centerX
+         )
+      ) {
+
+         const dx =
+            target.centerX -
+            moving.centerX;
+
+         snapX =
+            movingNode.x + dx;
+
+         guides.push({
+            type: "vertical-center",
+
+            x: target.centerX,
+
+            fromY: Math.min(
+               moving.top,
+               target.top
+            ) - 100,
+
+            toY: Math.max(
+               moving.bottom,
+               target.bottom
+            ) + 100,
+
+            sourceNodeId:
+               movingNode.id,
+
+            targetNodeId:
+               node.id,
+         });
+      }
+
+      //--------------------------------------------------
+      // CENTER Y
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.centerY,
+            target.centerY
+         )
+      ) {
+
+         const dy =
+            target.centerY -
+            moving.centerY;
+
+         snapY =
+            movingNode.y + dy;
+
+         guides.push({
+            type:
+               "horizontal-center",
+
+            y: target.centerY,
+
+            fromX: Math.min(
+               moving.left,
+               target.left
+            ) - 100,
+
+            toX: Math.max(
+               moving.right,
+               target.right
+            ) + 100,
+
+            sourceNodeId:
+               movingNode.id,
+
+            targetNodeId:
+               node.id,
+         });
+      }
+
+      //--------------------------------------------------
+      // LEFT ALIGN
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.left,
+            target.left
+         )
+      ) {
+
+         const dx =
+            target.left -
+            moving.left;
+
+         snapX =
+            movingNode.x + dx;
+
+         guides.push({
+            type: "vertical-left",
+
+            x: target.left,
+
+            fromY: Math.min(
+               moving.top,
+               target.top
+            ) - 100,
+
+            toY: Math.max(
+               moving.bottom,
+               target.bottom
+            ) + 100,
+         });
+      }
+
+      //--------------------------------------------------
+      // RIGHT ALIGN
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.right,
+            target.right
+         )
+      ) {
+
+         const dx =
+            target.right -
+            moving.right;
+
+         snapX =
+            movingNode.x + dx;
+
+         guides.push({
+            type: "vertical-right",
+
+            x:
+               target.right,
+
+            fromY: Math.min(
+               moving.top,
+               target.top
+            ) - 100,
+
+            toY: Math.max(
+               moving.bottom,
+               target.bottom
+            ) + 100,
+         });
+      }
+
+      //--------------------------------------------------
+      // TOP ALIGN
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.top,
+            target.top
+         )
+      ) {
+
+         const dy =
+            target.top -
+            moving.top;
+
+         snapY =
+            movingNode.y + dy;
+
+         guides.push({
+            type: "horizontal-top",
+
+            y: target.top,
+
+            fromX: Math.min(
+               moving.left,
+               target.left
+            ) - 100,
+
+            toX: Math.max(
+               moving.right,
+               target.right
+            ) + 100,
+         });
+      }
+
+      //--------------------------------------------------
+      // BOTTOM ALIGN
+      //--------------------------------------------------
+
+      if (
+         near(
+            moving.bottom,
+            target.bottom
+         )
+      ) {
+
+         const dy =
+            target.bottom -
+            moving.bottom;
+
+         snapY =
+            movingNode.y + dy;
+
+         guides.push({
+            type:
+               "horizontal-bottom",
+
+            y:
+               target.bottom,
+
+            fromX: Math.min(
+               moving.left,
+               target.left
+            ) - 100,
+
+            toX: Math.max(
+               moving.right,
+               target.right
+            ) + 100,
+         });
+      }
+   }
+
+   return {
+      snappedPosition: {
+         x:
+            snapX ?? movingNode.x,
+
+         y:
+            snapY ?? movingNode.y,
+      },
+
+      guides,
+   };
+}
+
+========================================================
+6. canvasController.js
+========================================================
+
+ІМПОРТ:
+
+import {
+   buildAlignmentResult,
+} from "@/lib/snapping/alignmentEngine";
+
+--------------------------------------------------------
+ДОДАТИ
+--------------------------------------------------------
+
+handleNodeDragMove(nodeId, pos) {
+
+   const store =
+      useCanvasStore.getState();
+
+   const node =
+      store.nodes.find(
+         (n) => n.id === nodeId
+      );
+
+   if (!node) return;
+
+   const tempNode = {
+      ...node,
+      x: pos.x,
+      y: pos.y,
+   };
+
+   const result =
+      buildAlignmentResult({
+         movingNode: tempNode,
+         allNodes: store.nodes,
+      });
+
+   store.setAlignmentGuides?.(
+      result.guides
+   );
+
+   const snapped =
+      result.snappedPosition;
+
+   const nextNode = {
+      ...node,
+      x: snapped.x,
+      y: snapped.y,
+   };
+
+   store.updateNode?.(
+      nodeId,
+      nextNode
+   );
+
+   //---------------------------------------------------
+   // rebuild attached connectors
+   //---------------------------------------------------
+
+   const updatedEdges =
+      store.edges.map((edge) => {
+
+         if (
+            edge.kind !== "connector"
+         ) {
+            return edge;
+         }
+
+         const attached =
+            edge.start?.attached
+               ?.nodeId === nodeId
+            ||
+            edge.end?.attached
+               ?.nodeId === nodeId;
+
+         if (!attached) {
+            return edge;
+         }
+
+         return rebuildConnectorGeometry(
+            edge,
+            store.nodes.map((n) =>
+               n.id === nodeId
+                  ? nextNode
+                  : n
+            )
+         );
+      });
+
+   store.setEdges?.(
+      updatedEdges
+   );
+}
+
+--------------------------------------------------------
+ДОДАТИ
+--------------------------------------------------------
+
+handleNodeDragEnd() {
+
+   const store =
+      useCanvasStore.getState();
+
+   store.clearAlignmentGuides?.();
+}
+
+========================================================
+7. STORE METHODS
+========================================================
+
+У useCanvasStore.js
+
+ДОДАТИ:
+
+updateNode: (id, nextNode) =>
+   set((s) => ({
+      nodes: s.nodes.map((n) =>
+         n.id === id
+            ? nextNode
+            : n
+      ),
+   })),
+
+setEdges: (edges) =>
+   set({ edges }),
+
+========================================================
+8. ALIGNMENT GUIDES LAYER
+========================================================
+
+СТВОРИТИ:
+AlignmentGuidesLayer.jsx
+
+========================================================
+КОД
+========================================================
+
+"use client";
+
+import React from "react";
+
+import { Line } from "react-konva";
+
+import { useCanvasStore }
+   from "@/store/useCanvasStore";
+
+export default function
+AlignmentGuidesLayer() {
+
+   const guides =
+      useCanvasStore(
+         (s) => s.alignmentGuides
+      );
+
+   if (!guides?.length) {
+      return null;
+   }
+
+   return (
+      <>
+         {guides.map(
+            (guide, index) => {
+
+            //------------------------------------------------
+            // VERTICAL
+            //------------------------------------------------
+
+            if (
+               guide.type.startsWith(
+                  "vertical"
+               )
+            ) {
+
+               return (
+                  <Line
+                     key={index}
+
+                     points={[
+                        guide.x,
+                        guide.fromY,
+
+                        guide.x,
+                        guide.toY,
+                     ]}
+
+                     stroke="#4DA3FF"
+
+                     strokeWidth={1}
+
+                     dash={[4, 4]}
+
+                     listening={false}
+                  />
+               );
+            }
+
+            //------------------------------------------------
+            // HORIZONTAL
+            //------------------------------------------------
+
+            if (
+               guide.type.startsWith(
+                  "horizontal"
+               )
+            ) {
+
+               return (
+                  <Line
+                     key={index}
+
+                     points={[
+                        guide.fromX,
+                        guide.y,
+
+                        guide.toX,
+                        guide.y,
+                     ]}
+
+                     stroke="#4DA3FF"
+
+                     strokeWidth={1}
+
+                     dash={[4, 4]}
+
+                     listening={false}
+                  />
+               );
+            }
+
+            return null;
+         })}
+      </>
+   );
+}
+
+========================================================
+9. ADD LAYER
+========================================================
+
+У EditorCanvas.jsx
+
+ДОДАТИ:
+
+<AlignmentGuidesLayer />
+
+ПЕРЕД:
+<ConnectorsLayer />
+
+========================================================
+10. NODE DRAG
+========================================================
+
+У Node component
+
+ЗАМІНИ:
+
+onDragMove
+
+НА:
+
+onDragMove={(e) => {
+
+   canvasController
+      .handleNodeDragMove?.(
+         node.id,
+         e.target.position()
+      );
+}}
+
+--------------------------------------------------------
+ДОДАТИ
+--------------------------------------------------------
+
+onDragEnd={() => {
+
+   canvasController
+      .handleNodeDragEnd?.();
+}}
+
+========================================================
+11. RESULT
+========================================================
+
+ПІСЛЯ ПАКЕТУ:
+
+✔ node snapping
+
+✔ center snapping
+
+✔ edge snapping
+
+✔ automatic connector straightening
+
+✔ vertical alignment
+
+✔ horizontal alignment
+
+✔ smart guides
+
+✔ connector auto rebuild
+
+========================================================
+12. WHY THIS IS CORRECT
+========================================================
+
+НЕ:
+
+connector snapping
+
+ПРАВИЛЬНО:
+
+global alignment system
+
+Тому:
+- працює для всіх node
+- працює для connector
+- працює для layout
+- працює для resize
+- працює для future auto-layout
+
+========================================================
+13. FUTURE EXPAND
+========================================================
+
+Можна додати:
+- grid snapping
+- equal spacing
+- smart distribution
+- magnetic guides
+- snap to anchors
+- snap to connectors
+- auto layout
+- docking
+- resize snapping
+
+========================================================
+END PACKAGE
+========================================================

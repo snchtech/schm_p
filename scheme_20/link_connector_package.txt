@@ -1,0 +1,527 @@
+
+LINK CONNECTOR PACKAGE
+======================
+
+МЕТА
+----
+Додати semantic connector links:
+- connector як navigation edge
+- відкриття іншої схеми
+- прив’язка не до schemeId, а до entityId
+- підтримка множинних схем для однієї сутності
+- можливість future expand:
+  - focus node
+  - highlight node
+  - chooser modal
+  - breadcrumbs
+  - mini-preview
+
+АРХІТЕКТУРА
+===========
+
+НЕПРАВИЛЬНО:
+connector -> scheme
+
+ПРАВИЛЬНО:
+connector -> entity -> scheme(s) -> node
+
+------------------------------------------------------------
+1. РОЗШИРЕННЯ CONNECTOR MODEL
+------------------------------------------------------------
+
+ФАЙЛ:
+connectorModel.js
+
+ЗАМІНИ behavior:
+
+behavior: {
+   type: behavior?.type ?? "default",
+   link: behavior?.link ?? null,
+},
+
+НА:
+
+behavior: {
+   type: behavior?.type ?? "default",
+
+   link: behavior?.link
+      ? {
+           entityType:
+             behavior.link.entityType || null,
+
+           entityId:
+             behavior.link.entityId || null,
+
+           preferredSchemeId:
+             behavior.link.preferredSchemeId || null,
+
+           preferredNodeId:
+             behavior.link.preferredNodeId || null,
+
+           openMode:
+             behavior.link.openMode || "chooser",
+
+           label:
+             behavior.link.label || null,
+
+           highlightTarget:
+             behavior.link.highlightTarget ?? true,
+        }
+      : null,
+},
+
+------------------------------------------------------------
+2. НОВИЙ TOOL
+------------------------------------------------------------
+
+ФАЙЛ:
+ConnectorsToolSection.js
+
+ДОДАТИ В tools:
+
+{
+   key: "link-line",
+
+   label: "Посилання",
+
+   icon: <ArrowRightAltIcon fontSize="small" />,
+
+   template: {
+      pathType: "orthogonal-elbow",
+
+      endcaps: {
+         start: "none",
+         end: "arrow",
+      },
+
+      behavior: {
+         type: "link",
+         link: null,
+      },
+
+      style: {
+         stroke: "#1565C0",
+         strokeWidth: 2,
+      },
+   },
+},
+
+------------------------------------------------------------
+3. STORE
+------------------------------------------------------------
+
+ФАЙЛ:
+useCanvasStore.js
+
+ДОДАТИ:
+
+linkConnectorSetup: null,
+
+setLinkConnectorSetup: (linkConnectorSetup) =>
+   set({ linkConnectorSetup }),
+
+clearLinkConnectorSetup: () =>
+   set({ linkConnectorSetup: null }),
+
+------------------------------------------------------------
+4. ВІДКРИТТЯ MODAL ПІСЛЯ CREATE
+------------------------------------------------------------
+
+ФАЙЛ:
+canvasController.js
+
+У finishDraftConnector()
+
+ПІСЛЯ:
+
+store.addEdge?.(next);
+
+ДОДАТИ:
+
+if (
+   tool?.behavior?.type === "link"
+) {
+   store.setLinkConnectorSetup?.({
+      edgeId: next.id,
+   });
+}
+
+------------------------------------------------------------
+5. LINK CONFIG MODAL
+------------------------------------------------------------
+
+СТВОРИТИ:
+LinkConnectorModal.jsx
+
+==================================================
+КОД
+==================================================
+
+"use client";
+
+import React, { useMemo, useState } from "react";
+
+import {
+   Dialog,
+   DialogTitle,
+   DialogContent,
+   DialogActions,
+   Button,
+   TextField,
+   MenuItem,
+   Stack,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function LinkConnectorModal() {
+
+   const edges =
+      useCanvasStore((s) => s.edges);
+
+   const setup =
+      useCanvasStore((s) => s.linkConnectorSetup);
+
+   const replaceEdge =
+      useCanvasStore((s) => s.replaceEdge);
+
+   const clearSetup =
+      useCanvasStore(
+         (s) => s.clearLinkConnectorSetup
+      );
+
+   const [entityType, setEntityType] =
+      useState("equipment");
+
+   const [entityId, setEntityId] =
+      useState("");
+
+   const [label, setLabel] =
+      useState("");
+
+   const edge = useMemo(() => {
+      if (!setup?.edgeId) return null;
+
+      return edges.find(
+         (e) => e.id === setup.edgeId
+      );
+   }, [setup, edges]);
+
+   if (!setup || !edge) return null;
+
+   function handleSave() {
+
+      const next = {
+         ...edge,
+
+         behavior: {
+            ...edge.behavior,
+
+            type: "link",
+
+            link: {
+               entityType,
+               entityId,
+               label,
+
+               preferredSchemeId: null,
+               preferredNodeId: null,
+
+               openMode: "chooser",
+
+               highlightTarget: true,
+            },
+         },
+      };
+
+      replaceEdge(edge.id, next);
+
+      clearSetup();
+   }
+
+   return (
+      <Dialog
+         open={true}
+         onClose={clearSetup}
+         maxWidth="sm"
+         fullWidth
+      >
+         <DialogTitle>
+            Налаштування посилання
+         </DialogTitle>
+
+         <DialogContent>
+
+            <Stack spacing={2} sx={{ mt: 1 }}>
+
+               <TextField
+                  select
+                  label="Тип сутності"
+                  value={entityType}
+                  onChange={(e) =>
+                     setEntityType(
+                        e.target.value
+                     )
+                  }
+               >
+                  <MenuItem value="equipment">
+                     Equipment
+                  </MenuItem>
+
+                  <MenuItem value="room">
+                     Room
+                  </MenuItem>
+
+                  <MenuItem value="cabinet">
+                     Cabinet
+                  </MenuItem>
+               </TextField>
+
+               <TextField
+                  label="Entity ID"
+                  value={entityId}
+                  onChange={(e) =>
+                     setEntityId(
+                        e.target.value
+                     )
+                  }
+               />
+
+               <TextField
+                  label="Label"
+                  value={label}
+                  onChange={(e) =>
+                     setLabel(
+                        e.target.value
+                     )
+                  }
+               />
+
+            </Stack>
+
+         </DialogContent>
+
+         <DialogActions>
+
+            <Button onClick={clearSetup}>
+               Скасувати
+            </Button>
+
+            <Button
+               variant="contained"
+               onClick={handleSave}
+               disabled={!entityId}
+            >
+               Зберегти
+            </Button>
+
+         </DialogActions>
+      </Dialog>
+   );
+}
+
+------------------------------------------------------------
+6. ДОДАТИ MODAL В EDITOR
+------------------------------------------------------------
+
+ФАЙЛ:
+EditorCanvas.jsx
+
+ДОДАТИ:
+
+<LinkConnectorModal />
+
+------------------------------------------------------------
+7. CONNECTOR CLICK NAVIGATION
+------------------------------------------------------------
+
+ФАЙЛ:
+canvasController.js
+
+ДОДАТИ:
+
+handleOpenConnectorLink(connector) {
+
+   if (
+      connector?.behavior?.type !== "link"
+   ) {
+      return;
+   }
+
+   const link =
+      connector.behavior.link;
+
+   if (!link?.entityId) {
+      return;
+   }
+
+   console.log(
+      "OPEN ENTITY:",
+      link.entityId
+   );
+
+   // future:
+   // API request
+   // chooser modal
+   // open scheme
+},
+
+------------------------------------------------------------
+8. DOUBLE CLICK
+------------------------------------------------------------
+
+ФАЙЛ:
+ConnectorsLayer.js
+
+ДОДАТИ В <Line />:
+
+onDblClick={() => {
+   canvasController
+      .handleOpenConnectorLink?.(
+         connector
+      );
+}}
+
+------------------------------------------------------------
+9. VISUAL STYLE
+------------------------------------------------------------
+
+У ConnectorsLayer.js
+
+ПІСЛЯ:
+
+const stroke =
+   connector.style?.stroke || "black";
+
+ЗАМІНИ НА:
+
+const stroke =
+   connector.behavior?.type === "link"
+      ? "#1565C0"
+      : connector.style?.stroke || "black";
+
+------------------------------------------------------------
+10. OPTIONAL DASH STYLE
+------------------------------------------------------------
+
+У <Line />
+
+ДОДАТИ:
+
+dash={
+   connector.behavior?.type === "link"
+      ? [8, 4]
+      : undefined
+}
+
+------------------------------------------------------------
+11. CONTEXT MENU
+------------------------------------------------------------
+
+ФАЙЛ:
+CanvasContextMenu.js
+
+ДОДАТИ:
+
+<MenuItem
+   onClick={() => {
+      canvasController
+         .openLinkConnectorEditor?.();
+   }}
+>
+   <ListItemText>
+      Редагувати посилання
+   </ListItemText>
+</MenuItem>
+
+------------------------------------------------------------
+12. API ARCHITECTURE
+------------------------------------------------------------
+
+ПРАВИЛЬНО:
+
+connector
+   -> entityId
+
+НЕ:
+
+connector
+   -> schemeId
+
+------------------------------------------------------------
+13. DATABASE
+------------------------------------------------------------
+
+TABLE:
+SCHEME_ENTITY_MAP
+
+CREATE TABLE SCHEME_ENTITY_MAP (
+   ID NUMBER PRIMARY KEY,
+
+   SCHEME_ID NUMBER NOT NULL,
+
+   NODE_ID VARCHAR2(200),
+
+   ENTITY_ID VARCHAR2(200) NOT NULL,
+
+   ENTITY_TYPE VARCHAR2(100),
+
+   DATE_CREATE DATE DEFAULT SYSDATE
+);
+
+------------------------------------------------------------
+14. OPEN LOGIC
+------------------------------------------------------------
+
+SELECT
+   scheme_id,
+   node_id
+FROM scheme_entity_map
+WHERE entity_id = :entityId
+
+------------------------------------------------------------
+15. OPEN FLOW
+------------------------------------------------------------
+
+IF:
+0 rows:
+   show message
+
+1 row:
+   open directly
+
+many rows:
+   chooser modal
+
+------------------------------------------------------------
+16. FUTURE EXPAND
+------------------------------------------------------------
+
+Можна додати:
+- mini preview
+- hover preview
+- breadcrumb navigation
+- history
+- open in new tab
+- focus target node
+- highlight target node
+- recent schemes
+
+------------------------------------------------------------
+17. ГОЛОВНА ПЕРЕВАГА
+------------------------------------------------------------
+
+Одна і та сама сутність:
+equipment_120
+
+може бути:
+- на overview схемі
+- на технологічній
+- на електричній
+- на аварійній
+
+і connector НЕ ЛАМАЄТЬСЯ.
+
+==================================================
+END PACKAGE
+==================================================
