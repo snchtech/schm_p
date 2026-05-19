@@ -1,0 +1,399 @@
+
+ROTATED TEXT ORIENTATION PATCH
+==============================
+
+МЕТА
+-----
+Додати підтримку rotated text labels:
+
+✔ horizontal text
+✔ vertical-left
+✔ vertical-right
+
+як у:
+- AutoCAD
+- draw.io
+- EPLAN
+- Visio
+
+ВАЖЛИВО
+--------
+Це НЕ stacked letters.
+
+Це:
+звичайний текстовий рядок
+повернутий на 90°.
+
+========================================================
+1. MODEL PATCH
+========================================================
+
+ФАЙЛ:
+annotationModel.js
+
+--------------------------------------------------------
+ЗАМІНИ
+--------------------------------------------------------
+
+style: {
+
+   fontFamily:
+      style.fontFamily ||
+      "Roboto Condensed",
+
+   fontSize:
+      style.fontSize || 12,
+
+   fontWeight:
+      style.fontWeight || 300,
+
+   fill:
+      style.fill || "#111",
+
+   rotation:
+      style.rotation || 0,
+},
+
+--------------------------------------------------------
+НА
+--------------------------------------------------------
+
+style: {
+
+   fontFamily:
+      style.fontFamily ||
+      "Roboto Condensed",
+
+   fontSize:
+      style.fontSize || 12,
+
+   fontWeight:
+      style.fontWeight || 300,
+
+   fill:
+      style.fill || "#111",
+
+   textOrientation:
+      style.textOrientation
+      || "horizontal",
+
+   align:
+      style.align || "center",
+},
+
+========================================================
+2. SUPPORTED ORIENTATIONS
+========================================================
+
+horizontal
+
+vertical-left
+(rotation = -90)
+
+vertical-right
+(rotation = 90)
+
+========================================================
+3. MODAL PATCH
+========================================================
+
+ФАЙЛ:
+AnnotationEditorModal.jsx
+
+--------------------------------------------------------
+ДОДАТИ STATE
+--------------------------------------------------------
+
+const [
+   textOrientation,
+   setTextOrientation
+] = useState(
+   "horizontal"
+);
+
+========================================================
+4. LOAD EXISTING VALUE
+========================================================
+
+У useEffect()
+
+ДОДАТИ:
+
+setTextOrientation(
+   existing.style
+      ?.textOrientation
+   || "horizontal"
+);
+
+========================================================
+5. ADD SELECT
+========================================================
+
+У MODAL ДОДАТИ:
+
+<TextField
+   select
+
+   label="Орієнтація тексту"
+
+   value={textOrientation}
+
+   onChange={(e) =>
+      setTextOrientation(
+         e.target.value
+      )
+   }
+>
+
+   <MenuItem value="horizontal">
+      Горизонтально
+   </MenuItem>
+
+   <MenuItem value="vertical-left">
+      Вертикально
+      (знизу вверх)
+   </MenuItem>
+
+   <MenuItem value="vertical-right">
+      Вертикально
+      (зверху вниз)
+   </MenuItem>
+
+</TextField>
+
+========================================================
+6. SAVE PATCH
+========================================================
+
+У CREATE:
+
+style: {
+   textOrientation,
+},
+
+--------------------------------------------------------
+У UPDATE:
+--------------------------------------------------------
+
+style: {
+   ...existing.style,
+
+   textOrientation,
+},
+
+========================================================
+7. RENDER PATCH
+========================================================
+
+ФАЙЛ:
+AnnotationsLayer.jsx
+
+--------------------------------------------------------
+ДОДАТИ LOGIC
+--------------------------------------------------------
+
+let rotation = 0;
+
+const orientation =
+   annotation.style
+      ?.textOrientation
+   || "horizontal";
+
+if (
+   orientation ===
+   "vertical-left"
+) {
+
+   rotation = -90;
+}
+
+if (
+   orientation ===
+   "vertical-right"
+) {
+
+   rotation = 90;
+}
+
+========================================================
+8. KONVA TEXT PATCH
+========================================================
+
+ЗАМІНИ:
+
+<Text
+   x={pos.x}
+   y={pos.y}
+
+   text={
+      annotation.text
+   }
+
+   fontFamily={
+      annotation.style
+         ?.fontFamily
+   }
+
+   fontSize={
+      annotation.style
+         ?.fontSize
+   }
+
+   fontStyle={
+      annotation.style
+         ?.fontWeight >=
+      500
+         ? "bold"
+         : "normal"
+   }
+
+   fill={
+      annotation.style
+         ?.fill
+   }
+
+   rotation={
+      annotation.style
+         ?.rotation
+   }
+
+   listening={true}
+/>
+
+--------------------------------------------------------
+НА
+--------------------------------------------------------
+
+<Text
+   x={pos.x}
+   y={pos.y}
+
+   text={
+      annotation.text
+   }
+
+   fontFamily={
+      annotation.style
+         ?.fontFamily
+   }
+
+   fontSize={
+      annotation.style
+         ?.fontSize
+   }
+
+   fontStyle={
+      annotation.style
+         ?.fontWeight >=
+      500
+         ? "bold"
+         : "normal"
+   }
+
+   fill={
+      annotation.style
+         ?.fill
+   }
+
+   rotation={rotation}
+
+   align={
+      annotation.style
+         ?.align
+   }
+
+   offsetX={
+      rotation !== 0
+         ? (
+            annotation.text
+               ?.length || 0
+           ) *
+           (
+             annotation.style
+                ?.fontSize || 12
+           ) * 0.25
+         : 0
+   }
+
+   offsetY={
+      rotation !== 0
+         ? (
+            annotation.style
+               ?.fontSize || 12
+           ) / 2
+         : 0
+   }
+
+   listening={true}
+/>
+
+========================================================
+9. WHY offsetX/offsetY IS IMPORTANT
+========================================================
+
+Після rotate:
+anchor зміщується.
+
+Без offset:
+- text буде "стрибати"
+- label positioning буде неправильний
+- drag буде дивний
+
+========================================================
+10. RESULT
+========================================================
+
+ПІСЛЯ PATCH:
+
+✔ horizontal labels
+
+✔ vertical rotated labels
+
+✔ CAD-like labels
+
+✔ draw.io style labels
+
+✔ connector side labels
+
+✔ vertical engineering text
+
+✔ rotated callouts
+
+========================================================
+11. IMPORTANT
+========================================================
+
+ЦЕ:
+rotate whole text block
+
+НЕ:
+stacked letters
+
+========================================================
+12. FUTURE EXPAND
+========================================================
+
+Можна додати:
+
+- rotation handle
+- arbitrary angle
+- auto orientation
+- connector angle detection
+- text flip prevention
+- auto readability
+- dynamic orientation
+- path-follow text
+
+========================================================
+13. RECOMMENDED UX
+========================================================
+
+TOP/BOTTOM labels:
+horizontal
+
+LEFT/RIGHT labels:
+vertical-left
+
+========================================================
+END PATCH
+========================================================

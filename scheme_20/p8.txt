@@ -1,0 +1,661 @@
+Це дуже важливе уточнення.
+І тут якраз треба правильно побудувати:
+
+# viewport architecture
+
+Бо:
+
+* A3 має реальні пропорції
+* а monitor — інші
+* і якщо зробити неправильно:
+
+  * буде або дуже дрібно
+  * або обрізатись
+  * або незручно zoom/pan
+
+І твій кейс дуже хороший:
+
+* FullHD
+* canvas майже на весь екран
+* тільки toolbar зліва
+
+Тобто можна зробити:
+
+# CAD-style centered fit viewport
+
+---
+
+# 1. ГОЛОВНА ІДЕЯ
+
+НЕ:
+
+```txt
+sheet = canvas size
+```
+
+ПРАВИЛЬНО:
+
+```txt
+sheet rendered inside viewport
+```
+
+---
+
+# 2. ТРЕБА РОЗДІЛИТИ
+
+# A. Physical sheet size
+
+і
+
+# B. Viewport fit scale
+
+---
+
+# 3. ЩО ЦЕ ОЗНАЧАЄ
+
+A3:
+
+```txt
+420 x 297
+```
+
+це:
+
+# logical size
+
+---
+
+але:
+
+# на екрані
+
+він:
+
+* автоматично масштабується
+* щоб поміститись максимально комфортно
+
+---
+
+# 4. ПРАВИЛЬНА АРХІТЕКТУРА
+
+Тобі треба:
+
+```js
+sheetScale
+viewportTransform
+```
+
+---
+
+# 5. НЕ МІШАТИ
+
+```txt
+zoom user
+```
+
+і
+
+```txt
+fit-to-screen scale
+```
+
+---
+
+# 6. Я Б ЗРОБИВ 2 SCALE
+
+---
+
+## BASE FIT SCALE
+
+Автоматичний.
+
+---
+
+## USER ZOOM
+
+wheel zoom.
+
+---
+
+# 7. ФОРМУЛА
+
+```txt
+finalScale =
+   fitScale * userZoom
+```
+
+---
+
+# 8. ЯК РАХУВАТИ FIT SCALE
+
+---
+
+## viewport:
+
+Наприклад:
+
+```txt
+1920 x 1080
+```
+
+---
+
+toolbar:
+
+```txt
+80 px
+```
+
+---
+
+usable:
+
+```txt
+1840 x 1080
+```
+
+---
+
+# 9. ДАЛІ
+
+A3:
+
+```txt
+420 x 297
+```
+
+---
+
+logical px:
+
+```txt
+1680 x 1188
+```
+
+(при 1mm = 4px)
+
+---
+
+# 10. FIT SCALE
+
+```js
+fitScaleX =
+   viewportWidth / sheetWidth
+
+fitScaleY =
+   viewportHeight / sheetHeight
+```
+
+---
+
+# 11. ДАЛІ
+
+```js
+fitScale =
+   Math.min(
+      fitScaleX,
+      fitScaleY
+   )
+```
+
+---
+
+# 12. І ЦЕ КЛЮЧОВЕ
+
+Тоді:
+
+# A3 автоматично влазить в екран.
+
+---
+
+# 13. І ЩО ВАЖЛИВО
+
+ЗБЕРІГАЮТЬСЯ:
+
+# пропорції листа.
+
+---
+
+# 14. ЯК ЦЕ ВИГЛЯДАЄ UX
+
+На FullHD:
+
+```txt
+grey background
+```
+
+---
+
+по центру:
+
+```txt
+A3 white sheet
+```
+
+---
+
+майже на всю висоту.
+
+---
+
+# 15. І ЦЕ САМИЙ ПРАВИЛЬНИЙ UX
+
+Як у:
+
+* Figma
+* Miro
+* AutoCAD layout
+* draw.io page mode
+
+---
+
+# 16. Я Б ЗРОБИВ
+
+# FIT HEIGHT PRIORITY
+
+Для тебе.
+
+---
+
+# 17. ЧОМУ
+
+Бо:
+
+* екран горизонтальний
+* A3 landscape теж горизонтальний
+* toolbar тільки зліва
+* по висоті нічого не заважає
+
+---
+
+# 18. ТОБТО
+
+Треба:
+
+# максимально використовувати висоту.
+
+---
+
+# 19. А ШИРИНА
+
+автоматично впишеться.
+
+---
+
+# 20. ЯК Я Б РОБИВ
+
+---
+
+# VIEWPORT
+
+```txt
+100vw - toolbarWidth
+100vh
+```
+
+---
+
+# SHEET FIT
+
+```txt
+height-based fit
+```
+
+---
+
+# CENTERING
+
+```txt
+horizontal + vertical center
+```
+
+---
+
+# 21. І ЩЕ ДУЖЕ ВАЖЛИВО
+
+НЕ міняй:
+
+# logical sheet size.
+
+---
+
+# 22. SCALE ONLY VIEWPORT
+
+Тобто:
+
+* paper geometry fixed
+* screen transform dynamic
+
+---
+
+# 23. PAPER SIZE НЕ МАЄ ЗАЛЕЖАТИ
+
+від:
+
+* monitor
+* browser size
+* zoom
+
+---
+
+# 24. ТІЛЬКИ VIEWPORT TRANSFORM
+
+---
+
+# 25. Я Б ЗРОБИВ ОКРЕМИЙ:
+
+```txt
+viewportManager
+```
+
+---
+
+# 26. ВІН РАХУЄ:
+
+```js
+{
+   fitScale,
+   userZoom,
+   finalScale,
+
+   offsetX,
+   offsetY,
+}
+```
+
+---
+
+# 27. offsetX / offsetY
+
+Для:
+
+# centering.
+
+---
+
+# 28. ТОДІ
+
+A3:
+
+* завжди красиво по центру
+* максимально великий
+* не виходить за viewport
+
+---
+
+# 29. І ЦЕ ДУЖЕ ВАЖЛИВО
+
+Коли:
+
+* resize browser
+* resize window
+
+fit:
+
+# автоматично перераховується.
+
+---
+
+# 30. USER ZOOM
+
+НЕ має ламати:
+
+# fit mode.
+
+---
+
+# 31. ПРАВИЛЬНО
+
+```txt
+Ctrl+0
+```
+
+або:
+
+```txt
+Fit to screen
+```
+
+повертає:
+
+# fitScale.
+
+---
+
+# 32. USER PAN
+
+Теж:
+
+# independent.
+
+---
+
+# 33. ІДЕАЛЬНА АРХІТЕКТУРА
+
+```txt
+Paper Space
+   ->
+Viewport Transform
+      ->
+User Zoom
+         ->
+Pan
+```
+
+---
+
+# 34. ЩО Я Б РЕКОМЕНДУВАВ ДЛЯ ТЕБЕ
+
+---
+
+# START MODE
+
+При open scheme:
+
+```txt
+Fit A3 to viewport
+```
+
+---
+
+# USER MODE
+
+wheel zoom.
+
+---
+
+# DOUBLE CLICK
+
+```txt
+Fit to screen
+```
+
+---
+
+# 35. ДУЖЕ ВАЖЛИВО
+
+НЕ:
+
+```txt
+infinite white canvas
+```
+
+---
+
+# 36. ПРАВИЛЬНО
+
+```txt
+grey workspace
+white sheet
+```
+
+---
+
+# 37. ЦЕ ДАЄ
+
+* відчуття paper
+* зрозумілі межі
+* підготовка до друку
+* PDF predictability
+
+---
+
+# 38. І ЩЕ ОДНА ДУЖЕ ВАЖЛИВА РІЧ
+
+Для:
+
+# A1
+
+на FullHD:
+
+* full sheet буде дрібний
+
+---
+
+# 39. ТОМУ
+
+Я б додав:
+
+```txt
+fit modes
+```
+
+---
+
+# 40. Наприклад
+
+```txt
+Fit page
+Fit width
+Fit drawing area
+100%
+```
+
+---
+
+# 41. ДЛЯ A3
+
+найкраще:
+
+# Fit page.
+
+---
+
+# 42. ДЛЯ A1
+
+можливо:
+
+# Fit width.
+
+---
+
+# 43. І ЩЕ ДУЖЕ ВАЖЛИВО
+
+Для drawing:
+
+# НЕ рендерити everything at browser resolution.
+
+---
+
+# 44. Konva
+
+має працювати:
+
+# через transforms.
+
+---
+
+# 45. ІНАКШЕ
+
+A1:
+
+* memory issues
+* lag
+* blurry render
+
+---
+
+# 46. НАЙКРАЩИЙ ПІДХІД
+
+```txt
+logical coordinates
++
+viewport transforms
+```
+
+---
+
+# 47. ТОДІ
+
+PDF:
+
+# не залежить від viewport.
+
+---
+
+# 48. ЦЕ КЛЮЧОВА ІДЕЯ
+
+Viewport:
+
+# only visual representation.
+
+Paper:
+
+# canonical geometry.
+
+---
+
+# 49. І ЦЕ ІДЕАЛЬНО ВПИСУЄТЬСЯ
+
+у твою:
+
+* centralized architecture
+* layers
+* controller
+* geometry system
+
+---
+
+# 50. ЯК БИ Я РЕАЛІЗОВУВАВ MVP
+
+---
+
+# STEP 1
+
+A3 paper geometry.
+
+---
+
+# STEP 2
+
+fit-to-height.
+
+---
+
+# STEP 3
+
+centered sheet.
+
+---
+
+# STEP 4
+
+user zoom.
+
+---
+
+# STEP 5
+
+fit-to-screen reset.
+
+---
+
+# STEP 6
+
+paper bounds preview.
+
+---
+
+# STEP 7
+
+PDF renderer.

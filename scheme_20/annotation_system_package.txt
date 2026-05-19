@@ -1,0 +1,645 @@
+
+ANNOTATION + LABEL + CALLOUT SYSTEM PACKAGE
+===========================================
+
+PROJECT TARGET
+--------------
+Реалізувати:
+- labels for nodes
+- labels for connectors
+- free text
+- callouts
+- specification integration
+- draggable labels
+- auto positioning
+- centralized useCanvasStore
+- centralized canvasController
+
+========================================================
+1. UX RECOMMENDATION
+========================================================
+
+A) LABEL FOR NODE/CONNECTOR
+---------------------------
+
+UX:
+1. Right click object
+2. "Редагувати інформацію"
+3. Open modal
+4. User enters text
+5. Label attached to object
+
+B) FREE TEXT
+------------
+
+Toolbar button:
+[T]
+
+User clicks canvas
+-> free text created
+
+C) CALLOUT
+-----------
+
+Right click object
+-> "Додати зноску"
+
+========================================================
+2. IMPORTANT ARCHITECTURE RULE
+========================================================
+
+НЕ:
+node.label
+connector.label
+
+ПРАВИЛЬНО:
+annotations[]
+
+========================================================
+3. STORE STRUCTURE
+========================================================
+
+ФАЙЛ:
+useCanvasStore.js
+
+ДОДАТИ:
+
+annotations: [],
+
+annotationSelection: null,
+
+annotationEditor: null,
+
+draftAnnotationTool: null,
+
+========================================================
+4. STORE METHODS
+========================================================
+
+addAnnotation: (annotation) =>
+   set((s) => ({
+      annotations: [
+         ...s.annotations,
+         annotation
+      ],
+   })),
+
+replaceAnnotation: (id, next) =>
+   set((s) => ({
+      annotations:
+         s.annotations.map((a) =>
+            a.id === id ? next : a
+         ),
+   })),
+
+removeAnnotation: (id) =>
+   set((s) => ({
+      annotations:
+         s.annotations.filter(
+            (a) => a.id !== id
+         ),
+   })),
+
+setAnnotationEditor:
+   (annotationEditor) =>
+      set({ annotationEditor }),
+
+clearAnnotationEditor:
+   () =>
+      set({
+         annotationEditor: null
+      }),
+
+setDraftAnnotationTool:
+   (draftAnnotationTool) =>
+      set({
+         draftAnnotationTool
+      }),
+
+clearDraftAnnotationTool:
+   () =>
+      set({
+         draftAnnotationTool: null
+      }),
+
+========================================================
+5. NEW DIRECTORY
+========================================================
+
+СТВОРИТИ:
+
+/lib/annotations
+
+========================================================
+6. annotationModel.js
+========================================================
+
+СТВОРИТИ:
+annotationModel.js
+
+--------------------------------------------------------
+КОД
+--------------------------------------------------------
+
+export function createAnnotation({
+
+   id = crypto.randomUUID(),
+
+   annotationType = "label",
+
+   attachedTo = null,
+
+   text = "",
+
+   position = {},
+
+   style = {},
+
+   specification = null,
+
+}) {
+
+   return {
+
+      id,
+
+      kind: "annotation",
+
+      annotationType,
+
+      attachedTo,
+
+      text,
+
+      position: {
+
+         mode:
+            position.mode || "top",
+
+         offsetX:
+            position.offsetX || 0,
+
+         offsetY:
+            position.offsetY || 0,
+
+         absoluteX:
+            position.absoluteX || 0,
+
+         absoluteY:
+            position.absoluteY || 0,
+      },
+
+      style: {
+
+         fontFamily:
+            style.fontFamily ||
+            "Roboto Condensed",
+
+         fontSize:
+            style.fontSize || 12,
+
+         fontWeight:
+            style.fontWeight || 300,
+
+         fill:
+            style.fill || "#111",
+
+         rotation:
+            style.rotation || 0,
+      },
+
+      specification,
+   };
+}
+
+========================================================
+7. SUPPORTED LABEL POSITIONS
+========================================================
+
+top
+bottom
+left
+right
+center
+free
+path-center
+callout
+
+========================================================
+8. annotationGeometry.js
+========================================================
+
+СТВОРИТИ:
+annotationGeometry.js
+
+--------------------------------------------------------
+MAIN IDEA
+--------------------------------------------------------
+
+Function:
+resolveAnnotationPosition()
+
+Input:
+- annotation
+- nodes
+- edges
+
+Output:
+- x/y
+
+--------------------------------------------------------
+NODE LABELS
+--------------------------------------------------------
+
+TOP:
+centerX
+top - offset
+
+BOTTOM:
+centerX
+bottom + offset
+
+LEFT:
+left - offset
+
+RIGHT:
+right + offset
+
+CENTER:
+centerX
+centerY
+
+FREE:
+centerX + offsetX
+centerY + offsetY
+
+--------------------------------------------------------
+CONNECTOR LABELS
+--------------------------------------------------------
+
+Take connector geometry points
+and place label
+near center path.
+
+========================================================
+9. AnnotationEditorModal.jsx
+========================================================
+
+СТВОРИТИ:
+AnnotationEditorModal.jsx
+
+--------------------------------------------------------
+MODAL MUST SUPPORT
+--------------------------------------------------------
+
+- text input
+- position select
+- OK
+- Cancel
+
+--------------------------------------------------------
+POSITION OPTIONS
+--------------------------------------------------------
+
+Зверху
+Знизу
+Зліва
+Справа
+По центру
+Вільно
+
+========================================================
+10. canvasController.js
+========================================================
+
+ДОДАТИ:
+
+openAnnotationEditor({
+   attachedTo,
+   annotationId = null,
+   annotationType = "label",
+}) {
+
+   const store =
+      useCanvasStore.getState();
+
+   store.setAnnotationEditor?.({
+      attachedTo,
+      annotationId,
+      annotationType,
+   });
+}
+
+========================================================
+11. FREE TEXT TOOL
+========================================================
+
+activateFreeTextTool() {
+
+   const store =
+      useCanvasStore.getState();
+
+   store.setDraftAnnotationTool?.({
+      type: "free-text",
+   });
+}
+
+========================================================
+12. CANVAS CLICK
+========================================================
+
+handleCanvasClick(pointer) {
+
+   const store =
+      useCanvasStore.getState();
+
+   const tool =
+      store.draftAnnotationTool;
+
+   if (!tool) return;
+
+   if (
+      tool.type ===
+      "free-text"
+   ) {
+
+      const annotation =
+         createAnnotation({
+
+            annotationType:
+               "free-text",
+
+            position: {
+               mode: "free",
+
+               absoluteX:
+                  pointer.x,
+
+               absoluteY:
+                  pointer.y,
+            },
+
+            text: "Text",
+         });
+
+      store.addAnnotation?.(
+         annotation
+      );
+
+      store.clearDraftAnnotationTool?.();
+
+      store.setAnnotationEditor?.({
+         annotationId:
+            annotation.id,
+      });
+   }
+}
+
+========================================================
+13. CONTEXT MENU
+========================================================
+
+CanvasContextMenu.jsx
+
+--------------------------------------------------------
+NODE
+--------------------------------------------------------
+
+<MenuItem
+   onClick={() => {
+
+      canvasController
+         .openAnnotationEditor?.({
+
+            attachedTo: {
+               type: "node",
+               id:
+                  contextMenu.nodeId,
+            },
+         });
+   }}
+>
+   <ListItemText>
+      Редагувати інформацію
+   </ListItemText>
+</MenuItem>
+
+--------------------------------------------------------
+CONNECTOR
+--------------------------------------------------------
+
+<MenuItem
+   onClick={() => {
+
+      canvasController
+         .openAnnotationEditor?.({
+
+            attachedTo: {
+               type: "edge",
+               id:
+                  contextMenu.edgeId,
+            },
+         });
+   }}
+>
+   <ListItemText>
+      Редагувати інформацію
+   </ListItemText>
+</MenuItem>
+
+========================================================
+14. CALLOUT MENU
+========================================================
+
+<MenuItem
+   onClick={() => {
+
+      canvasController
+         .openCalloutEditor?.(
+            contextMenu
+         );
+   }}
+>
+   <ListItemText>
+      Додати зноску
+   </ListItemText>
+</MenuItem>
+
+========================================================
+15. FREE TEXT BUTTON
+========================================================
+
+Toolbar button:
+
+{
+   key: "free-text",
+
+   label: "Текст",
+
+   onClick: () => {
+      canvasController
+         .activateFreeTextTool?.();
+   }
+}
+
+========================================================
+16. AnnotationsLayer.jsx
+========================================================
+
+СТВОРИТИ:
+AnnotationsLayer.jsx
+
+--------------------------------------------------------
+MAIN IDEA
+--------------------------------------------------------
+
+Render all annotations separately.
+
+Render:
+- Text
+- Callout leader line
+- Free text
+- Connector labels
+
+========================================================
+17. ADD LAYER
+========================================================
+
+EditorCanvas.jsx
+
+ДОДАТИ:
+
+<AnnotationsLayer />
+
+========================================================
+18. FONT RECOMMENDATION
+========================================================
+
+ВИКОРИСТАТИ:
+
+Roboto Condensed
+
+АБО:
+
+IBM Plex Sans Condensed
+
+АБО:
+
+Noto Sans Condensed
+
+--------------------------------------------------------
+NEXT.JS
+--------------------------------------------------------
+
+import {
+   Roboto_Condensed
+} from "next/font/google";
+
+========================================================
+19. LABEL DRAGGING
+========================================================
+
+IF:
+user drags label
+
+THEN:
+position.mode = "free"
+
+and offsets recalculated.
+
+========================================================
+20. CALLOUT ARCHITECTURE
+========================================================
+
+Callout = annotation.
+
+НЕ connector.
+
+--------------------------------------------------------
+STRUCTURE
+--------------------------------------------------------
+
+callout: {
+
+   anchorX,
+   anchorY,
+
+   elbowX,
+   elbowY,
+
+   textX,
+   textY,
+}
+
+========================================================
+21. SPECIFICATION TABLE LINK
+========================================================
+
+annotation.specification = {
+
+   tableId,
+
+   rowId,
+
+   positionNumber,
+}
+
+========================================================
+22. IMPORTANT RELATION
+========================================================
+
+many annotations
+   ->
+one specification row
+
+========================================================
+23. SPECIFICATION UX
+========================================================
+
+Modal tabs:
+
+TAB 1:
+existing rows
+
+TAB 2:
+create new row
+
+OPTION:
+[✓] increase quantity
+
+========================================================
+24. STEP ROADMAP
+========================================================
+
+STEP 1:
+simple labels
+
+STEP 2:
+draggable labels
+
+STEP 3:
+free text
+
+STEP 4:
+callouts
+
+STEP 5:
+specification integration
+
+========================================================
+25. FINAL IMPORTANT RULE
+========================================================
+
+НЕ:
+node.label
+
+НЕ:
+connector.label
+
+ПРАВИЛЬНО:
+annotations[]
+with semantic attachment
+
+========================================================
+END PACKAGE
+========================================================

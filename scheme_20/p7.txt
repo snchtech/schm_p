@@ -1,0 +1,744 @@
+Ти зараз підійшов до ще одного дуже важливого архітектурного рівня:
+
+# drawing sheet / paper space system
+
+І це вже відрізняє:
+
+* просто canvas editor
+  від
+* CAD/schematic editor.
+
+І дуже добре, що ти думаєш про це зараз, а не після реалізації PDF.
+
+Бо:
+
+# paper architecture треба закладати ДО export system.
+
+---
+
+# 1. ГОЛОВНА ПОМИЛКА ЯКУ НЕ МОЖНА ДОПУСТИТИ
+
+НЕ роби:
+
+```txt
+canvas infinite
+-> export visible area
+```
+
+Це дуже швидко стане проблемою:
+
+* різні формати
+* друк
+* рамки
+* title block
+* pagination
+* масштаби
+* callout tables
+
+---
+
+# 2. ПРАВИЛЬНА АРХІТЕКТУРА
+
+Треба розділити:
+
+# MODEL SPACE
+
+і
+
+# PAPER SPACE
+
+як у CAD системах.
+
+---
+
+# 3. ЩО ЦЕ ОЗНАЧАЄ
+
+---
+
+## MODEL SPACE
+
+Тут user:
+
+* малює
+* рухає
+* zoom
+* pan
+* infinite canvas
+
+---
+
+## PAPER SPACE
+
+Тут:
+
+* A3
+* A4
+* A1
+* рамка
+* title block
+* notes
+* spec table
+* export PDF
+
+---
+
+# 4. ЦЕ ДУЖЕ ВАЖЛИВО
+
+НЕ прив’язуй drawing:
+
+# до screen size.
+
+---
+
+# 5. ПРАВИЛЬНО
+
+Треба:
+
+# logical paper units.
+
+---
+
+# 6. Я Б ЗРОБИВ ТАК
+
+---
+
+# ROOT
+
+```txt
+diagram
+   ->
+sheets[]
+```
+
+---
+
+# 7. SHEET MODEL
+
+```js
+{
+   id,
+
+   format: "A3",
+
+   orientation:
+      "landscape",
+
+   scale: 1,
+
+   margins: {
+      top,
+      left,
+      right,
+      bottom,
+   },
+
+   drawingArea: {
+      x,
+      y,
+      width,
+      height,
+   },
+
+   titleBlock: {
+      shift,
+      unit,
+      system,
+      title,
+      sheetNumber,
+   },
+
+   notesArea: {
+      height,
+   },
+
+   specificationArea: {
+      height,
+   },
+}
+```
+
+---
+
+# 8. ЧОМУ ЦЕ ПРАВИЛЬНО
+
+Бо:
+
+* sheet = окремий entity
+* drawing = незалежний
+* PDF = deterministic
+* print = predictable
+
+---
+
+# 9. ГОЛОВНА ІДЕЯ
+
+Схема:
+
+# малюється в межах drawing area
+
+а не:
+
+# в межах whole canvas.
+
+---
+
+# 10. PAPER SYSTEM
+
+Тобі треба:
+
+# PaperLayer
+
+---
+
+# 11. НОВИЙ LAYER
+
+```txt
+PaperLayer
+```
+
+---
+
+# 12. ЩО ВІН РЕНДЕРИТЬ
+
+---
+
+## A. Sheet background
+
+---
+
+## B. Engineering frame
+
+---
+
+## C. Drawing area
+
+---
+
+## D. Title block
+
+---
+
+## E. Specification table
+
+---
+
+## F. Notes block
+
+---
+
+# 13. ДУЖЕ ВАЖЛИВО
+
+PaperLayer:
+
+# не interactive.
+
+---
+
+# 14. ЯК ВИГЛЯДАЄ СТРУКТУРА
+
+```txt
+PaperLayer
+GridLayer
+NodesLayer
+ConnectorsLayer
+AnnotationsLayer
+GuidesLayer
+```
+
+---
+
+# 15. FORMATS
+
+Я б зробив registry:
+
+```js
+PAPER_FORMATS
+```
+
+---
+
+# 16. Наприклад
+
+```js
+{
+   A4: {
+      width: 297,
+      height: 210,
+   },
+
+   A3: {
+      width: 420,
+      height: 297,
+   },
+
+   A1: {
+      width: 841,
+      height: 594,
+   },
+}
+```
+
+---
+
+# 17. АЛЕ
+
+НЕ ПРАЦЮЙ В MM.
+
+---
+
+# 18. ПРАВИЛЬНО
+
+Використати:
+
+# logical units
+
+---
+
+# 19. Наприклад
+
+```txt
+1 mm = 4 px
+```
+
+---
+
+# 20. ТОБТО
+
+A3:
+
+```txt
+420 * 4
+297 * 4
+```
+
+---
+
+# 21. І ЦЕ ДУЖЕ ВАЖЛИВО
+
+Тоді:
+
+* Konva render
+* PDF export
+* print scaling
+
+будуть:
+
+# deterministic.
+
+---
+
+# 22. DRAWING AREA
+
+Оце ключова штука.
+
+---
+
+# 23. НЕ ВСЯ СТОРІНКА
+
+Бо:
+
+* title block
+* spec table
+* notes
+* margins
+
+з’їдають місце.
+
+---
+
+# 24. ТОМУ
+
+```js
+drawingArea: {
+   x,
+   y,
+   width,
+   height,
+}
+```
+
+---
+
+# 25. І ВСІ OBJECTS
+
+повинні:
+
+# знаходитися в drawingArea.
+
+---
+
+# 26. Я Б ЗРОБИВ
+
+# soft clipping.
+
+---
+
+# 27. Тобто
+
+Коли user:
+
+* drag outside
+
+показати:
+
+```txt
+warning
+```
+
+---
+
+# 28. АЛЕ НЕ BLOCK.
+
+---
+
+# 29. TITLE BLOCK
+
+Теж окремий entity.
+
+---
+
+# 30. НЕ HARDCODE.
+
+---
+
+# 31. ПРАВИЛЬНО
+
+```js
+titleBlock: {
+   shift,
+   unit,
+   system,
+   title,
+   sheetNumber,
+}
+```
+
+---
+
+# 32. І ЦЕ ДУЖЕ ДОБРЕ
+
+Бо:
+
+* fields already exist
+* form already exists
+* PDF auto-generation easy
+
+---
+
+# 33. SPECIFICATION TABLE
+
+Це:
+
+# окремий layout block.
+
+---
+
+# 34. НЕ DRAW OBJECTS.
+
+---
+
+# 35. В PAPER SPACE
+
+```txt
+specificationArea
+```
+
+---
+
+# 36. NOTES AREA
+
+Аналогічно.
+
+---
+
+# 37. ЯК ЦЕ ВПЛИВАЄ НА DRAWING
+
+Наприклад:
+
+A3:
+
+```txt
+420x297
+```
+
+---
+
+нижня таблиця:
+
+```txt
+60 mm
+```
+
+---
+
+notes:
+
+```txt
+30 mm
+```
+
+---
+
+ТОДІ:
+
+# drawingArea.height менша.
+
+---
+
+# 38. І USER ЦЕ БАЧИТЬ
+
+Оце дуже важливо.
+
+---
+
+# 39. НЕ EXPORT-TIME CROPPING.
+
+---
+
+# 40. USER ОДРАЗУ ПРАЦЮЄ В PAPER LIMITS
+
+як у CAD.
+
+---
+
+# 41. ЯК ЦЕ ВІДОБРАЖАТИ
+
+Я б зробив:
+
+```txt
+white sheet
+grey outside
+```
+
+---
+
+# 42. Як у Figma / CAD.
+
+---
+
+# 43. EXPORT PDF
+
+Оце головна перевага.
+
+---
+
+# 44. Тоді PDF:
+
+# НЕ screenshot.
+
+---
+
+# 45. А:
+
+```txt
+render sheet
+```
+
+---
+
+# 46. Тобто:
+
+```txt
+sheet
+   ->
+paper frame
+   ->
+drawing area
+   ->
+nodes
+   ->
+connectors
+   ->
+annotations
+   ->
+title block
+   ->
+specification
+```
+
+---
+
+# 47. І ТОДІ
+
+PDF:
+
+# 1:1 deterministic.
+
+---
+
+# 48. НАЙКРАЩИЙ ПІДХІД ДЛЯ EXPORT
+
+НЕ:
+
+```txt
+html2canvas
+```
+
+---
+
+# 49. ПРАВИЛЬНО
+
+Або:
+
+# Konva stage export
+
+або:
+
+# SVG export
+
+або:
+
+# PDF renderer
+
+---
+
+# 50. Я Б РЕКОМЕНДУВАВ
+
+# SVG-first architecture.
+
+---
+
+# 51. ЧОМУ
+
+Бо:
+
+* print quality
+* vector export
+* CAD-like output
+* scaling
+* fonts
+* crisp lines
+
+---
+
+# 52. ІДЕАЛЬНА АРХІТЕКТУРА
+
+```txt
+Model Space
+    ->
+Paper Renderer
+    ->
+SVG
+    ->
+PDF
+```
+
+---
+
+# 53. ЦЕ ДУЖЕ ВАЖЛИВО
+
+НЕ:
+
+```txt
+export current zoom
+```
+
+---
+
+# 54. PDF НЕ МАЄ ЗАЛЕЖАТИ
+
+від:
+
+* viewport
+* pan
+* zoom
+
+---
+
+# 55. ТОМУ
+
+paper renderer:
+
+# окремий.
+
+---
+
+# 56. Я Б ЩЕ ДОДАВ
+
+```js
+sheet.viewportTransform
+```
+
+---
+
+# 57. ЩОБ
+
+User:
+
+* zoom
+* pan
+
+але:
+
+* sheet geometry stable.
+
+---
+
+# 58. В MAJOR CAD SYSTEMS
+
+це:
+
+# paper space architecture.
+
+---
+
+# 59. ЯКИЙ ПІДХІД Я Б РЕКОМЕНДУВАВ ТОБІ
+
+---
+
+# MVP
+
+## STEP 1
+
+PaperLayer
+
+---
+
+## STEP 2
+
+A3 registry
+
+---
+
+## STEP 3
+
+Frame renderer
+
+---
+
+## STEP 4
+
+Title block
+
+---
+
+## STEP 5
+
+Drawing area clipping preview
+
+---
+
+## STEP 6
+
+Spec table block
+
+---
+
+## STEP 7
+
+PDF export
+
+---
+
+# 60. НАЙВАЖЛИВІШЕ
+
+Твій editor уже має:
+
+* layers
+* geometry
+* controller
+* annotations
+
+Тому:
+
+# paper space дуже добре впишеться в поточну архітектуру.

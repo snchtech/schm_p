@@ -1,0 +1,336 @@
+Так, тепер абсолютно зрозуміло 👍
+
+Ти маєш на увазі:
+
+# rotated horizontal text
+
+тобто:
+
+* текст залишається нормальним горизонтальним рядком
+* але весь text block повертається на 90°
+* саме як у твоєму прикладі
+
+І це:
+
+# правильний CAD / draw.io / Figma підхід
+
+---
+
+# 1. ЦЕ НЕ “VERTICAL WRITING”
+
+А:
+
+# rotated text block
+
+Тобто:
+
+```txt
+Vertical Text
+```
+
+просто:
+
+# rotate(-90deg)
+
+---
+
+# 2. І ЦЕ ДУЖЕ ДОБРЕ
+
+Бо:
+
+* Konva це підтримує нативно
+* render дуже простий
+* selection простіший
+* editing простіший
+* drag простіший
+* scaling простіший
+
+---
+
+# 3. ЯК ЦЕ МАЄ БУТИ В АРХІТЕКТУРІ
+
+У annotation style:
+
+```js
+style: {
+
+   textOrientation:
+      "horizontal" |
+      "vertical-left" |
+      "vertical-right",
+
+}
+```
+
+---
+
+# 4. ЩО ОЗНАЧАЄ
+
+---
+
+## horizontal
+
+```txt
+TEXT
+```
+
+---
+
+## vertical-left
+
+(як на твоєму прикладі)
+
+```txt
+TEXT
+```
+
+але:
+
+```txt
+rotation = -90
+```
+
+---
+
+## vertical-right
+
+```txt
+rotation = 90
+```
+
+---
+
+# 5. ЯК ЦЕ РЕНДЕРИТИ
+
+У `AnnotationsLayer`
+
+---
+
+## логіка:
+
+```js
+let rotation = 0;
+
+if (
+   annotation.style
+      ?.textOrientation ===
+   "vertical-left"
+) {
+   rotation = -90;
+}
+
+if (
+   annotation.style
+      ?.textOrientation ===
+   "vertical-right"
+) {
+   rotation = 90;
+}
+```
+
+---
+
+# 6. ДАЛІ
+
+```jsx
+<Text
+   rotation={rotation}
+/>
+```
+
+---
+
+# 7. АЛЕ Є ДУЖЕ ВАЖЛИВА РІЧ
+
+Після rotate:
+
+# text anchor зміщується.
+
+---
+
+# 8. ТОМУ ТРЕБА ВИКОРИСТАТИ
+
+```jsx
+offsetX
+offsetY
+```
+
+---
+
+# 9. ПРАВИЛЬНИЙ РЕНДЕР
+
+Приблизно так:
+
+```jsx
+<Text
+   x={x}
+   y={y}
+
+   text={annotation.text}
+
+   rotation={rotation}
+
+   offsetX={
+      rotation !== 0
+         ? textWidth / 2
+         : 0
+   }
+
+   offsetY={
+      rotation !== 0
+         ? textHeight / 2
+         : 0
+   }
+/>
+```
+
+---
+
+# 10. І ЦЕ ДУЖЕ ДОБРЕ ВПИСУЄТЬСЯ В ТВОЮ СИСТЕМУ
+
+Бо:
+
+* annotation geometry не міняється
+* node geometry не міняється
+* connector geometry не міняється
+
+міняється лише:
+
+# render transform
+
+---
+
+# 11. ДЕ ЦЕ ОСОБЛИВО КОРИСНО
+
+---
+
+## connector labels
+
+```txt
+│
+│
+TEXT
+│
+│
+```
+
+---
+
+## labels справа/зліва фігур
+
+---
+
+## callouts
+
+---
+
+## electrical schematics
+
+---
+
+## pipelines
+
+---
+
+# 12. DRAW.IO / CAD UX
+
+Це саме:
+
+# rotate label
+
+а не special vertical text mode.
+
+---
+
+# 13. ЩО Я Б РЕКОМЕНДУВАВ ДОДАТИ В PACKAGE
+
+---
+
+# У MODEL
+
+```js
+style: {
+
+   textOrientation:
+      "horizontal",
+
+}
+```
+
+---
+
+# У MODAL
+
+```txt
+Горизонтально
+Вертикально знизу вверх
+Вертикально зверху вниз
+```
+
+---
+
+# У RENDERER
+
+```js
+rotation
+```
+
+based on orientation.
+
+---
+
+# 14. І ЩЕ ВАЖЛИВИЙ MOMENT
+
+Для:
+
+```txt
+left/right labels
+```
+
+orientation можна:
+
+# auto-assign.
+
+---
+
+# 15. Наприклад
+
+## label справа
+
+```txt
+vertical-left
+```
+
+---
+
+## label зверху
+
+```txt
+horizontal
+```
+
+---
+
+# 16. ЦЕ ВЖЕ ДУЖЕ ПРОФЕСІЙНИЙ UX
+
+І дуже близький до:
+
+* AutoCAD
+* EPLAN
+* draw.io
+* Visio
+* Figma schematic plugins
+
+---
+
+# 17. НАЙКРАЩЕ РІШЕННЯ ДЛЯ ТЕБЕ
+
+Саме:
+
+# rotated text block
+
+а НЕ:
+
+# stacked letters
+
+як я помилково спочатку зрозумів.
