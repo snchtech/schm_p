@@ -1,0 +1,833 @@
+Це дуже хороший підхід для старту.
+І насправді:
+
+# JSON-first architecture
+
+для твого editor — це майже ідеальний варіант на ранньому етапі.
+
+Особливо з урахуванням:
+
+* складної geometry
+* connectors
+* annotations
+* paper space
+* export
+* viewport
+* future DB migration
+
+---
+
+# 1. ГОЛОВНА ІДЕЯ
+
+НЕ робити:
+
+```txt
+save nodes separately immediately
+```
+
+---
+
+# ПРАВИЛЬНО:
+
+# diagram document model
+
+---
+
+# 2. ТИ ФАКТИЧНО БУДУЄШ
+
+# CAD document
+
+---
+
+# 3. ПРАВИЛЬНА АРХІТЕКТУРА
+
+```txt
+diagram
+   ->
+sheet
+nodes
+edges
+annotations
+viewport
+metadata
+```
+
+---
+
+# 4. І ЦЕ ДУЖЕ ВАЖЛИВО
+
+JSON:
+
+# має бути canonical document format.
+
+---
+
+# 5. ТОДІ
+
+Oracle:
+
+* просто storage layer
+* а не primary architecture.
+
+---
+
+# 6. Я Б РЕКОМЕНДУВАВ
+
+# diagram schema versioning
+
+вже зараз.
+
+---
+
+# 7. Тобто
+
+```js
+{
+   version: 1,
+
+   ...
+}
+```
+
+---
+
+# 8. ЧОМУ ЦЕ ВАЖЛИВО
+
+Бо:
+
+* структура зміниться
+* annotation system зміниться
+* paper system зміниться
+* connectors зміняться
+
+---
+
+# 9. І VERSIONING
+
+врятує migration.
+
+---
+
+# 10. Я Б ЗРОБИВ ГОЛОВНУ МОДЕЛЬ
+
+```js
+{
+   version: 1,
+
+   metadata: {},
+
+   sheet: {},
+
+   viewport: {},
+
+   nodes: [],
+
+   edges: [],
+
+   annotations: [],
+
+   specification: {},
+
+   notes: [],
+
+   createdAt,
+   updatedAt,
+}
+```
+
+---
+
+# 11. ЦЕ ДУЖЕ ВАЖЛИВО
+
+НЕ зберігати:
+
+# React state fragments.
+
+---
+
+# 12. ПРАВИЛЬНО
+
+Store:
+
+# має бути serializable document.
+
+---
+
+# 13. ТОДІ SAVE
+
+це буквально:
+
+```js
+JSON.stringify(store)
+```
+
+---
+
+# 14. АЛЕ
+
+Я Б НЕ ЗБЕРІГАВ:
+
+* UI state
+* selection
+* hover
+* draft
+* guides
+
+---
+
+# 15. ТОМУ
+
+Розділити:
+
+# document state
+
+і
+
+# editor state
+
+---
+
+# 16. DOCUMENT STATE
+
+```txt
+nodes
+edges
+annotations
+sheet
+```
+
+---
+
+# 17. EDITOR STATE
+
+```txt
+selection
+hover
+draft connector
+snap guides
+context menu
+```
+
+---
+
+# 18. ЦЕ КРИТИЧНО
+
+Бо:
+
+* editor state transient
+* document state persistent
+
+---
+
+# 19. Я Б ЗРОБИВ
+
+```txt
+/lib/serialization
+```
+
+---
+
+# 20. СТРУКТУРА
+
+```txt
+serialization/
+
+buildDiagramDocument.js
+loadDiagramDocument.js
+validateDiagram.js
+migrateDiagram.js
+```
+
+---
+
+# 21. buildDiagramDocument()
+
+# RESPONSIBILITY
+
+Витягнути:
+
+# тільки persistent data.
+
+---
+
+# 22. НЕ БРАТИ
+
+* zoom temp
+* hover
+* selection
+* drag previews
+
+---
+
+# 23. OUTPUT
+
+```js
+{
+   version,
+   metadata,
+   sheet,
+   nodes,
+   edges,
+   annotations,
+}
+```
+
+---
+
+# 24. SAVE FLOW
+
+---
+
+# USER
+
+```txt
+Save
+```
+
+---
+
+# CONTROLLER
+
+```txt
+canvasController.saveDiagram()
+```
+
+---
+
+# SERIALIZER
+
+```txt
+buildDiagramDocument()
+```
+
+---
+
+# JSON
+
+```txt
+JSON.stringify()
+```
+
+---
+
+# FILE
+
+```txt
+scheme.json
+```
+
+---
+
+# 25. ЯК ЗБЕРІГАТИ
+
+Для MVP:
+
+# filesystem API
+
+---
+
+# 26. АБО
+
+Next.js API route.
+
+---
+
+# 27. Я Б РЕКОМЕНДУВАВ
+
+---
+
+# CLIENT
+
+```txt
+POST /api/schemes/save
+```
+
+---
+
+# SERVER
+
+```txt
+writeFile()
+```
+
+---
+
+# 28. ЧОМУ ЦЕ КРАЩЕ
+
+Бо:
+
+* architecture ближча до future DB
+* no browser limitations
+* no localStorage limits
+* easy migration
+
+---
+
+# 29. FILE STRUCTURE
+
+```txt
+/schemes
+
+scheme_1.json
+scheme_2.json
+```
+
+---
+
+# 30. OPEN SCHEME
+
+Архітектурно:
+
+# inverse serialization.
+
+---
+
+# 31. FLOW
+
+---
+
+# USER
+
+```txt
+Open
+```
+
+---
+
+# API
+
+```txt
+GET /api/schemes/:id
+```
+
+---
+
+# SERVER
+
+```txt
+readFile()
+```
+
+---
+
+# JSON
+
+```txt
+JSON.parse()
+```
+
+---
+
+# LOADER
+
+```txt
+loadDiagramDocument()
+```
+
+---
+
+# STORE
+
+```txt
+replaceDiagramState()
+```
+
+---
+
+# 32. ЦЕ ДУЖЕ ВАЖЛИВО
+
+НЕ:
+
+```txt
+append nodes
+```
+
+---
+
+# ПРАВИЛЬНО
+
+# full document replacement.
+
+---
+
+# 33. ТОДІ
+
+Відкриття:
+
+* deterministic
+* predictable
+* clean
+
+---
+
+# 34. Я Б ДОДАВ
+
+```js
+replaceDocument()
+```
+
+в store.
+
+---
+
+# 35. ВОНА МІНЯЄ
+
+```txt
+nodes
+edges
+annotations
+sheet
+```
+
+---
+
+# 36. І НЕ ЧІПАЄ
+
+editor state.
+
+---
+
+# 37. І ЦЕ ДУЖЕ ВАЖЛИВО
+
+Бо:
+
+* viewport
+* zoom
+* UI
+* toolbar
+
+можуть залишатись.
+
+---
+
+# 38. VALIDATION
+
+Я Б ДОДАВ:
+
+# validateDiagram()
+
+---
+
+# 39. ЩО ПЕРЕВІРЯТИ
+
+✔ ids
+✔ references
+✔ connector endpoints
+✔ annotation attachments
+✔ schema version
+
+---
+
+# 40. ІНАКШЕ
+
+JSON corruption
+зламає editor.
+
+---
+
+# 41. MIGRATIONS
+
+Оце дуже важливо.
+
+---
+
+# 42. Наприклад
+
+version 1:
+
+```txt
+label.rotation
+```
+
+---
+
+version 2:
+
+```txt
+label.textOrientation
+```
+
+---
+
+# 43. migrateDiagram()
+
+автоматично оновлює schema.
+
+---
+
+# 44. Я Б ЗРОБИВ
+
+```txt
+CURRENT_DIAGRAM_VERSION
+```
+
+---
+
+# 45. І ПРИ LOAD
+
+```txt
+if version < current
+   migrate()
+```
+
+---
+
+# 46. ДУЖЕ ВАЖЛИВО
+
+Ти потім дуже легко перейдеш:
+
+# JSON -> Oracle.
+
+---
+
+# 47. ЯКИЙ ПІДХІД Я Б РЕКОМЕНДУВАВ
+
+---
+
+# STAGE 1
+
+Filesystem JSON.
+
+---
+
+# STAGE 2
+
+Next.js API.
+
+---
+
+# STAGE 3
+
+Oracle CLOB.
+
+---
+
+# STAGE 4
+
+Hybrid storage.
+
+---
+
+# 48. ІДЕАЛЬНА МОДЕЛЬ ДЛЯ ORACLE
+
+---
+
+## TABLE
+
+```txt
+SCHEME
+```
+
+---
+
+## COLUMNS
+
+```txt
+ID
+NAME
+VERSION
+SCHEME_JSON (CLOB)
+DATE_CREATE
+DATE_UPDATE
+```
+
+---
+
+# 49. ЧОМУ CLOB — ЦЕ ДОБРЕ
+
+Бо:
+
+* schema complex
+* nested geometry
+* annotations
+* orthogonal connectors
+* callouts
+
+---
+
+# 50. НЕ РЕКОМЕНДУЮ
+
+одразу:
+
+# fully normalized DB.
+
+---
+
+# 51. ЧОМУ
+
+Бо:
+
+* development slow
+* migrations painful
+* geometry updates painful
+
+---
+
+# 52. НАЙКРАЩИЙ ПІДХІД
+
+# JSON canonical document
+
+*
+
+# optional indexed tables
+
+---
+
+# 53. Наприклад
+
+Окремо в Oracle:
+
+* searchable entities
+* spec rows
+* references
+
+---
+
+але:
+
+# whole scheme = JSON.
+
+---
+
+# 54. ЦЕ ДУЖЕ ПОПУЛЯРНИЙ ПІДХІД
+
+Навіть у:
+
+* CAD systems
+* design tools
+* Figma-like systems
+
+---
+
+# 55. І ЩЕ ДУЖЕ ВАЖЛИВО
+
+JSON:
+
+# має бути human-readable.
+
+---
+
+# 56. НЕ ЗБЕРІГАЙ
+
+compressed binary.
+
+---
+
+# 57. ЧОМУ
+
+Бо:
+
+* debugging
+* migrations
+* recovery
+* diff
+* git
+
+---
+
+# 58. Я Б ЩЕ ДОДАВ
+
+```js
+metadata: {
+   editorVersion,
+   createdBy,
+   updatedBy,
+}
+```
+
+---
+
+# 59. ДЛЯ OPEN SCHEME
+
+Тобі треба:
+
+```txt
+diagramLoader
+```
+
+---
+
+# 60. RESPONSIBILITY
+
+✔ validate
+✔ migrate
+✔ normalize
+✔ inject defaults
+✔ replace store
+
+---
+
+# 61. Я Б РЕКОМЕНДУВАВ
+
+# normalize after load.
+
+---
+
+# 62. Наприклад
+
+Якщо:
+
+```txt
+annotation.style missing
+```
+
+додати defaults.
+
+---
+
+# 63. ЦЕ ВРЯТУЄ
+
+від:
+
+* старих схем
+* partial corruption
+* migration issues
+
+---
+
+# 64. ІДЕАЛЬНА АРХІТЕКТУРА ДЛЯ ТЕБЕ
+
+```txt
+Editor
+   ->
+Document State
+   ->
+Serializer
+   ->
+JSON
+   ->
+Storage
+```
+
+---
+
+# 65. І ДЛЯ LOAD
+
+```txt
+Storage
+   ->
+JSON
+   ->
+Migration
+   ->
+Validation
+   ->
+Normalizer
+   ->
+Store
+```
+
+---
+
+# 66. НАЙГОЛОВНІШЕ
+
+Твоя поточна:
+
+* centralized store
+* centralized controller
+* layer architecture
+
+дуже добре підходить
+для:
+
+# document-based CAD architecture.

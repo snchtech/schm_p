@@ -1,0 +1,301 @@
+Так, проблема тут саме в логіці `alignmentEngine`, а не в Konva.
+
+Зараз у тебе snapping працює по:
+
+* `top -> top`
+* `bottom -> bottom`
+* `center -> center`
+
+Але коли елементи різної висоти — `centerY` часто не попадає в threshold, зате `top` або `bottom` уже попадають першими, тому виникає відчуття “магніту” до країв.
+
+На скрінах видно саме це:
+
+* круг і прямокутник мають різну висоту
+* при русі прямокутника `top`/`bottom` alignment спрацьовує раніше за `centerY`
+
+---
+
+# Що треба зробити правильно
+
+Тобі треба:
+
+1. Додати пріоритет snapping
+2. Center snapping зробити сильнішим за edge snapping
+3. Вибирати НАЙКРАЩИЙ snap, а не останній знайдений
+
+Бо зараз у тебе:
+
+```js
+snapY = movingNode.y + dy;
+```
+
+просто перезаписується.
+
+---
+
+# Чому це зараз працює неправильно
+
+У тебе цикл:
+
+```js
+if (near(centerY)) {
+   snapY = ...
+}
+
+if (near(top)) {
+   snapY = ...
+}
+
+if (near(bottom)) {
+   snapY = ...
+}
+```
+
+І якщо `bottom` перевіряється останнім —
+він затирає `center`.
+
+---
+
+# Правильна архітектура snapping
+
+Треба:
+
+* рахувати distance
+* зберігати best match
+* center має більший priority
+
+---
+
+# Як виправити
+
+У `alignmentEngine.js`
+
+ЗАМІСТЬ:
+
+```js
+let snapX = null;
+let snapY = null;
+```
+
+РОБИ:
+
+```js
+let bestSnapX = null;
+let bestSnapY = null;
+```
+
+---
+
+# ДОДАЙ helper
+
+```js
+function trySetSnap(current, candidate) {
+
+   if (!candidate) {
+      return current;
+   }
+
+   if (!current) {
+      return candidate;
+   }
+
+   //--------------------------------------------------
+   // lower distance wins
+   //--------------------------------------------------
+
+   if (candidate.distance < current.distance) {
+      return candidate;
+   }
+
+   //--------------------------------------------------
+   // same distance:
+   // center priority
+   //--------------------------------------------------
+
+   if (
+      candidate.distance === current.distance
+   ) {
+
+      if (
+         candidate.priority >
+         current.priority
+      ) {
+         return candidate;
+      }
+   }
+
+   return current;
+}
+```
+
+---
+
+# Далі CENTER Y
+
+ЗАМІНИ:
+
+```js
+snapY =
+   movingNode.y + dy;
+```
+
+НА:
+
+```js
+bestSnapY = trySetSnap(
+   bestSnapY,
+   {
+      value:
+         movingNode.y + dy,
+
+      distance:
+         Math.abs(
+            target.centerY -
+            moving.centerY
+         ),
+
+      priority: 100,
+   }
+);
+```
+
+---
+
+# TOP ALIGN
+
+```js
+bestSnapY = trySetSnap(
+   bestSnapY,
+   {
+      value:
+         movingNode.y + dy,
+
+      distance:
+         Math.abs(
+            target.top -
+            moving.top
+         ),
+
+      priority: 10,
+   }
+);
+```
+
+---
+
+# BOTTOM ALIGN
+
+```js
+bestSnapY = trySetSnap(
+   bestSnapY,
+   {
+      value:
+         movingNode.y + dy,
+
+      distance:
+         Math.abs(
+            target.bottom -
+            moving.bottom
+         ),
+
+      priority: 10,
+   }
+);
+```
+
+---
+
+# Аналогічно для X
+
+CENTER:
+
+* priority 100
+
+LEFT/RIGHT:
+
+* priority 10
+
+---
+
+# В RETURN
+
+ЗАМІНИ:
+
+```js
+x: snapX ?? movingNode.x,
+y: snapY ?? movingNode.y,
+```
+
+НА:
+
+```js
+x:
+   bestSnapX?.value
+   ?? movingNode.x,
+
+y:
+   bestSnapY?.value
+   ?? movingNode.y,
+```
+
+---
+
+# Що це дасть
+
+Тепер:
+
+* якщо є center alignment → він виграє
+* edge snapping не буде “перетягувати”
+* snapping стане як у draw.io / Figma
+* різна висота елементів перестане ламати логіку
+
+---
+
+# Ще одна важлива проблема у твоєму коді
+
+У тебе guides зараз пушаться ВСІ.
+
+Тобто:
+
+* center
+* top
+* bottom
+
+одночасно.
+
+Через це інколи бачиш кілька guide lines.
+
+Правильно:
+
+* показувати guide тільки для best snap
+
+Але це вже другий етап.
+
+---
+
+# Рекомендація
+
+Тобі вже пора переходити від:
+
+```js
+snapX
+snapY
+```
+
+до:
+
+```js
+snapCandidatesX[]
+snapCandidatesY[]
+```
+
+і далі:
+
+* сортування
+* best candidate
+* priorities
+* magnetic snapping
+
+Бо ти вже фактично будуєш alignment engine рівня draw.io.
+
+І поточна проблема — класична проблема “last match wins”. 

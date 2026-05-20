@@ -1,0 +1,553 @@
+
+PDF EXPORT ARCHITECTURE PACKAGE
+===============================
+
+PROJECT TARGET
+--------------
+Реалізувати:
+- professional PDF export
+- A4/A3/A1 support
+- engineering frame
+- title block
+- specification table
+- notes export
+- vector export
+- SVG-first architecture
+- viewport independent export
+
+========================================================
+1. MAIN EXPORT ARCHITECTURE
+========================================================
+
+НЕ:
+canvas screenshot export
+
+ПРАВИЛЬНО:
+
+diagram model
+   ->
+paper renderer
+   ->
+SVG export scene
+   ->
+PDF generator
+
+========================================================
+2. IMPORTANT RULE
+========================================================
+
+PDF export MUST NOT depend on:
+- current zoom
+- current pan
+- viewport size
+- monitor size
+
+========================================================
+3. EXPORT TAKES FROM STORE
+========================================================
+
+✔ nodes
+✔ edges
+✔ annotations
+✔ sheet
+✔ specification
+✔ notes
+✔ title block
+
+========================================================
+4. NEW DIRECTORY
+========================================================
+
+СТВОРИТИ:
+
+/lib/export
+
+========================================================
+5. RECOMMENDED FILE STRUCTURE
+========================================================
+
+/lib/export
+
+buildExportScene.js
+exportSvg.js
+exportPdf.js
+svgRenderer.js
+paperExportRenderer.js
+
+========================================================
+6. REQUIRED LIBRARIES
+========================================================
+
+INSTALL:
+
+npm install jspdf
+npm install svg2pdf.js
+
+========================================================
+7. WHY SVG-FIRST
+========================================================
+
+✔ vector quality
+✔ crisp print
+✔ scalable
+✔ CAD-like output
+✔ small PDF size
+✔ proper fonts
+
+========================================================
+8. EXPORT FLOW
+========================================================
+
+STEP 1
+Build export scene
+
+STEP 2
+Render SVG
+
+STEP 3
+Convert SVG -> PDF
+
+STEP 4
+Download file
+
+========================================================
+9. BUTTON UX
+========================================================
+
+Toolbar button:
+
+[ Export PDF ]
+
+========================================================
+10. canvasController.js
+========================================================
+
+ДОДАТИ:
+
+async exportPdf() {
+
+   const store =
+      useCanvasStore.getState();
+
+   const exportScene =
+      buildExportScene(store);
+
+   const svg =
+      renderSvg(exportScene);
+
+   await exportPdf(svg, {
+      fileName:
+         "scheme.pdf",
+   });
+}
+
+========================================================
+11. buildExportScene.js
+========================================================
+
+СТВОРИТИ:
+buildExportScene.js
+
+========================================================
+12. RESPONSIBILITY
+========================================================
+
+Build canonical export scene.
+
+INPUT:
+- store
+
+OUTPUT:
+
+{
+   sheet,
+   frame,
+   drawingArea,
+
+   nodes,
+   edges,
+   annotations,
+
+   titleBlock,
+   specification,
+   notes,
+}
+
+========================================================
+13. IMPORTANT
+========================================================
+
+buildExportScene()
+MUST use:
+
+paper geometry
+
+NOT:
+viewport geometry.
+
+========================================================
+14. renderSvg()
+========================================================
+
+СТВОРИТИ:
+svgRenderer.js
+
+========================================================
+15. RESPONSIBILITY
+========================================================
+
+Generate SVG markup.
+
+========================================================
+16. SVG ROOT
+========================================================
+
+<svg>
+
+sheet
+frame
+drawing
+specification
+notes
+title block
+
+</svg>
+
+========================================================
+17. SVG DIMENSIONS
+========================================================
+
+Use:
+paper size directly.
+
+EXAMPLE:
+A3:
+420 x 297
+
+========================================================
+18. IMPORTANT
+========================================================
+
+NO viewport transforms.
+NO zoom transforms.
+
+========================================================
+19. PAPER RENDERER
+========================================================
+
+СТВОРИТИ:
+paperExportRenderer.js
+
+========================================================
+20. RESPONSIBILITY
+========================================================
+
+Render:
+✔ engineering frame
+✔ title block
+✔ notes
+✔ specification area
+
+========================================================
+21. TITLE BLOCK
+========================================================
+
+Render:
+- shift
+- unit
+- system
+- title
+- sheet number
+
+========================================================
+22. TITLE BLOCK DATA
+========================================================
+
+Take data from:
+
+store.sheet.titleBlock
+
+========================================================
+23. SPECIFICATION AREA
+========================================================
+
+Render:
+table grid
+rows
+columns
+text
+
+========================================================
+24. SPECIFICATION COLUMNS
+========================================================
+
+Recommended:
+- Position
+- Designation
+- Name
+- Quantity
+- Note
+
+========================================================
+25. NOTES AREA
+========================================================
+
+Render engineering notes.
+
+========================================================
+26. NODES EXPORT
+========================================================
+
+SVG:
+- rect
+- ellipse
+- polygon
+- path
+
+========================================================
+27. CONNECTORS EXPORT
+========================================================
+
+SVG:
+path/polyline
+
+========================================================
+28. ANNOTATIONS EXPORT
+========================================================
+
+SVG:
+text
+
+========================================================
+29. ROTATED TEXT EXPORT
+========================================================
+
+Use:
+
+transform="rotate(...)"
+
+========================================================
+30. CALLOUT EXPORT
+========================================================
+
+Render:
+- line
+- elbow
+- text
+
+========================================================
+31. FONT EXPORT
+========================================================
+
+RECOMMENDED:
+
+Roboto Condensed
+
+OR:
+
+IBM Plex Sans Condensed
+
+========================================================
+32. exportPdf.js
+========================================================
+
+СТВОРИТИ:
+exportPdf.js
+
+========================================================
+33. RESPONSIBILITY
+========================================================
+
+Convert:
+SVG -> PDF
+
+========================================================
+34. RECOMMENDED IMPLEMENTATION
+========================================================
+
+import { jsPDF }
+from "jspdf";
+
+import svg2pdf
+from "svg2pdf.js";
+
+========================================================
+35. PDF PAGE SIZE
+========================================================
+
+MUST use:
+sheet format.
+
+EXAMPLE:
+A3 landscape
+
+========================================================
+36. PDF ORIENTATION
+========================================================
+
+portrait
+landscape
+
+========================================================
+37. DOWNLOAD FLOW
+========================================================
+
+Generate blob
+-> save/download
+
+========================================================
+38. FILE NAME
+========================================================
+
+RECOMMENDED:
+
+system_sheetNumber.pdf
+
+EXAMPLE:
+
+Cooling_1.pdf
+
+========================================================
+39. EXPORT OPTIONS MODAL
+========================================================
+
+RECOMMENDED:
+
+✔ format
+✔ orientation
+✔ scale
+✔ include notes
+✔ include specification
+✔ margins
+
+========================================================
+40. IMPORTANT
+========================================================
+
+Export options
+must not change:
+editor viewport.
+
+========================================================
+41. EXPORT RENDERER
+========================================================
+
+IMPORTANT:
+Separate from viewport renderer.
+
+========================================================
+42. WHY SEPARATE RENDERER IS IMPORTANT
+========================================================
+
+Viewport renderer:
+- optimized for editing
+
+Export renderer:
+- optimized for print
+
+========================================================
+43. PAPER EXPORT RENDERER
+========================================================
+
+Render directly in:
+paper coordinates.
+
+========================================================
+44. NO SCREEN DEPENDENCY
+========================================================
+
+Export must look identical:
+on every monitor.
+
+========================================================
+45. PDF QUALITY
+========================================================
+
+TARGET:
+
+professional engineering print quality.
+
+========================================================
+46. A3 EXPORT
+========================================================
+
+IMPORTANT:
+A3 must remain vector.
+
+DO NOT:
+rasterize.
+
+========================================================
+47. EXPORT SCALE
+========================================================
+
+Use:
+sheet.scale
+
+EXAMPLE:
+1:1
+1:2
+1:5
+
+========================================================
+48. MULTI-PAGE FUTURE SUPPORT
+========================================================
+
+Architecture already supports:
+multiple sheets.
+
+========================================================
+49. FUTURE EXPAND
+========================================================
+
+✔ print preview
+✔ multi-page export
+✔ DSTU templates
+✔ ГОСТ templates
+✔ SVG export
+✔ PNG export
+✔ preview modal
+✔ watermark
+✔ signatures
+
+========================================================
+50. RECOMMENDED MVP IMPLEMENTATION ORDER
+========================================================
+
+STEP 1
+buildExportScene()
+
+STEP 2
+SVG renderer
+
+STEP 3
+paper renderer
+
+STEP 4
+PDF generator
+
+STEP 5
+toolbar button
+
+STEP 6
+download flow
+
+========================================================
+51. FINAL ARCHITECTURE
+========================================================
+
+Editor
+   ->
+Model
+   ->
+Paper Space
+   ->
+Export Scene
+   ->
+SVG Renderer
+   ->
+PDF Generator
+
+========================================================
+END PACKAGE
+========================================================

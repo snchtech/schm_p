@@ -1,0 +1,689 @@
+Тут дуже важливо НЕ зробити помилку рівня:
+
+# "експорт canvas screenshot"
+
+Бо в тебе вже архітектура рухається до:
+
+# professional schematic CAD editor
+
+І PDF generation треба будувати:
+
+# як окремий rendering pipeline.
+
+---
+
+# 1. ГОЛОВНА ІДЕЯ
+
+НЕ:
+
+```txt
+видимий canvas
+-> png
+-> pdf
+```
+
+---
+
+# ПРАВИЛЬНО:
+
+```txt
+diagram model
+   ->
+paper renderer
+   ->
+export renderer
+   ->
+pdf
+```
+
+---
+
+# 2. ТИ ВЖЕ МАЄШ ВСЕ НЕОБХІДНЕ
+
+Після попередніх пакетів:
+
+✔ nodes
+✔ connectors
+✔ annotations
+✔ sheet
+✔ title block
+✔ notes
+✔ specification table
+✔ paper geometry
+✔ viewport separation
+
+Тобто:
+
+# export layer можна робити дуже правильно.
+
+---
+
+# 3. НАЙПРАВИЛЬНІША АРХІТЕКТУРА
+
+# Export НЕ має залежати від viewport.
+
+---
+
+# 4. PDF EXPORT НЕ МАЄ БРАТИ
+
+* zoom
+* pan
+* visible screen
+* viewport scale
+
+---
+
+# 5. ПОВИННО БРАТИСЯ
+
+# canonical paper geometry
+
+---
+
+# 6. ПРАВИЛЬНИЙ PIPELINE
+
+```txt
+Store
+   ->
+Paper Renderer
+   ->
+Export Scene
+   ->
+SVG
+   ->
+PDF
+```
+
+---
+
+# 7. ЧОМУ SVG-FIRST
+
+Бо:
+
+* vector quality
+* print quality
+* sharp lines
+* fonts
+* scaling
+* A1/A3 support
+* CAD-like export
+
+---
+
+# 8. НЕ РЕКОМЕНДУЮ
+
+```txt
+html2canvas
+```
+
+---
+
+# 9. НЕ РЕКОМЕНДУЮ
+
+```txt
+stage.toDataURL()
+```
+
+як головний export.
+
+---
+
+# 10. ЧОМУ
+
+Бо:
+
+* bitmap
+* blurry print
+* погані шрифти
+* scaling artifacts
+* великі PDF
+
+---
+
+# 11. НАЙКРАЩИЙ ПІДХІД
+
+# export renderer
+
+---
+
+# 12. Я Б ЗРОБИВ
+
+```txt
+/lib/export
+```
+
+---
+
+# 13. СТРУКТУРА
+
+```txt
+export/
+
+buildExportScene.js
+exportSvg.js
+exportPdf.js
+paperExportRenderer.js
+```
+
+---
+
+# 14. ГОЛОВНА ІДЕЯ
+
+Export renderer:
+
+# не використовує viewport.
+
+---
+
+# 15. Тобто
+
+НЕ:
+
+```txt
+current canvas transform
+```
+
+---
+
+# А:
+
+```txt
+sheet geometry directly
+```
+
+---
+
+# 16. ЯК ЦЕ ПРАЦЮЄ
+
+---
+
+# STEP 1
+
+Беремо:
+
+```txt
+sheet
+nodes
+edges
+annotations
+```
+
+---
+
+# STEP 2
+
+Будуємо:
+
+# export scene.
+
+---
+
+# STEP 3
+
+Render:
+
+* frame
+* title block
+* drawing
+* spec table
+* notes
+
+---
+
+# STEP 4
+
+Convert:
+
+# SVG -> PDF
+
+---
+
+# 17. BUTTON UX
+
+Я б зробив:
+
+```txt
+[ Export PDF ]
+```
+
+у top toolbar.
+
+---
+
+# 18. КНОПКА
+
+НЕ повинна:
+
+# export current screen.
+
+---
+
+# 19. ПРАВИЛЬНО
+
+```txt
+Export current sheet
+```
+
+---
+
+# 20. ЯКИЙ LIB ВИКОРИСТОВУВАТИ
+
+---
+
+# BEST OPTION
+
+```txt
+svg2pdf.js
++
+jsPDF
+```
+
+---
+
+# 21. АРХІТЕКТУРА
+
+```txt
+SVG renderer
+   ->
+svg2pdf
+   ->
+jsPDF
+```
+
+---
+
+# 22. ЧОМУ ЦЕ ДОБРЕ
+
+✔ vector export
+✔ proper fonts
+✔ crisp lines
+✔ scalable
+✔ CAD-like print
+
+---
+
+# 23. ЯК РЕНДЕРИТИ PDF
+
+Тобі НЕ треба:
+
+# export visible Konva stage.
+
+---
+
+# 24. ПРАВИЛЬНО
+
+Побудувати:
+
+# окремий SVG scene.
+
+---
+
+# 25. ТОДІ
+
+SVG:
+
+* paper frame
+* title block
+* notes
+* spec table
+* nodes
+* connectors
+* labels
+
+---
+
+# 26. TITLE BLOCK
+
+Теж:
+
+# SVG elements.
+
+---
+
+# 27. SPEC TABLE
+
+Теж:
+
+# SVG table renderer.
+
+---
+
+# 28. NOTES
+
+Теж:
+
+# SVG text blocks.
+
+---
+
+# 29. ЦЕ ДУЖЕ ВАЖЛИВО
+
+Тоді:
+
+# PDF = deterministic.
+
+---
+
+# 30. ТОБТО
+
+A3:
+
+* завжди однаковий
+* незалежно від монітора
+* незалежно від zoom
+
+---
+
+# 31. Я Б РОЗДІЛИВ
+
+# VIEW RENDERER
+
+і
+
+# EXPORT RENDERER
+
+---
+
+# 32. ЧОМУ
+
+Бо:
+
+* viewport transforms
+* zoom
+* pan
+* performance optimizations
+
+не повинні впливати на PDF.
+
+---
+
+# 33. EXPORT RENDERER
+
+має працювати:
+
+# у paper coordinates.
+
+---
+
+# 34. ВАЖЛИВО
+
+НЕ роби:
+
+# screenshot export.
+
+---
+
+# 35. ІНАКШЕ БУДЕ
+
+* blurry A3
+* поганий print
+* huge PDF
+* font issues
+
+---
+
+# 36. ЯК РЕНДЕРИТИ CONNECTORS
+
+У SVG:
+
+# path.
+
+---
+
+# 37. ЯК РЕНДЕРИТИ NODES
+
+SVG:
+
+* rect
+* ellipse
+* polygon
+* custom path
+
+---
+
+# 38. ЯК РЕНДЕРИТИ LABELS
+
+SVG:
+
+# text.
+
+---
+
+# 39. ROTATED LABELS
+
+```svg
+transform="rotate(...)"
+```
+
+---
+
+# 40. ЯК РЕНДЕРИТИ CALLOUTS
+
+SVG:
+
+* line
+* polyline
+* text
+
+---
+
+# 41. SPECIFICATION TABLE
+
+SVG:
+
+* grid
+* rows
+* text
+
+---
+
+# 42. Я Б ЩЕ ДОДАВ
+
+```txt
+export templates
+```
+
+---
+
+# 43. Наприклад
+
+```txt
+DSTU
+ГОСТ
+Internal company
+```
+
+---
+
+# 44. І ЦЕ ДУЖЕ ДОБРЕ ВПИСУЄТЬСЯ
+
+у paper architecture.
+
+---
+
+# 45. PDF BUTTON FLOW
+
+---
+
+# USER
+
+```txt
+Export PDF
+```
+
+---
+
+# CONTROLLER
+
+```txt
+canvasController.exportPdf()
+```
+
+---
+
+# EXPORT PIPELINE
+
+```txt
+buildExportScene()
+```
+
+---
+
+# SVG
+
+```txt
+renderSvg()
+```
+
+---
+
+# PDF
+
+```txt
+exportPdf()
+```
+
+---
+
+# DOWNLOAD
+
+```txt
+scheme.pdf
+```
+
+---
+
+# 46. Я Б ЩЕ ДОДАВ
+
+```txt
+Export options modal
+```
+
+---
+
+# 47. ДЕ МОЖНА ВИБРАТИ
+
+✔ format
+✔ orientation
+✔ scale
+✔ include notes
+✔ include specification
+✔ margins
+
+---
+
+# 48. І ЩЕ ДУЖЕ ВАЖЛИВО
+
+PDF export:
+
+# не повинен залежати від Konva.
+
+---
+
+# 49. Konva
+
+добре для:
+
+* editing
+* viewport rendering
+
+---
+
+# 50. EXPORT
+
+краще:
+
+# SVG renderer.
+
+---
+
+# 51. ЧОМУ
+
+Бо:
+
+* vector
+* scalable
+* print-safe
+* CAD-like
+
+---
+
+# 52. НАЙКРАЩА АРХІТЕКТУРА ДЛЯ ТЕБЕ
+
+```txt
+Editor
+   ->
+Model
+   ->
+Paper Space
+   ->
+SVG Export Renderer
+   ->
+PDF Generator
+```
+
+---
+
+# 53. І ЦЕ ДУЖЕ ВАЖЛИВО
+
+Тоді:
+
+# print quality буде професійною.
+
+---
+
+# 54. ЯКИЙ ПІДХІД Я Б РЕКОМЕНДУВАВ
+
+---
+
+# MVP
+
+## STEP 1
+
+Paper renderer.
+
+---
+
+## STEP 2
+
+SVG renderer.
+
+---
+
+## STEP 3
+
+Title block export.
+
+---
+
+## STEP 4
+
+Specification export.
+
+---
+
+## STEP 5
+
+PDF export button.
+
+---
+
+## STEP 6
+
+Download blob.
+
+---
+
+# 55. І НАЙВАЖЛИВІШЕ
+
+Твоя поточна архітектура:
+
+* centralized store
+* controller
+* geometry
+* layers
+* paper space
+
+дуже добре підходить
+для:
+
+# professional print/export pipeline.
