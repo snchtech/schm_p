@@ -1,0 +1,1745 @@
+JSON SCHEME SAVE/LOAD READY CODE PACKAGE
+========================================
+
+PURPOSE
+-------
+Готовий пакет коду для:
+- збереження розробленої схеми в JSON;
+- завантаження схеми з JSON;
+- зберігання файлів у каталозі /schemes на рівні project root;
+- версіонності JSON-документа;
+- міграцій між версіями;
+- нормалізації старих/неповних схем;
+- підключення до centralized useCanvasStore;
+- виклику через canvasController;
+- кнопок Save / Load / Import / Export.
+
+ASSUMPTIONS
+-----------
+- Next.js App Router використовується у /app/api.
+- Якщо у тебе Pages Router, нижче є альтернативні API файли для /pages/api.
+- Store: Zustand useCanvasStore.
+- Canvas architecture: centralized canvasController + persistent document state.
+- Каталог /schemes створюється автоматично, якщо його немає.
+
+INSTALL
+-------
+Нічого додатково ставити не треба.
+Використовуються тільки Node.js fs/path у server API routes.
+
+
+===============================================================================
+FILE: src/lib/serialization/diagramVersion.js
+===============================================================================
+
+export const CURRENT_DIAGRAM_VERSION = 2;
+
+export const DIAGRAM_APP_NAME = "schemes-canvas-editor";
+
+export const DIAGRAM_DOCUMENT_KIND = "scheme-document";
+
+
+===============================================================================
+FILE: src/lib/serialization/defaultDiagramState.js
+===============================================================================
+
+export function createDefaultSheet() {
+  return {
+    format: "A3",
+    orientation: "landscape",
+    scale: 1,
+    frame: true,
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+    notes: [],
+    specification: {
+      visible: true,
+      height: 220,
+    },
+  };
+}
+
+export function createDefaultSpecification() {
+  return {
+    tables: [],
+    rows: [],
+  };
+}
+
+export function createDefaultDocumentState() {
+  return {
+    nodes: [],
+    edges: [],
+    annotations: [],
+    specificationTables: [],
+    sheet: createDefaultSheet(),
+    specification: createDefaultSpecification(),
+    notes: [],
+  };
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/sanitizeDiagramDocument.js
+===============================================================================
+
+function jsonClone(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+export function sanitizePersistentArray(value) {
+  if (!Array.isArray(value)) return [];
+  return jsonClone(value);
+}
+
+export function sanitizePersistentObject(value, fallback = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return jsonClone(fallback);
+  }
+
+  return jsonClone(value);
+}
+
+export function removeUndefinedDeep(value) {
+  if (Array.isArray(value)) {
+    return value.map(removeUndefinedDeep);
+  }
+
+  if (value && typeof value === "object") {
+    const out = {};
+
+    Object.entries(value).forEach(([key, val]) => {
+      if (typeof val === "undefined") return;
+      if (typeof val === "function") return;
+      out[key] = removeUndefinedDeep(val);
+    });
+
+    return out;
+  }
+
+  return value;
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/buildDiagramDocument.js
+===============================================================================
+
+import {
+  CURRENT_DIAGRAM_VERSION,
+  DIAGRAM_APP_NAME,
+  DIAGRAM_DOCUMENT_KIND,
+} from "./diagramVersion";
+
+import {
+  createDefaultSheet,
+  createDefaultSpecification,
+} from "./defaultDiagramState";
+
+import {
+  sanitizePersistentArray,
+  sanitizePersistentObject,
+  removeUndefinedDeep,
+} from "./sanitizeDiagramDocument";
+
+export function buildDiagramDocument(store, options = {}) {
+  const now = new Date().toISOString();
+
+  const previousMetadata =
+    store.documentMetadata && typeof store.documentMetadata === "object"
+      ? store.documentMetadata
+      : {};
+
+  const metadata = {
+    app: DIAGRAM_APP_NAME,
+    name: options.name || previousMetadata.name || "scheme",
+    description: options.description || previousMetadata.description || "",
+    createdAt: previousMetadata.createdAt || now,
+    updatedAt: now,
+    editorVersion: options.editorVersion || "1.0.0",
+  };
+
+  return removeUndefinedDeep({
+    kind: DIAGRAM_DOCUMENT_KIND,
+    version: CURRENT_DIAGRAM_VERSION,
+    metadata,
+
+    sheet: sanitizePersistentObject(store.sheet, createDefaultSheet()),
+
+    nodes: sanitizePersistentArray(store.nodes),
+    edges: sanitizePersistentArray(store.edges),
+    annotations: sanitizePersistentArray(store.annotations),
+    specificationTables: sanitizePersistentArray(store.specificationTables),
+
+    specification: sanitizePersistentObject(
+      store.specification,
+      createDefaultSpecification()
+    ),
+
+    notes: sanitizePersistentArray(store.notes),
+  });
+}
+
+export function diagramDocumentToJson(document) {
+  return JSON.stringify(document, null, 2);
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/validateDiagram.js
+===============================================================================
+
+import {
+  DIAGRAM_DOCUMENT_KIND,
+} from "./diagramVersion";
+
+export function validateDiagramDocument(document) {
+  const errors = [];
+
+  if (!document || typeof document !== "object") {
+    return {
+      valid: false,
+      errors: ["Document is not an object"],
+    };
+  }
+
+  if (document.kind && document.kind !== DIAGRAM_DOCUMENT_KIND) {
+    errors.push(`Unsupported document kind: ${document.kind}`);
+  }
+
+  if (typeof document.version !== "number") {
+    errors.push("Document version must be a number");
+  }
+
+  if (!Array.isArray(document.nodes)) {
+    errors.push("nodes must be an array");
+  }
+
+  if (!Array.isArray(document.edges)) {
+    errors.push("edges must be an array");
+  }
+
+  if (document.annotations && !Array.isArray(document.annotations)) {
+    errors.push("annotations must be an array");
+  }
+
+  if (
+    document.specificationTables &&
+    !Array.isArray(document.specificationTables)
+  ) {
+    errors.push("specificationTables must be an array");
+  }
+
+  if (!document.sheet || typeof document.sheet !== "object") {
+    errors.push("sheet must be an object");
+  }
+
+  const ids = new Set();
+
+  if (Array.isArray(document.nodes)) {
+    document.nodes.forEach((node, index) => {
+      if (!node?.id) {
+        errors.push(`nodes[${index}] has no id`);
+        return;
+      }
+
+      if (ids.has(node.id)) {
+        errors.push(`Duplicate id: ${node.id}`);
+      }
+
+      ids.add(node.id);
+    });
+  }
+
+  if (Array.isArray(document.edges)) {
+    document.edges.forEach((edge, index) => {
+      if (!edge?.id) {
+        errors.push(`edges[${index}] has no id`);
+      }
+    });
+  }
+
+  if (Array.isArray(document.annotations)) {
+    document.annotations.forEach((annotation, index) => {
+      if (!annotation?.id) {
+        errors.push(`annotations[${index}] has no id`);
+      }
+    });
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+export function assertValidDiagramDocument(document) {
+  const result = validateDiagramDocument(document);
+
+  if (!result.valid) {
+    throw new Error(result.errors.join("; "));
+  }
+
+  return true;
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/migrateDiagram.js
+===============================================================================
+
+import {
+  CURRENT_DIAGRAM_VERSION,
+  DIAGRAM_DOCUMENT_KIND,
+} from "./diagramVersion";
+
+function migrateV1ToV2(document) {
+  const annotations = (document.annotations || []).map((annotation) => {
+    const style = annotation.style || {};
+
+    let textOrientation = style.textOrientation;
+
+    if (!textOrientation) {
+      if (style.rotation === -90) textOrientation = "vertical-left";
+      else if (style.rotation === 90) textOrientation = "vertical-right";
+      else textOrientation = "horizontal";
+    }
+
+    const nextStyle = {
+      fontFamily: style.fontFamily || "Roboto Condensed",
+      fontSize: style.fontSize || 12,
+      fontWeight: style.fontWeight || 300,
+      fill: style.fill || "#111",
+      textOrientation,
+      align: style.align || "center",
+    };
+
+    return {
+      ...annotation,
+      style: nextStyle,
+    };
+  });
+
+  return {
+    ...document,
+    version: 2,
+    annotations,
+  };
+}
+
+export function migrateDiagramDocument(inputDocument) {
+  let document = {
+    ...inputDocument,
+    kind: inputDocument.kind || DIAGRAM_DOCUMENT_KIND,
+    version: typeof inputDocument.version === "number" ? inputDocument.version : 1,
+  };
+
+  if (document.version > CURRENT_DIAGRAM_VERSION) {
+    throw new Error(
+      `Document version ${document.version} is newer than supported version ${CURRENT_DIAGRAM_VERSION}`
+    );
+  }
+
+  while (document.version < CURRENT_DIAGRAM_VERSION) {
+    if (document.version === 1) {
+      document = migrateV1ToV2(document);
+      continue;
+    }
+
+    throw new Error(`No migration available for version ${document.version}`);
+  }
+
+  return document;
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/normalizeDiagram.js
+===============================================================================
+
+import {
+  CURRENT_DIAGRAM_VERSION,
+  DIAGRAM_DOCUMENT_KIND,
+  DIAGRAM_APP_NAME,
+} from "./diagramVersion";
+
+import {
+  createDefaultSheet,
+  createDefaultSpecification,
+} from "./defaultDiagramState";
+
+function normalizeSheet(sheet = {}) {
+  const defaults = createDefaultSheet();
+
+  return {
+    ...defaults,
+    ...sheet,
+    titleBlock: {
+      ...defaults.titleBlock,
+      ...(sheet.titleBlock || {}),
+    },
+    specification: {
+      ...defaults.specification,
+      ...(sheet.specification || {}),
+    },
+    notes: Array.isArray(sheet.notes) ? sheet.notes : [],
+  };
+}
+
+function normalizeConnector(edge) {
+  if (!edge || edge.kind !== "connector") return edge;
+
+  return {
+    ...edge,
+    pathType: edge.pathType || edge.connectorType || "orthogonal-elbow",
+    connectorType: edge.connectorType || edge.pathType || "orthogonal-elbow",
+    route: {
+      vertices: edge.route?.vertices || [],
+      pathHandles: edge.route?.pathHandles || [],
+      fixedAnchors: edge.route?.fixedAnchors || null,
+      autoRouting: {
+        enabled: edge.route?.autoRouting?.enabled === true,
+        mode: edge.route?.autoRouting?.mode || "smart",
+      },
+    },
+    endcaps: {
+      start: edge.endcaps?.start || "none",
+      end: edge.endcaps?.end || "none",
+    },
+    behavior: {
+      type: edge.behavior?.type || "default",
+      link: edge.behavior?.link || null,
+    },
+    geometry: {
+      start: edge.geometry?.start || edge.start || { x: 0, y: 0 },
+      end: edge.geometry?.end || edge.end || { x: 0, y: 0 },
+      points: edge.geometry?.points || [],
+      segmentsMeta: edge.geometry?.segmentsMeta || [],
+    },
+    style: {
+      stroke: edge.style?.stroke || "black",
+      strokeWidth: edge.style?.strokeWidth || 2,
+      ...(edge.style || {}),
+    },
+  };
+}
+
+function normalizeAnnotation(annotation) {
+  if (!annotation) return annotation;
+
+  return {
+    ...annotation,
+    kind: "annotation",
+    annotationType: annotation.annotationType || "label",
+    attachedTo: annotation.attachedTo || null,
+    text: annotation.text || "",
+    position: {
+      mode: annotation.position?.mode || "top",
+      offsetX: annotation.position?.offsetX || 0,
+      offsetY: annotation.position?.offsetY || 0,
+      absoluteX: annotation.position?.absoluteX || 0,
+      absoluteY: annotation.position?.absoluteY || 0,
+    },
+    style: {
+      fontFamily: annotation.style?.fontFamily || "Roboto Condensed",
+      fontSize: annotation.style?.fontSize || 12,
+      fontWeight: annotation.style?.fontWeight || 300,
+      fill: annotation.style?.fill || "#111",
+      textOrientation: annotation.style?.textOrientation || "horizontal",
+      align: annotation.style?.align || "center",
+    },
+    specification: annotation.specification || null,
+  };
+}
+
+export function normalizeDiagramDocument(document) {
+  const now = new Date().toISOString();
+
+  return {
+    kind: DIAGRAM_DOCUMENT_KIND,
+    version: CURRENT_DIAGRAM_VERSION,
+    metadata: {
+      app: document.metadata?.app || DIAGRAM_APP_NAME,
+      name: document.metadata?.name || "scheme",
+      description: document.metadata?.description || "",
+      createdAt: document.metadata?.createdAt || now,
+      updatedAt: document.metadata?.updatedAt || now,
+      editorVersion: document.metadata?.editorVersion || "1.0.0",
+    },
+    sheet: normalizeSheet(document.sheet),
+    nodes: Array.isArray(document.nodes) ? document.nodes : [],
+    edges: Array.isArray(document.edges)
+      ? document.edges.map(normalizeConnector)
+      : [],
+    annotations: Array.isArray(document.annotations)
+      ? document.annotations.map(normalizeAnnotation)
+      : [],
+    specificationTables: Array.isArray(document.specificationTables)
+      ? document.specificationTables
+      : [],
+    specification: {
+      ...createDefaultSpecification(),
+      ...(document.specification || {}),
+      tables: Array.isArray(document.specification?.tables)
+        ? document.specification.tables
+        : [],
+      rows: Array.isArray(document.specification?.rows)
+        ? document.specification.rows
+        : [],
+    },
+    notes: Array.isArray(document.notes) ? document.notes : [],
+  };
+}
+
+
+===============================================================================
+FILE: src/lib/serialization/loadDiagramDocument.js
+===============================================================================
+
+import { migrateDiagramDocument } from "./migrateDiagram";
+import { normalizeDiagramDocument } from "./normalizeDiagram";
+import { assertValidDiagramDocument } from "./validateDiagram";
+
+export function parseDiagramJson(jsonText) {
+  if (typeof jsonText !== "string") {
+    throw new Error("JSON input must be a string");
+  }
+
+  return JSON.parse(jsonText);
+}
+
+export function prepareDiagramDocumentForStore(inputDocument) {
+  const migrated = migrateDiagramDocument(inputDocument);
+  const normalized = normalizeDiagramDocument(migrated);
+
+  assertValidDiagramDocument(normalized);
+
+  return normalized;
+}
+
+export function applyDiagramDocumentToStore(store, inputDocument) {
+  const document = prepareDiagramDocumentForStore(inputDocument);
+
+  store.replaceDocumentState?.({
+    documentMetadata: document.metadata,
+    sheet: document.sheet,
+    nodes: document.nodes,
+    edges: document.edges,
+    annotations: document.annotations,
+    specificationTables: document.specificationTables,
+    specification: document.specification,
+    notes: document.notes,
+  });
+
+  return document;
+}
+
+
+===============================================================================
+FILE: src/lib/storage/schemeFileNames.js
+===============================================================================
+
+export function sanitizeSchemeId(value) {
+  const raw = String(value || "scheme").trim();
+
+  const safe = raw
+    .replace(/\.json$/i, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return safe || "scheme";
+}
+
+export function ensureJsonFileName(idOrName) {
+  return `${sanitizeSchemeId(idOrName)}.json`;
+}
+
+
+===============================================================================
+FILE: src/lib/storage/browserJsonDownload.js
+===============================================================================
+
+export function downloadJsonFile(document, fileName = "scheme.json") {
+  const json = JSON.stringify(document, null, 2);
+  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const link = window.document.createElement("a");
+  link.href = url;
+  link.download = fileName.endsWith(".json") ? fileName : `${fileName}.json`;
+  window.document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+export function readJsonFileFromInputFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      try {
+        resolve(JSON.parse(String(reader.result || "{}")));
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    reader.onerror = () => reject(reader.error || new Error("File read error"));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+
+===============================================================================
+FILE: src/lib/server/schemesDirectory.js
+===============================================================================
+
+import fs from "fs/promises";
+import path from "path";
+import { ensureJsonFileName } from "@/lib/storage/schemeFileNames";
+
+export function getSchemesDirectory() {
+  return path.join(process.cwd(), "schemes");
+}
+
+export async function ensureSchemesDirectory() {
+  const dir = getSchemesDirectory();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+export async function getSchemeFilePath(idOrName) {
+  const dir = await ensureSchemesDirectory();
+  return path.join(dir, ensureJsonFileName(idOrName));
+}
+
+export async function listSchemeFiles() {
+  const dir = await ensureSchemesDirectory();
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+
+  const files = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!entry.name.endsWith(".json")) continue;
+
+    const filePath = path.join(dir, entry.name);
+    const stat = await fs.stat(filePath);
+
+    files.push({
+      id: entry.name.replace(/\.json$/i, ""),
+      fileName: entry.name,
+      size: stat.size,
+      updatedAt: stat.mtime.toISOString(),
+      createdAt: stat.birthtime.toISOString(),
+    });
+  }
+
+  files.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+  return files;
+}
+
+
+===============================================================================
+FILE: src/app/api/schemes/route.js
+===============================================================================
+
+import fs from "fs/promises";
+import { NextResponse } from "next/server";
+
+import {
+  getSchemeFilePath,
+  listSchemeFiles,
+} from "@/lib/server/schemesDirectory";
+
+import {
+  prepareDiagramDocumentForStore,
+} from "@/lib/serialization/loadDiagramDocument";
+
+import {
+  sanitizeSchemeId,
+} from "@/lib/storage/schemeFileNames";
+
+export async function GET() {
+  try {
+    const files = await listSchemeFiles();
+
+    return NextResponse.json({
+      ok: true,
+      files,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error.message || "Failed to list schemes",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(request) {
+  try {
+    const body = await request.json();
+
+    const document = prepareDiagramDocumentForStore(body.document || body);
+
+    const id = sanitizeSchemeId(
+      body.id || document.metadata?.name || `scheme_${Date.now()}`
+    );
+
+    const filePath = await getSchemeFilePath(id);
+
+    const finalDocument = {
+      ...document,
+      metadata: {
+        ...document.metadata,
+        name: document.metadata?.name || id,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+
+    await fs.writeFile(
+      filePath,
+      JSON.stringify(finalDocument, null, 2),
+      "utf-8"
+    );
+
+    return NextResponse.json({
+      ok: true,
+      id,
+      fileName: `${id}.json`,
+      document: finalDocument,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error.message || "Failed to save scheme",
+      },
+      { status: 400 }
+    );
+  }
+}
+
+
+===============================================================================
+FILE: src/app/api/schemes/[id]/route.js
+===============================================================================
+
+import fs from "fs/promises";
+import { NextResponse } from "next/server";
+
+import {
+  getSchemeFilePath,
+} from "@/lib/server/schemesDirectory";
+
+import {
+  prepareDiagramDocumentForStore,
+} from "@/lib/serialization/loadDiagramDocument";
+
+export async function GET(_request, context) {
+  try {
+    const id = context.params.id;
+    const filePath = await getSchemeFilePath(id);
+    const jsonText = await fs.readFile(filePath, "utf-8");
+    const parsed = JSON.parse(jsonText);
+    const document = prepareDiagramDocumentForStore(parsed);
+
+    return NextResponse.json({
+      ok: true,
+      id,
+      document,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error.message || "Failed to load scheme",
+      },
+      { status: 404 }
+    );
+  }
+}
+
+export async function DELETE(_request, context) {
+  try {
+    const id = context.params.id;
+    const filePath = await getSchemeFilePath(id);
+    await fs.unlink(filePath);
+
+    return NextResponse.json({
+      ok: true,
+      id,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error.message || "Failed to delete scheme",
+      },
+      { status: 400 }
+    );
+  }
+}
+
+
+===============================================================================
+PAGES ROUTER ALTERNATIVE
+Only use this section if your project uses /pages/api instead of /app/api.
+===============================================================================
+
+===============================================================================
+FILE: src/pages/api/schemes/index.js
+===============================================================================
+
+import fs from "fs/promises";
+
+import {
+  getSchemeFilePath,
+  listSchemeFiles,
+} from "@/lib/server/schemesDirectory";
+
+import {
+  prepareDiagramDocumentForStore,
+} from "@/lib/serialization/loadDiagramDocument";
+
+import {
+  sanitizeSchemeId,
+} from "@/lib/storage/schemeFileNames";
+
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    try {
+      const files = await listSchemeFiles();
+      res.status(200).json({ ok: true, files });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === "POST") {
+    try {
+      const body = req.body;
+      const document = prepareDiagramDocumentForStore(body.document || body);
+      const id = sanitizeSchemeId(
+        body.id || document.metadata?.name || `scheme_${Date.now()}`
+      );
+
+      const filePath = await getSchemeFilePath(id);
+      const finalDocument = {
+        ...document,
+        metadata: {
+          ...document.metadata,
+          name: document.metadata?.name || id,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      await fs.writeFile(
+        filePath,
+        JSON.stringify(finalDocument, null, 2),
+        "utf-8"
+      );
+
+      res.status(200).json({
+        ok: true,
+        id,
+        fileName: `${id}.json`,
+        document: finalDocument,
+      });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+    return;
+  }
+
+  res.setHeader("Allow", ["GET", "POST"]);
+  res.status(405).json({ ok: false, error: "Method not allowed" });
+}
+
+
+===============================================================================
+FILE: src/pages/api/schemes/[id].js
+===============================================================================
+
+import fs from "fs/promises";
+
+import {
+  getSchemeFilePath,
+} from "@/lib/server/schemesDirectory";
+
+import {
+  prepareDiagramDocumentForStore,
+} from "@/lib/serialization/loadDiagramDocument";
+
+export default async function handler(req, res) {
+  const { id } = req.query;
+
+  if (req.method === "GET") {
+    try {
+      const filePath = await getSchemeFilePath(id);
+      const jsonText = await fs.readFile(filePath, "utf-8");
+      const parsed = JSON.parse(jsonText);
+      const document = prepareDiagramDocumentForStore(parsed);
+
+      res.status(200).json({ ok: true, id, document });
+    } catch (error) {
+      res.status(404).json({ ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === "DELETE") {
+    try {
+      const filePath = await getSchemeFilePath(id);
+      await fs.unlink(filePath);
+      res.status(200).json({ ok: true, id });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+    return;
+  }
+
+  res.setHeader("Allow", ["GET", "DELETE"]);
+  res.status(405).json({ ok: false, error: "Method not allowed" });
+}
+
+
+===============================================================================
+FILE: src/store/useCanvasStore.js
+PATCH VERSION - merge into existing store
+===============================================================================
+
+import { create } from "zustand";
+import { createDefaultSheet } from "@/lib/serialization/defaultDiagramState";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+  annotations: [],
+  specificationTables: [],
+  specification: {
+    tables: [],
+    rows: [],
+  },
+  notes: [],
+  sheet: createDefaultSheet(),
+
+  documentMetadata: {
+    name: "scheme",
+    description: "",
+    createdAt: null,
+    updatedAt: null,
+    editorVersion: "1.0.0",
+  },
+
+  selection: null,
+  contextMenu: null,
+
+  hoveredConnectorSegment: null,
+  connectorDragState: null,
+
+  activeConnectorTool: null,
+  draftConnector: null,
+  connectorAttachPreview: null,
+
+  annotationSelection: null,
+  annotationEditor: null,
+  draftAnnotationTool: null,
+
+  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
+  addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
+
+  replaceNode: (id, nextNode) =>
+    set((s) => ({
+      nodes: s.nodes.map((node) => (node.id === id ? nextNode : node)),
+    })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((s) => ({
+      edges: s.edges.map((edge) => (edge.id === id ? nextEdge : edge)),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((edge) => edge.id !== id),
+      selection:
+        s.selection?.type === "edge" && s.selection?.id === id
+          ? null
+          : s.selection,
+      contextMenu: s.contextMenu?.edgeId === id ? null : s.contextMenu,
+    })),
+
+  addAnnotation: (annotation) =>
+    set((s) => ({ annotations: [...s.annotations, annotation] })),
+
+  replaceAnnotation: (id, nextAnnotation) =>
+    set((s) => ({
+      annotations: s.annotations.map((annotation) =>
+        annotation.id === id ? nextAnnotation : annotation
+      ),
+    })),
+
+  removeAnnotation: (id) =>
+    set((s) => ({
+      annotations: s.annotations.filter((annotation) => annotation.id !== id),
+    })),
+
+  addSpecificationTable: (table) =>
+    set((s) => ({
+      specificationTables: [...s.specificationTables, table],
+    })),
+
+  replaceSpecificationTable: (id, nextTable) =>
+    set((s) => ({
+      specificationTables: s.specificationTables.map((table) =>
+        table.id === id ? nextTable : table
+      ),
+    })),
+
+  removeSpecificationTable: (id) =>
+    set((s) => ({
+      specificationTables: s.specificationTables.filter(
+        (table) => table.id !== id
+      ),
+    })),
+
+  setSpecification: (specification) => set({ specification }),
+  setNotes: (notes) => set({ notes }),
+  setSheet: (sheet) => set({ sheet }),
+
+  replaceDocumentState: (documentState) =>
+    set((s) => ({
+      documentMetadata:
+        documentState.documentMetadata || s.documentMetadata || null,
+      sheet: documentState.sheet || createDefaultSheet(),
+      nodes: documentState.nodes || [],
+      edges: documentState.edges || [],
+      annotations: documentState.annotations || [],
+      specificationTables: documentState.specificationTables || [],
+      specification: documentState.specification || { tables: [], rows: [] },
+      notes: documentState.notes || [],
+
+      selection: null,
+      contextMenu: null,
+      hoveredConnectorSegment: null,
+      connectorDragState: null,
+      activeConnectorTool: null,
+      draftConnector: null,
+      connectorAttachPreview: null,
+      annotationSelection: null,
+      annotationEditor: null,
+      draftAnnotationTool: null,
+    })),
+
+  clearDocumentState: () =>
+    set({
+      documentMetadata: {
+        name: "scheme",
+        description: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        editorVersion: "1.0.0",
+      },
+      sheet: createDefaultSheet(),
+      nodes: [],
+      edges: [],
+      annotations: [],
+      specificationTables: [],
+      specification: { tables: [], rows: [] },
+      notes: [],
+      selection: null,
+      contextMenu: null,
+      hoveredConnectorSegment: null,
+      connectorDragState: null,
+      activeConnectorTool: null,
+      draftConnector: null,
+      connectorAttachPreview: null,
+      annotationSelection: null,
+      annotationEditor: null,
+      draftAnnotationTool: null,
+    }),
+
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+
+  setHoveredConnectorSegment: (hoveredConnectorSegment) =>
+    set({ hoveredConnectorSegment }),
+  clearHoveredConnectorSegment: () => set({ hoveredConnectorSegment: null }),
+
+  setConnectorDragState: (connectorDragState) => set({ connectorDragState }),
+  clearConnectorDragState: () => set({ connectorDragState: null }),
+
+  setActiveConnectorTool: (activeConnectorTool) => set({ activeConnectorTool }),
+  clearActiveConnectorTool: () => set({ activeConnectorTool: null }),
+
+  setDraftConnector: (draftConnector) => set({ draftConnector }),
+  clearDraftConnector: () => set({ draftConnector: null }),
+
+  setConnectorAttachPreview: (connectorAttachPreview) =>
+    set({ connectorAttachPreview }),
+  clearConnectorAttachPreview: () => set({ connectorAttachPreview: null }),
+
+  setAnnotationEditor: (annotationEditor) => set({ annotationEditor }),
+  clearAnnotationEditor: () => set({ annotationEditor: null }),
+
+  setDraftAnnotationTool: (draftAnnotationTool) => set({ draftAnnotationTool }),
+  clearDraftAnnotationTool: () => set({ draftAnnotationTool: null }),
+}));
+
+
+===============================================================================
+FILE: src/controllers/canvasController.js
+PATCH - add these imports and methods into existing canvasController object
+===============================================================================
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+import {
+  buildDiagramDocument,
+} from "@/lib/serialization/buildDiagramDocument";
+
+import {
+  applyDiagramDocumentToStore,
+} from "@/lib/serialization/loadDiagramDocument";
+
+import {
+  downloadJsonFile,
+  readJsonFileFromInputFile,
+} from "@/lib/storage/browserJsonDownload";
+
+import {
+  ensureJsonFileName,
+  sanitizeSchemeId,
+} from "@/lib/storage/schemeFileNames";
+
+export const canvasController = {
+  async saveSchemeToProjectJson(name = "scheme") {
+    const store = useCanvasStore.getState();
+    const safeName = sanitizeSchemeId(name);
+
+    const document = buildDiagramDocument(store, {
+      name: safeName,
+    });
+
+    const response = await fetch("/api/schemes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        id: safeName,
+        document,
+      }),
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "Failed to save scheme");
+    }
+
+    store.replaceDocumentState?.({
+      documentMetadata: payload.document.metadata,
+      sheet: payload.document.sheet,
+      nodes: payload.document.nodes,
+      edges: payload.document.edges,
+      annotations: payload.document.annotations,
+      specificationTables: payload.document.specificationTables,
+      specification: payload.document.specification,
+      notes: payload.document.notes,
+    });
+
+    return payload;
+  },
+
+  async loadSchemeFromProjectJson(id) {
+    const response = await fetch(`/api/schemes/${encodeURIComponent(id)}`, {
+      method: "GET",
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "Failed to load scheme");
+    }
+
+    const store = useCanvasStore.getState();
+    const document = applyDiagramDocumentToStore(store, payload.document);
+
+    return document;
+  },
+
+  async listProjectSchemes() {
+    const response = await fetch("/api/schemes", {
+      method: "GET",
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "Failed to list schemes");
+    }
+
+    return payload.files || [];
+  },
+
+  async deleteProjectScheme(id) {
+    const response = await fetch(`/api/schemes/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "Failed to delete scheme");
+    }
+
+    return payload;
+  },
+
+  exportSchemeJsonFile(fileName = "scheme.json") {
+    const store = useCanvasStore.getState();
+    const document = buildDiagramDocument(store, {
+      name: fileName.replace(/\.json$/i, ""),
+    });
+
+    downloadJsonFile(document, ensureJsonFileName(fileName));
+
+    return document;
+  },
+
+  async importSchemeJsonFile(file) {
+    const inputDocument = await readJsonFileFromInputFile(file);
+    const store = useCanvasStore.getState();
+    const document = applyDiagramDocumentToStore(store, inputDocument);
+
+    return document;
+  },
+
+  newEmptyScheme() {
+    const store = useCanvasStore.getState();
+    store.clearDocumentState?.();
+  },
+};
+
+
+===============================================================================
+FILE: src/components/schemes/SchemeJsonToolbar.jsx
+===============================================================================
+
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  List,
+  ListItem,
+  ListItemText,
+  Stack,
+  TextField,
+  Tooltip,
+} from "@mui/material";
+
+import SaveIcon from "@mui/icons-material/Save";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import FileUploadIcon from "@mui/icons-material/FileUpload";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import AddIcon from "@mui/icons-material/Add";
+
+import { canvasController } from "@/controllers/canvasController";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export default function SchemeJsonToolbar() {
+  const documentMetadata = useCanvasStore((s) => s.documentMetadata);
+
+  const [schemeName, setSchemeName] = useState(
+    documentMetadata?.name || "scheme"
+  );
+
+  const [openDialog, setOpenDialog] = useState(false);
+  const [schemes, setSchemes] = useState([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setSchemeName(documentMetadata?.name || "scheme");
+  }, [documentMetadata?.name]);
+
+  async function refreshSchemes() {
+    setError("");
+    setBusy(true);
+
+    try {
+      const files = await canvasController.listProjectSchemes();
+      setSchemes(files);
+    } catch (err) {
+      setError(err.message || "Не вдалося отримати список схем");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSave() {
+    setError("");
+    setBusy(true);
+
+    try {
+      await canvasController.saveSchemeToProjectJson(schemeName || "scheme");
+    } catch (err) {
+      setError(err.message || "Не вдалося зберегти схему");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleOpenDialog() {
+    setOpenDialog(true);
+    await refreshSchemes();
+  }
+
+  async function handleLoad(id) {
+    setError("");
+    setBusy(true);
+
+    try {
+      await canvasController.loadSchemeFromProjectJson(id);
+      setOpenDialog(false);
+    } catch (err) {
+      setError(err.message || "Не вдалося відкрити схему");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(id) {
+    setError("");
+    setBusy(true);
+
+    try {
+      await canvasController.deleteProjectScheme(id);
+      await refreshSchemes();
+    } catch (err) {
+      setError(err.message || "Не вдалося видалити схему");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleExportFile() {
+    canvasController.exportSchemeJsonFile(schemeName || "scheme");
+  }
+
+  async function handleImportFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setError("");
+    setBusy(true);
+
+    try {
+      await canvasController.importSchemeJsonFile(file);
+    } catch (err) {
+      setError(err.message || "Не вдалося імпортувати JSON");
+    } finally {
+      setBusy(false);
+      event.target.value = "";
+    }
+  }
+
+  function handleNew() {
+    canvasController.newEmptyScheme();
+  }
+
+  return (
+    <Box>
+      <Stack direction="column" spacing={1}>
+        <TextField
+          size="small"
+          label="Назва JSON"
+          value={schemeName}
+          onChange={(event) => setSchemeName(event.target.value)}
+        />
+
+        <Button
+          size="small"
+          variant="contained"
+          startIcon={<SaveIcon />}
+          disabled={busy}
+          onClick={handleSave}
+        >
+          Save JSON
+        </Button>
+
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<FolderOpenIcon />}
+          disabled={busy}
+          onClick={handleOpenDialog}
+        >
+          Load JSON
+        </Button>
+
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<FileDownloadIcon />}
+          onClick={handleExportFile}
+        >
+          Export file
+        </Button>
+
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<FileUploadIcon />}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          Import file
+        </Button>
+
+        <Button
+          size="small"
+          variant="text"
+          startIcon={<AddIcon />}
+          onClick={handleNew}
+        >
+          New
+        </Button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: "none" }}
+          onChange={handleImportFile}
+        />
+
+        {error && (
+          <Box sx={{ color: "error.main", fontSize: 12 }}>{error}</Box>
+        )}
+      </Stack>
+
+      <Dialog
+        open={openDialog}
+        onClose={() => setOpenDialog(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Відкрити схему з /schemes</DialogTitle>
+
+        <DialogContent dividers>
+          {error && (
+            <Box sx={{ color: "error.main", mb: 1 }}>{error}</Box>
+          )}
+
+          <List dense>
+            {schemes.map((file) => (
+              <ListItem
+                key={file.id}
+                secondaryAction={
+                  <Tooltip title="Видалити">
+                    <IconButton
+                      edge="end"
+                      onClick={() => handleDelete(file.id)}
+                      disabled={busy}
+                    >
+                      <DeleteOutlineIcon />
+                    </IconButton>
+                  </Tooltip>
+                }
+              >
+                <ListItemText
+                  primary={file.fileName}
+                  secondary={`Оновлено: ${file.updatedAt}`}
+                  onClick={() => handleLoad(file.id)}
+                  sx={{ cursor: "pointer" }}
+                />
+              </ListItem>
+            ))}
+
+            {!schemes.length && !busy && (
+              <ListItem>
+                <ListItemText primary="У каталозі /schemes ще немає JSON схем" />
+              </ListItem>
+            )}
+          </List>
+        </DialogContent>
+
+        <DialogActions>
+          <Button onClick={refreshSchemes} disabled={busy}>
+            Оновити
+          </Button>
+          <Button onClick={() => setOpenDialog(false)}>Закрити</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}
+
+
+===============================================================================
+FILE: src/components/schemes/SchemeJsonButtonsMinimal.jsx
+===============================================================================
+
+"use client";
+
+import React, { useRef } from "react";
+import { Button, Stack } from "@mui/material";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function SchemeJsonButtonsMinimal() {
+  const inputRef = useRef(null);
+
+  return (
+    <Stack direction="row" spacing={1}>
+      <Button
+        size="small"
+        variant="contained"
+        onClick={() => canvasController.saveSchemeToProjectJson("scheme_1")}
+      >
+        Save JSON
+      </Button>
+
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => canvasController.loadSchemeFromProjectJson("scheme_1")}
+      >
+        Load JSON
+      </Button>
+
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => canvasController.exportSchemeJsonFile("scheme_1")}
+      >
+        Export JSON
+      </Button>
+
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => inputRef.current?.click()}
+      >
+        Import JSON
+      </Button>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="application/json,.json"
+        hidden
+        onChange={async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          await canvasController.importSchemeJsonFile(file);
+          event.target.value = "";
+        }}
+      />
+    </Stack>
+  );
+}
+
+
+===============================================================================
+FILE: .gitignore
+PATCH
+===============================================================================
+
+# Local saved schemes
+# Remove this ignore if you want to commit test JSON schemes into repository.
+/schemes/*.json
+
+# Keep directory
+!/schemes/.gitkeep
+
+
+===============================================================================
+FILE: schemes/.gitkeep
+===============================================================================
+
+
+===============================================================================
+FILE: src/lib/serialization/example_v1_document.json
+===============================================================================
+
+{
+  "kind": "scheme-document",
+  "version": 1,
+  "metadata": {
+    "app": "schemes-canvas-editor",
+    "name": "legacy_v1_scheme",
+    "description": "Example legacy v1 document",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z",
+    "editorVersion": "0.9.0"
+  },
+  "sheet": {
+    "format": "A3",
+    "orientation": "landscape",
+    "scale": 1,
+    "frame": true,
+    "titleBlock": {
+      "albumCode": "",
+      "unit": "",
+      "system": "",
+      "title": "Legacy scheme",
+      "sheetNumber": "1"
+    },
+    "notes": [],
+    "specification": {
+      "visible": true,
+      "height": 220
+    }
+  },
+  "nodes": [],
+  "edges": [],
+  "annotations": [
+    {
+      "id": "annotation_1",
+      "kind": "annotation",
+      "annotationType": "free-text",
+      "attachedTo": null,
+      "text": "Rotated legacy text",
+      "position": {
+        "mode": "free",
+        "absoluteX": 100,
+        "absoluteY": 100
+      },
+      "style": {
+        "fontFamily": "Roboto Condensed",
+        "fontSize": 12,
+        "fontWeight": 300,
+        "fill": "#111",
+        "rotation": 90
+      }
+    }
+  ],
+  "specificationTables": [],
+  "specification": {
+    "tables": [],
+    "rows": []
+  },
+  "notes": []
+}
+
+
+===============================================================================
+HOW TO CONNECT
+===============================================================================
+
+1. Створи директорії:
+
+src/lib/serialization
+src/lib/storage
+src/lib/server
+src/components/schemes
+src/app/api/schemes
+src/app/api/schemes/[id]
+schemes
+
+2. Додай файли з цього пакету у відповідні місця.
+
+3. У твоєму існуючому useCanvasStore НЕ замінюй все бездумно.
+   Додай persistent state і methods:
+
+- documentMetadata
+- annotations
+- specificationTables
+- specification
+- notes
+- sheet
+- replaceDocumentState
+- clearDocumentState
+
+4. У canvasController додай imports і methods:
+
+- saveSchemeToProjectJson(name)
+- loadSchemeFromProjectJson(id)
+- listProjectSchemes()
+- deleteProjectScheme(id)
+- exportSchemeJsonFile(fileName)
+- importSchemeJsonFile(file)
+- newEmptyScheme()
+
+5. Додай кнопку у правий/лівий toolbar:
+
+import SchemeJsonToolbar from "@/components/schemes/SchemeJsonToolbar";
+
+<SchemeJsonToolbar />
+
+або мінімальний варіант:
+
+import SchemeJsonButtonsMinimal from "@/components/schemes/SchemeJsonButtonsMinimal";
+
+<SchemeJsonButtonsMinimal />
+
+6. Save JSON:
+
+canvasController.saveSchemeToProjectJson("scheme_1")
+
+створить:
+
+/schemes/scheme_1.json
+
+7. Load JSON:
+
+canvasController.loadSchemeFromProjectJson("scheme_1")
+
+прочитає:
+
+/schemes/scheme_1.json
+
+8. Browser Export JSON:
+
+canvasController.exportSchemeJsonFile("scheme_1")
+
+скачає файл через браузер.
+
+9. Browser Import JSON:
+
+canvasController.importSchemeJsonFile(file)
+
+прочитає local file input і замінить document state у store.
+
+
+===============================================================================
+IMPORTANT NOTES
+===============================================================================
+
+- Не зберігається selection/contextMenu/draft/hover/drag state.
+- JSON зберігає тільки persistent document state.
+- API storage працює тільки на server runtime Next.js.
+- На Vercel/serverless filesystem може бути read-only або ephemeral.
+  Для production краще Oracle/Postgres/S3, але формат JSON уже готовий.
+- Версія документа: CURRENT_DIAGRAM_VERSION = 2.
+- v1 -> v2 migration переводить annotation.style.rotation у textOrientation.
+- Нові зміни схеми додавай через нові migrations: v2ToV3, v3ToV4 тощо.
+
+===============================================================================

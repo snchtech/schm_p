@@ -1,0 +1,554 @@
+```txt
+// ============================================================================
+// FILE: paperFrameHeaderPatch.txt
+// PURPOSE:
+// Додає верхню header-рамку для paper format:
+//
+// ┌──────────────────────────────────────────────┐
+// │ Шифр альбому | Unit | Система | Назва | Арк │
+// └──────────────────────────────────────────────┘
+//
+// FEATURES:
+// ✔ black engineering border
+// ✔ top header row
+// ✔ configurable title block
+// ✔ Konva-native rendering
+// ✔ A3/A4/A1 compatible
+// ✔ centered text
+// ✔ CAD-like frame
+//
+// КУДИ ДОДАВАТИ:
+// 1. paperConstants.js
+// 2. sheetGeometry.js
+// 3. PaperLayer.jsx
+// ============================================================================
+
+
+
+// ============================================================================
+// 1. FILE: paperConstants.js
+// ============================================================================
+
+export const MM_TO_PX = 4;
+
+export const FRAME_MARGIN = 20;
+
+export const TITLE_BLOCK_HEIGHT = 120;
+
+export const NOTES_AREA_HEIGHT = 80;
+
+// NEW
+export const HEADER_HEIGHT = 32;
+
+export const HEADER_COLUMNS = [
+  {
+    key: "albumCode",
+    label: "Шифр альбому",
+    width: 180,
+  },
+
+  {
+    key: "unit",
+    label: "Unit",
+    width: 120,
+  },
+
+  {
+    key: "system",
+    label: "Система",
+    width: 140,
+  },
+
+  {
+    key: "title",
+    label: "Назва схеми",
+    width: 320,
+  },
+
+  {
+    key: "sheetNumber",
+    label: "Аркуш",
+    width: 80,
+  },
+];
+
+
+
+// ============================================================================
+// 2. FILE: useCanvasStore.js
+// ============================================================================
+
+// PATCH sheet.titleBlock
+
+sheet: {
+
+   format: "A3",
+
+   orientation: "landscape",
+
+   scale: 1,
+
+   frame: true,
+
+   titleBlock: {
+
+      albumCode: "",
+
+      unit: "",
+
+      system: "",
+
+      title: "",
+
+      sheetNumber: "1",
+   },
+
+   notes: [],
+
+   specification: {
+
+      visible: true,
+
+      height: 220,
+   },
+},
+
+
+
+// ============================================================================
+// 3. FILE: sheetGeometry.js
+// ============================================================================
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+} from "./paperConstants";
+
+import { PAPER_FORMATS } from "./paperFormats";
+
+export function buildSheetGeometry(sheet) {
+
+  const format =
+    PAPER_FORMATS[
+      sheet.format || "A3"
+    ];
+
+  if (!format) {
+    return null;
+  }
+
+  const isLandscape =
+    sheet.orientation !== "portrait";
+
+  const sheetWidth =
+    (isLandscape
+      ? format.width
+      : format.height) * MM_TO_PX;
+
+  const sheetHeight =
+    (isLandscape
+      ? format.height
+      : format.width) * MM_TO_PX;
+
+  const frameMargin =
+    FRAME_MARGIN;
+
+  const headerHeight =
+    HEADER_HEIGHT;
+
+  const titleBlockHeight =
+    TITLE_BLOCK_HEIGHT;
+
+  const notesHeight =
+    NOTES_AREA_HEIGHT;
+
+  const drawingArea = {
+    x: frameMargin,
+    y:
+      frameMargin +
+      headerHeight,
+
+    width:
+      sheetWidth -
+      frameMargin * 2,
+
+    height:
+      sheetHeight -
+      frameMargin * 2 -
+      headerHeight -
+      titleBlockHeight -
+      notesHeight,
+  };
+
+  return {
+
+    sheetRect: {
+      x: 0,
+      y: 0,
+      width: sheetWidth,
+      height: sheetHeight,
+    },
+
+    frameRect: {
+      x: frameMargin,
+      y: frameMargin,
+      width:
+        sheetWidth -
+        frameMargin * 2,
+
+      height:
+        sheetHeight -
+        frameMargin * 2,
+    },
+
+    headerArea: {
+      x: frameMargin,
+      y: frameMargin,
+
+      width:
+        sheetWidth -
+        frameMargin * 2,
+
+      height: headerHeight,
+    },
+
+    drawingArea,
+
+    titleBlockArea: {
+      x: frameMargin,
+      y:
+        sheetHeight -
+        frameMargin -
+        titleBlockHeight,
+
+      width:
+        sheetWidth -
+        frameMargin * 2,
+
+      height: titleBlockHeight,
+    },
+
+    notesArea: {
+      x: frameMargin,
+      y:
+        sheetHeight -
+        frameMargin -
+        titleBlockHeight -
+        notesHeight,
+
+      width: 320,
+
+      height: notesHeight,
+    },
+  };
+}
+
+
+
+// ============================================================================
+// 4. FILE: PaperLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import {
+  Layer,
+  Group,
+  Rect,
+  Line,
+  Text,
+} from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+import { buildSheetGeometry }
+from "@/lib/paper/sheetGeometry";
+
+import {
+  HEADER_COLUMNS,
+} from "@/lib/paper/paperConstants";
+
+export default function PaperLayer() {
+
+  const sheet =
+    useCanvasStore(
+      (s) => s.sheet
+    );
+
+  const viewport =
+    useCanvasStore(
+      (s) => s.viewport
+    );
+
+  const geometry =
+    buildSheetGeometry(sheet);
+
+  if (!geometry) {
+    return null;
+  }
+
+  const {
+    sheetRect,
+    frameRect,
+    drawingArea,
+    titleBlockArea,
+    notesArea,
+    headerArea,
+  } = geometry;
+
+  const titleBlock =
+    sheet.titleBlock || {};
+
+  return (
+
+    <Layer
+      listening={false}
+
+      scaleX={
+        viewport?.finalScale || 1
+      }
+
+      scaleY={
+        viewport?.finalScale || 1
+      }
+
+      x={viewport?.offsetX || 0}
+
+      y={viewport?.offsetY || 0}
+    >
+
+      {/* OUTSIDE BACKGROUND */}
+
+      <Rect
+        x={-5000}
+        y={-5000}
+        width={10000}
+        height={10000}
+        fill="#8A8A8A"
+      />
+
+
+
+      {/* SHEET */}
+
+      <Rect
+        x={sheetRect.x}
+        y={sheetRect.y}
+        width={sheetRect.width}
+        height={sheetRect.height}
+        fill="white"
+      />
+
+
+
+      {/* MAIN FRAME */}
+
+      <Rect
+        x={frameRect.x}
+        y={frameRect.y}
+        width={frameRect.width}
+        height={frameRect.height}
+
+        stroke="black"
+        strokeWidth={2}
+      />
+
+
+
+      {/* HEADER FRAME */}
+
+      <Rect
+        x={headerArea.x}
+        y={headerArea.y}
+
+        width={headerArea.width}
+        height={headerArea.height}
+
+        stroke="black"
+        strokeWidth={1}
+      />
+
+
+
+      {/* HEADER COLUMNS */}
+
+      {(() => {
+
+        let offsetX =
+          headerArea.x;
+
+        return HEADER_COLUMNS.map(
+          (column, index) => {
+
+            const columnX =
+              offsetX;
+
+            offsetX +=
+              column.width;
+
+            return (
+              <Group
+                key={column.key}
+              >
+
+                {/* COLUMN BORDER */}
+
+                <Rect
+                  x={columnX}
+                  y={headerArea.y}
+
+                  width={
+                    column.width
+                  }
+
+                  height={
+                    headerArea.height
+                  }
+
+                  stroke="black"
+                  strokeWidth={1}
+                />
+
+
+
+                {/* HEADER LABEL */}
+
+                <Text
+                  x={columnX}
+                  y={
+                    headerArea.y + 4
+                  }
+
+                  width={
+                    column.width
+                  }
+
+                  align="center"
+
+                  text={
+                    column.label
+                  }
+
+                  fontSize={11}
+
+                  fontStyle="bold"
+
+                  fill="black"
+                />
+
+
+
+                {/* VALUE */}
+
+                <Text
+                  x={columnX + 4}
+
+                  y={
+                    headerArea.y + 16
+                  }
+
+                  width={
+                    column.width - 8
+                  }
+
+                  align="center"
+
+                  text={
+                    titleBlock[
+                      column.key
+                    ] || ""
+                  }
+
+                  fontSize={12}
+
+                  fill="black"
+                />
+              </Group>
+            );
+          }
+        );
+      })()}
+
+
+
+      {/* DRAWING AREA */}
+
+      <Rect
+        x={drawingArea.x}
+        y={drawingArea.y}
+
+        width={
+          drawingArea.width
+        }
+
+        height={
+          drawingArea.height
+        }
+
+        stroke="#D0D0D0"
+        strokeWidth={1}
+
+        dash={[6, 6]}
+      />
+
+
+
+      {/* NOTES AREA */}
+
+      <Rect
+        x={notesArea.x}
+        y={notesArea.y}
+
+        width={notesArea.width}
+        height={notesArea.height}
+
+        stroke="black"
+        strokeWidth={1}
+      />
+
+
+
+      {/* TITLE BLOCK */}
+
+      <Rect
+        x={titleBlockArea.x}
+        y={titleBlockArea.y}
+
+        width={
+          titleBlockArea.width
+        }
+
+        height={
+          titleBlockArea.height
+        }
+
+        stroke="black"
+        strokeWidth={1}
+      />
+
+    </Layer>
+  );
+}
+
+
+
+// ============================================================================
+// RESULT
+// ============================================================================
+//
+// ✔ black engineering frame
+// ✔ top header row
+// ✔ configurable title block
+// ✔ CAD-like paper format
+// ✔ Konva-native rendering
+// ✔ viewport compatible
+// ✔ PDF-safe architecture
+// ✔ scalable for A4/A3/A1
+//
+// ============================================================================
+```

@@ -1,0 +1,1050 @@
+// ============================================================================
+// FILE: canvas_notes_functionality_package.txt
+// PURPOSE:
+// Готовий пакет для реалізації функціоналу приміток на canvas.
+//
+// UX:
+// - справа на canvas вже є кнопка "Примітки" / "Додати примітку";
+// - на кнопку навішується handler canvasController.openSheetNoteEditor();
+// - відкривається проста форма з textarea;
+// - після збереження примітка додається на аркуш;
+// - примітки рендеряться безпосередньо на canvas;
+// - блок приміток знаходиться справа знизу над таблицею / title-block area;
+// - блок приміток приєднаний до нижньої рамки формату, як у кресленнях;
+// - працює з A4 / A3 / A1, бо позиція рахується від sheet geometry.
+//
+// ARCHITECTURE:
+// - centralized useCanvasStore
+// - centralized canvasController
+// - Konva-native PaperNotesLayer
+// - no HTML overlay для самих приміток
+// - textarea тільки у modal/editor формі
+// ============================================================================
+
+
+
+// ============================================================================
+// 1. FILE: src/lib/paper/paperConstants.js
+// ============================================================================
+
+export const MM_TO_PX = 4;
+
+export const FRAME_MARGIN = 20;
+
+export const TITLE_BLOCK_HEIGHT = 120;
+
+export const NOTES_AREA_HEIGHT = 80;
+
+export const HEADER_HEIGHT = 32;
+
+export const SHEET_NOTES_WIDTH = 360;
+
+export const SHEET_NOTES_MIN_HEIGHT = 72;
+
+export const SHEET_NOTES_ROW_HEIGHT = 24;
+
+export const SHEET_NOTES_PADDING = 10;
+
+export const SHEET_NOTES_TITLE_HEIGHT = 26;
+
+export const HEADER_COLUMNS = [
+  {
+    key: "albumCode",
+    label: "Шифр альбому",
+    width: 180,
+  },
+  {
+    key: "unit",
+    label: "Unit",
+    width: 120,
+  },
+  {
+    key: "system",
+    label: "Система",
+    width: 140,
+  },
+  {
+    key: "title",
+    label: "Назва схеми",
+    width: 320,
+  },
+  {
+    key: "sheetNumber",
+    label: "Аркуш",
+    width: 80,
+  },
+];
+
+
+
+// ============================================================================
+// 2. FILE: src/lib/paper/paperFormats.js
+// ============================================================================
+
+export const PAPER_FORMATS = {
+  A4: {
+    width: 297,
+    height: 210,
+  },
+
+  A3: {
+    width: 420,
+    height: 297,
+  },
+
+  A1: {
+    width: 841,
+    height: 594,
+  },
+};
+
+
+
+// ============================================================================
+// 3. FILE: src/lib/paper/sheetNoteModel.js
+// ============================================================================
+
+export function createSheetNote({
+  id = crypto.randomUUID(),
+  text = "",
+  createdAt = Date.now(),
+  updatedAt = Date.now(),
+  style = {},
+} = {}) {
+  return {
+    id,
+    kind: "sheet-note",
+    text,
+    createdAt,
+    updatedAt,
+    style: {
+      fontFamily: style.fontFamily || "Roboto Condensed",
+      fontSize: style.fontSize || 12,
+      fill: style.fill || "black",
+      fontWeight: style.fontWeight || 300,
+    },
+  };
+}
+
+export function updateSheetNote(note, patch = {}) {
+  return {
+    ...note,
+    ...patch,
+    style: {
+      ...(note.style || {}),
+      ...(patch.style || {}),
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+
+
+// ============================================================================
+// 4. FILE: src/lib/paper/sheetGeometry.js
+// ============================================================================
+
+import { PAPER_FORMATS } from "./paperFormats";
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+  SHEET_NOTES_WIDTH,
+  SHEET_NOTES_MIN_HEIGHT,
+  SHEET_NOTES_ROW_HEIGHT,
+  SHEET_NOTES_PADDING,
+  SHEET_NOTES_TITLE_HEIGHT,
+} from "./paperConstants";
+
+export function getPaperFormatSize(sheet) {
+  const format = PAPER_FORMATS[sheet?.format || "A3"] || PAPER_FORMATS.A3;
+  const isLandscape = sheet?.orientation !== "portrait";
+
+  return {
+    width: (isLandscape ? format.width : format.height) * MM_TO_PX,
+    height: (isLandscape ? format.height : format.width) * MM_TO_PX,
+  };
+}
+
+export function buildSheetNotesGeometry({ sheet, notes = [] }) {
+  const { width: sheetWidth, height: sheetHeight } = getPaperFormatSize(sheet);
+
+  const frameMargin = FRAME_MARGIN;
+  const titleBlockHeight = TITLE_BLOCK_HEIGHT;
+
+  const visibleNotes = (notes || []).filter((note) => {
+    return note && typeof note.text === "string" && note.text.trim().length > 0;
+  });
+
+  const contentHeight =
+    SHEET_NOTES_TITLE_HEIGHT +
+    SHEET_NOTES_PADDING * 2 +
+    Math.max(1, visibleNotes.length) * SHEET_NOTES_ROW_HEIGHT;
+
+  const notesHeight = Math.max(SHEET_NOTES_MIN_HEIGHT, contentHeight);
+
+  const x = sheetWidth - frameMargin - SHEET_NOTES_WIDTH;
+
+  const y = sheetHeight - frameMargin - titleBlockHeight - notesHeight;
+
+  return {
+    x,
+    y,
+    width: SHEET_NOTES_WIDTH,
+    height: notesHeight,
+    titleHeight: SHEET_NOTES_TITLE_HEIGHT,
+    padding: SHEET_NOTES_PADDING,
+    rowHeight: SHEET_NOTES_ROW_HEIGHT,
+    notes: visibleNotes.map((note, index) => ({
+      note,
+      index,
+      x: x + SHEET_NOTES_PADDING,
+      y:
+        y +
+        SHEET_NOTES_TITLE_HEIGHT +
+        SHEET_NOTES_PADDING +
+        index * SHEET_NOTES_ROW_HEIGHT,
+      width: SHEET_NOTES_WIDTH - SHEET_NOTES_PADDING * 2,
+      height: SHEET_NOTES_ROW_HEIGHT,
+    })),
+  };
+}
+
+export function buildSheetGeometry(sheet) {
+  const { width: sheetWidth, height: sheetHeight } = getPaperFormatSize(sheet);
+
+  const frameMargin = FRAME_MARGIN;
+  const headerHeight = HEADER_HEIGHT;
+  const titleBlockHeight = TITLE_BLOCK_HEIGHT;
+  const notesHeight = NOTES_AREA_HEIGHT;
+
+  const drawingArea = {
+    x: frameMargin,
+    y: frameMargin + headerHeight,
+    width: sheetWidth - frameMargin * 2,
+    height:
+      sheetHeight -
+      frameMargin * 2 -
+      headerHeight -
+      titleBlockHeight -
+      notesHeight,
+  };
+
+  return {
+    sheetRect: {
+      x: 0,
+      y: 0,
+      width: sheetWidth,
+      height: sheetHeight,
+    },
+
+    frameRect: {
+      x: frameMargin,
+      y: frameMargin,
+      width: sheetWidth - frameMargin * 2,
+      height: sheetHeight - frameMargin * 2,
+    },
+
+    headerArea: {
+      x: frameMargin,
+      y: frameMargin,
+      width: sheetWidth - frameMargin * 2,
+      height: headerHeight,
+    },
+
+    drawingArea,
+
+    titleBlockArea: {
+      x: frameMargin,
+      y: sheetHeight - frameMargin - titleBlockHeight,
+      width: sheetWidth - frameMargin * 2,
+      height: titleBlockHeight,
+    },
+
+    notesArea: {
+      x: frameMargin,
+      y: sheetHeight - frameMargin - titleBlockHeight - notesHeight,
+      width: sheetWidth - frameMargin * 2,
+      height: notesHeight,
+    },
+
+    sheetNotesArea: buildSheetNotesGeometry({
+      sheet,
+      notes: sheet?.notes || [],
+    }),
+  };
+}
+
+
+
+// ============================================================================
+// 5. FILE: src/store/useCanvasStore.js
+// ============================================================================
+
+import { create } from "zustand";
+import { createSheetNote, updateSheetNote } from "@/lib/paper/sheetNoteModel";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+  annotations: [],
+
+  selection: null,
+  contextMenu: null,
+
+  sheetNoteEditor: null,
+
+  sheet: {
+    format: "A3",
+    orientation: "landscape",
+    scale: 1,
+    frame: true,
+
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+
+    notes: [],
+
+    specification: {
+      visible: true,
+      height: 220,
+    },
+  },
+
+  viewport: {
+    fitMode: "fit-page",
+    fitScale: 1,
+    userZoom: 1,
+    finalScale: 1,
+    offsetX: 0,
+    offsetY: 0,
+    viewportWidth: 0,
+    viewportHeight: 0,
+    toolbarWidth: 80,
+  },
+
+  setSheet: (sheetPatch) =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        ...sheetPatch,
+      },
+    })),
+
+  setSheetTitleBlock: (titleBlockPatch) =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        titleBlock: {
+          ...(state.sheet?.titleBlock || {}),
+          ...titleBlockPatch,
+        },
+      },
+    })),
+
+  setSheetNoteEditor: (sheetNoteEditor) => set({ sheetNoteEditor }),
+
+  clearSheetNoteEditor: () => set({ sheetNoteEditor: null }),
+
+  addSheetNote: (payload) =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        notes: [
+          ...(state.sheet?.notes || []),
+          createSheetNote(payload),
+        ],
+      },
+    })),
+
+  replaceSheetNote: (noteId, patch) =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        notes: (state.sheet?.notes || []).map((note) => {
+          if (note.id !== noteId) return note;
+          return updateSheetNote(note, patch);
+        }),
+      },
+    })),
+
+  removeSheetNote: (noteId) =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        notes: (state.sheet?.notes || []).filter((note) => note.id !== noteId),
+      },
+      selection:
+        state.selection?.type === "sheet-note" && state.selection?.id === noteId
+          ? null
+          : state.selection,
+    })),
+
+  clearSheetNotes: () =>
+    set((state) => ({
+      sheet: {
+        ...state.sheet,
+        notes: [],
+      },
+      selection:
+        state.selection?.type === "sheet-note" ? null : state.selection,
+    })),
+
+  setSelection: (selection) => set({ selection }),
+
+  clearSelection: () => set({ selection: null }),
+
+  setViewport: (viewportPatch) =>
+    set((state) => ({
+      viewport: {
+        ...state.viewport,
+        ...viewportPatch,
+      },
+    })),
+
+  addNode: (node) => set((state) => ({ nodes: [...state.nodes, node] })),
+
+  addEdge: (edge) => set((state) => ({ edges: [...state.edges, edge] })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((state) => ({
+      edges: state.edges.map((edge) => (edge.id === id ? nextEdge : edge)),
+    })),
+
+  removeEdge: (id) =>
+    set((state) => ({
+      edges: state.edges.filter((edge) => edge.id !== id),
+    })),
+}));
+
+
+
+// ============================================================================
+// 6. FILE: src/controllers/canvasController.js
+// ============================================================================
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export const canvasController = {
+  openSheetNoteEditor(noteId = null) {
+    const store = useCanvasStore.getState();
+
+    const existing = noteId
+      ? (store.sheet?.notes || []).find((note) => note.id === noteId)
+      : null;
+
+    store.setSheetNoteEditor?.({
+      mode: existing ? "edit" : "create",
+      noteId: existing?.id || null,
+      initialText: existing?.text || "",
+    });
+  },
+
+  closeSheetNoteEditor() {
+    const store = useCanvasStore.getState();
+    store.clearSheetNoteEditor?.();
+  },
+
+  submitSheetNoteEditor(text) {
+    const store = useCanvasStore.getState();
+    const editor = store.sheetNoteEditor;
+    const value = String(text || "").trim();
+
+    if (!editor) return;
+
+    if (!value) {
+      store.clearSheetNoteEditor?.();
+      return;
+    }
+
+    if (editor.mode === "edit" && editor.noteId) {
+      store.replaceSheetNote?.(editor.noteId, {
+        text: value,
+      });
+
+      store.setSelection?.({
+        type: "sheet-note",
+        id: editor.noteId,
+      });
+
+      store.clearSheetNoteEditor?.();
+      return;
+    }
+
+    const id = crypto.randomUUID();
+
+    store.addSheetNote?.({
+      id,
+      text: value,
+    });
+
+    store.setSelection?.({
+      type: "sheet-note",
+      id,
+    });
+
+    store.clearSheetNoteEditor?.();
+  },
+
+  deleteSheetNote(noteId) {
+    const store = useCanvasStore.getState();
+    if (!noteId) return;
+    store.removeSheetNote?.(noteId);
+  },
+
+  selectSheetNote(noteId) {
+    const store = useCanvasStore.getState();
+    if (!noteId) return;
+
+    store.setSelection?.({
+      type: "sheet-note",
+      id: noteId,
+    });
+  },
+
+  editSelectedSheetNote() {
+    const store = useCanvasStore.getState();
+    const selection = store.selection;
+
+    if (selection?.type !== "sheet-note") return;
+
+    this.openSheetNoteEditor(selection.id);
+  },
+};
+
+
+
+// ============================================================================
+// 7. FILE: src/components/paper/SheetNoteEditorModal.jsx
+// ============================================================================
+
+"use client";
+
+import React, { useEffect, useState } from "react";
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function SheetNoteEditorModal() {
+  const editor = useCanvasStore((state) => state.sheetNoteEditor);
+
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    if (!editor) {
+      setText("");
+      return;
+    }
+
+    setText(editor.initialText || "");
+  }, [editor]);
+
+  const open = !!editor;
+
+  return (
+    <Dialog
+      open={open}
+      onClose={() => canvasController.closeSheetNoteEditor?.()}
+      fullWidth
+      maxWidth="sm"
+    >
+      <DialogTitle>
+        {editor?.mode === "edit" ? "Редагувати примітку" : "Додати примітку"}
+      </DialogTitle>
+
+      <DialogContent>
+        <TextField
+          autoFocus
+          multiline
+          minRows={5}
+          fullWidth
+          margin="dense"
+          label="Текст примітки"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={() => canvasController.closeSheetNoteEditor?.()}>
+          Скасувати
+        </Button>
+
+        <Button
+          variant="contained"
+          onClick={() => canvasController.submitSheetNoteEditor?.(text)}
+        >
+          Додати
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// 8. FILE: src/components/paper/PaperNotesLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Group, Rect, Text, Line } from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { buildSheetNotesGeometry } from "@/lib/paper/sheetGeometry";
+import { canvasController } from "@/controllers/canvasController";
+
+function splitTextToLines(text, maxChars = 58) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length > maxChars && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) lines.push(current);
+
+  return lines.length ? lines : [""];
+}
+
+export default function PaperNotesLayer() {
+  const sheet = useCanvasStore((state) => state.sheet);
+  const selection = useCanvasStore((state) => state.selection);
+
+  const notes = sheet?.notes || [];
+
+  const geometry = buildSheetNotesGeometry({
+    sheet,
+    notes,
+  });
+
+  if (!geometry) return null;
+
+  const selectedNoteId =
+    selection?.type === "sheet-note" ? selection.id : null;
+
+  const hasNotes = geometry.notes.length > 0;
+
+  return (
+    <Group listening>
+      <Rect
+        x={geometry.x}
+        y={geometry.y}
+        width={geometry.width}
+        height={geometry.height}
+        fill="white"
+        stroke="black"
+        strokeWidth={1}
+      />
+
+      <Line
+        points={[
+          geometry.x,
+          geometry.y + geometry.titleHeight,
+          geometry.x + geometry.width,
+          geometry.y + geometry.titleHeight,
+        ]}
+        stroke="black"
+        strokeWidth={1}
+      />
+
+      <Text
+        x={geometry.x}
+        y={geometry.y + 6}
+        width={geometry.width}
+        align="center"
+        text="Примітки"
+        fontFamily="Roboto Condensed"
+        fontSize={13}
+        fontStyle="bold"
+        fill="black"
+        listening={false}
+      />
+
+      {!hasNotes && (
+        <Text
+          x={geometry.x + geometry.padding}
+          y={geometry.y + geometry.titleHeight + geometry.padding}
+          width={geometry.width - geometry.padding * 2}
+          text=""
+          fontFamily="Roboto Condensed"
+          fontSize={12}
+          fill="black"
+          listening={false}
+        />
+      )}
+
+      {geometry.notes.map((item) => {
+        const note = item.note;
+        const isSelected = selectedNoteId === note.id;
+        const lines = splitTextToLines(note.text, 58);
+        const visibleText = `${item.index + 1}. ${lines.join("\n   ")}`;
+
+        return (
+          <Group
+            key={note.id}
+            onMouseDown={(event) => {
+              event.cancelBubble = true;
+              canvasController.selectSheetNote?.(note.id);
+            }}
+            onDblClick={(event) => {
+              event.cancelBubble = true;
+              canvasController.openSheetNoteEditor?.(note.id);
+            }}
+          >
+            {isSelected && (
+              <Rect
+                x={item.x - 4}
+                y={item.y - 3}
+                width={item.width + 8}
+                height={Math.max(item.height, lines.length * 15 + 6)}
+                fill="rgba(47,128,237,0.08)"
+                stroke="#2F80ED"
+                strokeWidth={1}
+              />
+            )}
+
+            <Text
+              x={item.x}
+              y={item.y}
+              width={item.width}
+              text={visibleText}
+              fontFamily={note.style?.fontFamily || "Roboto Condensed"}
+              fontSize={note.style?.fontSize || 12}
+              fontStyle={note.style?.fontWeight >= 500 ? "bold" : "normal"}
+              fill={note.style?.fill || "black"}
+              lineHeight={1.15}
+            />
+          </Group>
+        );
+      })}
+    </Group>
+  );
+}
+
+
+
+// ============================================================================
+// 9. FILE: src/components/paper/PaperLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Layer, Group, Rect, Text } from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { buildSheetGeometry } from "@/lib/paper/sheetGeometry";
+import { HEADER_COLUMNS } from "@/lib/paper/paperConstants";
+import PaperNotesLayer from "./PaperNotesLayer";
+
+export default function PaperLayer() {
+  const sheet = useCanvasStore((state) => state.sheet);
+  const viewport = useCanvasStore((state) => state.viewport);
+
+  const geometry = buildSheetGeometry(sheet);
+
+  if (!geometry) return null;
+
+  const {
+    sheetRect,
+    frameRect,
+    headerArea,
+    drawingArea,
+    titleBlockArea,
+  } = geometry;
+
+  const titleBlock = sheet?.titleBlock || {};
+
+  return (
+    <Layer
+      scaleX={viewport?.finalScale || 1}
+      scaleY={viewport?.finalScale || 1}
+      x={viewport?.offsetX || 0}
+      y={viewport?.offsetY || 0}
+    >
+      <Rect
+        x={-5000}
+        y={-5000}
+        width={10000}
+        height={10000}
+        fill="#8A8A8A"
+        listening={false}
+      />
+
+      <Rect
+        x={sheetRect.x}
+        y={sheetRect.y}
+        width={sheetRect.width}
+        height={sheetRect.height}
+        fill="white"
+        listening={false}
+      />
+
+      <Rect
+        x={frameRect.x}
+        y={frameRect.y}
+        width={frameRect.width}
+        height={frameRect.height}
+        stroke="black"
+        strokeWidth={2}
+        listening={false}
+      />
+
+      <Rect
+        x={headerArea.x}
+        y={headerArea.y}
+        width={headerArea.width}
+        height={headerArea.height}
+        stroke="black"
+        strokeWidth={1}
+        listening={false}
+      />
+
+      {(() => {
+        let offsetX = headerArea.x;
+
+        return HEADER_COLUMNS.map((column) => {
+          const columnX = offsetX;
+          offsetX += column.width;
+
+          return (
+            <Group key={column.key} listening={false}>
+              <Rect
+                x={columnX}
+                y={headerArea.y}
+                width={column.width}
+                height={headerArea.height}
+                stroke="black"
+                strokeWidth={1}
+              />
+
+              <Text
+                x={columnX}
+                y={headerArea.y + 4}
+                width={column.width}
+                align="center"
+                text={column.label}
+                fontFamily="Roboto Condensed"
+                fontSize={11}
+                fontStyle="bold"
+                fill="black"
+              />
+
+              <Text
+                x={columnX + 4}
+                y={headerArea.y + 16}
+                width={column.width - 8}
+                align="center"
+                text={titleBlock[column.key] || ""}
+                fontFamily="Roboto Condensed"
+                fontSize={12}
+                fill="black"
+              />
+            </Group>
+          );
+        });
+      })()}
+
+      <Rect
+        x={drawingArea.x}
+        y={drawingArea.y}
+        width={drawingArea.width}
+        height={drawingArea.height}
+        stroke="#D0D0D0"
+        strokeWidth={1}
+        dash={[6, 6]}
+        listening={false}
+      />
+
+      <Rect
+        x={titleBlockArea.x}
+        y={titleBlockArea.y}
+        width={titleBlockArea.width}
+        height={titleBlockArea.height}
+        stroke="black"
+        strokeWidth={1}
+        listening={false}
+      />
+
+      <PaperNotesLayer />
+    </Layer>
+  );
+}
+
+
+
+// ============================================================================
+// 10. FILE: src/components/tools/NotesButton.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Button } from "@mui/material";
+import NotesIcon from "@mui/icons-material/Notes";
+
+import { canvasController } from "@/controllers/canvasController";
+
+export default function NotesButton() {
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      startIcon={<NotesIcon fontSize="small" />}
+      onClick={() => {
+        canvasController.openSheetNoteEditor?.();
+      }}
+      sx={{ justifyContent: "flex-start" }}
+    >
+      Примітки
+    </Button>
+  );
+}
+
+
+
+// ============================================================================
+// 11. FILE: приклад підключення у праву панель / toolbar
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Stack } from "@mui/material";
+
+import NotesButton from "@/components/tools/NotesButton";
+
+export default function RightCanvasToolbar() {
+  return (
+    <Stack spacing={1}>
+      <NotesButton />
+    </Stack>
+  );
+}
+
+
+
+// ============================================================================
+// 12. FILE: приклад підключення у EditorCanvas.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Stage } from "react-konva";
+
+import PaperLayer from "@/components/paper/PaperLayer";
+import SheetNoteEditorModal from "@/components/paper/SheetNoteEditorModal";
+
+export default function EditorCanvas() {
+  return (
+    <>
+      <Stage width={window.innerWidth} height={window.innerHeight}>
+        <PaperLayer />
+
+        {/*
+          Далі твої існуючі layers:
+          <GridLayer />
+          <ConnectorsLayer />
+          <NodesLayer />
+          <AnnotationsLayer />
+          <SpecificationTablesLayer />
+        */}
+      </Stage>
+
+      <SheetNoteEditorModal />
+    </>
+  );
+}
+
+
+
+// ============================================================================
+// 13. FILE: optional hotkeys для редагування / видалення вибраної примітки
+// ============================================================================
+
+"use client";
+
+import { useEffect } from "react";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export function useSheetNotesHotkeys() {
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const store = useCanvasStore.getState();
+      const selection = store.selection;
+
+      if (selection?.type !== "sheet-note") return;
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        canvasController.openSheetNoteEditor?.(selection.id);
+      }
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        canvasController.deleteSheetNote?.(selection.id);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+}
+
+
+
+// ============================================================================
+// RESULT
+// ============================================================================
+//
+// ✔ Кнопка справа відкриває textarea форму
+// ✔ Після submit примітка додається на canvas
+// ✔ Примітка рендериться у правій нижній частині аркуша
+// ✔ Блок приміток прив’язаний до нижньої рамки / title-block zone
+// ✔ Позиція не hardcoded під A3
+// ✔ A4 / A3 / A1 підтримуються через sheet geometry
+// ✔ Konva-native rendering
+// ✔ Centralized useCanvasStore
+// ✔ Centralized canvasController
+// ✔ PDF/export-safe підхід
+//
+// ============================================================================

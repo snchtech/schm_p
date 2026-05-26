@@ -1,0 +1,1040 @@
+PDF EXPORT READY CODE PACKAGE
+=============================
+
+INSTALL:
+ npm install jspdf svg2pdf.js
+
+IMPORTANT:
+ - Export is viewport-independent.
+ - It uses sheet geometry, not current Konva zoom/pan.
+ - It exports: frame + top header + notes + specification tables + annotations + connectors + nodes.
+
+===============================================================================
+FILE: src/lib/export/svgEscape.js
+===============================================================================
+
+export function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function svgAttrs(attrs = {}) {
+  return Object.entries(attrs)
+    .filter(([, value]) => value !== undefined && value !== null && value !== false)
+    .map(([key, value]) => `${key}="${escapeXml(value)}"`)
+    .join(" ");
+}
+
+export function rect(attrs = {}) {
+  return `<rect ${svgAttrs(attrs)} />`;
+}
+
+export function line(attrs = {}) {
+  return `<line ${svgAttrs(attrs)} />`;
+}
+
+export function polyline(attrs = {}) {
+  return `<polyline ${svgAttrs(attrs)} />`;
+}
+
+export function textNode(content, attrs = {}) {
+  return `<text ${svgAttrs(attrs)}>${escapeXml(content)}</text>`;
+}
+
+export function group(content, attrs = {}) {
+  return `<g ${svgAttrs(attrs)}>${content}</g>`;
+}
+
+===============================================================================
+FILE: src/lib/export/exportConstants.js
+===============================================================================
+
+export const EXPORT_FONT_FAMILY = "Roboto Condensed, Arial, sans-serif";
+
+export const EXPORT_COLORS = {
+  black: "#000000",
+  white: "#ffffff",
+  paper: "#ffffff",
+  drawingArea: "#d0d0d0",
+  lightGrid: "#e5e5e5",
+};
+
+export const DEFAULT_EXPORT_OPTIONS = {
+  includeNodes: true,
+  includeConnectors: true,
+  includeAnnotations: true,
+  includeSpecificationTables: true,
+  includeNotes: true,
+  includePaperFrame: true,
+  includeDrawingAreaGuide: false,
+  fileName: "scheme.pdf",
+};
+
+===============================================================================
+FILE: src/lib/export/buildExportScene.js
+===============================================================================
+
+import { buildSheetGeometry } from "@/lib/paper/sheetGeometry";
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+export function buildExportScene(store, options = {}) {
+  const sheet = store.sheet || {};
+  const geometry = buildSheetGeometry(sheet);
+
+  if (!geometry) {
+    throw new Error("Cannot build export scene: sheet geometry is missing.");
+  }
+
+  return {
+    options,
+    sheet,
+    geometry,
+    nodes: normalizeArray(store.nodes),
+    edges: normalizeArray(store.edges),
+    annotations: normalizeArray(store.annotations),
+    specificationTables: normalizeArray(store.specificationTables),
+    notes: normalizeArray(sheet.notes || store.notes),
+  };
+}
+
+===============================================================================
+FILE: src/lib/export/renderPaperSvg.js
+===============================================================================
+
+import { rect, line, textNode } from "./svgEscape";
+import { EXPORT_COLORS, EXPORT_FONT_FAMILY } from "./exportConstants";
+import { HEADER_COLUMNS } from "@/lib/paper/paperConstants";
+
+function renderHeaderColumns(scene) {
+  const { geometry, sheet } = scene;
+  const { headerArea } = geometry;
+  const titleBlock = sheet.titleBlock || {};
+
+  let x = headerArea.x;
+  let out = "";
+
+  for (const column of HEADER_COLUMNS) {
+    const width = column.width;
+
+    out += rect({
+      x,
+      y: headerArea.y,
+      width,
+      height: headerArea.height,
+      fill: "none",
+      stroke: EXPORT_COLORS.black,
+      "stroke-width": 1,
+    });
+
+    out += textNode(column.label, {
+      x: x + width / 2,
+      y: headerArea.y + 12,
+      "font-family": EXPORT_FONT_FAMILY,
+      "font-size": 10,
+      "font-weight": 700,
+      fill: EXPORT_COLORS.black,
+      "text-anchor": "middle",
+      "dominant-baseline": "middle",
+    });
+
+    out += textNode(titleBlock[column.key] || "", {
+      x: x + width / 2,
+      y: headerArea.y + 24,
+      "font-family": EXPORT_FONT_FAMILY,
+      "font-size": 11,
+      fill: EXPORT_COLORS.black,
+      "text-anchor": "middle",
+      "dominant-baseline": "middle",
+    });
+
+    x += width;
+  }
+
+  const lastX = headerArea.x + headerArea.width;
+  if (x < lastX) {
+    out += rect({
+      x,
+      y: headerArea.y,
+      width: lastX - x,
+      height: headerArea.height,
+      fill: "none",
+      stroke: EXPORT_COLORS.black,
+      "stroke-width": 1,
+    });
+  }
+
+  return out;
+}
+
+function renderNotesArea(scene) {
+  const { geometry, notes } = scene;
+  const { notesArea } = geometry;
+
+  let out = rect({
+    x: notesArea.x,
+    y: notesArea.y,
+    width: notesArea.width,
+    height: notesArea.height,
+    fill: "none",
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+
+  out += textNode("Примітки", {
+    x: notesArea.x + 8,
+    y: notesArea.y + 14,
+    "font-family": EXPORT_FONT_FAMILY,
+    "font-size": 11,
+    "font-weight": 700,
+    fill: EXPORT_COLORS.black,
+  });
+
+  const list = Array.isArray(notes) ? notes : [];
+  list.slice(0, 6).forEach((note, index) => {
+    const text = typeof note === "string" ? note : note?.text || "";
+
+    out += textNode(`${index + 1}. ${text}`, {
+      x: notesArea.x + 8,
+      y: notesArea.y + 32 + index * 14,
+      "font-family": EXPORT_FONT_FAMILY,
+      "font-size": 10,
+      fill: EXPORT_COLORS.black,
+    });
+  });
+
+  return out;
+}
+
+function renderTitleBlockArea(scene) {
+  const { geometry } = scene;
+  const { titleBlockArea } = geometry;
+
+  return rect({
+    x: titleBlockArea.x,
+    y: titleBlockArea.y,
+    width: titleBlockArea.width,
+    height: titleBlockArea.height,
+    fill: "none",
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+}
+
+export function renderPaperSvg(scene) {
+  const { geometry, options } = scene;
+  const { sheetRect, frameRect, drawingArea } = geometry;
+
+  let out = "";
+
+  out += rect({
+    x: sheetRect.x,
+    y: sheetRect.y,
+    width: sheetRect.width,
+    height: sheetRect.height,
+    fill: EXPORT_COLORS.paper,
+    stroke: "none",
+  });
+
+  if (options.includePaperFrame !== false) {
+    out += rect({
+      x: frameRect.x,
+      y: frameRect.y,
+      width: frameRect.width,
+      height: frameRect.height,
+      fill: "none",
+      stroke: EXPORT_COLORS.black,
+      "stroke-width": 2,
+    });
+
+    out += renderHeaderColumns(scene);
+    out += renderTitleBlockArea(scene);
+  }
+
+  if (options.includeNotes !== false) {
+    out += renderNotesArea(scene);
+  }
+
+  if (options.includeDrawingAreaGuide === true) {
+    out += rect({
+      x: drawingArea.x,
+      y: drawingArea.y,
+      width: drawingArea.width,
+      height: drawingArea.height,
+      fill: "none",
+      stroke: EXPORT_COLORS.drawingArea,
+      "stroke-width": 1,
+      "stroke-dasharray": "6 6",
+    });
+  }
+
+  return out;
+}
+
+===============================================================================
+FILE: src/lib/export/renderNodesSvg.js
+===============================================================================
+
+import { rect, textNode, group } from "./svgEscape";
+import { EXPORT_FONT_FAMILY } from "./exportConstants";
+
+function getNodeX(node) {
+  return node?.position?.x ?? node?.x ?? 0;
+}
+
+function getNodeY(node) {
+  return node?.position?.y ?? node?.y ?? 0;
+}
+
+function getNodeWidth(node) {
+  return node?.size?.width ?? node?.width ?? 120;
+}
+
+function getNodeHeight(node) {
+  return node?.size?.height ?? node?.height ?? 60;
+}
+
+export function renderNodesSvg(scene) {
+  if (scene.options.includeNodes === false) return "";
+
+  return scene.nodes
+    .map((node) => {
+      const x = getNodeX(node);
+      const y = getNodeY(node);
+      const width = getNodeWidth(node);
+      const height = getNodeHeight(node);
+      const fill = node?.style?.fill || "#ffffff";
+      const stroke = node?.style?.stroke || "#000000";
+      const strokeWidth = node?.style?.strokeWidth || 1.5;
+      const label = node?.label || node?.title || node?.name || "";
+
+      let content = "";
+
+      content += rect({
+        x,
+        y,
+        width,
+        height,
+        rx: node?.style?.radius || 0,
+        ry: node?.style?.radius || 0,
+        fill,
+        stroke,
+        "stroke-width": strokeWidth,
+      });
+
+      if (label) {
+        content += textNode(label, {
+          x: x + width / 2,
+          y: y + height / 2,
+          "font-family": EXPORT_FONT_FAMILY,
+          "font-size": node?.style?.fontSize || 12,
+          fill: node?.style?.textFill || "#000000",
+          "text-anchor": "middle",
+          "dominant-baseline": "middle",
+        });
+      }
+
+      return group(content, { id: `node-${node.id}` });
+    })
+    .join("");
+}
+
+===============================================================================
+FILE: src/lib/export/renderConnectorsSvg.js
+===============================================================================
+
+import { polyline, group } from "./svgEscape";
+
+function pointsToString(points = []) {
+  const pairs = [];
+
+  for (let i = 0; i < points.length - 1; i += 2) {
+    pairs.push(`${points[i]},${points[i + 1]}`);
+  }
+
+  return pairs.join(" ");
+}
+
+function getArrowMarkerDefs() {
+  return `
+    <defs>
+      <marker id="arrow-end" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,6 L9,3 z" fill="#000000" />
+      </marker>
+      <marker id="arrow-start" markerWidth="10" markerHeight="10" refX="0" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+        <path d="M9,0 L9,6 L0,3 z" fill="#000000" />
+      </marker>
+    </defs>
+  `;
+}
+
+export function renderConnectorDefsSvg() {
+  return getArrowMarkerDefs();
+}
+
+export function renderConnectorsSvg(scene) {
+  if (scene.options.includeConnectors === false) return "";
+
+  return scene.edges
+    .filter((edge) => edge.kind === "connector")
+    .map((connector) => {
+      const points = connector.geometry?.points || [];
+      if (points.length < 4) return "";
+
+      const attrs = {
+        points: pointsToString(points),
+        fill: "none",
+        stroke: connector.style?.stroke || "#000000",
+        "stroke-width": connector.style?.strokeWidth || 2,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      };
+
+      if (connector.endcaps?.end === "arrow") {
+        attrs["marker-end"] = "url(#arrow-end)";
+      }
+
+      if (connector.endcaps?.start === "arrow") {
+        attrs["marker-start"] = "url(#arrow-start)";
+      }
+
+      return group(polyline(attrs), { id: `connector-${connector.id}` });
+    })
+    .join("");
+}
+
+===============================================================================
+FILE: src/lib/export/renderAnnotationsSvg.js
+===============================================================================
+
+import { textNode, group, line } from "./svgEscape";
+import { EXPORT_FONT_FAMILY } from "./exportConstants";
+
+function resolveAnnotationPosition(annotation, scene) {
+  const position = annotation.position || {};
+
+  if (position.mode === "free") {
+    return {
+      x: position.absoluteX || 0,
+      y: position.absoluteY || 0,
+    };
+  }
+
+  const attached = annotation.attachedTo;
+
+  if (attached?.type === "node") {
+    const node = scene.nodes.find((n) => n.id === attached.id);
+    if (!node) return { x: position.absoluteX || 0, y: position.absoluteY || 0 };
+
+    const x = node.position?.x ?? node.x ?? 0;
+    const y = node.position?.y ?? node.y ?? 0;
+    const width = node.size?.width ?? node.width ?? 120;
+    const height = node.size?.height ?? node.height ?? 60;
+    const offsetX = position.offsetX || 0;
+    const offsetY = position.offsetY || 0;
+
+    if (position.mode === "top") return { x: x + width / 2 + offsetX, y: y - 8 + offsetY };
+    if (position.mode === "bottom") return { x: x + width / 2 + offsetX, y: y + height + 16 + offsetY };
+    if (position.mode === "left") return { x: x - 8 + offsetX, y: y + height / 2 + offsetY };
+    if (position.mode === "right") return { x: x + width + 8 + offsetX, y: y + height / 2 + offsetY };
+
+    return { x: x + width / 2 + offsetX, y: y + height / 2 + offsetY };
+  }
+
+  if (attached?.type === "edge") {
+    const edge = scene.edges.find((e) => e.id === attached.id);
+    const pts = edge?.geometry?.points || [];
+    if (pts.length >= 4) {
+      const mid = Math.floor(pts.length / 4) * 2;
+      return {
+        x: pts[mid] + (position.offsetX || 0),
+        y: pts[mid + 1] + (position.offsetY || 0),
+      };
+    }
+  }
+
+  return {
+    x: position.absoluteX || 0,
+    y: position.absoluteY || 0,
+  };
+}
+
+function orientationToRotation(annotation) {
+  const orientation = annotation.style?.textOrientation || "horizontal";
+  if (orientation === "vertical-left") return -90;
+  if (orientation === "vertical-right") return 90;
+  return annotation.style?.rotation || 0;
+}
+
+export function renderAnnotationsSvg(scene) {
+  if (scene.options.includeAnnotations === false) return "";
+
+  return scene.annotations
+    .map((annotation) => {
+      const pos = resolveAnnotationPosition(annotation, scene);
+      const rotation = orientationToRotation(annotation);
+      const fontSize = annotation.style?.fontSize || 12;
+      const fill = annotation.style?.fill || "#000000";
+      const text = annotation.text || "";
+
+      let content = "";
+
+      if (annotation.annotationType === "callout" && annotation.callout) {
+        const c = annotation.callout;
+        content += line({
+          x1: c.anchorX,
+          y1: c.anchorY,
+          x2: c.elbowX,
+          y2: c.elbowY,
+          stroke: fill,
+          "stroke-width": 1,
+        });
+        content += line({
+          x1: c.elbowX,
+          y1: c.elbowY,
+          x2: c.textX,
+          y2: c.textY,
+          stroke: fill,
+          "stroke-width": 1,
+        });
+      }
+
+      content += textNode(text, {
+        x: pos.x,
+        y: pos.y,
+        "font-family": annotation.style?.fontFamily || EXPORT_FONT_FAMILY,
+        "font-size": fontSize,
+        "font-weight": annotation.style?.fontWeight || 400,
+        fill,
+        "text-anchor": annotation.style?.align === "left" ? "start" : "middle",
+        "dominant-baseline": "middle",
+        transform: rotation ? `rotate(${rotation} ${pos.x} ${pos.y})` : undefined,
+      });
+
+      return group(content, { id: `annotation-${annotation.id}` });
+    })
+    .join("");
+}
+
+===============================================================================
+FILE: src/lib/export/renderSpecificationTablesSvg.js
+===============================================================================
+
+import { rect, line, textNode, group } from "./svgEscape";
+import { EXPORT_FONT_FAMILY } from "./exportConstants";
+
+const DEFAULT_COLUMNS = [
+  { key: "positionNumber", label: "Поз.", width: 48 },
+  { key: "title", label: "Найменування", width: 220 },
+  { key: "quantity", label: "К-сть", width: 60 },
+  { key: "unit", label: "Од.", width: 56 },
+  { key: "note", label: "Примітка", width: 120 },
+];
+
+function getCellValue(row, key) {
+  return row?.[key] ?? "";
+}
+
+function renderOneTable(table) {
+  const x = table.position?.x ?? table.x ?? 0;
+  const y = table.position?.y ?? table.y ?? 0;
+  const columns = table.columns?.length ? table.columns : DEFAULT_COLUMNS;
+  const rowHeight = table.style?.rowHeight || 24;
+  const headerHeight = table.style?.headerHeight || 28;
+  const fontSize = table.style?.fontSize || 10;
+  const rows = Array.isArray(table.rows) ? table.rows : [];
+  const width = columns.reduce((sum, c) => sum + c.width, 0);
+  const height = headerHeight + rows.length * rowHeight;
+
+  let out = "";
+
+  out += rect({
+    x,
+    y,
+    width,
+    height,
+    fill: "white",
+    stroke: "black",
+    "stroke-width": 1,
+  });
+
+  let cx = x;
+  for (const column of columns) {
+    out += rect({
+      x: cx,
+      y,
+      width: column.width,
+      height: headerHeight,
+      fill: "white",
+      stroke: "black",
+      "stroke-width": 1,
+    });
+
+    out += textNode(column.label, {
+      x: cx + column.width / 2,
+      y: y + headerHeight / 2,
+      "font-family": table.style?.fontFamily || EXPORT_FONT_FAMILY,
+      "font-size": fontSize,
+      "font-weight": 700,
+      fill: "black",
+      "text-anchor": "middle",
+      "dominant-baseline": "middle",
+    });
+
+    cx += column.width;
+  }
+
+  rows.forEach((row, rowIndex) => {
+    const rowY = y + headerHeight + rowIndex * rowHeight;
+
+    out += line({
+      x1: x,
+      y1: rowY,
+      x2: x + width,
+      y2: rowY,
+      stroke: "black",
+      "stroke-width": 1,
+    });
+
+    let cellX = x;
+    columns.forEach((column) => {
+      out += line({
+        x1: cellX,
+        y1: y,
+        x2: cellX,
+        y2: y + height,
+        stroke: "black",
+        "stroke-width": 1,
+      });
+
+      out += textNode(getCellValue(row, column.key), {
+        x: cellX + column.width / 2,
+        y: rowY + rowHeight / 2,
+        "font-family": table.style?.fontFamily || EXPORT_FONT_FAMILY,
+        "font-size": fontSize,
+        fill: "black",
+        "text-anchor": "middle",
+        "dominant-baseline": "middle",
+      });
+
+      cellX += column.width;
+    });
+  });
+
+  return group(out, { id: `specification-table-${table.id}` });
+}
+
+export function renderSpecificationTablesSvg(scene) {
+  if (scene.options.includeSpecificationTables === false) return "";
+  return scene.specificationTables.map(renderOneTable).join("");
+}
+
+===============================================================================
+FILE: src/lib/export/renderSvg.js
+===============================================================================
+
+import { renderPaperSvg } from "./renderPaperSvg";
+import { renderConnectorDefsSvg, renderConnectorsSvg } from "./renderConnectorsSvg";
+import { renderNodesSvg } from "./renderNodesSvg";
+import { renderAnnotationsSvg } from "./renderAnnotationsSvg";
+import { renderSpecificationTablesSvg } from "./renderSpecificationTablesSvg";
+
+export function renderSvg(scene) {
+  const { sheetRect } = scene.geometry;
+
+  const width = sheetRect.width;
+  const height = sheetRect.height;
+
+  const body = [
+    renderConnectorDefsSvg(),
+    renderPaperSvg(scene),
+    renderConnectorsSvg(scene),
+    renderNodesSvg(scene),
+    renderAnnotationsSvg(scene),
+    renderSpecificationTablesSvg(scene),
+  ].join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  ${body}
+</svg>`;
+}
+
+===============================================================================
+FILE: src/lib/export/exportSvgFile.js
+===============================================================================
+
+export function downloadSvg(svg, fileName = "scheme.svg") {
+  const blob = new Blob([svg], {
+    type: "image/svg+xml;charset=utf-8",
+  });
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+===============================================================================
+FILE: src/lib/export/exportPdf.js
+===============================================================================
+
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+
+function getPdfFormatFromScene(scene) {
+  const { sheetRect } = scene.geometry;
+
+  return [
+    sheetRect.width / MM_TO_PX,
+    sheetRect.height / MM_TO_PX,
+  ];
+}
+
+export async function exportPdfFromSvg(svg, scene, options = {}) {
+  const format = getPdfFormatFromScene(scene);
+  const orientation = scene.sheet.orientation === "portrait" ? "portrait" : "landscape";
+
+  const pdf = new jsPDF({
+    orientation,
+    unit: "mm",
+    format,
+    compress: true,
+    putOnlyUsedFonts: true,
+  });
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "-100000px";
+  container.innerHTML = svg;
+  document.body.appendChild(container);
+
+  const svgElement = container.querySelector("svg");
+
+  if (!svgElement) {
+    container.remove();
+    throw new Error("SVG element was not created for PDF export.");
+  }
+
+  await svg2pdf(svgElement, pdf, {
+    x: 0,
+    y: 0,
+    width: format[0],
+    height: format[1],
+  });
+
+  container.remove();
+
+  const fileName = options.fileName || "scheme.pdf";
+  pdf.save(fileName);
+}
+
+===============================================================================
+FILE: src/lib/export/exportSchemePdf.js
+===============================================================================
+
+import { buildExportScene } from "./buildExportScene";
+import { renderSvg } from "./renderSvg";
+import { exportPdfFromSvg } from "./exportPdf";
+import { downloadSvg } from "./exportSvgFile";
+import { DEFAULT_EXPORT_OPTIONS } from "./exportConstants";
+
+function makeFileName(scene) {
+  const tb = scene.sheet?.titleBlock || {};
+  const system = String(tb.system || "scheme")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]/g, "");
+
+  const sheetNumber = String(tb.sheetNumber || "1")
+    .trim()
+    .replace(/\s+/g, "_");
+
+  return `${system || "scheme"}_${sheetNumber || "1"}.pdf`;
+}
+
+export async function exportSchemePdf(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  await exportPdfFromSvg(svg, scene, {
+    fileName: mergedOptions.fileName || makeFileName(scene),
+  });
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+export function exportSchemeSvg(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  downloadSvg(svg, mergedOptions.svgFileName || "scheme.svg");
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+===============================================================================
+FILE: src/controllers/canvasController.js
+PATCH: imports
+===============================================================================
+
+import { exportSchemePdf, exportSchemeSvg } from "@/lib/export/exportSchemePdf";
+
+===============================================================================
+FILE: src/controllers/canvasController.js
+PATCH: add methods inside canvasController object
+===============================================================================
+
+async exportCurrentSchemePdf(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return await exportSchemePdf(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+exportCurrentSchemeSvg(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return exportSchemeSvg(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+===============================================================================
+FILE: src/components/toolbar/ExportPdfButton.jsx
+===============================================================================
+
+"use client";
+
+import React, { useState } from "react";
+import { Button } from "@mui/material";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ExportPdfButton() {
+  const [loading, setLoading] = useState(false);
+
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      startIcon={<PictureAsPdfIcon fontSize="small" />}
+      disabled={loading}
+      onClick={async () => {
+        if (loading) return;
+
+        try {
+          setLoading(true);
+          await canvasController.exportCurrentSchemePdf?.();
+        } catch (error) {
+          console.error("PDF export failed", error);
+          alert("Не вдалося сформувати PDF. Деталі в console.");
+        } finally {
+          setLoading(false);
+        }
+      }}
+      sx={{ justifyContent: "flex-start" }}
+    >
+      {loading ? "Формування..." : "PDF"}
+    </Button>
+  );
+}
+
+===============================================================================
+FILE: src/components/toolbar/ExportSvgButton.jsx
+OPTIONAL
+===============================================================================
+
+"use client";
+
+import React from "react";
+import { Button } from "@mui/material";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ExportSvgButton() {
+  return (
+    <Button
+      variant="text"
+      size="small"
+      onClick={() => {
+        canvasController.exportCurrentSchemeSvg?.();
+      }}
+      sx={{ justifyContent: "flex-start" }}
+    >
+      SVG
+    </Button>
+  );
+}
+
+===============================================================================
+FILE: src/lib/paper/paperConstants.js
+REQUIRED SHAPE CHECK
+===============================================================================
+
+export const MM_TO_PX = 4;
+export const FRAME_MARGIN = 20;
+export const TITLE_BLOCK_HEIGHT = 120;
+export const NOTES_AREA_HEIGHT = 80;
+export const HEADER_HEIGHT = 32;
+
+export const HEADER_COLUMNS = [
+  { key: "albumCode", label: "Шифр альбому", width: 180 },
+  { key: "unit", label: "Unit", width: 120 },
+  { key: "system", label: "Система", width: 140 },
+  { key: "title", label: "Назва схеми", width: 320 },
+  { key: "sheetNumber", label: "Аркуш", width: 80 },
+];
+
+===============================================================================
+FILE: src/lib/paper/paperFormats.js
+REQUIRED SHAPE CHECK
+===============================================================================
+
+export const PAPER_FORMATS = {
+  A4: { width: 297, height: 210 },
+  A3: { width: 420, height: 297 },
+  A1: { width: 841, height: 594 },
+};
+
+===============================================================================
+FILE: src/lib/paper/sheetGeometry.js
+REQUIRED EXPORT-COMPATIBLE VERSION
+===============================================================================
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+} from "./paperConstants";
+
+import { PAPER_FORMATS } from "./paperFormats";
+
+export function buildSheetGeometry(sheet) {
+  const format = PAPER_FORMATS[sheet?.format || "A3"] || PAPER_FORMATS.A3;
+  const isLandscape = sheet?.orientation !== "portrait";
+
+  const sheetWidth = (isLandscape ? format.width : format.height) * MM_TO_PX;
+  const sheetHeight = (isLandscape ? format.height : format.width) * MM_TO_PX;
+
+  const frameMargin = FRAME_MARGIN;
+  const headerHeight = HEADER_HEIGHT;
+  const titleBlockHeight = TITLE_BLOCK_HEIGHT;
+  const notesHeight = NOTES_AREA_HEIGHT;
+
+  const frameRect = {
+    x: frameMargin,
+    y: frameMargin,
+    width: sheetWidth - frameMargin * 2,
+    height: sheetHeight - frameMargin * 2,
+  };
+
+  const headerArea = {
+    x: frameRect.x,
+    y: frameRect.y,
+    width: frameRect.width,
+    height: headerHeight,
+  };
+
+  const titleBlockArea = {
+    x: frameRect.x,
+    y: frameRect.y + frameRect.height - titleBlockHeight,
+    width: frameRect.width,
+    height: titleBlockHeight,
+  };
+
+  const notesArea = {
+    x: frameRect.x,
+    y: titleBlockArea.y - notesHeight,
+    width: 360,
+    height: notesHeight,
+  };
+
+  const drawingArea = {
+    x: frameRect.x,
+    y: frameRect.y + headerHeight,
+    width: frameRect.width,
+    height: frameRect.height - headerHeight - notesHeight - titleBlockHeight,
+  };
+
+  return {
+    sheetRect: {
+      x: 0,
+      y: 0,
+      width: sheetWidth,
+      height: sheetHeight,
+    },
+    frameRect,
+    headerArea,
+    drawingArea,
+    titleBlockArea,
+    notesArea,
+  };
+}
+
+===============================================================================
+NOTES ABOUT INTEGRATION
+===============================================================================
+
+1. Your existing PaperLayer can stay as visual editor renderer.
+2. PDF export does not read Konva stage.
+3. It reads canonical store state only.
+4. If some nodes have custom shapes, extend renderNodesSvg.js.
+5. If your specification table model has different field names, update renderSpecificationTablesSvg.js only.
+6. If notes are stored in sheet.notes, they export automatically.
+7. If notes are stored in store.notes, they also export automatically.
+8. Current viewport.finalScale, offsetX, offsetY are intentionally ignored.
+
+===============================================================================
