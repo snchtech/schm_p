@@ -1,0 +1,196 @@
+Так, можна глобальніше — **через режим read-only на рівні canvas/store/controller wrapper**, без переписування кожної функції вручну.
+
+Найпрактичніше:
+
+```ts
+// store
+accessMode: "editor" | "reader",
+
+isReadOnly: () => get().accessMode === "reader",
+```
+
+Далі зробити один helper:
+
+```ts
+// lib/auth/guardAction.ts
+
+export function guardCanvasAction(fn) {
+  return (...args) => {
+    const store = useCanvasStore.getState();
+
+    if (store.accessMode === "reader") {
+      return;
+    }
+
+    return fn(...args);
+  };
+}
+```
+
+І в `canvasController` обгорнути тільки **mutating actions**:
+
+```ts
+export const canvasController = {
+  addNode: guardCanvasAction((node) => {
+    useCanvasStore.getState().addNode(node);
+  }),
+
+  removeEdge: guardCanvasAction((edgeId) => {
+    useCanvasStore.getState().removeEdge(edgeId);
+  }),
+
+  moveNode: guardCanvasAction((nodeId, pos) => {
+    useCanvasStore.getState().updateNodePosition(nodeId, pos);
+  }),
+};
+```
+
+Ще глобальніше — зробити два рівні:
+
+```txt
+1. UI lock
+2. Store mutation lock
+```
+
+### 1. UI lock
+
+У Stage або root canvas:
+
+```tsx
+const readOnly = useCanvasStore((s) => s.accessMode === "reader");
+
+<Stage
+  draggable={!readOnly}
+>
+```
+
+Для object layers:
+
+```tsx
+<Group draggable={!readOnly}>
+```
+
+Для toolbar:
+
+```tsx
+{!readOnly && <EditingToolbar />}
+```
+
+### 2. Store mutation lock
+
+Це найважливіше. Навіть якщо якийсь handler забули закрити, store не дасть змінити документ.
+
+```ts
+// useCanvasStore.js
+
+function readOnlyGuard(get) {
+  return get().accessMode === "reader";
+}
+
+addNode: (node) =>
+  set((s) => {
+    if (s.accessMode === "reader") return s;
+    return { nodes: [...s.nodes, node] };
+  }),
+
+replaceEdge: (id, nextEdge) =>
+  set((s) => {
+    if (s.accessMode === "reader") return s;
+    return {
+      edges: s.edges.map((e) => e.id === id ? nextEdge : e),
+    };
+  }),
+```
+
+Але щоб не дублювати скрізь, краще зробити wrapper:
+
+```ts
+const guardedSet =
+  (set, get) =>
+  (producer) => {
+    if (get().accessMode === "reader") return;
+    set(producer);
+  };
+```
+
+І далі:
+
+```ts
+export const useCanvasStore = create((set, get) => {
+  const setDocument = guardedSet(set, get);
+
+  return {
+    accessMode: "editor",
+
+    nodes: [],
+    edges: [],
+
+    addNode: (node) =>
+      setDocument((s) => ({
+        nodes: [...s.nodes, node],
+      })),
+
+    replaceEdge: (id, nextEdge) =>
+      setDocument((s) => ({
+        edges: s.edges.map((e) =>
+          e.id === id ? nextEdge : e
+        ),
+      })),
+
+    // editor state можна міняти навіть reader
+    setSelection: (selection) => set({ selection }),
+    clearSelection: () => set({ selection: null }),
+  };
+});
+```
+
+Це найкращий компроміс:
+
+```txt
+document state — locked for reader
+editor state — allowed for reader
+```
+
+Reader зможе:
+
+```txt
+- дивитись схему
+- zoom
+- pan
+- selection
+- відкривати інформаційну картку read-only
+- export PDF, якщо дозволиш
+```
+
+Reader не зможе:
+
+```txt
+- створити node
+- редагувати edge
+- рухати об’єкти
+- міняти annotation
+- міняти таблицю
+- зберегти JSON
+```
+
+Тобто повністю глобально без жодних змін не вийде, але можна переробити **центральні точки**, а не всі компоненти:
+
+```txt
+useCanvasStore document mutations
+canvasController mutating methods
+toolbar visibility
+Konva draggable
+API save/update endpoints
+```
+
+Я б робив саме так:
+
+```txt
+1. accessMode у store
+2. guardedSet для document state
+3. readOnly у canvas root
+4. disable/hide editing toolbar
+5. API-level check на save/update
+```
+
+Це дасть глобальний read-only режим без тотального переписування всіх функцій.

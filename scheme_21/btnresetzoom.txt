@@ -1,0 +1,49 @@
+Додай у `canvasController`:
+
+```ts
+resetZoom() {
+  const store = useCanvasStore.getState();
+
+  store.setViewport?.({
+    ...store.viewport,
+    userZoom: 1,
+    finalScale: store.viewport.fitScale || 1,
+  });
+}
+```
+
+У `useCanvasStore` має бути action:
+
+```ts
+setViewport: (viewport) => set({ viewport }),
+```
+
+Кнопка в toolbar:
+
+```tsx
+<Button
+  variant="outlined"
+  size="small"
+  onClick={() => {
+    canvasController.resetZoom?.();
+  }}
+>
+  Скинути zoom
+</Button>
+```
+
+Якщо хочеш не просто `zoom = 1`, а повернення до “вмістити сторінку”, краще так:
+
+```ts
+resetZoomToFit() {
+  const store = useCanvasStore.getState();
+
+  store.setViewport?.({
+    ...store.viewport,
+    userZoom: 1,
+    finalScale: store.viewport.fitScale || 1,
+  });
+}
+```
+
+Тобто `fitScale` лишається автоматичним, а ручний zoom скидається.

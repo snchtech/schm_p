@@ -1,0 +1,68 @@
+Так, для UX це нормально: **якщо об’єкт не можна resize**, то квадратики краще не показувати, бо вони візуально обіцяють дію resize.
+
+Оптимальний UX:
+
+```txt
+editable + resizable:
+рамка + anchors
+
+editable, але fixed size:
+рамка без anchors
+
+reader/read-only:
+тонка рамка або hover/selection outline
+```
+
+Якщо хочеш залишити “квадратики” як маркери виділення, але без resize — це може плутати користувача. Краще зробити кастомні corner markers, які **не draggable**:
+
+```tsx
+<Rect
+  x={x - 4}
+  y={y - 4}
+  width={8}
+  height={8}
+  fill="white"
+  stroke="#2F80ED"
+  listening={false}
+/>
+```
+
+Тобто замість `Transformer anchors` — власні декоративні маркери.
+
+Практична рекомендація для твоєї схеми:
+
+```tsx
+<Transformer
+  ref={transformerRef}
+  rotateEnabled={false}
+  enabledAnchors={[]}
+  borderEnabled={true}
+  borderStroke="#2F80ED"
+  borderStrokeWidth={1.5}
+  anchorSize={0}
+/>
+```
+
+А для кращого UX додай невеликий бейдж або cursor:
+
+```tsx
+<Group draggable>
+```
+
+Користувач розуміє: об’єкт виділений і його можна переміщати, але не змінювати розмір.
+
+Якщо в майбутньому для деяких ролей/об’єктів resize буде дозволений, логіка проста:
+
+```tsx
+const canResize = false;
+
+<Transformer
+  enabledAnchors={
+    canResize
+      ? ["top-left", "top-right", "bottom-left", "bottom-right"]
+      : []
+  }
+  resizeEnabled={canResize}
+  rotateEnabled={false}
+/>
+```

@@ -1,0 +1,181 @@
+Архітектурно заклади **permission layer**, а не розкидай `if role === "reader"` по компонентах.
+
+Найкраща модель:
+
+```ts
+role: "editor" | "reader"
+
+scope:
+  album
+  albumPage
+  scheme
+  drawingObject
+```
+
+Зроби один файл:
+
+```ts
+// lib/auth/permissions.ts
+
+export const Permissions = {
+  album: {
+    createPage: ["editor"],
+    editPageOrder: ["editor"],
+    deletePage: ["editor"],
+    view: ["editor", "reader"],
+  },
+
+  albumPage: {
+    editMetadata: ["editor"],
+    editFrame: ["editor"],
+    view: ["editor", "reader"],
+  },
+
+  scheme: {
+    editInfo: ["editor"],
+    exportPdf: ["editor", "reader"],
+    saveJson: ["editor"],
+    view: ["editor", "reader"],
+  },
+
+  drawing: {
+    createNode: ["editor"],
+    editNode: ["editor"],
+    deleteNode: ["editor"],
+
+    createEdge: ["editor"],
+    editEdge: ["editor"],
+    deleteEdge: ["editor"],
+
+    moveObject: ["editor"],
+    editAnnotation: ["editor"],
+    editSpecification: ["editor"],
+
+    view: ["editor", "reader"],
+  },
+};
+
+export function can(userRole, scope, action) {
+  const allowedRoles = Permissions?.[scope]?.[action] || [];
+  return allowedRoles.includes(userRole);
+}
+```
+
+У store тримай:
+
+```ts
+userRole: "reader",
+
+setUserRole: (userRole) => set({ userRole }),
+```
+
+У `canvasController` перевіряй права **перед зміною state**:
+
+```ts
+import { can } from "@/lib/auth/permissions";
+
+addNode(node) {
+  const store = useCanvasStore.getState();
+
+  if (!can(store.userRole, "drawing", "createNode")) return;
+
+  store.addNode(node);
+}
+
+moveNode(nodeId, position) {
+  const store = useCanvasStore.getState();
+
+  if (!can(store.userRole, "drawing", "moveObject")) return;
+
+  store.updateNodePosition(nodeId, position);
+}
+
+saveDiagram() {
+  const store = useCanvasStore.getState();
+
+  if (!can(store.userRole, "scheme", "saveJson")) return;
+
+  // save logic
+}
+```
+
+У UI лише ховай або disable:
+
+```tsx
+const role = useCanvasStore((s) => s.userRole);
+const editable = can(role, "drawing", "createNode");
+
+<Button disabled={!editable}>
+  Додати елемент
+</Button>
+```
+
+Для Konva objects:
+
+```tsx
+const canEditDrawing = can(role, "drawing", "moveObject");
+
+<Group
+  draggable={canEditDrawing}
+  listening={true}
+/>
+```
+
+Для модалок типу “Інформаційна картка”:
+
+```tsx
+const readonly = !can(role, "drawing", "editNode");
+
+<TextField
+  value={name}
+  disabled={readonly}
+  onChange={(e) => setName(e.target.value)}
+/>
+
+<Button disabled={readonly}>
+  Зберегти
+</Button>
+```
+
+Головне правило:
+
+```txt
+UI disable/hide — для зручності.
+canvasController permission check — для безпеки логіки.
+API permission check — для реальної безпеки.
+```
+
+У майбутньому з БД це добре ляже на таку модель:
+
+```ts
+{
+  userId,
+  albumId,
+  role: "editor" | "reader",
+  permissionsOverride: {}
+}
+```
+
+Я б заклав рівні так:
+
+```txt
+Album
+  └── Page
+       └── Scheme
+            └── Drawing Objects
+```
+
+І не робив би просто глобальний `reader/editor`, бо потім знадобиться:
+
+```txt
+editor одного альбому
+reader іншого альбому
+editor тільки однієї сторінки
+reader для всієї схеми
+```
+
+Тому краще одразу думати не “роль користувача”, а:
+
+```txt
+роль користувача у конкретному album/page/scheme scope
+```

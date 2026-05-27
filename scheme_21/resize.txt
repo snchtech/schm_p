@@ -1,0 +1,70 @@
+У Konva `Transformer` можна залишити як рамку виділення, але вимкнути resize anchors.
+
+Заміни налаштування `Transformer` на таке:
+
+```tsx
+<Transformer
+  ref={transformerRef}
+  rotateEnabled={false}
+  resizeEnabled={false}
+  enabledAnchors={[]}
+  borderEnabled={true}
+  anchorSize={0}
+  ignoreStroke={true}
+/>
+```
+
+Якщо `resizeEnabled` у твоїй версії `react-konva` не працює, достатньо:
+
+```tsx
+<Transformer
+  ref={transformerRef}
+  rotateEnabled={false}
+  enabledAnchors={[]}
+  borderEnabled={true}
+  anchorSize={0}
+  ignoreStroke={true}
+/>
+```
+
+Додатково, щоб повністю заблокувати випадковий scale після transform:
+
+```tsx
+onTransformEnd={(e) => {
+  const node = e.target;
+
+  node.scaleX(1);
+  node.scaleY(1);
+}}
+```
+
+Для node-компонента:
+
+```tsx
+<Group
+  id={node.id}
+  draggable
+  onClick={(e) => {
+    e.cancelBubble = true;
+    setSelection({ type: "node", id: node.id });
+  }}
+  onTransformEnd={(e) => {
+    const target = e.target;
+    target.scaleX(1);
+    target.scaleY(1);
+  }}
+>
+  ...
+</Group>
+```
+
+Тобто логіка така:
+
+```txt
+Transformer залишається
+рамка виділення залишається
+anchors прибираємо
+resize вимикаємо
+rotation вимикаємо
+drag можна залишити
+```

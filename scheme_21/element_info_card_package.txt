@@ -1,0 +1,832 @@
+// ============================================================================
+// ELEMENT INFO CARD PACKAGE
+// ============================================================================
+// PURPOSE:
+// Реалізує інформаційну картку для nodes та edges/connectors через context menu.
+//
+// FEATURES:
+// - пункт меню "Інформаційна картка" для node та edge
+// - modal dialog
+// - input "Назва елемента"
+// - запис у Zustand state без БД
+// - підтримка role-based режиму: editor / reader
+// - reader бачить картку, але не редагує
+// - editor може редагувати і зберігати
+// - підготовлено до майбутніх параметрів/БД/системних привʼязок
+//
+// ASSUMPTIONS:
+// - useCanvasStore містить nodes, edges, selection, contextMenu
+// - node має id
+// - edge має id
+// - canvasController вже централізований
+// - UI: MUI
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/elementInfo/elementInfoModel.js
+// ============================================================================
+
+export function createDefaultElementInfo(existing = {}) {
+  return {
+    title: existing.title || "",
+
+    // reserved for future DB/system links
+    systemId: existing.systemId || null,
+    externalId: existing.externalId || null,
+
+    // reserved for future dynamic parameters
+    parameters: existing.parameters || {},
+
+    updatedAt: existing.updatedAt || null,
+  };
+}
+
+export function patchElementInfo(existing = {}, patch = {}) {
+  return {
+    ...createDefaultElementInfo(existing),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/store/useCanvasStore.js
+// PATCH: додати в create((set, get) => ({ ... }))
+// ============================================================================
+
+/*
+  ДОДАТИ STATE:
+
+  userRole: "editor",
+
+  elementInfoEditor: null,
+
+  ДОДАТИ ACTIONS:
+
+  setUserRole: (userRole) => set({ userRole }),
+
+  setElementInfoEditor: (elementInfoEditor) =>
+    set({ elementInfoEditor }),
+
+  clearElementInfoEditor: () =>
+    set({ elementInfoEditor: null }),
+
+  updateNodeInfo: (nodeId, infoPatch) =>
+    set((s) => ({
+      nodes: s.nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+
+        return {
+          ...node,
+          info: {
+            ...(node.info || {}),
+            ...infoPatch,
+          },
+        };
+      }),
+    })),
+
+  updateEdgeInfo: (edgeId, infoPatch) =>
+    set((s) => ({
+      edges: s.edges.map((edge) => {
+        if (edge.id !== edgeId) return edge;
+
+        return {
+          ...edge,
+          info: {
+            ...(edge.info || {}),
+            ...infoPatch,
+          },
+        };
+      }),
+    })),
+*/
+
+
+
+// ============================================================================
+// FULL PATCH EXAMPLE FOR useCanvasStore.js
+// Якщо хочеш вставити напряму, перенеси ці поля в існуючий store.
+// ============================================================================
+
+/*
+import { create } from "zustand";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+
+  selection: null,
+  contextMenu: null,
+
+  userRole: "editor",
+
+  elementInfoEditor: null,
+
+  setUserRole: (userRole) => set({ userRole }),
+
+  setElementInfoEditor: (elementInfoEditor) =>
+    set({ elementInfoEditor }),
+
+  clearElementInfoEditor: () =>
+    set({ elementInfoEditor: null }),
+
+  updateNodeInfo: (nodeId, infoPatch) =>
+    set((s) => ({
+      nodes: s.nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+
+        return {
+          ...node,
+          info: {
+            ...(node.info || {}),
+            ...infoPatch,
+          },
+        };
+      }),
+    })),
+
+  updateEdgeInfo: (edgeId, infoPatch) =>
+    set((s) => ({
+      edges: s.edges.map((edge) => {
+        if (edge.id !== edgeId) return edge;
+
+        return {
+          ...edge,
+          info: {
+            ...(edge.info || {}),
+            ...infoPatch,
+          },
+        };
+      }),
+    })),
+
+  setSelection: (selection) => set({ selection }),
+  clearSelection: () => set({ selection: null }),
+
+  setContextMenu: (contextMenu) => set({ contextMenu }),
+  clearContextMenu: () => set({ contextMenu: null }),
+
+  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
+  addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
+
+  replaceEdge: (id, nextEdge) =>
+    set((s) => ({
+      edges: s.edges.map((e) => (e.id === id ? nextEdge : e)),
+    })),
+
+  removeEdge: (id) =>
+    set((s) => ({
+      edges: s.edges.filter((e) => e.id !== id),
+      selection:
+        s.selection?.type === "edge" && s.selection?.id === id
+          ? null
+          : s.selection,
+      contextMenu: s.contextMenu?.edgeId === id ? null : s.contextMenu,
+    })),
+}));
+*/
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: додати imports
+// ============================================================================
+
+/*
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { patchElementInfo } from "@/lib/elementInfo/elementInfoModel";
+*/
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: додати методи в object canvasController
+// ============================================================================
+
+/*
+openElementInfoCard(target) {
+  const store = useCanvasStore.getState();
+
+  if (!target?.type || !target?.id) return;
+
+  const entity =
+    target.type === "node"
+      ? store.nodes.find((node) => node.id === target.id)
+      : store.edges.find((edge) => edge.id === target.id);
+
+  if (!entity) return;
+
+  store.setElementInfoEditor?.({
+    target: {
+      type: target.type,
+      id: target.id,
+    },
+  });
+
+  store.clearContextMenu?.();
+},
+
+openElementInfoCardFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu) return;
+
+  if (menu.type === "node" && menu.nodeId) {
+    this.openElementInfoCard({
+      type: "node",
+      id: menu.nodeId,
+    });
+    return;
+  }
+
+  if (menu.type === "connector" && menu.edgeId) {
+    this.openElementInfoCard({
+      type: "edge",
+      id: menu.edgeId,
+    });
+    return;
+  }
+
+  if (menu.type === "edge" && menu.edgeId) {
+    this.openElementInfoCard({
+      type: "edge",
+      id: menu.edgeId,
+    });
+    return;
+  }
+},
+
+closeElementInfoCard() {
+  const store = useCanvasStore.getState();
+  store.clearElementInfoEditor?.();
+},
+
+saveElementInfoCard({ title }) {
+  const store = useCanvasStore.getState();
+  const editor = store.elementInfoEditor;
+
+  if (!editor?.target) return;
+
+  if (store.userRole === "reader") {
+    store.clearElementInfoEditor?.();
+    return;
+  }
+
+  const { type, id } = editor.target;
+
+  const entity =
+    type === "node"
+      ? store.nodes.find((node) => node.id === id)
+      : store.edges.find((edge) => edge.id === id);
+
+  if (!entity) return;
+
+  const nextInfo = patchElementInfo(entity.info, {
+    title,
+  });
+
+  if (type === "node") {
+    store.updateNodeInfo?.(id, nextInfo);
+  }
+
+  if (type === "edge") {
+    store.updateEdgeInfo?.(id, nextInfo);
+  }
+
+  store.clearElementInfoEditor?.();
+},
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/ElementInfoCardModal.jsx
+// ============================================================================
+
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Stack,
+  Typography,
+  Chip,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { createDefaultElementInfo } from "@/lib/elementInfo/elementInfoModel";
+
+export default function ElementInfoCardModal() {
+  const editor = useCanvasStore((s) => s.elementInfoEditor);
+  const nodes = useCanvasStore((s) => s.nodes);
+  const edges = useCanvasStore((s) => s.edges);
+  const userRole = useCanvasStore((s) => s.userRole);
+
+  const [title, setTitle] = useState("");
+
+  const open = !!editor?.target;
+
+  const entity = useMemo(() => {
+    if (!editor?.target) return null;
+
+    if (editor.target.type === "node") {
+      return nodes.find((node) => node.id === editor.target.id) || null;
+    }
+
+    if (editor.target.type === "edge") {
+      return edges.find((edge) => edge.id === editor.target.id) || null;
+    }
+
+    return null;
+  }, [editor, nodes, edges]);
+
+  const info = useMemo(() => {
+    return createDefaultElementInfo(entity?.info || {});
+  }, [entity]);
+
+  const isReadonly = userRole === "reader";
+
+  useEffect(() => {
+    if (!open) return;
+    setTitle(info.title || "");
+  }, [open, info.title]);
+
+  function handleClose() {
+    canvasController.closeElementInfoCard?.();
+  }
+
+  function handleSave() {
+    canvasController.saveElementInfoCard?.({
+      title,
+    });
+  }
+
+  if (!open) return null;
+
+  return (
+    <Dialog
+      open={open}
+      onClose={handleClose}
+      fullWidth
+      maxWidth="sm"
+    >
+      <DialogTitle>
+        Інформаційна картка
+      </DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip
+              size="small"
+              label={
+                editor?.target?.type === "node"
+                  ? "Node"
+                  : "Edge"
+              }
+            />
+
+            <Typography variant="caption" color="text.secondary">
+              ID: {editor?.target?.id}
+            </Typography>
+
+            {isReadonly && (
+              <Chip
+                size="small"
+                color="default"
+                label="Тільки перегляд"
+              />
+            )}
+          </Stack>
+
+          <TextField
+            label="Назва елемента"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            fullWidth
+            disabled={isReadonly}
+            placeholder="Введіть назву елемента або зʼєднання"
+          />
+
+          <Typography variant="caption" color="text.secondary">
+            Це поле зараз зберігається тільки у canvas state. Надалі сюди можна
+            додати параметри, системні привʼязки та DB identifiers.
+          </Typography>
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose}>
+          {isReadonly ? "Закрити" : "Скасувати"}
+        </Button>
+
+        {!isReadonly && (
+          <Button
+            variant="contained"
+            onClick={handleSave}
+          >
+            Зберегти
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати пункт меню для node/edge/connector
+// ============================================================================
+
+/*
+IMPORTS:
+
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import { canvasController } from "@/controllers/canvasController";
+*/
+
+
+// ============================================================================
+// PATCH INSIDE <Menu> ... </Menu>
+// ============================================================================
+
+/*
+{contextMenu?.type === "node" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openElementInfoCardFromContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <InfoOutlinedIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Інформаційна картка</ListItemText>
+  </MenuItem>
+)}
+*/
+
+/*
+{contextMenu?.type === "connector" && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController.openElementInfoCardFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <InfoOutlinedIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Інформаційна картка</ListItemText>
+    </MenuItem>
+
+    <Divider />
+
+    // далі існуючі connector menu items
+  </>
+)}
+*/
+
+/*
+{contextMenu?.type === "edge" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openElementInfoCardFromContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <InfoOutlinedIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Інформаційна картка</ListItemText>
+  </MenuItem>
+)}
+*/
+
+
+
+// ============================================================================
+// FULL EXAMPLE: CanvasContextMenu.jsx
+// Якщо треба повністю окремий файл.
+// ============================================================================
+
+/*
+"use client";
+
+import React from "react";
+
+import {
+  Menu,
+  MenuItem,
+  Divider,
+  ListItemIcon,
+  ListItemText,
+} from "@mui/material";
+
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function CanvasContextMenu() {
+  const contextMenu = useCanvasStore((s) => s.contextMenu);
+  const clearContextMenu = useCanvasStore((s) => s.clearContextMenu);
+
+  return (
+    <Menu
+      open={!!contextMenu}
+      onClose={clearContextMenu}
+      anchorReference="anchorPosition"
+      anchorPosition={
+        contextMenu
+          ? {
+              top: contextMenu.y,
+              left: contextMenu.x,
+            }
+          : undefined
+      }
+    >
+      {contextMenu?.type === "node" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.openElementInfoCardFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <InfoOutlinedIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Інформаційна картка</ListItemText>
+        </MenuItem>
+      )}
+
+      {contextMenu?.type === "connector" && (
+        <>
+          <MenuItem
+            onClick={() => {
+              canvasController.openElementInfoCardFromContextMenu?.();
+            }}
+          >
+            <ListItemIcon>
+              <InfoOutlinedIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Інформаційна картка</ListItemText>
+          </MenuItem>
+
+          <Divider />
+
+          {contextMenu.segmentId && (
+            <>
+              <MenuItem
+                onClick={() => {
+                  canvasController.addConnectorPathHandleFromContextMenu?.();
+                }}
+              >
+                <ListItemIcon>
+                  <AddCircleOutlineIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Додати точку шляху</ListItemText>
+              </MenuItem>
+
+              <Divider />
+            </>
+          )}
+
+          <MenuItem
+            onClick={() => {
+              canvasController.deleteConnectorFromContextMenu?.();
+            }}
+          >
+            <ListItemIcon>
+              <DeleteOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Видалити лінію</ListItemText>
+          </MenuItem>
+        </>
+      )}
+
+      {contextMenu?.type === "edge" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.openElementInfoCardFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <InfoOutlinedIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Інформаційна картка</ListItemText>
+        </MenuItem>
+      )}
+
+      {contextMenu?.type === "connector-path-handle" && (
+        <MenuItem
+          onClick={() => {
+            canvasController.removeConnectorPathHandleFromContextMenu?.();
+          }}
+        >
+          <ListItemIcon>
+            <RemoveCircleOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Прибрати точку шляху</ListItemText>
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+*/
+
+
+
+// ============================================================================
+// FILE: Node rendering / NodesLayer.jsx
+// PATCH: node context menu має записувати contextMenu.type = "node"
+// ============================================================================
+
+/*
+<Group
+  onContextMenu={(e) => {
+    e.evt.preventDefault();
+    e.cancelBubble = true;
+
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+
+    const store = useCanvasStore.getState();
+
+    store.setContextMenu?.({
+      type: "node",
+      nodeId: node.id,
+      x: pointer.x,
+      y: pointer.y,
+    });
+  }}
+>
+  ...
+</Group>
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: додати modal поруч із CanvasContextMenu
+// ============================================================================
+
+/*
+import CanvasContextMenu from "@/components/canvas/CanvasContextMenu";
+import ElementInfoCardModal from "@/components/canvas/ElementInfoCardModal";
+
+export default function EditorCanvas() {
+  return (
+    <>
+      <Stage>
+        ...
+      </Stage>
+
+      <CanvasContextMenu />
+      <ElementInfoCardModal />
+    </>
+  );
+}
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/toolbar/RoleSwitcherExample.jsx
+// OPTIONAL: тестовий перемикач ролей editor / reader
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Button, Stack } from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export function RoleSwitcherExample() {
+  const userRole = useCanvasStore((s) => s.userRole);
+  const setUserRole = useCanvasStore((s) => s.setUserRole);
+
+  return (
+    <Stack direction="row" spacing={1}>
+      <Button
+        size="small"
+        variant={userRole === "editor" ? "contained" : "outlined"}
+        onClick={() => setUserRole("editor")}
+      >
+        Editor
+      </Button>
+
+      <Button
+        size="small"
+        variant={userRole === "reader" ? "contained" : "outlined"}
+        onClick={() => setUserRole("reader")}
+      >
+        Reader
+      </Button>
+    </Stack>
+  );
+}
+
+
+
+// ============================================================================
+// SERIALIZATION PATCH
+// ============================================================================
+// Якщо ти вже зробив JSON save/load, info автоматично збережеться,
+// якщо serializer бере nodes та edges повністю.
+//
+// Важливо: info — persistent state, його треба залишати у JSON.
+//
+// Приклад node:
+// {
+//   id: "node_1",
+//   ...,
+//   info: {
+//     title: "Насос №1",
+//     systemId: null,
+//     externalId: null,
+//     parameters: {},
+//     updatedAt: "..."
+//   }
+// }
+//
+// Приклад edge:
+// {
+//   id: "edge_1",
+//   kind: "connector",
+//   ...,
+//   info: {
+//     title: "Лінія подачі",
+//     systemId: null,
+//     externalId: null,
+//     parameters: {},
+//     updatedAt: "..."
+//   }
+// }
+// ============================================================================
+
+
+
+// ============================================================================
+// MIGRATION / NORMALIZATION PATCH
+// ============================================================================
+// Якщо є normalizeDiagram.js, додай дефолт info для nodes/edges.
+// ============================================================================
+
+/*
+import { createDefaultElementInfo } from "@/lib/elementInfo/elementInfoModel";
+
+export function normalizeNode(node) {
+  return {
+    ...node,
+    info: createDefaultElementInfo(node.info || {}),
+  };
+}
+
+export function normalizeEdge(edge) {
+  return {
+    ...edge,
+    info: createDefaultElementInfo(edge.info || {}),
+  };
+}
+*/
+
+
+
+// ============================================================================
+// RESULT
+// ============================================================================
+// Після підключення:
+//
+// 1. Right click node
+// 2. Click "Інформаційна картка"
+// 3. Modal opens
+// 4. Input "Назва елемента"
+// 5. Save
+// 6. node.info.title оновлено в Zustand
+//
+// Аналогічно для edge / connector:
+// edge.info.title
+//
+// Role behavior:
+// - userRole === "editor" => input enabled + save button
+// - userRole === "reader" => input disabled + only close button
+// ============================================================================

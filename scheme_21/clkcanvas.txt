@@ -1,0 +1,43 @@
+Додай/онови handler кліку по Stage так, щоб очищення було тільки при кліку саме по порожньому canvas, а не по node/edge.
+
+```tsx
+<Stage
+  ...
+  onMouseDown={(e) => {
+    const clickedOnStage = e.target === e.target.getStage();
+
+    if (!clickedOnStage) return;
+
+    const store = useCanvasStore.getState();
+
+    store.clearSelection?.();
+
+    // якщо є окремий annotation selection
+    store.clearAnnotationSelection?.();
+
+    // якщо є context menu
+    store.clearContextMenu?.();
+  }}
+>
+```
+
+Якщо в тебе selection ставиться так:
+
+```ts
+selection: { type: "node", id }
+selection: { type: "edge", id }
+```
+
+то достатньо цього в `useCanvasStore`:
+
+```ts
+clearSelection: () => set({ selection: null }),
+```
+
+Головне: у `Node` та `Connector` handlers має бути:
+
+```ts
+e.cancelBubble = true;
+```
+
+щоб клік по об’єкту не доходив до canvas.

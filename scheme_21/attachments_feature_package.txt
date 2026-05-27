@@ -1,0 +1,1442 @@
+ATTACHMENTS FEATURE READY CODE PACKAGE
+======================================
+
+Target:
+- Next.js + React + MUI + Konva
+- centralized useCanvasStore
+- centralized canvasController
+- attachments for node / edge
+- file upload to project-level catalog
+- future Oracle BLOB compatible metadata model
+- blue attachment badge on canvas
+- viewer modal for pdf / jpg / png / gif / svg
+- fallback for vsdx
+
+IMPORTANT:
+- This package uses App Router API routes: app/api/...
+- If your project uses Pages Router, use the alternative pages/api section near the bottom.
+- Files are stored in: /uploads/attachments/{attachmentId}/{originalName}
+- Public access is served through API: /api/attachments/file/{attachmentId}
+- JSON document should save only attachment metadata, not binary file content.
+
+
+================================================================================
+1) FILE: src/lib/attachments/attachmentFileTypes.js
+================================================================================
+
+export const ALLOWED_ATTACHMENT_EXTENSIONS = [
+  "pdf",
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "svg",
+  "vsdx",
+];
+
+export const ALLOWED_ATTACHMENT_MIME_TYPES = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/svg+xml",
+  "application/vnd.visio",
+  "application/vnd.ms-visio.drawing",
+  "application/vnd.ms-visio.drawing.main+xml",
+  "application/octet-stream",
+];
+
+export function getFileExtension(fileName = "") {
+  const parts = String(fileName).split(".");
+  if (parts.length < 2) return "";
+  return parts[parts.length - 1].toLowerCase();
+}
+
+export function isAllowedAttachmentFile(file) {
+  if (!file) return false;
+
+  const ext = getFileExtension(file.name);
+  if (!ALLOWED_ATTACHMENT_EXTENSIONS.includes(ext)) return false;
+
+  if (!file.type) return true;
+
+  if (ext === "vsdx") return true;
+
+  return ALLOWED_ATTACHMENT_MIME_TYPES.includes(file.type);
+}
+
+export function getAttachmentPreviewKind(file = {}) {
+  const mimeType = file.mimeType || file.type || "";
+  const name = file.originalName || file.name || "";
+  const ext = getFileExtension(name);
+
+  if (mimeType === "application/pdf" || ext === "pdf") return "pdf";
+
+  if (
+    mimeType.startsWith("image/") ||
+    ["jpg", "jpeg", "png", "gif", "svg"].includes(ext)
+  ) {
+    return "image";
+  }
+
+  if (ext === "vsdx") return "download-only";
+
+  return "download-only";
+}
+
+export function getAcceptAttribute() {
+  return ".pdf,.jpg,.jpeg,.png,.gif,.svg,.vsdx,application/pdf,image/jpeg,image/png,image/gif,image/svg+xml";
+}
+
+
+================================================================================
+2) FILE: src/lib/attachments/attachmentModel.js
+================================================================================
+
+export function createAttachment({
+  id = crypto.randomUUID(),
+  attachedTo,
+  file,
+  comment = "",
+  createdAt = new Date().toISOString(),
+  updatedAt = new Date().toISOString(),
+  createdBy = null,
+  source = "local-ui",
+}) {
+  if (!attachedTo?.type || !attachedTo?.id) {
+    throw new Error("createAttachment: attachedTo.type and attachedTo.id are required");
+  }
+
+  return {
+    id,
+    kind: "attachment",
+
+    attachedTo: {
+      type: attachedTo.type,
+      id: attachedTo.id,
+    },
+
+    file: {
+      id: file?.id || id,
+      originalName: file?.originalName || "file",
+      mimeType: file?.mimeType || "application/octet-stream",
+      size: Number(file?.size || 0),
+
+      // Now: filesystem.
+      // Future Oracle: oracle-blob.
+      storageType: file?.storageType || "filesystem",
+
+      // Now: attachmentId or relative file key.
+      // Future Oracle: attachment row id / blob id.
+      storageKey: file?.storageKey || id,
+
+      previewUrl: file?.previewUrl || `/api/attachments/file/${id}`,
+      downloadUrl: file?.downloadUrl || `/api/attachments/file/${id}?download=1`,
+    },
+
+    comment,
+
+    createdAt,
+    updatedAt,
+    createdBy,
+    source,
+  };
+}
+
+export function normalizeAttachment(raw) {
+  if (!raw) return null;
+
+  return createAttachment({
+    id: raw.id,
+    attachedTo: raw.attachedTo,
+    file: raw.file,
+    comment: raw.comment || "",
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
+    createdBy: raw.createdBy || null,
+    source: raw.source || "loaded-json",
+  });
+}
+
+
+================================================================================
+3) FILE: src/lib/attachments/attachmentGeometry.js
+================================================================================
+
+function getNodePosition(node) {
+  const x = node?.position?.x ?? node?.x ?? 0;
+  const y = node?.position?.y ?? node?.y ?? 0;
+  const width = node?.size?.width ?? node?.width ?? 120;
+  const height = node?.size?.height ?? node?.height ?? 60;
+
+  return { x, y, width, height };
+}
+
+function getEdgeCenter(edge) {
+  const pts = edge?.geometry?.points || [];
+
+  if (pts.length >= 4) {
+    const midIndex = Math.floor((pts.length / 2 - 1) / 2) * 2;
+    const x1 = pts[midIndex] ?? pts[0];
+    const y1 = pts[midIndex + 1] ?? pts[1];
+    const x2 = pts[midIndex + 2] ?? pts[pts.length - 2];
+    const y2 = pts[midIndex + 3] ?? pts[pts.length - 1];
+
+    return {
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+    };
+  }
+
+  const start = edge?.geometry?.start || edge?.start;
+  const end = edge?.geometry?.end || edge?.end;
+
+  if (start && end) {
+    return {
+      x: (start.x + end.x) / 2,
+      y: (start.y + end.y) / 2,
+    };
+  }
+
+  return { x: 0, y: 0 };
+}
+
+export function resolveAttachmentBadgePosition({
+  attachment,
+  nodes = [],
+  edges = [],
+  indexForTarget = 0,
+}) {
+  const targetType = attachment?.attachedTo?.type;
+  const targetId = attachment?.attachedTo?.id;
+
+  const badgeGap = 14;
+
+  if (targetType === "node") {
+    const node = nodes.find((n) => n.id === targetId);
+    if (!node) return null;
+
+    const rect = getNodePosition(node);
+
+    return {
+      x: rect.x + rect.width + 8,
+      y: rect.y + 8 + indexForTarget * badgeGap,
+    };
+  }
+
+  if (targetType === "edge") {
+    const edge = edges.find((e) => e.id === targetId);
+    if (!edge) return null;
+
+    const center = getEdgeCenter(edge);
+
+    return {
+      x: center.x + 10 + indexForTarget * badgeGap,
+      y: center.y - 10,
+    };
+  }
+
+  return null;
+}
+
+export function groupAttachmentIndexes(attachments = []) {
+  const counters = new Map();
+  const result = new Map();
+
+  for (const attachment of attachments) {
+    const key = `${attachment.attachedTo?.type}:${attachment.attachedTo?.id}`;
+    const index = counters.get(key) || 0;
+    counters.set(key, index + 1);
+    result.set(attachment.id, index);
+  }
+
+  return result;
+}
+
+
+================================================================================
+4) FILE: src/store/useCanvasStore.js PATCH
+================================================================================
+
+// Add to initial state:
+
+attachments: [],
+attachmentEditor: null,
+attachmentViewer: null,
+accessMode: "editor",
+
+// Add actions:
+
+setAccessMode: (accessMode) => set({ accessMode }),
+
+addAttachment: (attachment) =>
+  set((s) => ({
+    attachments: [...(s.attachments || []), attachment],
+  })),
+
+replaceAttachment: (id, nextAttachment) =>
+  set((s) => ({
+    attachments: (s.attachments || []).map((a) =>
+      a.id === id ? nextAttachment : a
+    ),
+  })),
+
+removeAttachment: (id) =>
+  set((s) => ({
+    attachments: (s.attachments || []).filter((a) => a.id !== id),
+    attachmentViewer:
+      s.attachmentViewer?.attachmentId === id ? null : s.attachmentViewer,
+  })),
+
+setAttachmentEditor: (attachmentEditor) => set({ attachmentEditor }),
+clearAttachmentEditor: () => set({ attachmentEditor: null }),
+
+setAttachmentViewer: (attachmentViewer) => set({ attachmentViewer }),
+clearAttachmentViewer: () => set({ attachmentViewer: null }),
+
+// Update replaceDocumentState if you use JSON load:
+
+replaceDocumentState: (documentState) =>
+  set((s) => ({
+    nodes: documentState.nodes || [],
+    edges: documentState.edges || [],
+    annotations: documentState.annotations || [],
+    specificationTables: documentState.specificationTables || [],
+    notes: documentState.notes || [],
+    sheet: documentState.sheet || s.sheet,
+    attachments: documentState.attachments || [],
+
+    selection: null,
+    contextMenu: null,
+    attachmentEditor: null,
+    attachmentViewer: null,
+  })),
+
+
+================================================================================
+5) FILE: src/controllers/canvasController.js PATCH
+================================================================================
+
+// Add imports:
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+// Add methods inside canvasController object:
+
+openAttachmentEditor(attachedTo) {
+  const store = useCanvasStore.getState();
+
+  if (store.accessMode === "reader") {
+    return;
+  }
+
+  if (!attachedTo?.type || !attachedTo?.id) return;
+
+  store.setAttachmentEditor?.({
+    attachedTo,
+  });
+},
+
+closeAttachmentEditor() {
+  const store = useCanvasStore.getState();
+  store.clearAttachmentEditor?.();
+},
+
+openAttachmentViewer(attachmentId) {
+  const store = useCanvasStore.getState();
+
+  const attachment = (store.attachments || []).find((a) => a.id === attachmentId);
+  if (!attachment) return;
+
+  store.setAttachmentViewer?.({
+    attachmentId,
+  });
+},
+
+closeAttachmentViewer() {
+  const store = useCanvasStore.getState();
+  store.clearAttachmentViewer?.();
+},
+
+async uploadAttachment({ attachedTo, file, comment }) {
+  const store = useCanvasStore.getState();
+
+  if (store.accessMode === "reader") {
+    return null;
+  }
+
+  if (!attachedTo?.type || !attachedTo?.id || !file) return null;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("attachedToType", attachedTo.type);
+  formData.append("attachedToId", attachedTo.id);
+  formData.append("comment", comment || "");
+
+  const response = await fetch("/api/attachments/upload", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Attachment upload failed");
+  }
+
+  const result = await response.json();
+
+  if (result?.attachment) {
+    store.addAttachment?.(result.attachment);
+    store.clearAttachmentEditor?.();
+    return result.attachment;
+  }
+
+  return null;
+},
+
+removeAttachment(attachmentId) {
+  const store = useCanvasStore.getState();
+
+  if (store.accessMode === "reader") {
+    return;
+  }
+
+  store.removeAttachment?.(attachmentId);
+},
+
+
+================================================================================
+6) FILE: src/components/attachments/AttachmentEditorModal.jsx
+================================================================================
+
+"use client";
+
+import React, { useMemo, useState } from "react";
+import {
+  Alert,
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  getAcceptAttribute,
+  isAllowedAttachmentFile,
+} from "@/lib/attachments/attachmentFileTypes";
+
+function getTargetLabel(attachedTo) {
+  if (!attachedTo) return "";
+  if (attachedTo.type === "node") return `Елемент: ${attachedTo.id}`;
+  if (attachedTo.type === "edge") return `З'єднання: ${attachedTo.id}`;
+  return `${attachedTo.type}: ${attachedTo.id}`;
+}
+
+export default function AttachmentEditorModal() {
+  const attachmentEditor = useCanvasStore((s) => s.attachmentEditor);
+  const accessMode = useCanvasStore((s) => s.accessMode);
+
+  const [file, setFile] = useState(null);
+  const [comment, setComment] = useState("");
+  const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  const open = !!attachmentEditor;
+  const readOnly = accessMode === "reader";
+
+  const targetLabel = useMemo(
+    () => getTargetLabel(attachmentEditor?.attachedTo),
+    [attachmentEditor]
+  );
+
+  const resetLocalState = () => {
+    setFile(null);
+    setComment("");
+    setError("");
+    setUploading(false);
+  };
+
+  const handleClose = () => {
+    resetLocalState();
+    canvasController.closeAttachmentEditor?.();
+  };
+
+  const handleFileChange = (event) => {
+    const nextFile = event.target.files?.[0] || null;
+    setError("");
+
+    if (!nextFile) {
+      setFile(null);
+      return;
+    }
+
+    if (!isAllowedAttachmentFile(nextFile)) {
+      setFile(null);
+      setError("Дозволені файли: pdf, jpg, jpeg, png, gif, svg, vsdx");
+      return;
+    }
+
+    setFile(nextFile);
+  };
+
+  const handleSubmit = async () => {
+    if (readOnly) return;
+
+    if (!file) {
+      setError("Оберіть файл для прикріплення");
+      return;
+    }
+
+    try {
+      setUploading(true);
+      setError("");
+
+      await canvasController.uploadAttachment?.({
+        attachedTo: attachmentEditor.attachedTo,
+        file,
+        comment,
+      });
+
+      resetLocalState();
+    } catch (err) {
+      setError(err?.message || "Помилка завантаження файлу");
+      setUploading(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Прикріпити графічний файл</DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          {targetLabel && (
+            <Typography variant="body2" color="text.secondary">
+              {targetLabel}
+            </Typography>
+          )}
+
+          {readOnly && (
+            <Alert severity="info">
+              Режим перегляду. Прикріплення файлів недоступне.
+            </Alert>
+          )}
+
+          {error && <Alert severity="error">{error}</Alert>}
+
+          <Box>
+            <Button
+              component="label"
+              variant="outlined"
+              startIcon={<AttachFileIcon />}
+              disabled={readOnly || uploading}
+            >
+              Обрати файл
+              <input
+                hidden
+                type="file"
+                accept={getAcceptAttribute()}
+                onChange={handleFileChange}
+              />
+            </Button>
+
+            {file && (
+              <Typography variant="body2" sx={{ mt: 1 }}>
+                {file.name} ({Math.round(file.size / 1024)} KB)
+              </Typography>
+            )}
+          </Box>
+
+          <TextField
+            label="Коментар"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            multiline
+            minRows={4}
+            fullWidth
+            disabled={readOnly || uploading}
+          />
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose} disabled={uploading}>
+          Закрити
+        </Button>
+
+        <Button
+          variant="contained"
+          onClick={handleSubmit}
+          disabled={readOnly || uploading}
+        >
+          {uploading ? "Завантаження..." : "Прикріпити"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+================================================================================
+7) FILE: src/components/attachments/AttachmentViewerModal.jsx
+================================================================================
+
+"use client";
+
+import React from "react";
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Stack,
+  Typography,
+} from "@mui/material";
+import DownloadIcon from "@mui/icons-material/Download";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getAttachmentPreviewKind } from "@/lib/attachments/attachmentFileTypes";
+
+export default function AttachmentViewerModal() {
+  const attachmentViewer = useCanvasStore((s) => s.attachmentViewer);
+  const attachments = useCanvasStore((s) => s.attachments || []);
+
+  const attachment = attachments.find(
+    (a) => a.id === attachmentViewer?.attachmentId
+  );
+
+  const open = !!attachmentViewer && !!attachment;
+
+  const handleClose = () => {
+    canvasController.closeAttachmentViewer?.();
+  };
+
+  if (!open) {
+    return null;
+  }
+
+  const previewKind = getAttachmentPreviewKind(attachment.file);
+  const previewUrl = attachment.file.previewUrl;
+  const downloadUrl = attachment.file.downloadUrl || previewUrl;
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="lg" fullWidth>
+      <DialogTitle>Прикріплений файл</DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <Box>
+            <Typography variant="subtitle2">
+              {attachment.file.originalName}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {attachment.file.mimeType} · {Math.round((attachment.file.size || 0) / 1024)} KB
+            </Typography>
+          </Box>
+
+          {attachment.comment && (
+            <Box>
+              <Typography variant="subtitle2">Коментар</Typography>
+              <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+                {attachment.comment}
+              </Typography>
+            </Box>
+          )}
+
+          <Divider />
+
+          {previewKind === "pdf" && (
+            <Box
+              component="iframe"
+              src={previewUrl}
+              sx={{
+                width: "100%",
+                height: "70vh",
+                border: "1px solid #ddd",
+                borderRadius: 1,
+              }}
+            />
+          )}
+
+          {previewKind === "image" && (
+            <Box
+              sx={{
+                width: "100%",
+                height: "70vh",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                overflow: "auto",
+                border: "1px solid #ddd",
+                borderRadius: 1,
+                backgroundColor: "#fafafa",
+              }}
+            >
+              <Box
+                component="img"
+                src={previewUrl}
+                alt={attachment.file.originalName}
+                sx={{
+                  maxWidth: "100%",
+                  maxHeight: "100%",
+                  objectFit: "contain",
+                }}
+              />
+            </Box>
+          )}
+
+          {previewKind === "download-only" && (
+            <Box sx={{ p: 3, border: "1px solid #ddd", borderRadius: 1 }}>
+              <Typography variant="body1" sx={{ mb: 1 }}>
+                Попередній перегляд цього типу файлу у браузері недоступний.
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Файл можна завантажити або відкрити зовнішньою програмою.
+              </Typography>
+            </Box>
+          )}
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button
+          component="a"
+          href={downloadUrl}
+          target="_blank"
+          rel="noreferrer"
+          startIcon={<DownloadIcon />}
+        >
+          Відкрити / завантажити
+        </Button>
+
+        <Button onClick={handleClose} variant="contained">
+          Закрити
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+================================================================================
+8) FILE: src/components/attachments/AttachmentBadgesLayer.jsx
+================================================================================
+
+"use client";
+
+import React from "react";
+import { Group, Circle, Text } from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  groupAttachmentIndexes,
+  resolveAttachmentBadgePosition,
+} from "@/lib/attachments/attachmentGeometry";
+
+export default function AttachmentBadgesLayer() {
+  const attachments = useCanvasStore((s) => s.attachments || []);
+  const nodes = useCanvasStore((s) => s.nodes || []);
+  const edges = useCanvasStore((s) => s.edges || []);
+
+  if (!attachments.length) return null;
+
+  const attachmentIndexes = groupAttachmentIndexes(attachments);
+
+  return (
+    <>
+      {attachments.map((attachment) => {
+        const indexForTarget = attachmentIndexes.get(attachment.id) || 0;
+
+        const pos = resolveAttachmentBadgePosition({
+          attachment,
+          nodes,
+          edges,
+          indexForTarget,
+        });
+
+        if (!pos) return null;
+
+        return (
+          <Group
+            key={attachment.id}
+            x={pos.x}
+            y={pos.y}
+            onMouseDown={(e) => {
+              e.cancelBubble = true;
+            }}
+            onClick={(e) => {
+              e.cancelBubble = true;
+              canvasController.openAttachmentViewer?.(attachment.id);
+            }}
+            onTap={(e) => {
+              e.cancelBubble = true;
+              canvasController.openAttachmentViewer?.(attachment.id);
+            }}
+          >
+            <Circle
+              radius={7}
+              fill="#2D9CDB"
+              stroke="white"
+              strokeWidth={2}
+              shadowColor="black"
+              shadowOpacity={0.18}
+              shadowBlur={3}
+            />
+
+            <Text
+              x={-3.2}
+              y={-5.7}
+              text="i"
+              fontSize={11}
+              fontStyle="bold"
+              fill="white"
+              listening={false}
+            />
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+
+================================================================================
+9) FILE: src/components/canvas/CanvasContextMenu.jsx PATCH
+================================================================================
+
+// Add import:
+
+import AttachFileIcon from "@mui/icons-material/AttachFile";
+
+// Inside NODE context menu block add:
+
+<MenuItem
+  onClick={() => {
+    canvasController.openAttachmentEditor?.({
+      type: "node",
+      id: contextMenu.nodeId,
+    });
+    clearContextMenu?.();
+  }}
+>
+  <ListItemIcon>
+    <AttachFileIcon fontSize="small" />
+  </ListItemIcon>
+  <ListItemText>Прикріпити графічний файл</ListItemText>
+</MenuItem>
+
+// Inside CONNECTOR / EDGE context menu block add:
+
+<MenuItem
+  onClick={() => {
+    canvasController.openAttachmentEditor?.({
+      type: "edge",
+      id: contextMenu.edgeId,
+    });
+    clearContextMenu?.();
+  }}
+>
+  <ListItemIcon>
+    <AttachFileIcon fontSize="small" />
+  </ListItemIcon>
+  <ListItemText>Прикріпити графічний файл</ListItemText>
+</MenuItem>
+
+
+================================================================================
+10) FILE: src/components/canvas/EditorCanvas.jsx PATCH
+================================================================================
+
+// Add imports:
+
+import AttachmentBadgesLayer from "@/components/attachments/AttachmentBadgesLayer";
+import AttachmentEditorModal from "@/components/attachments/AttachmentEditorModal";
+import AttachmentViewerModal from "@/components/attachments/AttachmentViewerModal";
+
+// Add AttachmentBadgesLayer inside Stage, above nodes/connectors or above annotations.
+// Recommended order:
+
+<Stage>
+  <PaperLayer />
+  <GridLayer />
+  <ConnectorsLayer />
+  <NodesLayer />
+  <AnnotationsLayer />
+  <SpecificationTablesLayer />
+  <AttachmentBadgesLayer />
+</Stage>
+
+// Add modals outside Stage:
+
+<AttachmentEditorModal />
+<AttachmentViewerModal />
+
+
+================================================================================
+11) FILE: src/app/api/attachments/upload/route.js
+================================================================================
+
+import { NextResponse } from "next/server";
+import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
+
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+
+const ALLOWED_EXTENSIONS = new Set([
+  "pdf",
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "svg",
+  "vsdx",
+]);
+
+function getExtension(fileName = "") {
+  const parts = String(fileName).split(".");
+  if (parts.length < 2) return "";
+  return parts[parts.length - 1].toLowerCase();
+}
+
+function sanitizeFileName(fileName = "file") {
+  const safe = String(fileName)
+    .replace(/[\\/]/g, "_")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 180);
+
+  return safe || "file";
+}
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+export async function POST(request) {
+  try {
+    const formData = await request.formData();
+
+    const file = formData.get("file");
+    const attachedToType = String(formData.get("attachedToType") || "");
+    const attachedToId = String(formData.get("attachedToId") || "");
+    const comment = String(formData.get("comment") || "");
+
+    if (!file || typeof file.arrayBuffer !== "function") {
+      return new NextResponse("File is required", { status: 400 });
+    }
+
+    if (!["node", "edge"].includes(attachedToType)) {
+      return new NextResponse("Invalid attachedToType", { status: 400 });
+    }
+
+    if (!attachedToId) {
+      return new NextResponse("attachedToId is required", { status: 400 });
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return new NextResponse("File is too large", { status: 400 });
+    }
+
+    const originalName = file.name || "file";
+    const ext = getExtension(originalName);
+
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      return new NextResponse("Unsupported file type", { status: 400 });
+    }
+
+    const attachmentId = crypto.randomUUID();
+    const safeFileName = sanitizeFileName(originalName);
+    const safeAttachedToId = sanitizeId(attachedToId);
+
+    const uploadRoot = path.join(process.cwd(), "uploads", "attachments");
+    const attachmentDir = path.join(uploadRoot, attachmentId);
+    const filePath = path.join(attachmentDir, safeFileName);
+
+    await fs.mkdir(attachmentDir, { recursive: true });
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(filePath, buffer);
+
+    const now = new Date().toISOString();
+
+    const attachment = {
+      id: attachmentId,
+      kind: "attachment",
+
+      attachedTo: {
+        type: attachedToType,
+        id: safeAttachedToId || attachedToId,
+      },
+
+      file: {
+        id: attachmentId,
+        originalName,
+        mimeType: file.type || "application/octet-stream",
+        size: file.size || buffer.length,
+        storageType: "filesystem",
+        storageKey: attachmentId,
+        previewUrl: `/api/attachments/file/${attachmentId}`,
+        downloadUrl: `/api/attachments/file/${attachmentId}?download=1`,
+      },
+
+      comment,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: null,
+      source: "filesystem",
+    };
+
+    const metadataPath = path.join(attachmentDir, "metadata.json");
+    await fs.writeFile(metadataPath, JSON.stringify(attachment, null, 2), "utf8");
+
+    return NextResponse.json({ attachment });
+  } catch (error) {
+    console.error("Attachment upload error:", error);
+    return new NextResponse("Attachment upload failed", { status: 500 });
+  }
+}
+
+
+================================================================================
+12) FILE: src/app/api/attachments/file/[id]/route.js
+================================================================================
+
+import { NextResponse } from "next/server";
+import fs from "fs/promises";
+import path from "path";
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+function contentDispositionFileName(fileName = "file") {
+  return String(fileName).replace(/["\\]/g, "_");
+}
+
+export async function GET(request, context) {
+  try {
+    const rawId = context?.params?.id || "";
+    const id = sanitizeId(rawId);
+
+    if (!id) {
+      return new NextResponse("Invalid attachment id", { status: 400 });
+    }
+
+    const attachmentDir = path.join(
+      process.cwd(),
+      "uploads",
+      "attachments",
+      id
+    );
+
+    const metadataPath = path.join(attachmentDir, "metadata.json");
+    const metadataRaw = await fs.readFile(metadataPath, "utf8");
+    const metadata = JSON.parse(metadataRaw);
+
+    const originalName = metadata?.file?.originalName || "file";
+    const entries = await fs.readdir(attachmentDir);
+
+    const fileName = entries.find((entry) => entry !== "metadata.json");
+    if (!fileName) {
+      return new NextResponse("File not found", { status: 404 });
+    }
+
+    const filePath = path.join(attachmentDir, fileName);
+    const fileBuffer = await fs.readFile(filePath);
+
+    const url = new URL(request.url);
+    const download = url.searchParams.get("download") === "1";
+
+    const headers = new Headers();
+    headers.set("Content-Type", metadata?.file?.mimeType || "application/octet-stream");
+    headers.set("Content-Length", String(fileBuffer.length));
+    headers.set(
+      "Content-Disposition",
+      `${download ? "attachment" : "inline"}; filename="${contentDispositionFileName(originalName)}"`
+    );
+    headers.set("Cache-Control", "private, max-age=0, must-revalidate");
+
+    return new NextResponse(fileBuffer, {
+      status: 200,
+      headers,
+    });
+  } catch (error) {
+    console.error("Attachment file read error:", error);
+    return new NextResponse("Attachment file not found", { status: 404 });
+  }
+}
+
+
+================================================================================
+13) FILE: src/app/api/attachments/[id]/route.js OPTIONAL DELETE
+================================================================================
+
+import { NextResponse } from "next/server";
+import fs from "fs/promises";
+import path from "path";
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+export async function DELETE(_request, context) {
+  try {
+    const id = sanitizeId(context?.params?.id || "");
+
+    if (!id) {
+      return new NextResponse("Invalid attachment id", { status: 400 });
+    }
+
+    const attachmentDir = path.join(
+      process.cwd(),
+      "uploads",
+      "attachments",
+      id
+    );
+
+    await fs.rm(attachmentDir, {
+      recursive: true,
+      force: true,
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    console.error("Attachment delete error:", error);
+    return new NextResponse("Attachment delete failed", { status: 500 });
+  }
+}
+
+
+================================================================================
+14) FILE: src/lib/serialization/buildDiagramDocument.js PATCH
+================================================================================
+
+// Add attachments to your JSON document builder.
+// Do NOT store binary file content in JSON.
+
+export function buildDiagramDocument(store) {
+  return {
+    version: CURRENT_DIAGRAM_VERSION,
+
+    metadata: {
+      editorVersion: "1.0",
+    },
+
+    sheet: store.sheet,
+    nodes: store.nodes || [],
+    edges: store.edges || [],
+    annotations: store.annotations || [],
+    specificationTables: store.specificationTables || [],
+    notes: store.notes || [],
+
+    attachments: store.attachments || [],
+
+    createdAt: store.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+
+================================================================================
+15) FILE: src/lib/serialization/normalizeDiagram.js PATCH
+================================================================================
+
+import { normalizeAttachment } from "@/lib/attachments/attachmentModel";
+
+export function normalizeDiagram(document) {
+  const safe = document || {};
+
+  return {
+    ...safe,
+    nodes: safe.nodes || [],
+    edges: safe.edges || [],
+    annotations: safe.annotations || [],
+    specificationTables: safe.specificationTables || [],
+    notes: safe.notes || [],
+    attachments: (safe.attachments || [])
+      .map(normalizeAttachment)
+      .filter(Boolean),
+  };
+}
+
+
+================================================================================
+16) ORACLE BLOB FUTURE STORAGE CONTRACT
+================================================================================
+
+// Keep frontend attachment metadata exactly the same.
+// Only storageType/storageKey/previewUrl changes.
+
+{
+  id: "att_...",
+  kind: "attachment",
+  attachedTo: {
+    type: "node",
+    id: "node_1"
+  },
+  file: {
+    id: "att_...",
+    originalName: "pump.pdf",
+    mimeType: "application/pdf",
+    size: 123456,
+    storageType: "oracle-blob",
+    storageKey: "ORACLE_ATTACHMENT_ROW_ID",
+    previewUrl: "/api/attachments/file/att_...",
+    downloadUrl: "/api/attachments/file/att_...?download=1"
+  },
+  comment: "Passport / technical drawing",
+  createdAt: "...",
+  updatedAt: "..."
+}
+
+// Oracle table example:
+
+CREATE TABLE SCHEME_ATTACHMENT (
+  ID VARCHAR2(64) PRIMARY KEY,
+  SCHEME_ID VARCHAR2(64),
+  ATTACHED_TO_TYPE VARCHAR2(16),
+  ATTACHED_TO_ID VARCHAR2(128),
+  ORIGINAL_NAME VARCHAR2(512),
+  MIME_TYPE VARCHAR2(128),
+  FILE_SIZE NUMBER,
+  FILE_BLOB BLOB,
+  COMMENT_TEXT CLOB,
+  CREATED_AT TIMESTAMP,
+  UPDATED_AT TIMESTAMP
+);
+
+
+================================================================================
+17) PAGES ROUTER ALTERNATIVE: pages/api/attachments/upload.js
+================================================================================
+
+// Only use this section if your project uses pages/api instead of app/api.
+// For multipart parsing in Pages Router, install formidable:
+// npm install formidable
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
+import formidable from "formidable";
+
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "jpeg", "png", "gif", "svg", "vsdx"]);
+
+function getExtension(fileName = "") {
+  const parts = String(fileName).split(".");
+  if (parts.length < 2) return "";
+  return parts[parts.length - 1].toLowerCase();
+}
+
+function sanitizeFileName(fileName = "file") {
+  return String(fileName)
+    .replace(/[\\/]/g, "_")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 180) || "file";
+}
+
+function parseForm(req) {
+  const form = formidable({
+    multiples: false,
+    maxFileSize: MAX_FILE_SIZE,
+  });
+
+  return new Promise((resolve, reject) => {
+    form.parse(req, (err, fields, files) => {
+      if (err) reject(err);
+      else resolve({ fields, files });
+    });
+  });
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  try {
+    const { fields, files } = await parseForm(req);
+    const uploaded = Array.isArray(files.file) ? files.file[0] : files.file;
+
+    if (!uploaded) {
+      res.status(400).send("File is required");
+      return;
+    }
+
+    const attachedToType = String(Array.isArray(fields.attachedToType) ? fields.attachedToType[0] : fields.attachedToType || "");
+    const attachedToId = String(Array.isArray(fields.attachedToId) ? fields.attachedToId[0] : fields.attachedToId || "");
+    const comment = String(Array.isArray(fields.comment) ? fields.comment[0] : fields.comment || "");
+
+    if (!["node", "edge"].includes(attachedToType)) {
+      res.status(400).send("Invalid attachedToType");
+      return;
+    }
+
+    const originalName = uploaded.originalFilename || "file";
+    const ext = getExtension(originalName);
+
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      res.status(400).send("Unsupported file type");
+      return;
+    }
+
+    const attachmentId = crypto.randomUUID();
+    const safeFileName = sanitizeFileName(originalName);
+
+    const uploadRoot = path.join(process.cwd(), "uploads", "attachments");
+    const attachmentDir = path.join(uploadRoot, attachmentId);
+    const filePath = path.join(attachmentDir, safeFileName);
+
+    await fs.mkdir(attachmentDir, { recursive: true });
+    await fs.copyFile(uploaded.filepath, filePath);
+
+    const now = new Date().toISOString();
+
+    const attachment = {
+      id: attachmentId,
+      kind: "attachment",
+      attachedTo: {
+        type: attachedToType,
+        id: attachedToId,
+      },
+      file: {
+        id: attachmentId,
+        originalName,
+        mimeType: uploaded.mimetype || "application/octet-stream",
+        size: uploaded.size || 0,
+        storageType: "filesystem",
+        storageKey: attachmentId,
+        previewUrl: `/api/attachments/file/${attachmentId}`,
+        downloadUrl: `/api/attachments/file/${attachmentId}?download=1`,
+      },
+      comment,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: null,
+      source: "filesystem",
+    };
+
+    await fs.writeFile(
+      path.join(attachmentDir, "metadata.json"),
+      JSON.stringify(attachment, null, 2),
+      "utf8"
+    );
+
+    res.status(200).json({ attachment });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Attachment upload failed");
+  }
+}
+
+
+================================================================================
+18) PAGES ROUTER ALTERNATIVE: pages/api/attachments/file/[id].js
+================================================================================
+
+import fs from "fs/promises";
+import path from "path";
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "GET") {
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  try {
+    const id = sanitizeId(req.query.id || "");
+    const attachmentDir = path.join(process.cwd(), "uploads", "attachments", id);
+    const metadataRaw = await fs.readFile(path.join(attachmentDir, "metadata.json"), "utf8");
+    const metadata = JSON.parse(metadataRaw);
+
+    const entries = await fs.readdir(attachmentDir);
+    const fileName = entries.find((entry) => entry !== "metadata.json");
+
+    if (!fileName) {
+      res.status(404).send("File not found");
+      return;
+    }
+
+    const buffer = await fs.readFile(path.join(attachmentDir, fileName));
+    const originalName = metadata.file?.originalName || "file";
+    const download = req.query.download === "1";
+
+    res.setHeader("Content-Type", metadata.file?.mimeType || "application/octet-stream");
+    res.setHeader("Content-Length", String(buffer.length));
+    res.setHeader(
+      "Content-Disposition",
+      `${download ? "attachment" : "inline"}; filename="${String(originalName).replace(/["\\]/g, "_")}"`
+    );
+
+    res.status(200).send(buffer);
+  } catch (error) {
+    console.error(error);
+    res.status(404).send("Attachment file not found");
+  }
+}
+
+
+================================================================================
+19) QUICK INTEGRATION CHECKLIST
+================================================================================
+
+1. Create folders:
+   src/lib/attachments
+   src/components/attachments
+   src/app/api/attachments/upload
+   src/app/api/attachments/file/[id]
+   src/app/api/attachments/[id]
+
+2. Add store fields/actions.
+
+3. Add controller methods.
+
+4. Add context menu item for node and edge.
+
+5. Add inside Stage:
+   <AttachmentBadgesLayer />
+
+6. Add outside Stage:
+   <AttachmentEditorModal />
+   <AttachmentViewerModal />
+
+7. Add attachments to JSON save/load document.
+
+8. Add uploads folder to .gitignore if needed:
+
+   uploads/
+
+9. Test:
+   - right click node -> attach file
+   - right click edge -> attach file
+   - blue badge appears
+   - click blue badge -> viewer opens
+   - pdf opens in iframe
+   - image opens in image preview
+   - vsdx shows download-only message
+
+END PACKAGE
