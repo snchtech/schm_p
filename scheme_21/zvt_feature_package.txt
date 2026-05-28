@@ -1,0 +1,1494 @@
+// ============================================================================
+// ZVT FEATURE PACKAGE
+// Next.js + React Konva + MUI + Zustand
+// ============================================================================
+// PURPOSE:
+// Готовий стартовий пакет для реалізації графічного елементу ЗВТ:
+// - окрема сутність zvts[] на рівні store
+// - форма створення/редагування через MUI Dialog
+// - прив'язка до node або edge/connector
+// - ортогональна лінія приєднання
+// - рендер символу ЗВТ на Konva canvas
+// - drag символу
+// - context menu item "Додати ЗВТ"
+// - JSON serialization-ready структура
+// - PDF/SVG export-ready модель
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtDictionaries.js
+// ============================================================================
+
+export const ZVT_INSTALL_PLACES = [
+  {
+    value: "local",
+    label: "За місцем",
+    description: "Коло без горизонтальної лінії",
+    hasDivider: false,
+  },
+  {
+    value: "BTY",
+    label: "BTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+  {
+    value: "MTY",
+    label: "MTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+  {
+    value: "RTY",
+    label: "RTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+];
+
+export const ZVT_PARAMETERS = [
+  {
+    value: "F",
+    label: "F — витрата",
+  },
+  {
+    value: "P",
+    label: "P — тиск",
+  },
+  {
+    value: "L",
+    label: "L — рівень",
+  },
+  {
+    value: "T",
+    label: "T — температура",
+  },
+  {
+    value: "ae",
+    label: "ae — електропровідність",
+  },
+  {
+    value: "pH",
+    label: "pH — pH середовища",
+  },
+];
+
+export const ZVT_FUNCTION_SIGNS = [
+  {
+    value: "A",
+    label: "A — сигналізація",
+  },
+  {
+    value: "B",
+    label: "B — режимні блокування",
+  },
+  {
+    value: "C",
+    label: "C — регулювання",
+  },
+  {
+    value: "F",
+    label: "F — блокування",
+  },
+  {
+    value: "J",
+    label: "J — покази на стрілочних приладах",
+  },
+  {
+    value: "R",
+    label: "R — реєстрація на записуючих приладах",
+  },
+  {
+    value: "S",
+    label: "S — захисти",
+  },
+];
+
+export const ZVT_SIGNAL_DIRECTIONS = [
+  {
+    value: "none",
+    label: "Не передається",
+  },
+  {
+    value: "left",
+    label: "Вліво",
+  },
+  {
+    value: "right",
+    label: "Вправо",
+  },
+];
+
+export const ZVT_RECIPIENTS = [
+  {
+    value: "1",
+    label: "1 — дисплей",
+  },
+  {
+    value: "2",
+    label: "2 — сигналізація",
+  },
+  {
+    value: "3",
+    label: "3 — розрахунки",
+  },
+  {
+    value: "4",
+    label: "4 — реєстрація періодична",
+  },
+  {
+    value: "5",
+    label: "5 — реєстрація відхилень",
+  },
+  {
+    value: "6",
+    label: "6 — реєстрація дискретних сигналів",
+  },
+];
+
+export const ZVT_ACTION_SIGNS = [
+  {
+    value: "none",
+    label: "Без позначення",
+  },
+  {
+    value: "+",
+    label: "+",
+  },
+  {
+    value: "-",
+    label: "-",
+  },
+  {
+    value: "+-",
+    label: "+ та -",
+  },
+];
+
+export function getZvtInstallPlace(value) {
+  return ZVT_INSTALL_PLACES.find((item) => item.value === value) || ZVT_INSTALL_PLACES[0];
+}
+
+export function getZvtParameterLabel(value) {
+  return ZVT_PARAMETERS.find((item) => item.value === value)?.label || value;
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtModel.js
+// ============================================================================
+
+export function createZvt({
+  id = crypto.randomUUID(),
+  attachedTo,
+  anchor = {},
+  position = {},
+  data = {},
+  route = {},
+  style = {},
+} = {}) {
+  return {
+    id,
+    kind: "zvt",
+
+    attachedTo: attachedTo || {
+      type: "none",
+      id: null,
+      segmentId: null,
+    },
+
+    anchor: {
+      x: anchor.x ?? 0,
+      y: anchor.y ?? 0,
+      side: anchor.side ?? null,
+    },
+
+    position: {
+      x: position.x ?? 0,
+      y: position.y ?? 0,
+    },
+
+    route: {
+      type: route.type || "orthogonal",
+      vertices: Array.isArray(route.vertices) ? route.vertices : [],
+      preferredSide: route.preferredSide || "auto",
+    },
+
+    data: {
+      installPlace: data.installPlace || "local",
+      parameter: data.parameter || "F",
+      functionSigns: Array.isArray(data.functionSigns) ? data.functionSigns : [],
+      signal: {
+        enabled: data.signal?.enabled ?? false,
+        direction: data.signal?.direction || "right",
+      },
+      recipients: Array.isArray(data.recipients) ? data.recipients : [],
+      actionSign: data.actionSign || "none",
+      tag: data.tag || "",
+      comment: data.comment || "",
+    },
+
+    style: {
+      radius: style.radius ?? 26,
+      stroke: style.stroke || "black",
+      strokeWidth: style.strokeWidth ?? 2,
+      fill: style.fill || "white",
+      fontFamily: style.fontFamily || "Roboto Condensed",
+      fontSize: style.fontSize ?? 14,
+      smallFontSize: style.smallFontSize ?? 12,
+      selectedStroke: style.selectedStroke || "#2F80ED",
+    },
+
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+export function updateZvtData(zvt, nextData) {
+  return {
+    ...zvt,
+    data: {
+      ...zvt.data,
+      ...nextData,
+      signal: {
+        ...zvt.data?.signal,
+        ...nextData?.signal,
+      },
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+export function moveZvt(zvt, position) {
+  return {
+    ...zvt,
+    position: {
+      x: position.x,
+      y: position.y,
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtGeometry.js
+// ============================================================================
+
+function getNodeRect(node) {
+  const x = node?.position?.x ?? node?.x ?? 0;
+  const y = node?.position?.y ?? node?.y ?? 0;
+  const width = node?.size?.width ?? node?.width ?? 120;
+  const height = node?.size?.height ?? node?.height ?? 60;
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    centerX: x + width / 2,
+    centerY: y + height / 2,
+  };
+}
+
+function getEdgeCenter(edge) {
+  const points = edge?.geometry?.points || [];
+  if (points.length >= 4) {
+    const middleIndex = Math.max(0, Math.floor(points.length / 4) * 2 - 2);
+    const x1 = points[middleIndex] ?? points[0];
+    const y1 = points[middleIndex + 1] ?? points[1];
+    const x2 = points[middleIndex + 2] ?? points[points.length - 2];
+    const y2 = points[middleIndex + 3] ?? points[points.length - 1];
+
+    return {
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+    };
+  }
+
+  return {
+    x: edge?.geometry?.start?.x ?? edge?.start?.x ?? 0,
+    y: edge?.geometry?.start?.y ?? edge?.start?.y ?? 0,
+  };
+}
+
+function getEdgeSegmentCenter(edge, segmentId) {
+  const segment = edge?.geometry?.segmentsMeta?.find((seg) => seg.id === segmentId);
+  if (!segment) return getEdgeCenter(edge);
+
+  return {
+    x: (segment.x1 + segment.x2) / 2,
+    y: (segment.y1 + segment.y2) / 2,
+  };
+}
+
+function getNearestNodeSide(rect, target) {
+  const distances = [
+    {
+      side: "left",
+      x: rect.x,
+      y: rect.centerY,
+      d: Math.abs(target.x - rect.x),
+    },
+    {
+      side: "right",
+      x: rect.x + rect.width,
+      y: rect.centerY,
+      d: Math.abs(target.x - (rect.x + rect.width)),
+    },
+    {
+      side: "top",
+      x: rect.centerX,
+      y: rect.y,
+      d: Math.abs(target.y - rect.y),
+    },
+    {
+      side: "bottom",
+      x: rect.centerX,
+      y: rect.y + rect.height,
+      d: Math.abs(target.y - (rect.y + rect.height)),
+    },
+  ];
+
+  distances.sort((a, b) => a.d - b.d);
+  return distances[0];
+}
+
+export function resolveZvtAnchor(zvt, nodes = [], edges = []) {
+  if (!zvt?.attachedTo) {
+    return {
+      x: zvt?.anchor?.x ?? 0,
+      y: zvt?.anchor?.y ?? 0,
+      side: null,
+    };
+  }
+
+  if (zvt.attachedTo.type === "node") {
+    const node = nodes.find((item) => item.id === zvt.attachedTo.id);
+    if (!node) return zvt.anchor || { x: 0, y: 0, side: null };
+
+    const rect = getNodeRect(node);
+    const symbol = zvt.position || { x: rect.centerX + 100, y: rect.centerY };
+    const sidePoint = getNearestNodeSide(rect, symbol);
+
+    return {
+      x: sidePoint.x,
+      y: sidePoint.y,
+      side: sidePoint.side,
+    };
+  }
+
+  if (zvt.attachedTo.type === "edge") {
+    const edge = edges.find((item) => item.id === zvt.attachedTo.id);
+    if (!edge) return zvt.anchor || { x: 0, y: 0, side: null };
+
+    const center = zvt.attachedTo.segmentId
+      ? getEdgeSegmentCenter(edge, zvt.attachedTo.segmentId)
+      : getEdgeCenter(edge);
+
+    return {
+      x: center.x,
+      y: center.y,
+      side: null,
+    };
+  }
+
+  return zvt.anchor || { x: 0, y: 0, side: null };
+}
+
+export function createInitialZvtPosition(anchor) {
+  return {
+    x: anchor.x + 120,
+    y: anchor.y - 80,
+  };
+}
+
+export function buildZvtLeaderRoute({ anchor, symbol, radius = 26 }) {
+  if (!anchor || !symbol) return [];
+
+  const dx = symbol.x - anchor.x;
+  const dy = symbol.y - anchor.y;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+
+  let attachPoint;
+
+  if (absDx >= absDy) {
+    attachPoint = {
+      x: symbol.x + (dx >= 0 ? -radius : radius),
+      y: symbol.y,
+    };
+  } else {
+    attachPoint = {
+      x: symbol.x,
+      y: symbol.y + (dy >= 0 ? -radius : radius),
+    };
+  }
+
+  const mid = absDx >= absDy
+    ? {
+        x: attachPoint.x,
+        y: anchor.y,
+      }
+    : {
+        x: anchor.x,
+        y: attachPoint.y,
+      };
+
+  return [
+    anchor.x,
+    anchor.y,
+    mid.x,
+    mid.y,
+    attachPoint.x,
+    attachPoint.y,
+  ];
+}
+
+export function buildZvtSignalGeometry(zvt) {
+  const radius = zvt?.style?.radius ?? 26;
+  const x = zvt?.position?.x ?? 0;
+  const y = zvt?.position?.y ?? 0;
+  const signal = zvt?.data?.signal;
+
+  if (!signal?.enabled) return null;
+
+  const direction = signal.direction || "right";
+  const sign = direction === "left" ? -1 : 1;
+
+  const startX = x + sign * radius;
+  const endX = x + sign * (radius + 86);
+  const lineY = y;
+
+  const arrowSize = 9;
+
+  const arrowPoints = direction === "right"
+    ? [
+        endX,
+        lineY,
+        endX - arrowSize,
+        lineY - arrowSize / 2,
+        endX - arrowSize,
+        lineY + arrowSize / 2,
+      ]
+    : [
+        endX,
+        lineY,
+        endX + arrowSize,
+        lineY - arrowSize / 2,
+        endX + arrowSize,
+        lineY + arrowSize / 2,
+      ];
+
+  const textX = direction === "right" ? x + radius + 8 : endX;
+  const textY = y - 34;
+
+  return {
+    line: [startX, lineY, endX, lineY],
+    arrowPoints,
+    labelX: textX,
+    labelY: textY,
+    labelWidth: Math.abs(endX - startX),
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/components/zvt/ZvtSymbol.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Group, Circle, Line, Text } from "react-konva";
+import { getZvtInstallPlace } from "@/lib/zvt/zvtDictionaries";
+import { buildZvtSignalGeometry } from "@/lib/zvt/zvtGeometry";
+
+function joinUpperSigns(functionSigns) {
+  if (!Array.isArray(functionSigns) || functionSigns.length === 0) return "";
+  return functionSigns.join("");
+}
+
+function joinRecipients(recipients) {
+  if (!Array.isArray(recipients) || recipients.length === 0) return "";
+  return `M${recipients.join(",")}`;
+}
+
+export default function ZvtSymbol({
+  zvt,
+  selected = false,
+  draggable = true,
+  onClick,
+  onDblClick,
+  onContextMenu,
+  onDragMove,
+  onDragEnd,
+}) {
+  const x = zvt.position?.x ?? 0;
+  const y = zvt.position?.y ?? 0;
+  const radius = zvt.style?.radius ?? 26;
+  const stroke = selected ? zvt.style?.selectedStroke || "#2F80ED" : zvt.style?.stroke || "black";
+  const strokeWidth = selected ? Math.max(zvt.style?.strokeWidth || 2, 3) : zvt.style?.strokeWidth || 2;
+  const fill = zvt.style?.fill || "white";
+  const fontFamily = zvt.style?.fontFamily || "Roboto Condensed";
+  const fontSize = zvt.style?.fontSize ?? 14;
+  const smallFontSize = zvt.style?.smallFontSize ?? 12;
+
+  const installPlace = getZvtInstallPlace(zvt.data?.installPlace);
+  const upper = joinUpperSigns(zvt.data?.functionSigns);
+  const lower = zvt.data?.parameter || "";
+  const signalGeometry = buildZvtSignalGeometry(zvt);
+  const recipientsLabel = joinRecipients(zvt.data?.recipients);
+  const actionSign = zvt.data?.actionSign || "none";
+
+  return (
+    <Group
+      x={x}
+      y={y}
+      draggable={draggable}
+      onClick={onClick}
+      onTap={onClick}
+      onDblClick={onDblClick}
+      onContextMenu={onContextMenu}
+      onDragMove={onDragMove}
+      onDragEnd={onDragEnd}
+    >
+      <Circle
+        x={0}
+        y={0}
+        radius={radius}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {installPlace.hasDivider && (
+        <Line
+          points={[-radius, 0, radius, 0]}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+        />
+      )}
+
+      <Text
+        x={-radius}
+        y={installPlace.hasDivider ? -radius + 5 : -fontSize / 2}
+        width={radius * 2}
+        height={installPlace.hasDivider ? radius - 4 : fontSize + 4}
+        text={installPlace.hasDivider ? upper : lower}
+        fontFamily={fontFamily}
+        fontSize={fontSize}
+        fontStyle="bold"
+        align="center"
+        verticalAlign="middle"
+        fill="black"
+      />
+
+      {installPlace.hasDivider && (
+        <Text
+          x={-radius}
+          y={2}
+          width={radius * 2}
+          height={radius - 4}
+          text={lower}
+          fontFamily={fontFamily}
+          fontSize={fontSize}
+          fontStyle="bold"
+          align="center"
+          verticalAlign="middle"
+          fill="black"
+        />
+      )}
+
+      {actionSign !== "none" && (
+        <Text
+          x={radius - 2}
+          y={-radius - 20}
+          width={40}
+          height={24}
+          text={actionSign}
+          fontFamily={fontFamily}
+          fontSize={20}
+          fontStyle="bold"
+          fill="black"
+        />
+      )}
+
+      {signalGeometry && (
+        <>
+          <Line
+            points={signalGeometry.line.map((value, index) => (index % 2 === 0 ? value - x : value - y))}
+            stroke="black"
+            strokeWidth={2}
+            dash={[18, 8]}
+          />
+
+          <Line
+            points={signalGeometry.arrowPoints.map((value, index) => (index % 2 === 0 ? value - x : value - y))}
+            closed
+            fill="black"
+            stroke="black"
+            strokeWidth={1}
+          />
+
+          <Text
+            x={signalGeometry.labelX - x}
+            y={signalGeometry.labelY - y}
+            width={signalGeometry.labelWidth}
+            text={recipientsLabel}
+            fontFamily={fontFamily}
+            fontSize={smallFontSize + 2}
+            fontStyle="bold"
+            fill="black"
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+
+
+
+// ============================================================================
+// FILE: src/components/zvt/ZvtLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Group, Line } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import ZvtSymbol from "@/components/zvt/ZvtSymbol";
+import { buildZvtLeaderRoute, resolveZvtAnchor } from "@/lib/zvt/zvtGeometry";
+
+export default function ZvtLayer() {
+  const zvts = useCanvasStore((s) => s.zvts || []);
+  const nodes = useCanvasStore((s) => s.nodes || []);
+  const edges = useCanvasStore((s) => s.edges || []);
+  const selection = useCanvasStore((s) => s.selection);
+  const setSelection = useCanvasStore((s) => s.setSelection);
+  const accessMode = useCanvasStore((s) => s.accessMode || "editor");
+
+  const readOnly = accessMode === "reader";
+
+  return (
+    <>
+      {zvts.map((zvt) => {
+        const selected = selection?.type === "zvt" && selection?.id === zvt.id;
+        const anchor = resolveZvtAnchor(zvt, nodes, edges);
+        const leaderPoints = buildZvtLeaderRoute({
+          anchor,
+          symbol: zvt.position,
+          radius: zvt.style?.radius ?? 26,
+        });
+
+        return (
+          <Group key={zvt.id}>
+            {leaderPoints.length >= 4 && (
+              <Line
+                points={leaderPoints}
+                stroke={selected ? "#2F80ED" : "black"}
+                strokeWidth={selected ? 2.5 : 2}
+                lineCap="round"
+                lineJoin="round"
+                listening={false}
+              />
+            )}
+
+            <ZvtSymbol
+              zvt={zvt}
+              selected={selected}
+              draggable={!readOnly}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection?.({ type: "zvt", id: zvt.id });
+              }}
+              onDblClick={(e) => {
+                e.cancelBubble = true;
+                canvasController.openZvtEditor?.({
+                  zvtId: zvt.id,
+                  attachedTo: zvt.attachedTo,
+                });
+              }}
+              onContextMenu={(e) => {
+                e.evt.preventDefault();
+                e.cancelBubble = true;
+                canvasController.handleZvtContextMenu?.(e, zvt);
+              }}
+              onDragMove={(e) => {
+                canvasController.moveZvt?.(zvt.id, {
+                  x: e.target.x(),
+                  y: e.target.y(),
+                });
+              }}
+              onDragEnd={(e) => {
+                canvasController.moveZvt?.(zvt.id, {
+                  x: e.target.x(),
+                  y: e.target.y(),
+                });
+              }}
+            />
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+
+
+// ============================================================================
+// FILE: src/components/zvt/ZvtEditorModal.jsx
+// ============================================================================
+
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControl,
+  FormControlLabel,
+  FormGroup,
+  FormLabel,
+  Radio,
+  RadioGroup,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  ZVT_ACTION_SIGNS,
+  ZVT_FUNCTION_SIGNS,
+  ZVT_INSTALL_PLACES,
+  ZVT_PARAMETERS,
+  ZVT_RECIPIENTS,
+  ZVT_SIGNAL_DIRECTIONS,
+} from "@/lib/zvt/zvtDictionaries";
+
+function toggleArrayValue(array, value) {
+  if (array.includes(value)) {
+    return array.filter((item) => item !== value);
+  }
+
+  return [...array, value];
+}
+
+export default function ZvtEditorModal() {
+  const zvtEditor = useCanvasStore((s) => s.zvtEditor);
+  const zvts = useCanvasStore((s) => s.zvts || []);
+  const accessMode = useCanvasStore((s) => s.accessMode || "editor");
+
+  const readOnly = accessMode === "reader";
+  const open = !!zvtEditor;
+
+  const existing = useMemo(() => {
+    if (!zvtEditor?.zvtId) return null;
+    return zvts.find((item) => item.id === zvtEditor.zvtId) || null;
+  }, [zvtEditor, zvts]);
+
+  const [installPlace, setInstallPlace] = useState("local");
+  const [parameter, setParameter] = useState("F");
+  const [functionSigns, setFunctionSigns] = useState([]);
+  const [signalDirection, setSignalDirection] = useState("none");
+  const [recipients, setRecipients] = useState([]);
+  const [actionSign, setActionSign] = useState("none");
+  const [tag, setTag] = useState("");
+  const [comment, setComment] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+
+    if (existing) {
+      setInstallPlace(existing.data?.installPlace || "local");
+      setParameter(existing.data?.parameter || "F");
+      setFunctionSigns(existing.data?.functionSigns || []);
+      setSignalDirection(existing.data?.signal?.enabled ? existing.data?.signal?.direction || "right" : "none");
+      setRecipients(existing.data?.recipients || []);
+      setActionSign(existing.data?.actionSign || "none");
+      setTag(existing.data?.tag || "");
+      setComment(existing.data?.comment || "");
+      return;
+    }
+
+    setInstallPlace("local");
+    setParameter("F");
+    setFunctionSigns([]);
+    setSignalDirection("none");
+    setRecipients([]);
+    setActionSign("none");
+    setTag("");
+    setComment("");
+  }, [open, existing]);
+
+  const handleClose = () => {
+    canvasController.closeZvtEditor?.();
+  };
+
+  const handleSave = () => {
+    if (readOnly) return;
+
+    const payload = {
+      installPlace,
+      parameter,
+      functionSigns,
+      signal: {
+        enabled: signalDirection !== "none",
+        direction: signalDirection === "none" ? "right" : signalDirection,
+      },
+      recipients,
+      actionSign,
+      tag,
+      comment,
+    };
+
+    if (existing) {
+      canvasController.updateZvtFromEditor?.(existing.id, payload);
+    } else {
+      canvasController.createZvtFromEditor?.({
+        attachedTo: zvtEditor?.attachedTo,
+        data: payload,
+      });
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
+      <DialogTitle>ЗВТ</DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={3}>
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Місце встановлення
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={installPlace}
+                onChange={(e) => setInstallPlace(e.target.value)}
+              >
+                {ZVT_INSTALL_PLACES.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Вид параметру
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={parameter}
+                onChange={(e) => setParameter(e.target.value)}
+              >
+                {ZVT_PARAMETERS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <FormControl component="fieldset" disabled={readOnly}>
+              <FormLabel component="legend">
+                Функціональна ознака вимірюваного параметра
+              </FormLabel>
+
+              <FormGroup row>
+                {ZVT_FUNCTION_SIGNS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    control={
+                      <Checkbox
+                        checked={functionSigns.includes(item.value)}
+                        onChange={() => setFunctionSigns((current) => toggleArrayValue(current, item.value))}
+                      />
+                    }
+                    label={item.label}
+                  />
+                ))}
+              </FormGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Передача сигналу
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={signalDirection}
+                onChange={(e) => setSignalDirection(e.target.value)}
+              >
+                {ZVT_SIGNAL_DIRECTIONS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Box>
+            <FormControl component="fieldset" disabled={readOnly || signalDirection === "none"}>
+              <FormLabel component="legend">Адресат</FormLabel>
+
+              <FormGroup row>
+                {ZVT_RECIPIENTS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    control={
+                      <Checkbox
+                        checked={recipients.includes(item.value)}
+                        onChange={() => setRecipients((current) => toggleArrayValue(current, item.value))}
+                      />
+                    }
+                    label={item.label}
+                  />
+                ))}
+              </FormGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Позначення дії приладу
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={actionSign}
+                onChange={(e) => setActionSign(e.target.value)}
+              >
+                {ZVT_ACTION_SIGNS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <TextField
+            label="Позначення / тег"
+            value={tag}
+            onChange={(e) => setTag(e.target.value)}
+            disabled={readOnly}
+            fullWidth
+          />
+
+          <TextField
+            label="Коментар"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            disabled={readOnly}
+            minRows={3}
+            multiline
+            fullWidth
+          />
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose}>Закрити</Button>
+
+        {!readOnly && (
+          <Button variant="contained" onClick={handleSave}>
+            Зберегти
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// FILE: src/store/useCanvasStore.js
+// PATCH: вставити у твій existing store
+// ============================================================================
+
+// 1) STATE
+
+zvts: [],
+zvtEditor: null,
+
+// 2) ACTIONS
+
+addZvt: (zvt) =>
+  set((s) => ({
+    zvts: [...(s.zvts || []), zvt],
+  })),
+
+replaceZvt: (id, nextZvt) =>
+  set((s) => ({
+    zvts: (s.zvts || []).map((zvt) => (zvt.id === id ? nextZvt : zvt)),
+  })),
+
+removeZvt: (id) =>
+  set((s) => ({
+    zvts: (s.zvts || []).filter((zvt) => zvt.id !== id),
+    selection: s.selection?.type === "zvt" && s.selection?.id === id ? null : s.selection,
+  })),
+
+setZvtEditor: (zvtEditor) => set({ zvtEditor }),
+clearZvtEditor: () => set({ zvtEditor: null }),
+
+// 3) JSON SAVE/LOAD PATCH
+// У replaceDocumentState додати:
+
+zvts: Array.isArray(document.zvts) ? document.zvts : [],
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: imports
+// ============================================================================
+
+import { createZvt, moveZvt, updateZvtData } from "@/lib/zvt/zvtModel";
+import { createInitialZvtPosition, resolveZvtAnchor } from "@/lib/zvt/zvtGeometry";
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: вставити методи в об'єкт canvasController
+// ============================================================================
+
+openZvtEditor({ attachedTo = null, zvtId = null } = {}) {
+  const store = useCanvasStore.getState();
+
+  store.setZvtEditor?.({
+    attachedTo,
+    zvtId,
+  });
+},
+
+closeZvtEditor() {
+  const store = useCanvasStore.getState();
+  store.clearZvtEditor?.();
+},
+
+createZvtFromEditor({ attachedTo, data }) {
+  const store = useCanvasStore.getState();
+
+  if ((store.accessMode || "editor") === "reader") return;
+  if (!attachedTo?.type || !attachedTo?.id) return;
+
+  const tempZvt = createZvt({
+    attachedTo,
+    data,
+  });
+
+  const anchor = resolveZvtAnchor(tempZvt, store.nodes, store.edges);
+  const position = createInitialZvtPosition(anchor);
+
+  const zvt = createZvt({
+    attachedTo,
+    anchor,
+    position,
+    data,
+  });
+
+  store.addZvt?.(zvt);
+  store.setSelection?.({ type: "zvt", id: zvt.id });
+  store.clearZvtEditor?.();
+},
+
+updateZvtFromEditor(zvtId, data) {
+  const store = useCanvasStore.getState();
+
+  if ((store.accessMode || "editor") === "reader") return;
+
+  const zvt = (store.zvts || []).find((item) => item.id === zvtId);
+  if (!zvt) return;
+
+  const next = updateZvtData(zvt, data);
+
+  store.replaceZvt?.(zvtId, next);
+  store.clearZvtEditor?.();
+},
+
+moveZvt(zvtId, position) {
+  const store = useCanvasStore.getState();
+
+  if ((store.accessMode || "editor") === "reader") return;
+
+  const zvt = (store.zvts || []).find((item) => item.id === zvtId);
+  if (!zvt) return;
+
+  const next = moveZvt(zvt, position);
+  store.replaceZvt?.(zvtId, next);
+},
+
+handleZvtContextMenu(e, zvt) {
+  e.evt.preventDefault();
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+  if (!pointer) return;
+
+  const store = useCanvasStore.getState();
+
+  store.setContextMenu?.({
+    type: "zvt",
+    zvtId: zvt.id,
+    x: pointer.x,
+    y: pointer.y,
+  });
+},
+
+editZvtFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (!menu || menu.type !== "zvt" || !menu.zvtId) return;
+
+  const zvt = (store.zvts || []).find((item) => item.id === menu.zvtId);
+  if (!zvt) return;
+
+  store.setZvtEditor?.({
+    zvtId: zvt.id,
+    attachedTo: zvt.attachedTo,
+  });
+
+  store.clearContextMenu?.();
+},
+
+deleteZvtFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if ((store.accessMode || "editor") === "reader") return;
+  if (!menu || menu.type !== "zvt" || !menu.zvtId) return;
+
+  store.removeZvt?.(menu.zvtId);
+  store.clearContextMenu?.();
+},
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: imports
+// ============================================================================
+
+import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати в меню node
+// ============================================================================
+
+{contextMenu?.type === "node" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openZvtEditor?.({
+        attachedTo: {
+          type: "node",
+          id: contextMenu.nodeId,
+        },
+      });
+      clearContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <SettingsInputComponentIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Додати ЗВТ</ListItemText>
+  </MenuItem>
+)}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати в меню connector/edge
+// ============================================================================
+
+{contextMenu?.type === "connector" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openZvtEditor?.({
+        attachedTo: {
+          type: "edge",
+          id: contextMenu.edgeId,
+          segmentId: contextMenu.segmentId || null,
+        },
+      });
+      clearContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <SettingsInputComponentIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Додати ЗВТ</ListItemText>
+  </MenuItem>
+)}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати меню для самого ZVT
+// ============================================================================
+
+{contextMenu?.type === "zvt" && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController.editZvtFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <EditOutlinedIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Редагувати ЗВТ</ListItemText>
+    </MenuItem>
+
+    <MenuItem
+      onClick={() => {
+        canvasController.deleteZvtFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <DeleteOutlineIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Видалити ЗВТ</ListItemText>
+    </MenuItem>
+  </>
+)}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: imports
+// ============================================================================
+
+import ZvtLayer from "@/components/zvt/ZvtLayer";
+import ZvtEditorModal from "@/components/zvt/ZvtEditorModal";
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: render layers
+// ============================================================================
+
+<ConnectorsLayer />
+<NodesLayer />
+<AnnotationsLayer />
+<ZvtLayer />
+<AttachmentBadgesLayer />
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: render modals outside Stage
+// ============================================================================
+
+<ZvtEditorModal />
+
+
+
+// ============================================================================
+// FILE: src/lib/serialization/buildDiagramDocument.js
+// PATCH: додати zvts
+// ============================================================================
+
+zvts: Array.isArray(store.zvts) ? store.zvts : [],
+
+
+
+// ============================================================================
+// FILE: src/lib/serialization/normalizeDiagram.js
+// PATCH: додати дефолт
+// ============================================================================
+
+export function normalizeDiagramDocument(document) {
+  return {
+    ...document,
+    nodes: Array.isArray(document.nodes) ? document.nodes : [],
+    edges: Array.isArray(document.edges) ? document.edges : [],
+    annotations: Array.isArray(document.annotations) ? document.annotations : [],
+    zvts: Array.isArray(document.zvts) ? document.zvts : [],
+    attachments: Array.isArray(document.attachments) ? document.attachments : [],
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/export/zvtSvgRenderer.js
+// ============================================================================
+
+import { getZvtInstallPlace } from "@/lib/zvt/zvtDictionaries";
+import { buildZvtLeaderRoute, buildZvtSignalGeometry, resolveZvtAnchor } from "@/lib/zvt/zvtGeometry";
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function pointsToSvg(points) {
+  const pairs = [];
+  for (let i = 0; i < points.length; i += 2) {
+    pairs.push(`${points[i]},${points[i + 1]}`);
+  }
+  return pairs.join(" ");
+}
+
+export function renderZvtSvg(zvt, scene) {
+  const nodes = scene.nodes || [];
+  const edges = scene.edges || [];
+
+  const x = zvt.position?.x ?? 0;
+  const y = zvt.position?.y ?? 0;
+  const r = zvt.style?.radius ?? 26;
+  const installPlace = getZvtInstallPlace(zvt.data?.installPlace);
+  const upper = Array.isArray(zvt.data?.functionSigns) ? zvt.data.functionSigns.join("") : "";
+  const lower = zvt.data?.parameter || "";
+  const stroke = zvt.style?.stroke || "black";
+  const strokeWidth = zvt.style?.strokeWidth ?? 2;
+  const fontFamily = zvt.style?.fontFamily || "Roboto Condensed";
+  const fontSize = zvt.style?.fontSize ?? 14;
+
+  const anchor = resolveZvtAnchor(zvt, nodes, edges);
+  const leader = buildZvtLeaderRoute({ anchor, symbol: zvt.position, radius: r });
+  const signal = buildZvtSignalGeometry(zvt);
+  const recipients = Array.isArray(zvt.data?.recipients) && zvt.data.recipients.length
+    ? `M${zvt.data.recipients.join(",")}`
+    : "";
+  const actionSign = zvt.data?.actionSign || "none";
+
+  let svg = "";
+
+  if (leader.length >= 4) {
+    svg += `<polyline points="${pointsToSvg(leader)}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" />`;
+  }
+
+  svg += `<circle cx="${x}" cy="${y}" r="${r}" fill="white" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+
+  if (installPlace.hasDivider) {
+    svg += `<line x1="${x - r}" y1="${y}" x2="${x + r}" y2="${y}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+    svg += `<text x="${x}" y="${y - 8}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(upper)}</text>`;
+    svg += `<text x="${x}" y="${y + 14}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(lower)}</text>`;
+  } else {
+    svg += `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(lower)}</text>`;
+  }
+
+  if (actionSign !== "none") {
+    svg += `<text x="${x + r - 2}" y="${y - r - 6}" font-family="${fontFamily}" font-size="20" font-weight="700">${esc(actionSign)}</text>`;
+  }
+
+  if (signal) {
+    svg += `<polyline points="${pointsToSvg(signal.line)}" fill="none" stroke="black" stroke-width="2" stroke-dasharray="18 8" />`;
+    svg += `<polygon points="${pointsToSvg(signal.arrowPoints)}" fill="black" stroke="black" stroke-width="1" />`;
+    svg += `<text x="${signal.labelX}" y="${signal.labelY + 14}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(recipients)}</text>`;
+  }
+
+  return svg;
+}
+
+export function renderZvtsSvg(scene) {
+  return (scene.zvts || []).map((zvt) => renderZvtSvg(zvt, scene)).join("\n");
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/export/svgRenderer.js
+// PATCH: імпортувати і додати renderZvtsSvg(scene)
+// ============================================================================
+
+import { renderZvtsSvg } from "@/lib/export/zvtSvgRenderer";
+
+// усередині renderSvg(scene), після nodes/connectors/annotations:
+
+${"${renderZvtsSvg(scene)}"}
+
+
+
+// ============================================================================
+// FILE: src/lib/export/buildExportScene.js
+// PATCH: додати zvts
+// ============================================================================
+
+zvts: Array.isArray(store.zvts) ? store.zvts : [],
+
+
+
+// ============================================================================
+// IMPORTANT NOTES
+// ============================================================================
+// 1. ZVT винесено як окрему сутність zvts[], не як annotations[].
+// 2. attachedTo підтримує node та edge.
+// 3. Для edge підтримується segmentId, якщо context menu передає segmentId.
+// 4. Лінія приєднання ортогональна і будується окремим zvtGeometry.
+// 5. Символ можна drag-ати; anchor перераховується від node/edge.
+// 6. Подвійний клік по ЗВТ відкриває форму редагування.
+// 7. Context menu по ЗВТ дозволяє редагувати/видалити.
+// 8. accessMode === "reader" блокує редагування та drag.
+// 9. Для JSON save/load треба додати zvts у document.
+// 10. Для PDF/SVG export треба додати renderZvtsSvg(scene).
+// ============================================================================
