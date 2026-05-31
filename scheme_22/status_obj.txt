@@ -1,0 +1,285 @@
+Правильно розділити **постійну модель вузла** і **динамічний стан з БД**.
+
+### 1. Статус ремонту / підсвічування
+
+У `node` не треба записувати “в ремонті” як постійне поле. Краще мати окремий runtime-шар:
+
+```ts
+nodeRuntimeStatusById: {
+  [nodeId]: {
+    status: "repair",
+    color: "#FF9800",
+    reason: "Задіяний у ремонті №123",
+    sourceId: "repair_123"
+  }
+}
+```
+
+При відкритті схеми:
+
+```txt
+load scheme JSON / DB
+  -> nodes, edges, annotations...
+  -> окремо fetch /api/schemes/:id/runtime-status
+  -> записати в nodeRuntimeStatusById
+```
+
+У renderer node:
+
+```tsx
+const runtimeStatus = nodeRuntimeStatusById[node.id];
+
+<NodeShape
+  node={node}
+  statusOverlay={runtimeStatus}
+/>
+```
+
+І далі:
+
+```tsx
+<Group
+  onMouseEnter={() => {
+    if (runtimeStatus) {
+      canvasController.showNodeStatusTooltip(node.id);
+    }
+  }}
+>
+  <Rect
+    stroke={runtimeStatus?.color || defaultStroke}
+    shadowColor={runtimeStatus?.color}
+    shadowBlur={runtimeStatus ? 8 : 0}
+  />
+</Group>
+```
+
+Тобто:
+
+```txt
+node.data = постійні параметри
+nodeRuntimeStatusById = поточні статуси з БД/view
+```
+
+Це важливо, бо “ремонт” може змінюватися без редагування схеми.
+
+---
+
+### 2. Стани об’єктів: відкритий / закритий
+
+Для станів, які є частиною схеми або технологічного стану елемента, додай у `node`:
+
+```ts
+state: {
+  key: "open"
+}
+```
+
+або гнучкіше:
+
+```ts
+states: {
+  position: "open",
+  mode: "manual"
+}
+```
+
+Для простого MVP достатньо:
+
+```ts
+node.visualState = "open" | "closed" | "unknown"
+```
+
+Приклад node:
+
+```ts
+{
+  id: "node_1",
+  type: "valve",
+  x: 100,
+  y: 100,
+  width: 60,
+  height: 40,
+
+  visualState: "open",
+
+  params: {
+    diameter: "DN100",
+    material: "steel"
+  }
+}
+```
+
+---
+
+### 3. Як організувати каталог компонента
+
+Якщо зараз у тебе під кожний елемент є каталог, я б робив так:
+
+```txt
+/components/scheme-elements/Valve/
+  ValveNode.jsx
+  ValveIcon.jsx
+  valveDefinition.js
+  valveGeometry.js
+  valveRenderers.js
+```
+
+Або простіше:
+
+```txt
+/elements/valve
+  definition.ts
+  render.tsx
+  icon.tsx
+  states.ts
+```
+
+---
+
+### 4. Definition файлу
+
+```ts
+// elements/valve/definition.ts
+
+import ValveOpen from "./ValveOpen";
+import ValveClosed from "./ValveClosed";
+import ValveIcon from "./ValveIcon";
+
+export const valveDefinition = {
+  type: "valve",
+
+  label: "Засувка",
+
+  version: "1.0.0",
+
+  defaultSize: {
+    width: 80,
+    height: 40,
+  },
+
+  defaultState: "open",
+
+  states: {
+    open: {
+      label: "Відкрита",
+      renderer: ValveOpen,
+    },
+
+    closed: {
+      label: "Закрита",
+      renderer: ValveClosed,
+    },
+  },
+
+  icon: ValveIcon,
+};
+```
+
+---
+
+### 5. Загальний registry
+
+```ts
+// elements/elementRegistry.ts
+
+import { valveDefinition } from "./valve/definition";
+import { pumpDefinition } from "./pump/definition";
+
+export const ELEMENT_REGISTRY = {
+  valve: valveDefinition,
+  pump: pumpDefinition,
+};
+```
+
+---
+
+### 6. Універсальний NodeRenderer
+
+```tsx
+import { ELEMENT_REGISTRY } from "@/elements/elementRegistry";
+
+export function NodeRenderer({ node }) {
+  const definition = ELEMENT_REGISTRY[node.type];
+
+  if (!definition) return null;
+
+  const stateKey =
+    node.visualState ||
+    definition.defaultState;
+
+  const StateRenderer =
+    definition.states?.[stateKey]?.renderer ||
+    definition.states?.[definition.defaultState]?.renderer;
+
+  if (!StateRenderer) return null;
+
+  return (
+    <StateRenderer
+      node={node}
+      definition={definition}
+    />
+  );
+}
+```
+
+Тоді при зміні стану:
+
+```ts
+replaceNode(nodeId, {
+  ...node,
+  visualState: "closed",
+});
+```
+
+рендер автоматично зміниться.
+
+---
+
+### 7. Runtime status поверх state
+
+Важливо не плутати:
+
+```txt
+visualState = вигляд самого елемента: open/closed
+runtimeStatus = зовнішній статус: ремонт/аварія/заблоковано
+```
+
+Тобто клапан може бути:
+
+```txt
+visualState: "open"
+runtimeStatus: "repair"
+```
+
+І тоді він рендериться як відкритий, але з помаранчевою підсвіткою ремонту.
+
+---
+
+### 8. Що додати в JSON / БД
+
+У `nodes`:
+
+```ts
+{
+  id,
+  type,
+  typeVersion,
+  visualState,
+  params,
+  geometry,
+  style
+}
+```
+
+У runtime з БД не зберігати в snapshot схеми, а отримувати окремо:
+
+```txt
+SCHEME_NODE_RUNTIME_VIEW
+  NODE_ID
+  STATUS_CODE
+  STATUS_COLOR
+  REASON
+  SOURCE_DOC_ID
+```
+
+Це дасть масштабовану архітектуру: схема стабільна, а актуальні статуси живуть окремо.
