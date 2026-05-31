@@ -1,0 +1,1030 @@
+ORACLE DB SCHEMA SKELETON FOR SCHEME EDITOR
+===========================================
+
+МЕТА
+----
+Початковий каркас структури БД Oracle для зберігання альбомів, сторінок альбомів, схем, об'єктів схеми, зв'язків, анотацій, виносок, таблиць специфікації, таблиць приміток, ЗВТ, прикріплених файлів, версійності схем/альбомів/рендер-функцій/фігур та CLOB-знімка схеми.
+
+Це НЕ фінальний DDL.
+Це архітектурна схема з таблицями, основними полями, зв'язками та правилами зберігання.
+
+============================================================
+1. ГОЛОВНИЙ ПРИНЦИП ЗБЕРІГАННЯ
+============================================================
+
+Рекомендована модель гібридна:
+
+1) Нормалізовані таблиці
+   - для пошуку, фільтрації, прив'язок, статусів, параметрів, специфікацій, файлів, прав доступу.
+
+2) JSON/CLOB snapshot
+   - для швидкого відкриття схеми у frontend;
+   - для відновлення canvas state;
+   - для сумісності з версіями редактора;
+   - для збереження повного стану схеми у форматі, близькому до useCanvasStore.
+
+Тобто:
+
+SCHEME_VERSION
+   -> SCHEME_SNAPSHOT_CLOB
+   -> NORMALIZED ENTITIES
+
+При відкритті схеми:
+
+1. Завантажити активну версію SCHEME_VERSION.
+2. Взяти SNAPSHOT_CLOB.
+3. Перевірити DOCUMENT_SCHEMA_VERSION.
+4. Якщо треба, прогнати migration на рівні application.
+5. Завантажити у useCanvasStore.
+6. За потреби довантажити normalized metadata, attachments, catalogs.
+
+============================================================
+2. РІВНІ ДАНИХ
+============================================================
+
+ALBUM
+  ALBUM_VERSION
+    ALBUM_PAGE
+      SCHEME
+        SCHEME_VERSION
+          SNAPSHOT_CLOB
+          OBJECTS
+          CONNECTORS
+          ANNOTATIONS
+          CALLOUTS
+          SPECIFICATION_TABLES
+          NOTES_TABLES
+          ZVTS
+          ATTACHMENTS
+
+============================================================
+3. АЛЬБОМИ
+============================================================
+
+TABLE: ALBUM
+------------
+Призначення:
+Базова сутність альбому, до якого прив'язані сторінки і схеми.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CODE                       VARCHAR2(100)
+- NAME                       VARCHAR2(500)
+- DESCRIPTION                CLOB
+- CURRENT_VERSION_ID         FK -> ALBUM_VERSION.ID
+- STATUS                     VARCHAR2(50)      -- DRAFT, ACTIVE, ARCHIVED
+- CREATED_BY                 NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+- UPDATED_BY                 NUMBER / VARCHAR2
+- UPDATED_AT                 TIMESTAMP
+
+Зв'язки:
+- ALBUM 1 -> N ALBUM_VERSION
+- ALBUM 1 -> N ALBUM_PAGE
+
+------------------------------------------------------------
+
+TABLE: ALBUM_VERSION
+--------------------
+Призначення:
+Версійність альбому як контейнера.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ALBUM_ID                   FK -> ALBUM.ID
+- VERSION_NO                 NUMBER
+- VERSION_LABEL              VARCHAR2(100)     -- v1, v2, Rev.A
+- CHANGE_COMMENT             CLOB
+- IS_CURRENT                 CHAR(1)           -- Y/N
+- CREATED_BY                 NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+
+Унікальність:
+- UNIQUE(ALBUM_ID, VERSION_NO)
+
+============================================================
+4. СТОРІНКИ АЛЬБОМУ
+============================================================
+
+TABLE: ALBUM_PAGE
+-----------------
+Призначення:
+Сторінка альбому. На сторінці може бути одна схема або декілька схем у майбутньому.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ALBUM_ID                   FK -> ALBUM.ID
+- ALBUM_VERSION_ID           FK -> ALBUM_VERSION.ID NULLABLE
+- PAGE_NO                    NUMBER
+- PAGE_CODE                  VARCHAR2(100)
+- PAGE_TITLE                 VARCHAR2(500)
+- SHEET_FORMAT               VARCHAR2(20)      -- A4, A3, A1
+- SHEET_ORIENTATION          VARCHAR2(20)      -- portrait, landscape
+- SORT_ORDER                 NUMBER
+- STATUS                     VARCHAR2(50)      -- DRAFT, ACTIVE, ARCHIVED
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Зв'язки:
+- ALBUM_PAGE 1 -> N SCHEME
+
+Унікальність:
+- UNIQUE(ALBUM_ID, PAGE_NO)
+
+============================================================
+5. СХЕМИ
+============================================================
+
+TABLE: SCHEME
+-------------
+Призначення:
+Логічна схема, прив'язана до сторінки альбому.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ALBUM_ID                   FK -> ALBUM.ID
+- ALBUM_PAGE_ID              FK -> ALBUM_PAGE.ID
+- CODE                       VARCHAR2(100)
+- NAME                       VARCHAR2(500)
+- DESCRIPTION                CLOB
+- CURRENT_VERSION_ID         FK -> SCHEME_VERSION.ID
+- STATUS                     VARCHAR2(50)      -- DRAFT, REVIEW, APPROVED, ARCHIVED
+- CREATED_BY                 NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+- UPDATED_BY                 NUMBER / VARCHAR2
+- UPDATED_AT                 TIMESTAMP
+
+Зв'язки:
+- SCHEME 1 -> N SCHEME_VERSION
+
+------------------------------------------------------------
+
+TABLE: SCHEME_VERSION
+---------------------
+Призначення:
+Версія схеми. Саме тут зберігається CLOB-знімок повного canvas/document state.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_ID                  FK -> SCHEME.ID
+- VERSION_NO                 NUMBER
+- VERSION_LABEL              VARCHAR2(100)
+- IS_CURRENT                 CHAR(1)           -- Y/N
+- DOCUMENT_SCHEMA_VERSION    NUMBER            -- версія JSON-документа
+- EDITOR_VERSION             VARCHAR2(50)      -- версія frontend/editor
+- CONNECTOR_ENGINE_VERSION   VARCHAR2(50)      -- версія алгоритмів конекторів
+- SHAPE_ENGINE_VERSION       VARCHAR2(50)      -- версія рендеру фігур
+- ZVT_ENGINE_VERSION         VARCHAR2(50)      -- версія рендеру ЗВТ
+- SNAPSHOT_CLOB              CLOB              -- повний JSON схеми
+- SNAPSHOT_HASH              VARCHAR2(128)     -- checksum
+- CHANGE_COMMENT             CLOB
+- CREATED_BY                 NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+
+Унікальність:
+- UNIQUE(SCHEME_ID, VERSION_NO)
+
+Примітка:
+SNAPSHOT_CLOB має містити canonical diagram document:
+{
+  version,
+  metadata,
+  sheet,
+  nodes,
+  edges,
+  annotations,
+  callouts,
+  specificationTables,
+  notesTables,
+  zvts,
+  attachments,
+  createdAt,
+  updatedAt
+}
+
+============================================================
+6. SHEET / PAPER SPACE
+============================================================
+
+TABLE: SCHEME_SHEET
+-------------------
+Призначення:
+Нормалізовані параметри формату аркуша для версії схеми.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- FORMAT_CODE                VARCHAR2(20)      -- A4, A3, A1
+- ORIENTATION                VARCHAR2(20)      -- portrait, landscape
+- SCALE_VALUE                VARCHAR2(50)      -- 1:1, 1:2, 1:5
+- FRAME_TEMPLATE_CODE        VARCHAR2(100)
+- TITLE_ALBUM_CODE           VARCHAR2(200)
+- TITLE_UNIT                 VARCHAR2(200)
+- TITLE_SYSTEM               VARCHAR2(200)
+- TITLE_SCHEME_NAME          VARCHAR2(500)
+- TITLE_SHEET_NUMBER         VARCHAR2(50)
+- SHEET_JSON                 CLOB              -- додаткові параметри рамки/шапки
+
+Зв'язки:
+- SCHEME_VERSION 1 -> 1 SCHEME_SHEET
+
+============================================================
+7. ДОВІДНИКИ ТИПІВ ФІГУР І ВЕРСІЙ РЕНДЕРУ
+============================================================
+
+TABLE: SHAPE_TYPE
+-----------------
+Призначення:
+Довідник типів графічних елементів/node.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CODE                       VARCHAR2(100)     -- valve, pump, tank, custom_x
+- NAME                       VARCHAR2(500)
+- DESCRIPTION                CLOB
+- CURRENT_VERSION_ID         FK -> SHAPE_TYPE_VERSION.ID
+- IS_ACTIVE                  CHAR(1)
+
+------------------------------------------------------------
+
+TABLE: SHAPE_TYPE_VERSION
+-------------------------
+Призначення:
+Версія реалізації фігури/рендер-функції.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SHAPE_TYPE_ID              FK -> SHAPE_TYPE.ID
+- VERSION_NO                 NUMBER
+- VERSION_LABEL              VARCHAR2(100)
+- RENDERER_KEY               VARCHAR2(200)     -- ключ frontend renderer
+- RENDERER_VERSION           VARCHAR2(50)
+- DEFAULT_WIDTH              NUMBER
+- DEFAULT_HEIGHT             NUMBER
+- ANCHORS_JSON               CLOB              -- anchors/ports definition
+- PARAM_SCHEMA_JSON          CLOB              -- схема параметрів
+- STATE_SCHEMA_JSON          CLOB              -- можливі стани
+- STYLE_SCHEMA_JSON          CLOB
+- IS_ACTIVE                  CHAR(1)
+- CREATED_AT                 TIMESTAMP
+
+Приклад STATE_SCHEMA_JSON:
+{
+  "states": [
+    { "code": "open", "label": "Відкритий" },
+    { "code": "closed", "label": "Закритий" },
+    { "code": "blocked", "label": "Заблокований" }
+  ]
+}
+
+============================================================
+8. ОБ'ЄКТИ СХЕМИ / NODES
+============================================================
+
+TABLE: SCHEME_OBJECT
+--------------------
+Призначення:
+Нормалізоване зберігання node-об'єктів схеми.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)     -- id з frontend/useCanvasStore
+- SHAPE_TYPE_ID              FK -> SHAPE_TYPE.ID
+- SHAPE_TYPE_VERSION_ID      FK -> SHAPE_TYPE_VERSION.ID
+- OBJECT_CODE                VARCHAR2(100)
+- OBJECT_NAME                VARCHAR2(500)
+- STATUS_CODE                VARCHAR2(100)     -- open, closed, inactive, warning
+- X                          NUMBER
+- Y                          NUMBER
+- WIDTH                      NUMBER
+- HEIGHT                     NUMBER
+- ROTATION                   NUMBER
+- Z_INDEX                    NUMBER
+- STYLE_JSON                 CLOB
+- GEOMETRY_JSON              CLOB              -- додаткова geometry
+- DATA_JSON                  CLOB              -- frontend-specific persistent data
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Індекси:
+- IDX_SCHEME_OBJECT_VERSION(SCHEME_VERSION_ID)
+- IDX_SCHEME_OBJECT_CLIENT(CLIENT_ID)
+- IDX_SCHEME_OBJECT_TYPE(SHAPE_TYPE_ID)
+
+------------------------------------------------------------
+
+TABLE: SCHEME_OBJECT_PARAM
+--------------------------
+Призначення:
+Параметри об'єкта, які можна шукати/зв'язувати з каталогами.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- OBJECT_ID                  FK -> SCHEME_OBJECT.ID
+- PARAM_CODE                 VARCHAR2(100)     -- diameter, material, pressure_class
+- PARAM_NAME                 VARCHAR2(500)
+- VALUE_TEXT                 VARCHAR2(4000)
+- VALUE_NUMBER               NUMBER
+- VALUE_DATE                 DATE
+- UNIT_CODE                  VARCHAR2(50)
+- CATALOG_REF_TYPE           VARCHAR2(100)     -- MATERIAL, EQUIPMENT, SYSTEM
+- CATALOG_REF_ID             NUMBER / VARCHAR2
+- PARAM_JSON                 CLOB
+
+Індекси:
+- IDX_OBJECT_PARAM_OBJECT(OBJECT_ID)
+- IDX_OBJECT_PARAM_CODE(PARAM_CODE)
+- IDX_OBJECT_PARAM_CATALOG(CATALOG_REF_TYPE, CATALOG_REF_ID)
+
+------------------------------------------------------------
+
+TABLE: SCHEME_OBJECT_STATE
+--------------------------
+Призначення:
+Історія або поточні стани об'єкта, які можуть впливати на вигляд.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- OBJECT_ID                  FK -> SCHEME_OBJECT.ID
+- STATE_CODE                 VARCHAR2(100)     -- open, closed, damaged, disabled
+- IS_CURRENT                 CHAR(1)
+- STYLE_OVERRIDE_JSON        CLOB              -- як статус змінює вигляд
+- VALID_FROM                 TIMESTAMP
+- VALID_TO                   TIMESTAMP NULLABLE
+- COMMENT_TEXT               CLOB
+
+============================================================
+9. ЗВ'ЯЗКИ / EDGES / CONNECTORS
+============================================================
+
+TABLE: CONNECTOR_TYPE
+---------------------
+Призначення:
+Довідник типів конекторів.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CODE                       VARCHAR2(100)     -- simple, link, process, zvt-related
+- NAME                       VARCHAR2(500)
+- DESCRIPTION                CLOB
+- CURRENT_VERSION_ID         FK -> CONNECTOR_TYPE_VERSION.ID
+- IS_ACTIVE                  CHAR(1)
+
+------------------------------------------------------------
+
+TABLE: CONNECTOR_TYPE_VERSION
+-----------------------------
+Призначення:
+Версія функцій побудови/маршрутизації зв'язків.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CONNECTOR_TYPE_ID          FK -> CONNECTOR_TYPE.ID
+- VERSION_NO                 NUMBER
+- VERSION_LABEL              VARCHAR2(100)
+- ROUTER_KEY                 VARCHAR2(200)     -- orthogonal-elbow-router
+- ROUTER_VERSION             VARCHAR2(50)
+- GEOMETRY_BUILDER_KEY       VARCHAR2(200)
+- GEOMETRY_BUILDER_VERSION   VARCHAR2(50)
+- DEFAULT_PATH_TYPE          VARCHAR2(100)     -- orthogonal-elbow, free-straight
+- PARAM_SCHEMA_JSON          CLOB
+- IS_ACTIVE                  CHAR(1)
+- CREATED_AT                 TIMESTAMP
+
+------------------------------------------------------------
+
+TABLE: SCHEME_CONNECTOR
+-----------------------
+Призначення:
+Нормалізоване зберігання edges/connectors.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- CONNECTOR_TYPE_ID          FK -> CONNECTOR_TYPE.ID
+- CONNECTOR_TYPE_VERSION_ID  FK -> CONNECTOR_TYPE_VERSION.ID
+- CONNECTOR_CODE             VARCHAR2(100)
+- CONNECTOR_NAME             VARCHAR2(500)
+- PATH_TYPE                  VARCHAR2(100)     -- orthogonal-elbow, free-straight
+- STATUS_CODE                VARCHAR2(100)
+- START_REF_TYPE             VARCHAR2(50)      -- node, none
+- START_REF_CLIENT_ID        VARCHAR2(100)
+- START_ANCHOR_CODE          VARCHAR2(100)
+- START_X                    NUMBER
+- START_Y                    NUMBER
+- END_REF_TYPE               VARCHAR2(50)      -- node, none, scheme-link
+- END_REF_CLIENT_ID          VARCHAR2(100)
+- END_ANCHOR_CODE            VARCHAR2(100)
+- END_X                      NUMBER
+- END_Y                      NUMBER
+- LINK_TARGET_SCHEME_ID      FK -> SCHEME.ID NULLABLE
+- ROUTE_JSON                 CLOB              -- vertices, pathHandles, fixedAnchors, autoRouting
+- GEOMETRY_JSON              CLOB              -- calculated points/segmentsMeta snapshot
+- STYLE_JSON                 CLOB
+- DATA_JSON                  CLOB
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Індекси:
+- IDX_CONNECTOR_VERSION(SCHEME_VERSION_ID)
+- IDX_CONNECTOR_START(START_REF_CLIENT_ID)
+- IDX_CONNECTOR_END(END_REF_CLIENT_ID)
+- IDX_CONNECTOR_LINK(LINK_TARGET_SCHEME_ID)
+
+------------------------------------------------------------
+
+TABLE: SCHEME_CONNECTOR_PARAM
+-----------------------------
+Призначення:
+Параметри зв'язку/лінії.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CONNECTOR_ID               FK -> SCHEME_CONNECTOR.ID
+- PARAM_CODE                 VARCHAR2(100)
+- PARAM_NAME                 VARCHAR2(500)
+- VALUE_TEXT                 VARCHAR2(4000)
+- VALUE_NUMBER               NUMBER
+- UNIT_CODE                  VARCHAR2(50)
+- CATALOG_REF_TYPE           VARCHAR2(100)
+- CATALOG_REF_ID             NUMBER / VARCHAR2
+- PARAM_JSON                 CLOB
+
+============================================================
+10. АНОТАЦІЇ / ПІДПИСИ / ВІЛЬНИЙ ТЕКСТ
+============================================================
+
+TABLE: SCHEME_ANNOTATION
+------------------------
+Призначення:
+Підписи, labels, free-text, прості annotations.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- ANNOTATION_TYPE            VARCHAR2(100)     -- label, free-text, connector-label
+- ATTACHED_TO_TYPE           VARCHAR2(50)      -- node, edge, none
+- ATTACHED_TO_CLIENT_ID      VARCHAR2(100)
+- TEXT_VALUE                 CLOB
+- POSITION_MODE              VARCHAR2(100)     -- top, bottom, left, right, free, path-center
+- X                          NUMBER
+- Y                          NUMBER
+- OFFSET_X                   NUMBER
+- OFFSET_Y                   NUMBER
+- ROTATION                   NUMBER
+- STYLE_JSON                 CLOB
+- DATA_JSON                  CLOB
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Індекси:
+- IDX_ANNOTATION_VERSION(SCHEME_VERSION_ID)
+- IDX_ANNOTATION_TARGET(ATTACHED_TO_TYPE, ATTACHED_TO_CLIENT_ID)
+
+============================================================
+11. ВИНОСКИ / CALLOUTS
+============================================================
+
+TABLE: SCHEME_CALLOUT
+---------------------
+Призначення:
+Виноски як окрема сутність, якщо їх логіка складніша за annotation.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- ATTACHED_TO_TYPE           VARCHAR2(50)      -- node, edge
+- ATTACHED_TO_CLIENT_ID      VARCHAR2(100)
+- ANCHOR_X                   NUMBER
+- ANCHOR_Y                   NUMBER
+- ELBOW_X                    NUMBER
+- ELBOW_Y                    NUMBER
+- TEXT_X                     NUMBER
+- TEXT_Y                     NUMBER
+- TEXT_VALUE                 CLOB
+- ROUTE_TYPE                 VARCHAR2(100)     -- orthogonal, free
+- ROUTE_JSON                 CLOB
+- STYLE_JSON                 CLOB
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+============================================================
+12. ЗВТ
+============================================================
+
+TABLE: SCHEME_ZVT
+-----------------
+Призначення:
+ЗВТ як окрема доменна сутність на рівні nodes/edges/annotations.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- ATTACHED_TO_TYPE           VARCHAR2(50)      -- node, edge
+- ATTACHED_TO_CLIENT_ID      VARCHAR2(100)
+- ATTACHED_SEGMENT_ID        VARCHAR2(100) NULLABLE -- для edge segment
+- INSTALL_PLACE_CODE         VARCHAR2(50)      -- local, BTY, MTY, RTY
+- PARAMETER_CODE             VARCHAR2(50)      -- F, P, L, T, ae, pH
+- SIGNAL_ENABLED             CHAR(1)           -- Y/N
+- SIGNAL_DIRECTION           VARCHAR2(20)      -- left, right
+- ACTION_SIGN                VARCHAR2(10)      -- +, -, null
+- SYMBOL_X                   NUMBER
+- SYMBOL_Y                   NUMBER
+- ANCHOR_X                   NUMBER
+- ANCHOR_Y                   NUMBER
+- ROUTE_TYPE                 VARCHAR2(100)     -- orthogonal
+- ROUTE_JSON                 CLOB              -- orthogonal leader vertices
+- STYLE_JSON                 CLOB
+- DATA_JSON                  CLOB              -- повна zvt model
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Індекси:
+- IDX_ZVT_VERSION(SCHEME_VERSION_ID)
+- IDX_ZVT_TARGET(ATTACHED_TO_TYPE, ATTACHED_TO_CLIENT_ID)
+
+------------------------------------------------------------
+
+TABLE: SCHEME_ZVT_FUNCTION_SIGN
+-------------------------------
+Призначення:
+Функціональні ознаки ЗВТ у верхній частині кола.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ZVT_ID                     FK -> SCHEME_ZVT.ID
+- SIGN_CODE                  VARCHAR2(20)      -- A, B, C, F, J, R, S
+- SORT_ORDER                 NUMBER
+
+------------------------------------------------------------
+
+TABLE: SCHEME_ZVT_RECIPIENT
+---------------------------
+Призначення:
+Адресати передачі сигналу.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ZVT_ID                     FK -> SCHEME_ZVT.ID
+- RECIPIENT_CODE             VARCHAR2(20)      -- 1,2,3,4,5,6
+- SORT_ORDER                 NUMBER
+
+============================================================
+13. СПЕЦИФІКАЦІЇ
+============================================================
+
+TABLE: SPEC_TABLE
+-----------------
+Призначення:
+Таблиця специфікації на canvas/paper space.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- TABLE_CODE                 VARCHAR2(100)
+- TABLE_NAME                 VARCHAR2(500)
+- X                          NUMBER
+- Y                          NUMBER
+- WIDTH                      NUMBER
+- HEIGHT                     NUMBER
+- STYLE_JSON                 CLOB
+- DATA_JSON                  CLOB
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+------------------------------------------------------------
+
+TABLE: SPEC_ROW
+---------------
+Призначення:
+Рядок специфікації.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SPEC_TABLE_ID              FK -> SPEC_TABLE.ID
+- ROW_CLIENT_ID              VARCHAR2(100)
+- POSITION_NO                VARCHAR2(100)
+- DESIGNATION                VARCHAR2(500)
+- NAME                       VARCHAR2(1000)
+- QUANTITY                   NUMBER
+- UNIT_CODE                  VARCHAR2(50)
+- NOTE_TEXT                  CLOB
+- CATALOG_REF_TYPE           VARCHAR2(100)
+- CATALOG_REF_ID             NUMBER / VARCHAR2
+- SORT_ORDER                 NUMBER
+- ROW_JSON                   CLOB
+
+------------------------------------------------------------
+
+TABLE: SPEC_ROW_LINK
+--------------------
+Призначення:
+Зв'язок рядка специфікації з node/edge/zvt/annotation.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SPEC_ROW_ID                FK -> SPEC_ROW.ID
+- ENTITY_TYPE                VARCHAR2(50)      -- node, edge, zvt, annotation, callout
+- ENTITY_CLIENT_ID           VARCHAR2(100)
+- QUANTITY                   NUMBER DEFAULT 1
+- LINK_JSON                  CLOB
+
+============================================================
+14. ТАБЛИЦЯ ПРИМІТОК
+============================================================
+
+TABLE: NOTES_TABLE
+------------------
+Призначення:
+Таблиця/блок приміток на canvas, прив'язаний до рамки знизу.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CLIENT_ID                  VARCHAR2(100)
+- TABLE_CODE                 VARCHAR2(100)
+- TABLE_NAME                 VARCHAR2(500)
+- ANCHOR_AREA                VARCHAR2(100)     -- bottom-right, bottom-left
+- X                          NUMBER
+- Y                          NUMBER
+- WIDTH                      NUMBER
+- HEIGHT                     NUMBER
+- STYLE_JSON                 CLOB
+- DATA_JSON                  CLOB
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+------------------------------------------------------------
+
+TABLE: NOTE_ROW
+---------------
+Призначення:
+Окрема примітка.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- NOTES_TABLE_ID             FK -> NOTES_TABLE.ID
+- ROW_CLIENT_ID              VARCHAR2(100)
+- NOTE_NO                    NUMBER
+- NOTE_TEXT                  CLOB
+- SORT_ORDER                 NUMBER
+- ROW_JSON                   CLOB
+
+============================================================
+15. ATTACHMENTS / ФАЙЛИ
+============================================================
+
+TABLE: ATTACHMENT
+-----------------
+Призначення:
+Метадані прикріплених файлів до node/edge/zvt/annotation/callout/scheme.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID NULLABLE
+- ATTACHED_TO_TYPE           VARCHAR2(50)      -- scheme, node, edge, zvt, annotation, callout, spec-row
+- ATTACHED_TO_CLIENT_ID      VARCHAR2(100) NULLABLE
+- FILE_NAME_ORIGINAL         VARCHAR2(1000)
+- FILE_EXT                   VARCHAR2(20)      -- pdf, jpg, png, gif, svg, vsdx
+- MIME_TYPE                  VARCHAR2(200)
+- FILE_SIZE_BYTES            NUMBER
+- STORAGE_TYPE               VARCHAR2(50)      -- ORACLE_BLOB, FILESYSTEM, EXTERNAL
+- BLOB_ID                    FK -> ATTACHMENT_BLOB.ID NULLABLE
+- STORAGE_KEY                VARCHAR2(1000) NULLABLE
+- COMMENT_TEXT               CLOB
+- CREATED_BY                 NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+- UPDATED_AT                 TIMESTAMP
+
+Індекси:
+- IDX_ATTACHMENT_TARGET(ATTACHED_TO_TYPE, ATTACHED_TO_CLIENT_ID)
+- IDX_ATTACHMENT_SCHEME_VERSION(SCHEME_VERSION_ID)
+
+------------------------------------------------------------
+
+TABLE: ATTACHMENT_BLOB
+----------------------
+Призначення:
+Фізичне зберігання файлу в Oracle BLOB.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CONTENT_BLOB               BLOB
+- CONTENT_HASH               VARCHAR2(128)
+- COMPRESSION_TYPE           VARCHAR2(50) NULLABLE
+- CREATED_AT                 TIMESTAMP
+
+Примітка:
+Для великих файлів можна винести в окремий tablespace.
+
+------------------------------------------------------------
+
+TABLE: ATTACHMENT_PREVIEW
+-------------------------
+Призначення:
+Опціональний preview/thumbnail для PDF/JPG/SVG.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ATTACHMENT_ID              FK -> ATTACHMENT.ID
+- PREVIEW_TYPE               VARCHAR2(50)      -- thumbnail, first-page, svg-preview
+- MIME_TYPE                  VARCHAR2(200)
+- PREVIEW_BLOB               BLOB
+- WIDTH                      NUMBER
+- HEIGHT                     NUMBER
+- CREATED_AT                 TIMESTAMP
+
+============================================================
+16. СТАТУСИ І ВІЗУАЛЬНІ ПРАВИЛА
+============================================================
+
+TABLE: STATUS_DICTIONARY
+------------------------
+Призначення:
+Довідник статусів для об'єктів, зв'язків, схем.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ENTITY_SCOPE               VARCHAR2(50)      -- object, connector, scheme, album
+- STATUS_CODE                VARCHAR2(100)
+- STATUS_NAME                VARCHAR2(500)
+- DESCRIPTION                CLOB
+- IS_ACTIVE                  CHAR(1)
+
+------------------------------------------------------------
+
+TABLE: STATUS_STYLE_RULE
+------------------------
+Призначення:
+Правила зміни вигляду залежно від статусу.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ENTITY_SCOPE               VARCHAR2(50)      -- object, connector, zvt
+- STATUS_CODE                VARCHAR2(100)
+- SHAPE_TYPE_ID              FK -> SHAPE_TYPE.ID NULLABLE
+- CONNECTOR_TYPE_ID          FK -> CONNECTOR_TYPE.ID NULLABLE
+- STYLE_OVERRIDE_JSON        CLOB              -- stroke/fill/dash/icon overlay
+- PRIORITY                   NUMBER
+- IS_ACTIVE                  CHAR(1)
+
+============================================================
+17. КАТАЛОГИ ТА ПРИВ'ЯЗКИ ДО ДОВІДНИКІВ
+============================================================
+
+TABLE: CATALOG_REF
+------------------
+Призначення:
+Універсальний registry для майбутніх довідників або зовнішніх систем.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- CATALOG_TYPE               VARCHAR2(100)     -- MATERIAL, EQUIPMENT, SYSTEM, UNIT
+- EXTERNAL_ID                VARCHAR2(200)
+- CODE                       VARCHAR2(100)
+- NAME                       VARCHAR2(1000)
+- DATA_JSON                  CLOB
+- IS_ACTIVE                  CHAR(1)
+
+------------------------------------------------------------
+
+TABLE: ENTITY_CATALOG_LINK
+--------------------------
+Призначення:
+Універсальна прив'язка node/edge/zvt/spec-row до каталогів.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ENTITY_TYPE                VARCHAR2(50)      -- node, edge, zvt, spec-row
+- ENTITY_CLIENT_ID           VARCHAR2(100)
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID
+- CATALOG_REF_ID             FK -> CATALOG_REF.ID
+- LINK_TYPE                  VARCHAR2(100)     -- material, equipment, system, class
+- LINK_JSON                  CLOB
+
+============================================================
+18. ACCESS / РОЛІ
+============================================================
+
+TABLE: USER_ALBUM_ROLE
+----------------------
+Призначення:
+Права користувача на альбом.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- USER_ID                    NUMBER / VARCHAR2
+- ALBUM_ID                   FK -> ALBUM.ID
+- ROLE_CODE                  VARCHAR2(50)      -- editor, reader
+- VALID_FROM                 TIMESTAMP
+- VALID_TO                   TIMESTAMP NULLABLE
+
+------------------------------------------------------------
+
+TABLE: USER_SCHEME_ROLE
+-----------------------
+Призначення:
+Опціональне перевизначення прав на конкретну схему.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- USER_ID                    NUMBER / VARCHAR2
+- SCHEME_ID                  FK -> SCHEME.ID
+- ROLE_CODE                  VARCHAR2(50)      -- editor, reader
+- VALID_FROM                 TIMESTAMP
+- VALID_TO                   TIMESTAMP NULLABLE
+
+============================================================
+19. AUDIT / ІСТОРІЯ ДІЙ
+============================================================
+
+TABLE: SCHEME_AUDIT_LOG
+-----------------------
+Призначення:
+Журнал змін.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- SCHEME_ID                  FK -> SCHEME.ID
+- SCHEME_VERSION_ID          FK -> SCHEME_VERSION.ID NULLABLE
+- ACTION_CODE                VARCHAR2(100)     -- create, update, save, export, attach-file
+- ENTITY_TYPE                VARCHAR2(50) NULLABLE
+- ENTITY_CLIENT_ID           VARCHAR2(100) NULLABLE
+- OLD_VALUE_JSON             CLOB NULLABLE
+- NEW_VALUE_JSON             CLOB NULLABLE
+- USER_ID                    NUMBER / VARCHAR2
+- CREATED_AT                 TIMESTAMP
+
+============================================================
+20. ВЕРСІЙНІСТЬ РЕНДЕР-ФУНКЦІЙ
+============================================================
+
+TABLE: RENDER_ENGINE_VERSION
+----------------------------
+Призначення:
+Реєстр версій функцій побудови схеми.
+
+Поля:
+- ID                         NUMBER / UUID PK
+- ENGINE_SCOPE               VARCHAR2(100)     -- connector, shape, zvt, annotation, paper, export
+- ENGINE_KEY                 VARCHAR2(200)     -- orthogonal-elbow-router, valve-renderer
+- VERSION_NO                 NUMBER
+- VERSION_LABEL              VARCHAR2(100)
+- COMPATIBILITY_GROUP        VARCHAR2(100)
+- MIGRATION_REQUIRED         CHAR(1)
+- MIGRATION_HANDLER_KEY      VARCHAR2(200) NULLABLE
+- DESCRIPTION                CLOB
+- CREATED_AT                 TIMESTAMP
+- IS_ACTIVE                  CHAR(1)
+
+Як використовувати:
+- SCHEME_VERSION зберігає CONNECTOR_ENGINE_VERSION, SHAPE_ENGINE_VERSION, ZVT_ENGINE_VERSION.
+- SCHEME_OBJECT зберігає SHAPE_TYPE_VERSION_ID.
+- SCHEME_CONNECTOR зберігає CONNECTOR_TYPE_VERSION_ID.
+- При відкритті старої схеми application перевіряє сумісність і запускає migration.
+
+============================================================
+21. РЕКОМЕНДОВАНА JSON-СТРУКТУРА SNAPSHOT_CLOB
+============================================================
+
+{
+  "version": 3,
+  "metadata": {
+    "schemeId": "...",
+    "schemeVersionId": "...",
+    "editorVersion": "1.0.0",
+    "connectorEngineVersion": "2.0.0",
+    "shapeEngineVersion": "1.0.0",
+    "zvtEngineVersion": "1.0.0"
+  },
+  "sheet": {},
+  "nodes": [],
+  "edges": [],
+  "annotations": [],
+  "callouts": [],
+  "specificationTables": [],
+  "notesTables": [],
+  "zvts": [],
+  "attachments": [
+    {
+      "id": "att_...",
+      "attachedTo": { "type": "node", "id": "node_..." },
+      "file": {
+        "storageType": "oracle-blob",
+        "blobId": "...",
+        "originalName": "...",
+        "mimeType": "application/pdf"
+      },
+      "comment": "..."
+    }
+  ],
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+
+ВАЖЛИВО:
+- Файл/BLOB не вкладати у JSON.
+- У JSON тільки metadata і посилання на ATTACHMENT/ATTACHMENT_BLOB.
+
+============================================================
+22. ЯК ВІДКРИВАТИ СХЕМУ В ДОДАТКУ
+============================================================
+
+Рекомендований flow:
+
+1. Frontend запитує:
+   GET /api/schemes/{schemeId}/current
+
+2. Backend знаходить:
+   SCHEME.CURRENT_VERSION_ID
+
+3. Backend повертає:
+   - SCHEME_VERSION.SNAPSHOT_CLOB
+   - SCHEME_VERSION metadata
+   - список attachments metadata
+   - access role
+
+4. Frontend:
+   - перевіряє document version
+   - запускає migrations, якщо треба
+   - normalize document
+   - replaceDocumentState у useCanvasStore
+
+5. Якщо користувач клікає attachment badge:
+   GET /api/attachments/{attachmentId}/file
+   -> Oracle BLOB stream
+
+============================================================
+23. ЯК ЗБЕРІГАТИ СХЕМУ
+============================================================
+
+Рекомендований flow:
+
+1. Frontend збирає canonical document з useCanvasStore.
+2. Backend створює новий SCHEME_VERSION.
+3. Backend записує SNAPSHOT_CLOB.
+4. Backend оновлює normalized tables:
+   - SCHEME_OBJECT
+   - SCHEME_CONNECTOR
+   - SCHEME_ANNOTATION
+   - SCHEME_ZVT
+   - SPEC_TABLE/SPEC_ROW
+   - NOTES_TABLE/NOTE_ROW
+   - ATTACHMENT metadata
+5. Backend ставить SCHEME.CURRENT_VERSION_ID = new version.
+
+Для MVP можна спочатку:
+- зберігати тільки SCHEME_VERSION.SNAPSHOT_CLOB + ATTACHMENT_BLOB;
+- normalized tables наповнювати поступово.
+
+============================================================
+24. МІНІМАЛЬНИЙ MVP НА СТАРТ
+============================================================
+
+Якщо треба стартувати простіше, достатньо таблиць:
+
+1. ALBUM
+2. ALBUM_VERSION
+3. ALBUM_PAGE
+4. SCHEME
+5. SCHEME_VERSION з SNAPSHOT_CLOB
+6. ATTACHMENT
+7. ATTACHMENT_BLOB
+8. USER_ALBUM_ROLE
+
+Потім додати normalized tables:
+
+9. SCHEME_OBJECT
+10. SCHEME_CONNECTOR
+11. SCHEME_ANNOTATION
+12. SCHEME_ZVT
+13. SPEC_TABLE / SPEC_ROW
+14. NOTES_TABLE / NOTE_ROW
+15. SHAPE_TYPE_VERSION
+16. CONNECTOR_TYPE_VERSION
+17. STATUS_STYLE_RULE
+
+============================================================
+25. КЛЮЧОВІ РІШЕННЯ
+============================================================
+
+1. Схема прив'язана до ALBUM_PAGE.
+2. Версія схеми зберігає повний CLOB snapshot.
+3. Нормалізовані таблиці потрібні для пошуку, звітів, специфікацій, інтеграції з каталогами.
+4. Файли зберігати в ATTACHMENT_BLOB як BLOB, а в JSON тримати тільки metadata.
+5. Фігури мають SHAPE_TYPE_VERSION_ID.
+6. Конектори мають CONNECTOR_TYPE_VERSION_ID.
+7. ЗВТ краще окремою таблицею SCHEME_ZVT.
+8. Статуси об'єктів зберігати окремо, а вигляд міняти через STATUS_STYLE_RULE.
+9. Reader/editor права краще зберігати на рівні album/scheme.
+10. Міграції робити на рівні application, але версії зберігати в БД.
+
+============================================================
+END
+============================================================

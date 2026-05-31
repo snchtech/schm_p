@@ -1,0 +1,991 @@
+SVG/PDF Export Package for technological-schemes
+==================================================
+
+Мета пакету
+-----------
+Додати контрольований SVG export layer поверх існуючої scene model.
+Konva залишається для редактора, а експорт у PDF будується не зі screenshot/toDataURL, а з тих самих даних сцени:
+
+scene model -> render Konva
+scene model -> render SVG -> vector PDF
+
+Структура файлів
+----------------
+
+src/features/scheme/export/svg/
+  index.js
+  sceneToSvg.js
+  svgUtils.js
+  svgElementRegistry.js
+  svgConnectors.js
+  svgText.js
+  svgImages.js
+  svgFrame.js
+  svgPdf.js
+  elements/
+    twoTrianglesArrowDownSvg.js
+    twoTrianglesZigzagSvg.js
+    monitorCrossIconSvg.js
+
+src/features/scheme/export/pdf/
+  exportSchemeVectorPdf.js
+
+==================================================
+FILE: src/features/scheme/export/svg/svgUtils.js
+==================================================
+
+export function num(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+export function escapeXml(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+}
+
+export function attrs(input = {}) {
+  return Object.entries(input)
+    .filter(([, value]) => value !== undefined && value !== null && value !== false)
+    .map(([key, value]) => `${key}="${escapeXml(value)}"`)
+    .join(' ')
+}
+
+export function pointsToPath(points = []) {
+  if (!points.length) return ''
+
+  return points
+    .map((p, index) => {
+      const x = num(p.x)
+      const y = num(p.y)
+      return index === 0 ? `M ${x} ${y}` : `L ${x} ${y}`
+    })
+    .join(' ')
+}
+
+export function makeScaler(width, height, baseWidth = 200, baseHeight = 150) {
+  const kX = width / baseWidth
+  const kY = height / baseHeight
+
+  return {
+    kX,
+    kY,
+    sX: (value) => num(value) * kX,
+    sY: (value) => num(value) * kY,
+  }
+}
+
+export function getNodeBox(node, fallbackWidth = 200, fallbackHeight = 150) {
+  const data = node?.data || {}
+  const position = node?.position || {}
+
+  return {
+    x: num(position.x, num(node?.x, 0)),
+    y: num(position.y, num(node?.y, 0)),
+    width: num(data.width, num(node?.width, fallbackWidth)),
+    height: num(data.height, num(node?.height, fallbackHeight)),
+    rotation: num(data.rotation, num(node?.rotation, 0)),
+    scale: num(data.scale, num(node?.scale, 1)),
+  }
+}
+
+export function groupTransform({ x = 0, y = 0, rotation = 0, scale = 1, originX = 0, originY = 0 }) {
+  const parts = [`translate(${x} ${y})`]
+
+  if (rotation) parts.push(`rotate(${rotation} ${originX} ${originY})`)
+  if (scale !== 1) parts.push(`scale(${scale})`)
+
+  return parts.join(' ')
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/elements/twoTrianglesArrowDownSvg.js
+==================================================
+
+import { attrs, getNodeBox, makeScaler } from '../svgUtils'
+
+export function twoTrianglesArrowDownToSvg(node) {
+  const data = node.data || {}
+  const box = getNodeBox(node, 200, 150)
+  const { sX, sY, kX, kY } = makeScaler(box.width, box.height, 200, 150)
+
+  const stroke = data.stroke || 'black'
+  const strokeWidth = Number(data.strokeWidth) || 2
+  const fill = data.fill || 'none'
+  const arrowFill = data.arrowFill || data.fillArrow || 'black'
+
+  return `
+<g ${attrs({
+    id: node.id,
+    'data-element-type': 'twoTrianglesArrowDown',
+    transform: `translate(${box.x} ${box.y})`,
+  })}>
+  <path ${attrs({
+    d: `M ${sX(30)} ${sY(50)} L ${sX(30)} ${sY(120)} L ${sX(100)} ${sY(85)} Z`,
+    fill,
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linejoin': 'miter',
+    'stroke-linecap': 'square',
+  })} />
+
+  <path ${attrs({
+    d: `M ${sX(170)} ${sY(50)} L ${sX(170)} ${sY(120)} L ${sX(100)} ${sY(85)} Z`,
+    fill,
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linejoin': 'miter',
+    'stroke-linecap': 'square',
+  })} />
+
+  <rect ${attrs({
+    x: sX(96),
+    y: sY(10),
+    width: 8 * kX,
+    height: 55 * kY,
+    fill: arrowFill,
+  })} />
+
+  <path ${attrs({
+    d: `M ${sX(100)} ${sY(90)} L ${sX(85)} ${sY(65)} L ${sX(115)} ${sY(65)} Z`,
+    fill: arrowFill,
+  })} />
+</g>`
+}
+
+export function getTwoTrianglesArrowDownAnchors(node) {
+  const box = getNodeBox(node, 200, 150)
+  const { kX, kY } = makeScaler(box.width, box.height, 200, 150)
+
+  return [
+    {
+      id: `${node.id}-top`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'top',
+      x: box.x + 100 * kX,
+      y: box.y + 0 * kY,
+    },
+    {
+      id: `${node.id}-right`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'right',
+      x: box.x + 200 * kX,
+      y: box.y + 75 * kY,
+    },
+    {
+      id: `${node.id}-left`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'left',
+      x: box.x + 0 * kX,
+      y: box.y + 75 * kY,
+    },
+    {
+      id: `${node.id}-bottom`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'bottom',
+      x: box.x + 100 * kX,
+      y: box.y + 150 * kY,
+    },
+  ]
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/elements/twoTrianglesZigzagSvg.js
+==================================================
+
+import { attrs, getNodeBox, makeScaler } from '../svgUtils'
+
+export function twoTrianglesZigzagToSvg(node) {
+  const data = node.data || {}
+  const box = getNodeBox(node, 200, 140)
+  const { sX, sY, kX, kY } = makeScaler(box.width, box.height, 200, 140)
+
+  const stroke = data.stroke || 'black'
+  const strokeWidth = Number(data.strokeWidth) || 10
+  const capFill = data.capFill || stroke
+
+  return `
+<g ${attrs({
+    id: node.id,
+    'data-element-type': 'twoTrianglesZigzag',
+    transform: `translate(${box.x} ${box.y})`,
+  })}>
+  <path ${attrs({
+    d: `M ${sX(30)} ${sY(40)} L ${sX(30)} ${sY(110)} L ${sX(100)} ${sY(75)} Z`,
+    fill: 'none',
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linejoin': 'miter',
+    'stroke-linecap': 'square',
+  })} />
+
+  <path ${attrs({
+    d: `M ${sX(170)} ${sY(40)} L ${sX(170)} ${sY(110)} L ${sX(100)} ${sY(75)} Z`,
+    fill: 'none',
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linejoin': 'miter',
+    'stroke-linecap': 'square',
+  })} />
+
+  <path ${attrs({
+    d: `M ${sX(100)} ${sY(75)} L ${sX(100)} ${sY(60)} L ${sX(90)} ${sY(52)} L ${sX(110)} ${sY(44)} L ${sX(90)} ${sY(36)} L ${sX(110)} ${sY(28)} L ${sX(100)} ${sY(20)} L ${sX(100)} ${sY(12)}`,
+    fill: 'none',
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linejoin': 'miter',
+    'stroke-linecap': 'square',
+  })} />
+
+  <rect ${attrs({
+    x: sX(90),
+    y: sY(0),
+    width: 20 * kX,
+    height: 14 * kY,
+    fill: capFill,
+  })} />
+</g>`
+}
+
+export function getTwoTrianglesZigzagAnchors(node) {
+  const box = getNodeBox(node, 200, 140)
+  const { kX, kY } = makeScaler(box.width, box.height, 200, 140)
+
+  return [
+    {
+      id: `${node.id}-zigzag-top`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'top',
+      x: box.x + 100 * kX,
+      y: box.y + 0 * kY,
+    },
+    {
+      id: `${node.id}-left`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'left',
+      x: box.x + 0 * kX,
+      y: box.y + 75 * kY,
+    },
+    {
+      id: `${node.id}-right`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'right',
+      x: box.x + 200 * kX,
+      y: box.y + 75 * kY,
+    },
+  ]
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/elements/monitorCrossIconSvg.js
+==================================================
+
+import { attrs, getNodeBox, makeScaler } from '../svgUtils'
+
+export function monitorCrossIconToSvg(node) {
+  const data = node.data || {}
+  const box = getNodeBox(node, 200, 150)
+  const { sX, sY } = makeScaler(box.width, box.height, 200, 150)
+
+  const stroke = data.stroke || 'black'
+  const strokeWidth = Number(data.strokeWidth) || 2
+  const fill = data.fill || 'none'
+
+  return `
+<g ${attrs({
+    id: node.id,
+    'data-element-type': 'monitorCrossIcon',
+    transform: `translate(${box.x} ${box.y})`,
+  })}>
+  <rect ${attrs({
+    x: sX(30),
+    y: sY(25),
+    width: sX(140),
+    height: sY(90),
+    fill,
+    stroke,
+    'stroke-width': strokeWidth,
+  })} />
+  <path ${attrs({
+    d: `M ${sX(60)} ${sY(50)} L ${sX(140)} ${sY(90)} M ${sX(140)} ${sY(50)} L ${sX(60)} ${sY(90)}`,
+    fill: 'none',
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linecap': 'square',
+  })} />
+</g>`
+}
+
+export function getMonitorCrossIconAnchors(node) {
+  const box = getNodeBox(node, 200, 150)
+  const { kX, kY } = makeScaler(box.width, box.height, 200, 150)
+
+  return [
+    {
+      id: `${node.id}-top`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'top',
+      x: box.x + 100 * kX,
+      y: box.y,
+    },
+    {
+      id: `${node.id}-bottom`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'bottom',
+      x: box.x + 100 * kX,
+      y: box.y + 150 * kY,
+    },
+    {
+      id: `${node.id}-left`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'left',
+      x: box.x,
+      y: box.y + 75 * kY,
+    },
+    {
+      id: `${node.id}-right`,
+      nodeId: node.id,
+      type: 'node-anchor',
+      direction: 'right',
+      x: box.x + 200 * kX,
+      y: box.y + 75 * kY,
+    },
+  ]
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgElementRegistry.js
+==================================================
+
+import {
+  twoTrianglesArrowDownToSvg,
+  getTwoTrianglesArrowDownAnchors,
+} from './elements/twoTrianglesArrowDownSvg'
+
+import {
+  twoTrianglesZigzagToSvg,
+  getTwoTrianglesZigzagAnchors,
+} from './elements/twoTrianglesZigzagSvg'
+
+import {
+  monitorCrossIconToSvg,
+  getMonitorCrossIconAnchors,
+} from './elements/monitorCrossIconSvg'
+
+export const SVG_ELEMENT_REGISTRY = {
+  twoTrianglesArrowDown: {
+    toSvg: twoTrianglesArrowDownToSvg,
+    getAnchors: getTwoTrianglesArrowDownAnchors,
+  },
+
+  twoTrianglesZigzag: {
+    toSvg: twoTrianglesZigzagToSvg,
+    getAnchors: getTwoTrianglesZigzagAnchors,
+  },
+
+  monitorCrossIcon: {
+    toSvg: monitorCrossIconToSvg,
+    getAnchors: getMonitorCrossIconAnchors,
+  },
+}
+
+export function getSvgElementDefinition(type) {
+  return SVG_ELEMENT_REGISTRY[type] || null
+}
+
+export function getNodeAnchors(node) {
+  const def = getSvgElementDefinition(node.type)
+  if (!def?.getAnchors) return []
+  return def.getAnchors(node)
+}
+
+export function buildAnchorsIndex(nodes = []) {
+  const index = new Map()
+
+  for (const node of nodes) {
+    const anchors = getNodeAnchors(node)
+
+    for (const anchor of anchors) {
+      index.set(anchor.id, anchor)
+      index.set(`${anchor.nodeId}:${anchor.id}`, anchor)
+    }
+  }
+
+  return index
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgConnectors.js
+==================================================
+
+import { attrs, pointsToPath, num } from './svgUtils'
+import { getNodeAnchors } from './svgElementRegistry'
+
+function findAnchor(nodesById, nodeId, anchorId) {
+  const node = nodesById.get(nodeId)
+  if (!node) return null
+
+  const anchors = getNodeAnchors(node)
+  return anchors.find((a) => a.id === anchorId || a.id.endsWith(anchorId)) || null
+}
+
+function buildStraightConnectorPoints(connector, nodesById) {
+  const from = connector.from || connector.source || {}
+  const to = connector.to || connector.target || {}
+
+  const fromAnchor = findAnchor(nodesById, from.nodeId, from.anchorId)
+  const toAnchor = findAnchor(nodesById, to.nodeId, to.anchorId)
+
+  if (!fromAnchor || !toAnchor) return []
+
+  return [
+    { x: fromAnchor.x, y: fromAnchor.y },
+    { x: toAnchor.x, y: toAnchor.y },
+  ]
+}
+
+export function connectorToSvg(connector, context = {}) {
+  const nodesById = context.nodesById || new Map()
+  const data = connector.data || connector
+
+  const points = Array.isArray(connector.points) && connector.points.length
+    ? connector.points
+    : buildStraightConnectorPoints(connector, nodesById)
+
+  if (!points.length) return ''
+
+  const stroke = data.stroke || 'black'
+  const strokeWidth = num(data.strokeWidth, 2)
+  const dashArray = data.dashArray || data.strokeDasharray || undefined
+
+  return `<path ${attrs({
+    id: connector.id,
+    'data-element-type': 'connector',
+    d: pointsToPath(points),
+    fill: 'none',
+    stroke,
+    'stroke-width': strokeWidth,
+    'stroke-linecap': data.lineCap || 'round',
+    'stroke-linejoin': data.lineJoin || 'round',
+    'stroke-dasharray': dashArray,
+  })} />`
+}
+
+export function connectorsToSvg(connectors = [], context = {}) {
+  return connectors.map((connector) => connectorToSvg(connector, context)).join('\n')
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgText.js
+==================================================
+
+import { attrs, escapeXml, num } from './svgUtils'
+
+export function textToSvg(node) {
+  const data = node.data || node
+  const position = node.position || {}
+
+  const x = num(position.x, num(node.x, 0))
+  const y = num(position.y, num(node.y, 0))
+  const rotation = num(data.rotation, num(node.rotation, 0))
+
+  const lines = String(data.text || node.text || '').split('\n')
+  const fontSize = num(data.fontSize, 14)
+  const lineHeight = num(data.lineHeight, fontSize * 1.2)
+
+  const tspans = lines
+    .map((line, index) => {
+      return `<tspan x="${x}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
+    })
+    .join('')
+
+  return `<text ${attrs({
+    id: node.id,
+    'data-element-type': 'text',
+    x,
+    y,
+    fill: data.fill || 'black',
+    'font-size': fontSize,
+    'font-family': data.fontFamily || 'Arial, sans-serif',
+    'font-weight': data.fontWeight,
+    'font-style': data.fontStyle,
+    'text-anchor': data.align === 'center' ? 'middle' : data.align === 'right' ? 'end' : 'start',
+    transform: rotation ? `rotate(${rotation} ${x} ${y})` : undefined,
+  })}>${tspans}</text>`
+}
+
+export function textsToSvg(texts = []) {
+  return texts.map(textToSvg).join('\n')
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgImages.js
+==================================================
+
+import { attrs, num } from './svgUtils'
+
+export function imageNodeToSvg(node) {
+  const data = node.data || node
+  const position = node.position || {}
+
+  const x = num(position.x, num(node.x, 0))
+  const y = num(position.y, num(node.y, 0))
+  const width = num(data.width, num(node.width, 100))
+  const height = num(data.height, num(node.height, 100))
+  const rotation = num(data.rotation, num(node.rotation, 0))
+
+  const href = data.href || data.src || data.url || data.dataUrl
+  if (!href) return ''
+
+  return `<image ${attrs({
+    id: node.id,
+    'data-element-type': 'image',
+    href,
+    x,
+    y,
+    width,
+    height,
+    preserveAspectRatio: data.preserveAspectRatio || 'none',
+    transform: rotation ? `rotate(${rotation} ${x + width / 2} ${y + height / 2})` : undefined,
+  })} />`
+}
+
+export function imagesToSvg(images = []) {
+  return images.map(imageNodeToSvg).join('\n')
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgFrame.js
+==================================================
+
+import { attrs, num } from './svgUtils'
+
+export function frameToSvg(frame = {}) {
+  if (!frame) return ''
+
+  const x = num(frame.x, 0)
+  const y = num(frame.y, 0)
+  const width = num(frame.width, 0)
+  const height = num(frame.height, 0)
+
+  if (!width || !height) return ''
+
+  return `<rect ${attrs({
+    id: frame.id || 'scheme-frame',
+    'data-element-type': 'frame',
+    x,
+    y,
+    width,
+    height,
+    fill: frame.fill || 'none',
+    stroke: frame.stroke || 'black',
+    'stroke-width': num(frame.strokeWidth, 1),
+  })} />`
+}
+
+export function tableToSvg(table = {}) {
+  if (!table?.rows?.length || !table?.columns?.length) return ''
+
+  const x = num(table.x, 0)
+  const y = num(table.y, 0)
+  const stroke = table.stroke || 'black'
+  const strokeWidth = num(table.strokeWidth, 1)
+  const rowHeights = table.rows.map((r) => num(r.height, 20))
+  const colWidths = table.columns.map((c) => num(c.width, 80))
+  const totalWidth = colWidths.reduce((a, b) => a + b, 0)
+  const totalHeight = rowHeights.reduce((a, b) => a + b, 0)
+
+  let svg = `<g ${attrs({ id: table.id || 'scheme-table', 'data-element-type': 'table', transform: `translate(${x} ${y})` })}>`
+  svg += `<rect ${attrs({ x: 0, y: 0, width: totalWidth, height: totalHeight, fill: 'none', stroke, 'stroke-width': strokeWidth })} />`
+
+  let cursorX = 0
+  for (let i = 0; i < colWidths.length - 1; i += 1) {
+    cursorX += colWidths[i]
+    svg += `<line ${attrs({ x1: cursorX, y1: 0, x2: cursorX, y2: totalHeight, stroke, 'stroke-width': strokeWidth })} />`
+  }
+
+  let cursorY = 0
+  for (let i = 0; i < rowHeights.length - 1; i += 1) {
+    cursorY += rowHeights[i]
+    svg += `<line ${attrs({ x1: 0, y1: cursorY, x2: totalWidth, y2: cursorY, stroke, 'stroke-width': strokeWidth })} />`
+  }
+
+  svg += '</g>'
+  return svg
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/sceneToSvg.js
+==================================================
+
+import { attrs, num } from './svgUtils'
+import { getSvgElementDefinition } from './svgElementRegistry'
+import { connectorsToSvg } from './svgConnectors'
+import { textsToSvg } from './svgText'
+import { imagesToSvg } from './svgImages'
+import { frameToSvg, tableToSvg } from './svgFrame'
+
+export function normalizeScene(scene = {}) {
+  return {
+    width: num(scene.width, num(scene.page?.width, 1200)),
+    height: num(scene.height, num(scene.page?.height, 800)),
+    nodes: scene.nodes || scene.elements || [],
+    connectors: scene.connectors || scene.lines || [],
+    texts: scene.texts || scene.textElements || [],
+    images: scene.images || scene.imageElements || [],
+    frame: scene.frame || null,
+    table: scene.table || scene.titleBlock || null,
+    background: scene.background || 'white',
+  }
+}
+
+export function nodesToSvg(nodes = []) {
+  return nodes
+    .map((node) => {
+      const def = getSvgElementDefinition(node.type)
+
+      if (!def?.toSvg) {
+        console.warn('[SVG export] No exporter for node type:', node.type, node)
+        return ''
+      }
+
+      return def.toSvg(node)
+    })
+    .join('\n')
+}
+
+export function sceneToSvg(rawScene = {}, options = {}) {
+  const scene = normalizeScene(rawScene)
+  const nodesById = new Map(scene.nodes.map((node) => [node.id, node]))
+
+  const content = [
+    options.includeBackground !== false
+      ? `<rect x="0" y="0" width="${scene.width}" height="${scene.height}" fill="${scene.background}" />`
+      : '',
+    frameToSvg(scene.frame),
+    nodesToSvg(scene.nodes),
+    connectorsToSvg(scene.connectors, { nodesById }),
+    imagesToSvg(scene.images),
+    textsToSvg(scene.texts),
+    tableToSvg(scene.table),
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg ${attrs({
+    xmlns: 'http://www.w3.org/2000/svg',
+    width: scene.width,
+    height: scene.height,
+    viewBox: `0 0 ${scene.width} ${scene.height}`,
+  })}>
+${content}
+</svg>`
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/svgPdf.js
+==================================================
+
+// Варіант для browser: SVG -> PDF через jsPDF.svg()
+// Встановити:
+// npm install jspdf svg2pdf.js
+
+import { jsPDF } from 'jspdf'
+import 'svg2pdf.js'
+
+export async function svgStringToPdfBlob(svgString, options = {}) {
+  const width = options.width || 1200
+  const height = options.height || 800
+  const orientation = width > height ? 'landscape' : 'portrait'
+
+  const pdf = new jsPDF({
+    orientation,
+    unit: 'pt',
+    format: [width, height],
+    compress: true,
+  })
+
+  const parser = new DOMParser()
+  const svgDoc = parser.parseFromString(svgString, 'image/svg+xml')
+  const svgElement = svgDoc.documentElement
+
+  await pdf.svg(svgElement, {
+    x: 0,
+    y: 0,
+    width,
+    height,
+  })
+
+  return pdf.output('blob')
+}
+
+export function downloadBlob(blob, filename = 'scheme.pdf') {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+==================================================
+FILE: src/features/scheme/export/pdf/exportSchemeVectorPdf.js
+==================================================
+
+import { sceneToSvg } from '../svg/sceneToSvg'
+import { svgStringToPdfBlob, downloadBlob } from '../svg/svgPdf'
+
+export async function exportSchemeVectorPdf(scene, options = {}) {
+  const width = options.width || scene.width || scene.page?.width || 1200
+  const height = options.height || scene.height || scene.page?.height || 800
+
+  const svg = sceneToSvg(
+    {
+      ...scene,
+      width,
+      height,
+    },
+    options,
+  )
+
+  if (options.debugSvg) {
+    console.log(svg)
+  }
+
+  const blob = await svgStringToPdfBlob(svg, { width, height })
+
+  if (options.download !== false) {
+    downloadBlob(blob, options.filename || 'scheme.pdf')
+  }
+
+  return {
+    svg,
+    blob,
+  }
+}
+
+==================================================
+FILE: src/features/scheme/export/svg/index.js
+==================================================
+
+export { sceneToSvg } from './sceneToSvg'
+export { exportSchemeVectorPdf } from '../pdf/exportSchemeVectorPdf'
+export { SVG_ELEMENT_REGISTRY, getNodeAnchors, buildAnchorsIndex } from './svgElementRegistry'
+
+==================================================
+ПРИКЛАД ВИКОРИСТАННЯ
+==================================================
+
+import { exportSchemeVectorPdf, sceneToSvg } from '@/features/scheme/export/svg'
+
+const scene = {
+  width: 1200,
+  height: 800,
+  background: 'white',
+
+  frame: {
+    x: 20,
+    y: 20,
+    width: 1160,
+    height: 760,
+    stroke: 'black',
+    strokeWidth: 1,
+  },
+
+  nodes: [
+    {
+      id: 'node-1',
+      type: 'twoTrianglesArrowDown',
+      position: { x: 300, y: 200 },
+      data: {
+        width: 200,
+        height: 150,
+        stroke: 'black',
+        strokeWidth: 2,
+        arrowFill: 'black',
+      },
+    },
+    {
+      id: 'node-2',
+      type: 'twoTrianglesZigzag',
+      position: { x: 650, y: 180 },
+      data: {
+        width: 200,
+        height: 140,
+        stroke: 'black',
+        strokeWidth: 10,
+      },
+    },
+  ],
+
+  connectors: [
+    {
+      id: 'conn-1',
+      points: [
+        { x: 500, y: 275 },
+        { x: 600, y: 275 },
+        { x: 600, y: 250 },
+        { x: 650, y: 250 },
+      ],
+      data: {
+        stroke: 'black',
+        strokeWidth: 2,
+      },
+    },
+  ],
+
+  texts: [
+    {
+      id: 'text-1',
+      position: { x: 300, y: 190 },
+      data: {
+        text: 'TIC-101',
+        fontSize: 14,
+        fontFamily: 'Arial',
+        fill: 'black',
+      },
+    },
+  ],
+}
+
+const svg = sceneToSvg(scene)
+console.log(svg)
+
+await exportSchemeVectorPdf(scene, {
+  filename: 'scheme-vector.pdf',
+  debugSvg: true,
+})
+
+==================================================
+ЯК ПРИВʼЯЗАТИ ДО ТВОЄЇ ПОТОЧНОЇ АРХІТЕКТУРИ
+==================================================
+
+1. Джерело правди має бути не Konva node, а scene model/store.
+
+Наприклад у useCanvasStore.js:
+
+{
+  nodes: [],
+  connectors: [],
+  annotations: [],
+  texts: [],
+  frame: {},
+  table: {}
+}
+
+2. Konva-компоненти мають брати дані з model:
+
+node.position.x
+node.position.y
+node.data.width
+node.data.height
+node.data.stroke
+node.data.strokeWidth
+
+3. SVG exporter бере ті самі дані:
+
+node.position.x
+node.position.y
+node.data.width
+node.data.height
+node.data.stroke
+node.data.strokeWidth
+
+4. Якщо connector points вже збережені у store, експортер просто малює їх 1 до 1.
+
+5. Якщо connector points не збережені, експортер знаходить anchors через getAnchors(node) і будує лінію між ними.
+
+6. Для максимально точного 1 до 1 краще зберігати points конектора після побудови/редагування:
+
+connector.points = [
+  { x: 100, y: 200 },
+  { x: 180, y: 200 },
+  { x: 180, y: 300 },
+]
+
+Тоді PDF не буде залежати від повторного auto-routing.
+
+==================================================
+ПРАВИЛО ДЛЯ ДОДАВАННЯ НОВОГО ЕЛЕМЕНТА
+==================================================
+
+Для кожної нової фігури додаєш SVG exporter:
+
+export function myElementToSvg(node) {
+  return `<g transform="translate(${x} ${y})">...</g>`
+}
+
+export function getMyElementAnchors(node) {
+  return [
+    { id: `${node.id}-top`, nodeId: node.id, direction: 'top', x: ..., y: ... },
+  ]
+}
+
+Потім реєструєш:
+
+SVG_ELEMENT_REGISTRY.myElement = {
+  toSvg: myElementToSvg,
+  getAnchors: getMyElementAnchors,
+}
+
+==================================================
+ВАЖЛИВІ НЮАНСИ
+==================================================
+
+1. Якщо фігури фіксованого розміру, можна залишити width/height постійними 200x150 і не використовувати масштабування.
+
+2. Якщо потрібне 1 до 1, використовуй однакові базові координати у Konva і SVG.
+
+3. Текст може трохи відрізнятися між browser canvas і PDF через шрифти. Щоб мінімізувати різницю:
+   - використовуй стандартний шрифт Arial або Roboto;
+   - однаковий fontSize;
+   - уникай складного letterSpacing, якщо бібліотека PDF його погано підтримує.
+
+4. PNG-вставки залишаться растровими, але вся схема, лінії, фігури, рамка, таблиця і текст будуть векторними.
+
+5. Якщо треба експортувати в SVG-файл окремо, можна просто зберегти рядок sceneToSvg(scene) як .svg.
+
+==================================================
+МІНІМАЛЬНА КНОПКА ЕКСПОРТУ
+==================================================
+
+import { useCanvasStore } from '@/features/scheme/store/useCanvasStore'
+import { exportSchemeVectorPdf } from '@/features/scheme/export/svg'
+
+export function ExportVectorPdfButton() {
+  const scene = useCanvasStore((state) => ({
+    width: state.page?.width || 1200,
+    height: state.page?.height || 800,
+    nodes: state.nodes,
+    connectors: state.connectors,
+    texts: state.texts,
+    images: state.images,
+    frame: state.frame,
+    table: state.table,
+  }))
+
+  const handleExport = async () => {
+    await exportSchemeVectorPdf(scene, {
+      filename: 'scheme-vector.pdf',
+      debugSvg: true,
+    })
+  }
+
+  return <button onClick={handleExport}>Export vector PDF</button>
+}
+
