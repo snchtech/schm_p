@@ -1,0 +1,812 @@
+PDF EXPORT FONT + CYRILLIC + ANNOTATION OFFSET PATCH
+======================================================
+
+МЕТА
+----
+Вирішити дві проблеми PDF/SVG export:
+
+1. Roboto Condensed не розпізнається у PDF.
+2. Кирилиця в PDF перетворюється на "кракозябли".
+3. Annotation label offsetX / offsetY не враховується або враховується нестабільно.
+4. Текст зверху / знизу / зліва / справа має експортуватися так само, як на canvas.
+
+Поточна причина проблеми зі шрифтом:
+- SVG містить font-family: "Roboto Condensed";
+- браузер може показувати цей шрифт, якщо він завантажений через next/font/google;
+- але jsPDF/svg2pdf.js не має доступу до Next.js font runtime;
+- PDF не вміє автоматично взяти web font з DOM;
+- для кирилиці стандартні PDF-шрифти jsPDF не підходять;
+- потрібно явно зареєструвати TTF у jsPDF VFS.
+
+Поточна причина проблеми з offset:
+- renderAnnotationsSvg.js має власну локальну resolveAnnotationPosition();
+- вона частково враховує offsetX/offsetY для node labels;
+- але для free position використовується absoluteX/absoluteY без offset;
+- для callout тексту часто береться resolveAnnotationPosition(), а не callout.textX/textY;
+- логіка не централізована і може відрізнятися від canvas.
+
+
+============================================================
+ВАЖЛИВО ПРО ШРИФТ
+============================================================
+
+НЕ МОЖНА покладатися тільки на:
+
+font-family="Roboto Condensed"
+
+Для коректного PDF з кирилицею потрібно:
+
+1. мати .ttf файл у проекті;
+2. перетворити його у base64;
+3. зареєструвати у jsPDF через addFileToVFS + addFont;
+4. використовувати той самий font name у svg2pdf.
+
+Рекомендована структура:
+
+src/assets/fonts/RobotoCondensed-Regular.ttf
+src/assets/fonts/RobotoCondensed-Bold.ttf
+
+Але в browser bundle найпростіший стабільний варіант:
+зберегти base64 у JS-файлі.
+
+Не використовуй next/font/google як джерело для PDF export.
+next/font/google підходить для UI, але не для jsPDF embedding.
+
+
+============================================================
+PATCH 1
+CREATE FILE: src/lib/export/fonts/robotoCondensedBase64.js
+============================================================
+
+Створи файл:
+
+export const ROBOTO_CONDENSED_REGULAR_BASE64 = "PASTE_BASE64_TTF_HERE";
+
+export const ROBOTO_CONDENSED_BOLD_BASE64 = "PASTE_BASE64_TTF_HERE";
+
+
+Як отримати base64 з .ttf:
+
+Варіант Node script:
+
+node -e "const fs=require('fs'); const p='src/assets/fonts/RobotoCondensed-Regular.ttf'; console.log(fs.readFileSync(p).toString('base64'));"
+
+
+Для bold:
+
+node -e "const fs=require('fs'); const p='src/assets/fonts/RobotoCondensed-Bold.ttf'; console.log(fs.readFileSync(p).toString('base64'));"
+
+
+ВАЖЛИВО:
+- не вставляй WOFF/WOFF2;
+- для jsPDF використовуй саме TTF;
+- якщо потрібна кирилиця, TTF має містити Cyrillic glyphs.
+
+
+============================================================
+PATCH 2
+CREATE FILE: src/lib/export/fonts/registerPdfFonts.js
+============================================================
+
+import {
+  ROBOTO_CONDENSED_REGULAR_BASE64,
+  ROBOTO_CONDENSED_BOLD_BASE64,
+} from "./robotoCondensedBase64";
+
+export const PDF_FONT_FAMILY = "RobotoCondensed";
+
+let registered = false;
+
+export function registerPdfFonts(pdf) {
+  if (!pdf || registered) return;
+
+  pdf.addFileToVFS(
+    "RobotoCondensed-Regular.ttf",
+    ROBOTO_CONDENSED_REGULAR_BASE64
+  );
+
+  pdf.addFont(
+    "RobotoCondensed-Regular.ttf",
+    PDF_FONT_FAMILY,
+    "normal"
+  );
+
+  if (
+    ROBOTO_CONDENSED_BOLD_BASE64 &&
+    ROBOTO_CONDENSED_BOLD_BASE64 !== "PASTE_BASE64_TTF_HERE"
+  ) {
+    pdf.addFileToVFS(
+      "RobotoCondensed-Bold.ttf",
+      ROBOTO_CONDENSED_BOLD_BASE64
+    );
+
+    pdf.addFont(
+      "RobotoCondensed-Bold.ttf",
+      PDF_FONT_FAMILY,
+      "bold"
+    );
+  }
+
+  pdf.setFont(PDF_FONT_FAMILY, "normal");
+
+  registered = true;
+}
+
+
+============================================================
+PATCH 3
+FILE: src/lib/export/exportConstants.js
+============================================================
+
+Знайти:
+
+export const EXPORT_FONT_FAMILY = "Roboto Condensed, Arial, sans-serif";
+
+Замінити на:
+
+export const EXPORT_FONT_FAMILY = "RobotoCondensed";
+
+
+Пояснення:
+- у SVG для PDF краще використовувати просту назву font-family;
+- ця назва має збігатися з назвою, зареєстрованою у jsPDF:
+  PDF_FONT_FAMILY = "RobotoCondensed";
+- не використовуй тут fallback list типу "Roboto Condensed, Arial, sans-serif",
+  бо svg2pdf/jsPDF можуть взяти fallback і зламати кирилицю.
+
+
+============================================================
+PATCH 4
+FILE: src/lib/export/exportPdf.js
+============================================================
+
+Знайти:
+
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+
+Замінити на:
+
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+import { registerPdfFonts, PDF_FONT_FAMILY } from "@/lib/export/fonts/registerPdfFonts";
+
+
+Знайти:
+
+const pdf = new jsPDF({
+  orientation,
+  unit: "mm",
+  format,
+  compress: true,
+  putOnlyUsedFonts: true,
+});
+
+Додати після створення pdf:
+
+registerPdfFonts(pdf);
+pdf.setFont(PDF_FONT_FAMILY, "normal");
+
+
+ПОВНИЙ ФРАГМЕНТ:
+
+const pdf = new jsPDF({
+  orientation,
+  unit: "mm",
+  format,
+  compress: true,
+  putOnlyUsedFonts: true,
+});
+
+registerPdfFonts(pdf);
+pdf.setFont(PDF_FONT_FAMILY, "normal");
+
+
+============================================================
+PATCH 5
+FILE: src/lib/export/renderSvg.js
+============================================================
+
+Знайти SVG root:
+
+return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  ${body}
+</svg>`;
+
+Замінити на:
+
+return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  <style>
+    text {
+      font-family: RobotoCondensed;
+    }
+  </style>
+  ${body}
+</svg>`;
+
+
+Пояснення:
+- це не embed шрифту у SVG;
+- це лише гарантує, що всі SVG text node використовують те саме family name,
+  яке зареєстроване в jsPDF;
+- реальний embed робить registerPdfFonts(pdf).
+
+
+============================================================
+PATCH 6
+CREATE FILE: src/lib/export/annotationExportGeometry.js
+============================================================
+
+Цей файл централізує позицію annotation labels для export.
+
+export function getNodeBoxForExport(node) {
+  return {
+    x: node?.position?.x ?? node?.x ?? 0,
+    y: node?.position?.y ?? node?.y ?? 0,
+    width:
+      node?.size?.width ??
+      node?.data?.width ??
+      node?.width ??
+      120,
+    height:
+      node?.size?.height ??
+      node?.data?.height ??
+      node?.height ??
+      60,
+  };
+}
+
+function normalizeOffset(position = {}) {
+  return {
+    offsetX: Number(position.offsetX ?? 0),
+    offsetY: Number(position.offsetY ?? 0),
+  };
+}
+
+function resolveFreeAnnotationPosition(annotation) {
+  const position = annotation.position || {};
+  const { offsetX, offsetY } = normalizeOffset(position);
+
+  return {
+    x: Number(position.absoluteX ?? 0) + offsetX,
+    y: Number(position.absoluteY ?? 0) + offsetY,
+  };
+}
+
+function resolveNodeAnnotationPosition(annotation, scene) {
+  const position = annotation.position || {};
+  const attached = annotation.attachedTo || {};
+  const node = scene.nodes.find((item) => item.id === attached.id);
+
+  if (!node) {
+    return resolveFreeAnnotationPosition(annotation);
+  }
+
+  const box = getNodeBoxForExport(node);
+  const { offsetX, offsetY } = normalizeOffset(position);
+  const mode = position.mode || "top";
+
+  if (mode === "top") {
+    return {
+      x: box.x + box.width / 2 + offsetX,
+      y: box.y - 8 + offsetY,
+    };
+  }
+
+  if (mode === "bottom") {
+    return {
+      x: box.x + box.width / 2 + offsetX,
+      y: box.y + box.height + 16 + offsetY,
+    };
+  }
+
+  if (mode === "left") {
+    return {
+      x: box.x - 8 + offsetX,
+      y: box.y + box.height / 2 + offsetY,
+    };
+  }
+
+  if (mode === "right") {
+    return {
+      x: box.x + box.width + 8 + offsetX,
+      y: box.y + box.height / 2 + offsetY,
+    };
+  }
+
+  if (mode === "center") {
+    return {
+      x: box.x + box.width / 2 + offsetX,
+      y: box.y + box.height / 2 + offsetY,
+    };
+  }
+
+  if (mode === "free") {
+    return {
+      x: box.x + box.width / 2 + offsetX,
+      y: box.y + box.height / 2 + offsetY,
+    };
+  }
+
+  return {
+    x: box.x + box.width / 2 + offsetX,
+    y: box.y + box.height / 2 + offsetY,
+  };
+}
+
+function getPolylinePointAtHalfLength(points = []) {
+  if (!points || points.length < 4) return null;
+
+  const segments = [];
+  let total = 0;
+
+  for (let i = 0; i < points.length - 2; i += 2) {
+    const a = {
+      x: Number(points[i]),
+      y: Number(points[i + 1]),
+    };
+
+    const b = {
+      x: Number(points[i + 2]),
+      y: Number(points[i + 3]),
+    };
+
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+
+    segments.push({
+      a,
+      b,
+      length,
+    });
+
+    total += length;
+  }
+
+  if (!segments.length || total <= 0) {
+    return {
+      x: Number(points[0]),
+      y: Number(points[1]),
+    };
+  }
+
+  const target = total / 2;
+  let cursor = 0;
+
+  for (const segment of segments) {
+    if (cursor + segment.length >= target) {
+      const t = (target - cursor) / segment.length;
+
+      return {
+        x: segment.a.x + (segment.b.x - segment.a.x) * t,
+        y: segment.a.y + (segment.b.y - segment.a.y) * t,
+      };
+    }
+
+    cursor += segment.length;
+  }
+
+  const last = segments[segments.length - 1];
+  return {
+    x: last.b.x,
+    y: last.b.y,
+  };
+}
+
+function resolveEdgeAnnotationPosition(annotation, scene) {
+  const position = annotation.position || {};
+  const attached = annotation.attachedTo || {};
+  const edge = scene.edges.find((item) => item.id === attached.id);
+  const { offsetX, offsetY } = normalizeOffset(position);
+
+  const points = edge?.geometry?.points || [];
+  const center = getPolylinePointAtHalfLength(points);
+
+  if (!center) {
+    return resolveFreeAnnotationPosition(annotation);
+  }
+
+  return {
+    x: center.x + offsetX,
+    y: center.y + offsetY,
+  };
+}
+
+function resolveCalloutAnnotationPosition(annotation) {
+  const position = annotation.position || {};
+  const { offsetX, offsetY } = normalizeOffset(position);
+
+  if (annotation.callout) {
+    return {
+      x: Number(annotation.callout.textX ?? 0) + offsetX,
+      y: Number(annotation.callout.textY ?? 0) + offsetY,
+    };
+  }
+
+  return resolveFreeAnnotationPosition(annotation);
+}
+
+export function resolveAnnotationExportPosition(annotation, scene) {
+  if (!annotation) return { x: 0, y: 0 };
+
+  if (annotation.annotationType === "callout") {
+    return resolveCalloutAnnotationPosition(annotation);
+  }
+
+  const attached = annotation.attachedTo;
+
+  if (!attached) {
+    return resolveFreeAnnotationPosition(annotation);
+  }
+
+  if (attached.type === "node") {
+    return resolveNodeAnnotationPosition(annotation, scene);
+  }
+
+  if (attached.type === "edge") {
+    return resolveEdgeAnnotationPosition(annotation, scene);
+  }
+
+  return resolveFreeAnnotationPosition(annotation);
+}
+
+
+============================================================
+PATCH 7
+FILE: src/lib/export/renderAnnotationsSvg.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код:
+
+import { textNode, group, line } from "./svgEscape";
+import { EXPORT_FONT_FAMILY } from "./exportConstants";
+import { resolveAnnotationExportPosition } from "./annotationExportGeometry";
+
+function orientationToRotation(annotation) {
+  const orientation = annotation.style?.textOrientation || "horizontal";
+
+  if (orientation === "vertical-left") return -90;
+  if (orientation === "vertical-right") return 90;
+
+  return annotation.style?.rotation || 0;
+}
+
+function getTextAnchor(annotation) {
+  const align = annotation.style?.align;
+
+  if (align === "left") return "start";
+  if (align === "right") return "end";
+
+  return "middle";
+}
+
+function getFontWeight(annotation) {
+  const weight = annotation.style?.fontWeight;
+
+  if (weight === "bold") return "bold";
+  if (Number(weight) >= 500) return "bold";
+
+  return "normal";
+}
+
+function renderCalloutLines(annotation, fill) {
+  if (annotation.annotationType !== "callout" || !annotation.callout) {
+    return "";
+  }
+
+  const c = annotation.callout;
+
+  return [
+    line({
+      x1: c.anchorX,
+      y1: c.anchorY,
+      x2: c.elbowX,
+      y2: c.elbowY,
+      stroke: fill,
+      "stroke-width": 1,
+    }),
+    line({
+      x1: c.elbowX,
+      y1: c.elbowY,
+      x2: c.textX,
+      y2: c.textY,
+      stroke: fill,
+      "stroke-width": 1,
+    }),
+  ].join("");
+}
+
+function renderOneAnnotation(annotation, scene) {
+  const pos = resolveAnnotationExportPosition(annotation, scene);
+  const rotation = orientationToRotation(annotation);
+
+  const fontSize = annotation.style?.fontSize || 12;
+  const fill = annotation.style?.fill || "#000000";
+  const text = annotation.text || "";
+
+  let content = "";
+
+  content += renderCalloutLines(annotation, fill);
+
+  content += textNode(text, {
+    x: pos.x,
+    y: pos.y,
+    "font-family": EXPORT_FONT_FAMILY,
+    "font-size": fontSize,
+    "font-weight": getFontWeight(annotation),
+    fill,
+    "text-anchor": getTextAnchor(annotation),
+    "dominant-baseline": "middle",
+    transform: rotation ? `rotate(${rotation} ${pos.x} ${pos.y})` : undefined,
+  });
+
+  return group(content, { id: `annotation-${annotation.id}` });
+}
+
+export function renderAnnotationsSvg(scene) {
+  if (scene.options.includeAnnotations === false) return "";
+
+  return scene.annotations
+    .map((annotation) => renderOneAnnotation(annotation, scene))
+    .join("");
+}
+
+
+============================================================
+PATCH 8
+OPTIONAL BUT RECOMMENDED
+FILE: src/lib/export/renderPaperSvg.js
+============================================================
+
+Переконайся, що всі textNode мають:
+
+"font-family": EXPORT_FONT_FAMILY,
+
+а не:
+
+"Roboto Condensed"
+"Arial"
+"Roboto Condensed, Arial, sans-serif"
+
+Якщо десь є ручний font-family, заміни на EXPORT_FONT_FAMILY.
+
+
+============================================================
+PATCH 9
+OPTIONAL BUT RECOMMENDED
+FILE: src/lib/export/renderSpecificationTablesSvg.js
+============================================================
+
+Знайти місця типу:
+
+"font-family": table.style?.fontFamily || EXPORT_FONT_FAMILY,
+
+Замінити на:
+
+"font-family": EXPORT_FONT_FAMILY,
+
+
+Причина:
+- table.style.fontFamily може бути "Roboto Condensed";
+- у PDF зареєстрований font name "RobotoCondensed";
+- якщо залишити стару назву, svg2pdf може піти у fallback.
+
+
+============================================================
+PATCH 10
+OPTIONAL BUT RECOMMENDED
+FILE: src/lib/export/renderNodesSvg.js
+============================================================
+
+Знайти:
+
+"font-family": EXPORT_FONT_FAMILY,
+
+залишити як є.
+
+Якщо є:
+
+node?.style?.fontFamily
+
+не використовувати його напряму для PDF.
+Для export краще централізовано:
+
+"font-family": EXPORT_FONT_FAMILY,
+
+
+============================================================
+ПЕРЕВІРКА ПІСЛЯ ПАТЧУ
+============================================================
+
+1. Створи annotation з кирилицею:
+
+"Насос циркуляційний"
+
+2. Постав Roboto Condensed TTF з кирилицею у base64.
+
+3. Експортуй PDF.
+
+Очікуваний результат:
+- кирилиця читається нормально;
+- шрифт візуально Roboto Condensed;
+- текст не перетворюється на "кракозябли".
+
+4. Перевір node label:
+
+position: {
+  mode: "top",
+  offsetX: 30,
+  offsetY: -20,
+}
+
+Очікуваний результат:
+- label буде над node;
+- зміщений вправо на 30;
+- зміщений вверх на 20.
+
+5. Перевір left/right:
+
+position: {
+  mode: "right",
+  offsetX: 40,
+  offsetY: 10,
+}
+
+Очікуваний результат:
+- label буде праворуч від node;
+- додатково зміщений вправо на 40;
+- додатково зміщений вниз на 10.
+
+6. Перевір connector label:
+
+attachedTo: {
+  type: "edge",
+  id: "connector-id"
+},
+position: {
+  mode: "path-center",
+  offsetX: 0,
+  offsetY: -18
+}
+
+Очікуваний результат:
+- label буде по середині реальної довжини polyline;
+- зміщений вверх на 18.
+
+
+============================================================
+ВАЖЛИВО ПРО TEXT POSITIONING
+============================================================
+
+SVG text і Konva Text не мають повністю однакової text metrics моделі.
+
+Тому для точного 1:1:
+- не змішуй font-family між canvas і PDF;
+- використовуй один fontSize;
+- використовуй один textOrientation;
+- для PDF використовуй dominant-baseline="middle";
+- для вертикального тексту завжди rotate навколо resolved pos.x/pos.y.
+
+Якщо потрібна максимальна точність як у Konva:
+- у canvas теж краще перейти на ті самі правила anchor:
+  x/y = semantic anchor point,
+  offsetX/offsetY = user adjustment,
+  rotation = orientation transform.
+
+
+============================================================
+ВАЖЛИВО ПРО NEXT.JS І FONTS
+============================================================
+
+Якщо у UI ти використовуєш:
+
+import { Roboto_Condensed } from "next/font/google";
+
+це нормально для canvas/editor UI.
+
+Але для PDF export цього недостатньо.
+
+PDF export має свою окрему font registration pipeline:
+
+TTF file
+  ->
+base64
+  ->
+pdf.addFileToVFS()
+  ->
+pdf.addFont()
+  ->
+SVG text font-family = same registered name
+  ->
+svg2pdf()
+  ->
+PDF з embedded Cyrillic font
+
+
+============================================================
+МОЖЛИВА АЛЬТЕРНАТИВА
+============================================================
+
+Якщо не хочеш вставляти base64 у JS вручну, можна зробити script:
+
+scripts/generatePdfFontBase64.js
+
+const fs = require("fs");
+const path = require("path");
+
+const regular = fs.readFileSync(
+  path.join(process.cwd(), "src/assets/fonts/RobotoCondensed-Regular.ttf")
+).toString("base64");
+
+const bold = fs.readFileSync(
+  path.join(process.cwd(), "src/assets/fonts/RobotoCondensed-Bold.ttf")
+).toString("base64");
+
+const out = `export const ROBOTO_CONDENSED_REGULAR_BASE64 = ${JSON.stringify(regular)};
+
+export const ROBOTO_CONDENSED_BOLD_BASE64 = ${JSON.stringify(bold)};
+`;
+
+fs.mkdirSync(
+  path.join(process.cwd(), "src/lib/export/fonts"),
+  { recursive: true }
+);
+
+fs.writeFileSync(
+  path.join(process.cwd(), "src/lib/export/fonts/robotoCondensedBase64.js"),
+  out
+);
+
+console.log("PDF font base64 generated.");
+
+
+package.json:
+
+{
+  "scripts": {
+    "generate:pdf-fonts": "node scripts/generatePdfFontBase64.js"
+  }
+}
+
+
+Запуск:
+
+npm run generate:pdf-fonts
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ Roboto Condensed буде реально embedded у PDF
+✔ кирилиця не буде ламатися
+✔ PDF не залежить від next/font/google
+✔ SVG text використовує font-family, який знає jsPDF
+✔ annotation offsetX / offsetY враховується для:
+  - top
+  - bottom
+  - left
+  - right
+  - center
+  - free
+  - edge/path-center
+  - callout
+✔ connector labels стають ближчими до реального центру лінії
+✔ rotated text продовжує працювати через transform="rotate(...)"
+✔ export залишається SVG-first і vector PDF
+
+
+============================================================
+END PATCH
+============================================================

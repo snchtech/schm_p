@@ -1,0 +1,1121 @@
+PDF EXPORT ENGINEERING FRAME + SPLIT HEADER PATCH
+==================================================
+
+МЕТА
+----
+Додати у нову SVG/PDF export логіку повноцінну рамку креслення:
+
+1. Зовнішня рамка аркуша.
+2. Внутрішня інженерна рамка.
+3. Верхня шапка / header block.
+4. Кожна клітинка шапки має бути поділена горизонтально на дві частини:
+   - зверху назва поля: "Шифр", "Unit", "Система", "Назва", "Аркуш";
+   - знизу значення з sheet.titleBlock.
+5. Рамка має експортуватися у векторі.
+6. Рамка не залежить від zoom/pan/viewport.
+7. Рамка має бути частиною paper renderer, а не canvas screenshot.
+
+
+============================================================
+ГОЛОВНИЙ ПРИНЦИП
+============================================================
+
+НЕ:
+Konva Stage screenshot
+current viewport
+поточний масштаб редактора
+
+ПРАВИЛЬНО:
+
+store.sheet
+  ->
+buildSheetGeometry(sheet)
+  ->
+renderPaperSvg(scene)
+  ->
+renderSvg(scene)
+  ->
+svg2pdf
+
+
+============================================================
+1. ОЧІКУВАНА МОДЕЛЬ SHEET
+============================================================
+
+У store має бути:
+
+sheet: {
+  format: "A3",
+  orientation: "landscape",
+
+  titleBlock: {
+    albumCode: "A-001",
+    unit: "ТП-1",
+    system: "ОВ",
+    title: "Схема технологічна",
+    sheetNumber: "1",
+  },
+
+  notes: [
+    { text: "Примітка 1" },
+    { text: "Примітка 2" }
+  ]
+}
+
+Якщо sheet ще немає у store, дивись PATCH 1.
+
+
+============================================================
+PATCH 1
+FILE: src/store/useCanvasStore.js
+============================================================
+
+Якщо у store ще немає sheet, додати:
+
+sheet: {
+  format: "A3",
+  orientation: "landscape",
+
+  titleBlock: {
+    albumCode: "",
+    unit: "",
+    system: "",
+    title: "",
+    sheetNumber: "1",
+  },
+
+  notes: [],
+},
+
+setSheet: (sheet) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      ...(sheet || {}),
+    },
+  })),
+
+updateTitleBlock: (patch) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      titleBlock: {
+        ...(s.sheet?.titleBlock || {}),
+        ...(patch || {}),
+      },
+    },
+  })),
+
+setSheetNotes: (notes) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      notes: Array.isArray(notes) ? notes : [],
+    },
+  })),
+
+ПРИКЛАД ФРАГМЕНТА:
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+  annotations: [],
+  specificationTables: [],
+
+  sheet: {
+    format: "A3",
+    orientation: "landscape",
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+    notes: [],
+  },
+
+  setSheet: (sheet) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        ...(sheet || {}),
+      },
+    })),
+
+  updateTitleBlock: (patch) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        titleBlock: {
+          ...(s.sheet?.titleBlock || {}),
+          ...(patch || {}),
+        },
+      },
+    })),
+
+  setSheetNotes: (notes) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        notes: Array.isArray(notes) ? notes : [],
+      },
+    })),
+
+  ...
+}));
+
+
+============================================================
+PATCH 2
+FILE: src/lib/paper/paperConstants.js
+============================================================
+
+ЗАМІНИТИ або привести до такого вигляду:
+
+export const MM_TO_PX = 4;
+
+// Відступ внутрішньої рамки від краю аркуша.
+// При MM_TO_PX = 4 це 5 мм.
+export const FRAME_MARGIN = 20;
+
+// Верхня шапка.
+export const HEADER_HEIGHT = 40;
+
+// Шапка ділиться горизонтально на label/value.
+export const HEADER_LABEL_HEIGHT = 18;
+export const HEADER_VALUE_HEIGHT = HEADER_HEIGHT - HEADER_LABEL_HEIGHT;
+
+// Нижній основний блок / підвал, якщо потрібен.
+export const TITLE_BLOCK_HEIGHT = 120;
+
+// Блок приміток над нижнім блоком.
+export const NOTES_AREA_HEIGHT = 80;
+
+// Колонки верхньої шапки.
+// Сума може бути меншою за ширину рамки — залишок стане порожньою коміркою.
+export const HEADER_COLUMNS = [
+  {
+    key: "albumCode",
+    label: "Шифр",
+    width: 180,
+    align: "center",
+  },
+  {
+    key: "unit",
+    label: "Unit",
+    width: 120,
+    align: "center",
+  },
+  {
+    key: "system",
+    label: "Система",
+    width: 140,
+    align: "center",
+  },
+  {
+    key: "title",
+    label: "Назва схеми",
+    width: 320,
+    align: "center",
+  },
+  {
+    key: "sheetNumber",
+    label: "Аркуш",
+    width: 80,
+    align: "center",
+  },
+];
+
+
+============================================================
+PATCH 3
+FILE: src/lib/paper/paperFormats.js
+============================================================
+
+Переконатися, що є формати:
+
+export const PAPER_FORMATS = {
+  A4: { width: 297, height: 210 },
+  A3: { width: 420, height: 297 },
+  A1: { width: 841, height: 594 },
+};
+
+
+ВАЖЛИВО:
+- розміри в мм;
+- orientation застосовується у sheetGeometry.
+
+
+============================================================
+PATCH 4
+FILE: src/lib/paper/sheetGeometry.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код:
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+} from "./paperConstants";
+
+import { PAPER_FORMATS } from "./paperFormats";
+
+export function buildSheetGeometry(sheet = {}) {
+  const format = PAPER_FORMATS[sheet.format || "A3"] || PAPER_FORMATS.A3;
+  const isLandscape = sheet.orientation !== "portrait";
+
+  const sheetWidthMm = isLandscape ? format.width : format.height;
+  const sheetHeightMm = isLandscape ? format.height : format.width;
+
+  const sheetWidth = sheetWidthMm * MM_TO_PX;
+  const sheetHeight = sheetHeightMm * MM_TO_PX;
+
+  const frameMargin = FRAME_MARGIN;
+
+  const sheetRect = {
+    x: 0,
+    y: 0,
+    width: sheetWidth,
+    height: sheetHeight,
+  };
+
+  const frameRect = {
+    x: frameMargin,
+    y: frameMargin,
+    width: sheetWidth - frameMargin * 2,
+    height: sheetHeight - frameMargin * 2,
+  };
+
+  const headerArea = {
+    x: frameRect.x,
+    y: frameRect.y,
+    width: frameRect.width,
+    height: HEADER_HEIGHT,
+  };
+
+  const titleBlockArea = {
+    x: frameRect.x,
+    y: frameRect.y + frameRect.height - TITLE_BLOCK_HEIGHT,
+    width: frameRect.width,
+    height: TITLE_BLOCK_HEIGHT,
+  };
+
+  const notesArea = {
+    x: frameRect.x,
+    y: titleBlockArea.y - NOTES_AREA_HEIGHT,
+    width: Math.min(420, frameRect.width),
+    height: NOTES_AREA_HEIGHT,
+  };
+
+  const drawingArea = {
+    x: frameRect.x,
+    y: frameRect.y + HEADER_HEIGHT,
+    width: frameRect.width,
+    height:
+      frameRect.height -
+      HEADER_HEIGHT -
+      NOTES_AREA_HEIGHT -
+      TITLE_BLOCK_HEIGHT,
+  };
+
+  return {
+    sheetRect,
+    frameRect,
+    headerArea,
+    drawingArea,
+    titleBlockArea,
+    notesArea,
+  };
+}
+
+
+============================================================
+PATCH 5
+FILE: src/lib/export/svgEscape.js
+============================================================
+
+Переконатися, що є helpers:
+
+export function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function svgAttrs(attrs = {}) {
+  return Object.entries(attrs)
+    .filter(([, value]) => value !== undefined && value !== null && value !== false)
+    .map(([key, value]) => `${key}="${escapeXml(value)}"`)
+    .join(" ");
+}
+
+export function rect(attrs = {}) {
+  return `<rect ${svgAttrs(attrs)} />`;
+}
+
+export function line(attrs = {}) {
+  return `<line ${svgAttrs(attrs)} />`;
+}
+
+export function textNode(content, attrs = {}) {
+  return `<text ${svgAttrs(attrs)}>${escapeXml(content)}</text>`;
+}
+
+export function group(content, attrs = {}) {
+  return `<g ${svgAttrs(attrs)}>${content}</g>`;
+}
+
+
+============================================================
+PATCH 6
+FILE: src/lib/export/renderPaperSvg.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Цей файл:
+- малює папір;
+- малює внутрішню рамку;
+- малює верхню шапку;
+- кожну клітинку шапки ділить горизонтально на дві частини;
+- зверху label;
+- знизу value.
+
+import { rect, line, textNode, group } from "./svgEscape";
+import { EXPORT_COLORS, EXPORT_FONT_FAMILY } from "./exportConstants";
+import {
+  HEADER_COLUMNS,
+  HEADER_LABEL_HEIGHT,
+  HEADER_VALUE_HEIGHT,
+} from "@/lib/paper/paperConstants";
+
+function getTextAnchor(align = "center") {
+  if (align === "left") return "start";
+  if (align === "right") return "end";
+  return "middle";
+}
+
+function getTextX(x, width, align = "center", padding = 6) {
+  if (align === "left") return x + padding;
+  if (align === "right") return x + width - padding;
+  return x + width / 2;
+}
+
+function renderCenteredText({
+  text,
+  x,
+  y,
+  width,
+  height,
+  fontSize = 10,
+  fontWeight = "normal",
+  align = "center",
+}) {
+  return textNode(text || "", {
+    x: getTextX(x, width, align),
+    y: y + height / 2,
+    "font-family": EXPORT_FONT_FAMILY,
+    "font-size": fontSize,
+    "font-weight": fontWeight,
+    fill: EXPORT_COLORS.black,
+    "text-anchor": getTextAnchor(align),
+    "dominant-baseline": "middle",
+  });
+}
+
+function renderHeaderCell({
+  x,
+  y,
+  width,
+  height,
+  label,
+  value,
+  align = "center",
+}) {
+  const labelHeight = HEADER_LABEL_HEIGHT;
+  const valueHeight = HEADER_VALUE_HEIGHT;
+
+  let out = "";
+
+  // Outer cell
+  out += rect({
+    x,
+    y,
+    width,
+    height,
+    fill: "none",
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+
+  // Horizontal divider label/value
+  out += line({
+    x1: x,
+    y1: y + labelHeight,
+    x2: x + width,
+    y2: y + labelHeight,
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+
+  // Label top
+  out += renderCenteredText({
+    text: label,
+    x,
+    y,
+    width,
+    height: labelHeight,
+    fontSize: 9,
+    fontWeight: "bold",
+    align,
+  });
+
+  // Value bottom
+  out += renderCenteredText({
+    text: value,
+    x,
+    y: y + labelHeight,
+    width,
+    height: valueHeight,
+    fontSize: 11,
+    fontWeight: "normal",
+    align,
+  });
+
+  return out;
+}
+
+function renderHeaderColumns(scene) {
+  const { geometry, sheet } = scene;
+  const { headerArea } = geometry;
+  const titleBlock = sheet.titleBlock || {};
+
+  let x = headerArea.x;
+  let out = "";
+
+  for (const column of HEADER_COLUMNS) {
+    const width = column.width;
+    const value = titleBlock[column.key] || "";
+
+    out += renderHeaderCell({
+      x,
+      y: headerArea.y,
+      width,
+      height: headerArea.height,
+      label: column.label,
+      value,
+      align: column.align || "center",
+    });
+
+    x += width;
+  }
+
+  // Якщо колонки не заповнили всю ширину рамки,
+  // малюємо порожню клітинку-залишок, теж поділену навпіл.
+  const rightEdge = headerArea.x + headerArea.width;
+
+  if (x < rightEdge) {
+    out += renderHeaderCell({
+      x,
+      y: headerArea.y,
+      width: rightEdge - x,
+      height: headerArea.height,
+      label: "",
+      value: "",
+      align: "center",
+    });
+  }
+
+  return group(out, {
+    id: "paper-header",
+    "data-export-part": "paper-header",
+  });
+}
+
+function renderNotesArea(scene) {
+  const { geometry, notes, options } = scene;
+  if (options.includeNotes === false) return "";
+
+  const { notesArea } = geometry;
+  const list = Array.isArray(notes) ? notes : [];
+
+  let out = "";
+
+  out += rect({
+    x: notesArea.x,
+    y: notesArea.y,
+    width: notesArea.width,
+    height: notesArea.height,
+    fill: "none",
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+
+  out += textNode("Примітки", {
+    x: notesArea.x + 8,
+    y: notesArea.y + 14,
+    "font-family": EXPORT_FONT_FAMILY,
+    "font-size": 11,
+    "font-weight": "bold",
+    fill: EXPORT_COLORS.black,
+  });
+
+  list.slice(0, 6).forEach((note, index) => {
+    const text = typeof note === "string" ? note : note?.text || "";
+
+    out += textNode(`${index + 1}. ${text}`, {
+      x: notesArea.x + 8,
+      y: notesArea.y + 32 + index * 14,
+      "font-family": EXPORT_FONT_FAMILY,
+      "font-size": 10,
+      fill: EXPORT_COLORS.black,
+    });
+  });
+
+  return group(out, {
+    id: "paper-notes",
+    "data-export-part": "paper-notes",
+  });
+}
+
+function renderTitleBlockArea(scene) {
+  const { geometry } = scene;
+  const { titleBlockArea } = geometry;
+
+  const out = rect({
+    x: titleBlockArea.x,
+    y: titleBlockArea.y,
+    width: titleBlockArea.width,
+    height: titleBlockArea.height,
+    fill: "none",
+    stroke: EXPORT_COLORS.black,
+    "stroke-width": 1,
+  });
+
+  return group(out, {
+    id: "paper-title-block",
+    "data-export-part": "paper-title-block",
+  });
+}
+
+function renderDrawingAreaGuide(scene) {
+  const { geometry, options } = scene;
+  if (options.includeDrawingAreaGuide !== true) return "";
+
+  const { drawingArea } = geometry;
+
+  return rect({
+    x: drawingArea.x,
+    y: drawingArea.y,
+    width: drawingArea.width,
+    height: drawingArea.height,
+    fill: "none",
+    stroke: EXPORT_COLORS.drawingArea,
+    "stroke-width": 1,
+    "stroke-dasharray": "6 6",
+  });
+}
+
+export function renderPaperSvg(scene) {
+  const { geometry, options } = scene;
+  const { sheetRect, frameRect } = geometry;
+
+  let out = "";
+
+  // Paper background
+  out += rect({
+    x: sheetRect.x,
+    y: sheetRect.y,
+    width: sheetRect.width,
+    height: sheetRect.height,
+    fill: EXPORT_COLORS.paper,
+    stroke: "none",
+  });
+
+  if (options.includePaperFrame !== false) {
+    // Engineering frame
+    out += rect({
+      x: frameRect.x,
+      y: frameRect.y,
+      width: frameRect.width,
+      height: frameRect.height,
+      fill: "none",
+      stroke: EXPORT_COLORS.black,
+      "stroke-width": 2,
+    });
+
+    out += renderHeaderColumns(scene);
+    out += renderTitleBlockArea(scene);
+  }
+
+  out += renderNotesArea(scene);
+  out += renderDrawingAreaGuide(scene);
+
+  return group(out, {
+    id: "paper-frame-layer",
+    "data-export-layer": "paper",
+  });
+}
+
+
+============================================================
+PATCH 7
+FILE: src/lib/export/exportConstants.js
+============================================================
+
+Переконатися, що є:
+
+export const EXPORT_FONT_FAMILY = "RobotoCondensed";
+
+export const EXPORT_COLORS = {
+  black: "#000000",
+  white: "#ffffff",
+  paper: "#ffffff",
+  drawingArea: "#d0d0d0",
+  lightGrid: "#e5e5e5",
+};
+
+export const DEFAULT_EXPORT_OPTIONS = {
+  includeNodes: true,
+  includeConnectors: true,
+  includeAnnotations: true,
+  includeSpecificationTables: true,
+  includeNotes: true,
+  includePaperFrame: true,
+  includeDrawingAreaGuide: false,
+  fileName: "scheme.pdf",
+};
+
+
+ВАЖЛИВО:
+includePaperFrame має бути true.
+
+
+============================================================
+PATCH 8
+FILE: src/lib/export/buildExportScene.js
+============================================================
+
+Переконатися, що export scene бере sheet зі store:
+
+import { buildSheetGeometry } from "@/lib/paper/sheetGeometry";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+export function buildExportScene(store, options = {}) {
+  const sheet = store.sheet || {
+    format: "A3",
+    orientation: "landscape",
+    titleBlock: {},
+    notes: [],
+  };
+
+  const geometry = buildSheetGeometry(sheet);
+
+  if (!geometry) {
+    throw new Error("Cannot build export scene: sheet geometry is missing.");
+  }
+
+  const nodes = normalizeArray(store.nodes);
+
+  const edges = normalizeArray(store.edges).map((edge) => {
+    if (edge?.kind !== "connector") return edge;
+    return rebuildConnectorGeometry(edge, nodes);
+  });
+
+  return {
+    options,
+    sheet,
+    geometry,
+    nodes,
+    edges,
+    annotations: normalizeArray(store.annotations),
+    specificationTables: normalizeArray(store.specificationTables),
+    notes: normalizeArray(sheet.notes || store.notes),
+  };
+}
+
+
+============================================================
+PATCH 9
+FILE: src/lib/export/renderSvg.js
+============================================================
+
+Перевірити порядок рендеру.
+
+Рекомендовано:
+
+import { renderPaperSvg } from "./renderPaperSvg";
+import { renderConnectorsSvg } from "./renderConnectorsSvg";
+import { renderNodesSvg } from "./renderNodesSvg";
+import { renderAnnotationsSvg } from "./renderAnnotationsSvg";
+import { renderSpecificationTablesSvg } from "./renderSpecificationTablesSvg";
+
+export function renderSvg(scene) {
+  const { sheetRect } = scene.geometry;
+
+  const width = sheetRect.width;
+  const height = sheetRect.height;
+
+  const body = [
+    renderPaperSvg(scene),
+    renderConnectorsSvg(scene),
+    renderNodesSvg(scene),
+    renderAnnotationsSvg(scene),
+    renderSpecificationTablesSvg(scene),
+  ].join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  <style>
+    text {
+      font-family: RobotoCondensed;
+    }
+  </style>
+  ${body}
+</svg>`;
+}
+
+
+ВАЖЛИВО:
+- renderPaperSvg має бути першим;
+- тоді схема малюється поверх рамки;
+- якщо треба, щоб рамка перекривала схему, можна зробити окремо:
+  renderPaperBackgroundSvg()
+  renderScheme()
+  renderPaperForegroundSvg()
+  Але для MVP достатньо renderPaperSvg першим.
+
+
+============================================================
+10. ЯКЩО РАМКА МАЄ БУТИ ВИДИМА НА CANVAS ТАК САМО
+============================================================
+
+Для 1:1 canvas -> SVG/PDF треба не тільки export renderer,
+а й canvas PaperLayer, який використовує ту ж sheetGeometry.
+
+CREATE FILE:
+src/components/canvas/PaperLayer.jsx
+
+"use client";
+
+import React from "react";
+import { Group, Rect, Line, Text } from "react-konva";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { buildSheetGeometry } from "@/lib/paper/sheetGeometry";
+import {
+  HEADER_COLUMNS,
+  HEADER_LABEL_HEIGHT,
+  HEADER_VALUE_HEIGHT,
+} from "@/lib/paper/paperConstants";
+
+function CellText({
+  x,
+  y,
+  width,
+  height,
+  text,
+  fontSize,
+  fontStyle = "normal",
+}) {
+  return (
+    <Text
+      x={x}
+      y={y}
+      width={width}
+      height={height}
+      text={text || ""}
+      fontFamily="Roboto Condensed"
+      fontSize={fontSize}
+      fontStyle={fontStyle}
+      fill="black"
+      align="center"
+      verticalAlign="middle"
+      listening={false}
+    />
+  );
+}
+
+function HeaderCell({ x, y, width, height, label, value }) {
+  return (
+    <Group listening={false}>
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="white"
+        stroke="black"
+        strokeWidth={1}
+      />
+
+      <Line
+        points={[x, y + HEADER_LABEL_HEIGHT, x + width, y + HEADER_LABEL_HEIGHT]}
+        stroke="black"
+        strokeWidth={1}
+      />
+
+      <CellText
+        x={x}
+        y={y}
+        width={width}
+        height={HEADER_LABEL_HEIGHT}
+        text={label}
+        fontSize={9}
+        fontStyle="bold"
+      />
+
+      <CellText
+        x={x}
+        y={y + HEADER_LABEL_HEIGHT}
+        width={width}
+        height={HEADER_VALUE_HEIGHT}
+        text={value}
+        fontSize={11}
+      />
+    </Group>
+  );
+}
+
+export default function PaperLayer() {
+  const sheet = useCanvasStore((s) => s.sheet);
+  const geometry = buildSheetGeometry(sheet || {});
+  const titleBlock = sheet?.titleBlock || {};
+
+  const { sheetRect, frameRect, headerArea } = geometry;
+
+  let cursorX = headerArea.x;
+
+  return (
+    <Group listening={false}>
+      <Rect
+        x={sheetRect.x}
+        y={sheetRect.y}
+        width={sheetRect.width}
+        height={sheetRect.height}
+        fill="white"
+      />
+
+      <Rect
+        x={frameRect.x}
+        y={frameRect.y}
+        width={frameRect.width}
+        height={frameRect.height}
+        fill="transparent"
+        stroke="black"
+        strokeWidth={2}
+      />
+
+      {HEADER_COLUMNS.map((column) => {
+        const cellX = cursorX;
+        cursorX += column.width;
+
+        return (
+          <HeaderCell
+            key={column.key}
+            x={cellX}
+            y={headerArea.y}
+            width={column.width}
+            height={headerArea.height}
+            label={column.label}
+            value={titleBlock[column.key] || ""}
+          />
+        );
+      })}
+
+      {cursorX < headerArea.x + headerArea.width && (
+        <HeaderCell
+          x={cursorX}
+          y={headerArea.y}
+          width={headerArea.x + headerArea.width - cursorX}
+          height={headerArea.height}
+          label=""
+          value=""
+        />
+      )}
+    </Group>
+  );
+}
+
+
+У EditorCanvas додати PaperLayer першим:
+
+<Stage ...>
+  <PaperLayer />
+  <ConnectorsLayer />
+  <DraftConnectorLayer />
+  <NodesLayer />
+  <AnnotationsLayer />
+  <SpecificationTablesLayer />
+</Stage>
+
+
+============================================================
+11. ЧОМУ ШАПКА ДІЛИТЬСЯ САМЕ В renderPaperSvg
+============================================================
+
+Шапка є частиною аркуша, а не частиною схеми.
+
+Тому правильно:
+
+renderPaperSvg()
+  - sheet background
+  - frame
+  - header cells
+  - title block
+  - notes
+
+renderNodesSvg()
+  - технологічні елементи
+
+renderConnectorsSvg()
+  - лінії
+
+renderAnnotationsSvg()
+  - підписи / виноски
+
+renderSpecificationTablesSvg()
+  - таблиці специфікації / приміток
+
+
+============================================================
+12. ПРИКЛАД SVG ДЛЯ ОДНІЄЇ КЛІТИНКИ ШАПКИ
+============================================================
+
+Для колонки "Шифр":
+
+<g>
+  <rect x="20" y="20" width="180" height="40" fill="none" stroke="#000000" stroke-width="1" />
+
+  <line x1="20" y1="38" x2="200" y2="38" stroke="#000000" stroke-width="1" />
+
+  <text x="110" y="29" font-family="RobotoCondensed" font-size="9" font-weight="bold" text-anchor="middle" dominant-baseline="middle">
+    Шифр
+  </text>
+
+  <text x="110" y="49" font-family="RobotoCondensed" font-size="11" text-anchor="middle" dominant-baseline="middle">
+    A-001
+  </text>
+</g>
+
+
+============================================================
+13. ЯК ЗМІНИТИ ВИСОТУ ВЕРХНЬОГО/НИЖНЬОГО РЯДКА
+============================================================
+
+У paperConstants.js:
+
+export const HEADER_HEIGHT = 40;
+export const HEADER_LABEL_HEIGHT = 18;
+export const HEADER_VALUE_HEIGHT = HEADER_HEIGHT - HEADER_LABEL_HEIGHT;
+
+Наприклад, якщо треба більший value row:
+
+export const HEADER_HEIGHT = 44;
+export const HEADER_LABEL_HEIGHT = 16;
+export const HEADER_VALUE_HEIGHT = 28;
+
+
+============================================================
+14. ЯК ДОДАТИ НОВУ КОЛОНКУ
+============================================================
+
+У HEADER_COLUMNS:
+
+{
+  key: "revision",
+  label: "Рев.",
+  width: 60,
+  align: "center",
+}
+
+І у sheet.titleBlock:
+
+revision: "0",
+
+
+============================================================
+15. ЯКЩО ПОТРІБНА НИЖНЯ ОСНОВНА РАМКА ЯК У ДСТУ/ГОСТ
+============================================================
+
+Цей патч залишає нижній titleBlockArea як прямокутник.
+
+Далі можна розвинути його по такому ж принципу:
+
+TITLE_BLOCK_ROWS = [...]
+TITLE_BLOCK_COLUMNS = [...]
+
+і зробити renderTitleBlockArea() табличним, так само як renderHeaderCell().
+
+
+============================================================
+16. ПЕРЕВІРКА
+============================================================
+
+1. У store:
+
+sheet: {
+  format: "A3",
+  orientation: "landscape",
+  titleBlock: {
+    albumCode: "A-001",
+    unit: "ТП-1",
+    system: "ОВ",
+    title: "Схема технологічна",
+    sheetNumber: "1"
+  }
+}
+
+2. Виклик:
+
+await canvasController.exportCurrentSchemePdf();
+
+3. Очікуваний результат:
+- PDF має білий аркуш;
+- є чорна рамка;
+- зверху є шапка;
+- кожна клітинка шапки поділена горизонтально;
+- зверху видно назву поля;
+- знизу видно значення;
+- кирилиця працює, якщо застосовано попередній font patch;
+- схема експортується поверх рамки;
+- zoom/pan не впливає на PDF.
+
+
+============================================================
+17. РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ повертається рамка у нову vector export логіку
+✔ рамка є частиною SVG/PDF, а не screenshot
+✔ шапка має структуру table-like fields
+✔ кожне поле шапки розділене горизонтально label/value
+✔ значення беруться з store.sheet.titleBlock
+✔ підтримуються A4/A3/A1 через sheetGeometry
+✔ export не залежить від viewport
+✔ можна додати такий самий PaperLayer на canvas для 1:1
+
+
+============================================================
+END PATCH
+============================================================

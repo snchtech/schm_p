@@ -1,0 +1,598 @@
+SVG EXPORT BUTTON + FUNCTIONALITY PATCH
+======================================
+
+МЕТА
+----
+Маючи вже наявний SVG-first PDF export пакет, додати окремий експорт у .svg:
+
+1. Кнопка "SVG" у toolbar.
+2. Метод canvasController.exportCurrentSchemeSvg().
+3. Генерація SVG з тієї самої export scene, що і PDF.
+4. Download .svg файлу.
+5. SVG має враховувати:
+   - актуальний формат аркуша A4/A3/A1;
+   - orientation;
+   - рамку;
+   - шапку;
+   - nodes;
+   - connectors;
+   - annotations;
+   - callouts;
+   - specification tables.
+6. Export не залежить від zoom/pan/viewport.
+
+
+============================================================
+1. ПРАВИЛЬНА АРХІТЕКТУРА
+============================================================
+
+НЕ дублювати SVG renderer.
+
+Правильно:
+
+store
+  ->
+buildExportScene(store)
+  ->
+renderSvg(scene)
+  ->
+downloadSvg(svg)
+
+Тобто SVG export і PDF export мають використовувати один і той самий:
+
+src/lib/export/buildExportScene.js
+src/lib/export/renderSvg.js
+
+
+============================================================
+PATCH 1
+FILE: src/lib/export/exportSvgFile.js
+============================================================
+
+СТВОРИТИ або замінити файл:
+
+export function downloadSvg(svg, fileName = "scheme.svg") {
+  const blob = new Blob([svg], {
+    type: "image/svg+xml;charset=utf-8",
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+
+============================================================
+PATCH 2
+FILE: src/lib/export/exportSchemePdf.js
+============================================================
+
+Якщо у цьому файлі вже є exportSchemePdf(), додати поряд exportSchemeSvg().
+
+ПОВНИЙ РЕКОМЕНДОВАНИЙ ФАЙЛ:
+
+import { buildExportScene } from "./buildExportScene";
+import { renderSvg } from "./renderSvg";
+import { exportPdfFromSvg } from "./exportPdf";
+import { downloadSvg } from "./exportSvgFile";
+import { DEFAULT_EXPORT_OPTIONS } from "./exportConstants";
+
+function safeFilePart(value, fallback = "scheme") {
+  const normalized = String(value || fallback)
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]/g, "");
+
+  return normalized || fallback;
+}
+
+function makeBaseFileName(scene) {
+  const tb = scene.sheet?.titleBlock || {};
+
+  const system = safeFilePart(tb.system, "scheme");
+  const sheetNumber = safeFilePart(tb.sheetNumber, "1");
+  const format = safeFilePart(scene.sheet?.format, "A3");
+
+  return `${system}_${sheetNumber}_${format}`;
+}
+
+export async function exportSchemePdf(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  await exportPdfFromSvg(svg, scene, {
+    fileName: mergedOptions.fileName || `${makeBaseFileName(scene)}.pdf`,
+  });
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+export function exportSchemeSvg(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  const fileName =
+    mergedOptions.svgFileName ||
+    mergedOptions.fileName ||
+    `${makeBaseFileName(scene)}.svg`;
+
+  const normalizedFileName = fileName.toLowerCase().endsWith(".svg")
+    ? fileName
+    : `${fileName}.svg`;
+
+  if (mergedOptions.download !== false) {
+    downloadSvg(svg, normalizedFileName);
+  }
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+
+============================================================
+PATCH 3
+FILE: src/controllers/canvasController.js
+============================================================
+
+Додати import:
+
+import { exportSchemePdf, exportSchemeSvg } from "@/lib/export/exportSchemePdf";
+
+
+Додати метод у canvasController object:
+
+exportCurrentSchemeSvg(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return exportSchemeSvg(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+
+Якщо поруч уже є PDF method, має виглядати так:
+
+async exportCurrentSchemePdf(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return await exportSchemePdf(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+exportCurrentSchemeSvg(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return exportSchemeSvg(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+
+ВАЖЛИВО:
+- не передавати canvas/stage;
+- не брати zoom/pan;
+- не брати local cached scene;
+- тільки useCanvasStore.getState() у момент кліку.
+
+
+============================================================
+PATCH 4
+CREATE FILE: src/components/toolbar/ExportSvgButton.jsx
+============================================================
+
+"use client";
+
+import React, { useState } from "react";
+import { Button } from "@mui/material";
+import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ExportSvgButton() {
+  const [loading, setLoading] = useState(false);
+
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      startIcon={<InsertDriveFileOutlinedIcon fontSize="small" />}
+      disabled={loading}
+      onClick={() => {
+        if (loading) return;
+
+        try {
+          setLoading(true);
+
+          canvasController.exportCurrentSchemeSvg?.({
+            includeNodes: true,
+            includeConnectors: true,
+            includeAnnotations: true,
+            includeSpecificationTables: true,
+            includeNotes: true,
+            includePaperFrame: true,
+          });
+        } catch (error) {
+          console.error("SVG export failed", error);
+          alert("Не вдалося сформувати SVG. Деталі в console.");
+        } finally {
+          setLoading(false);
+        }
+      }}
+      sx={{ justifyContent: "flex-start" }}
+    >
+      {loading ? "Формування..." : "SVG"}
+    </Button>
+  );
+}
+
+
+============================================================
+PATCH 5
+ДОДАТИ КНОПКУ В TOOLBAR
+============================================================
+
+У компоненті toolbar, де вже є PDF кнопка, додати import:
+
+import ExportSvgButton from "@/components/toolbar/ExportSvgButton";
+
+
+І в JSX:
+
+<ExportSvgButton />
+
+
+Приклад:
+
+<Stack spacing={1}>
+  <ExportPdfButton />
+  <ExportSvgButton />
+</Stack>
+
+
+Або якщо toolbar horizontal:
+
+<Stack direction="row" spacing={1}>
+  <ExportPdfButton />
+  <ExportSvgButton />
+</Stack>
+
+
+============================================================
+PATCH 6
+FILE: src/lib/export/renderSvg.js
+============================================================
+
+Переконатися, що renderSvg() повертає повний самодостатній SVG.
+
+Рекомендований вигляд:
+
+import { renderPaperSvg } from "./renderPaperSvg";
+import { renderConnectorsSvg } from "./renderConnectorsSvg";
+import { renderNodesSvg } from "./renderNodesSvg";
+import { renderAnnotationsSvg } from "./renderAnnotationsSvg";
+import { renderSpecificationTablesSvg } from "./renderSpecificationTablesSvg";
+
+export function renderSvg(scene) {
+  const { sheetRect } = scene.geometry;
+
+  const width = sheetRect.width;
+  const height = sheetRect.height;
+
+  const body = [
+    renderPaperSvg(scene),
+    renderConnectorsSvg(scene),
+    renderNodesSvg(scene),
+    renderAnnotationsSvg(scene),
+    renderSpecificationTablesSvg(scene),
+  ].join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  <style>
+    text {
+      font-family: RobotoCondensed, Arial, sans-serif;
+    }
+  </style>
+  ${body}
+</svg>`;
+}
+
+
+ВАЖЛИВО:
+Для PDF ми реєстрували font-family як RobotoCondensed.
+Для SVG, який відкриватиметься окремо у браузері/редакторі, fallback можна залишити:
+
+RobotoCondensed, Arial, sans-serif
+
+Але якщо хочеш, щоб SVG сам містив шрифт, дивись PATCH 7.
+
+
+============================================================
+PATCH 7 OPTIONAL
+EMBED FONT У SVG
+============================================================
+
+Якщо треба, щоб SVG сам відкривався з Roboto Condensed навіть поза твоїм сайтом,
+можна embed font через @font-face.
+
+Для цього треба мати base64 TTF з попереднього font patch:
+
+src/lib/export/fonts/robotoCondensedBase64.js
+
+У renderSvg.js:
+
+import {
+  ROBOTO_CONDENSED_REGULAR_BASE64,
+} from "./fonts/robotoCondensedBase64";
+
+І style зробити так:
+
+<style>
+  @font-face {
+    font-family: 'RobotoCondensed';
+    src: url(data:font/truetype;charset=utf-8;base64,${ROBOTO_CONDENSED_REGULAR_BASE64}) format('truetype');
+    font-weight: normal;
+    font-style: normal;
+  }
+
+  text {
+    font-family: RobotoCondensed, Arial, sans-serif;
+  }
+</style>
+
+
+ПОВНИЙ ФРАГМЕНТ:
+
+return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  <style>
+    @font-face {
+      font-family: 'RobotoCondensed';
+      src: url(data:font/truetype;charset=utf-8;base64,${ROBOTO_CONDENSED_REGULAR_BASE64}) format('truetype');
+      font-weight: normal;
+      font-style: normal;
+    }
+
+    text {
+      font-family: RobotoCondensed, Arial, sans-serif;
+    }
+  </style>
+  ${body}
+</svg>`;
+
+
+ПРИМІТКА:
+- SVG файл стане більший;
+- зате шрифт буде самодостатній;
+- для PDF це не замінює jsPDF.addFileToVFS(), але для standalone SVG корисно.
+
+
+============================================================
+PATCH 8 OPTIONAL
+ДОДАТИ SVG DEBUG PREVIEW БЕЗ DOWNLOAD
+============================================================
+
+Оскільки exportSchemeSvg() повертає { scene, svg }, можна використовувати:
+
+const result = canvasController.exportCurrentSchemeSvg?.({
+  download: false,
+});
+
+console.log(result.svg);
+
+
+Це корисно для debug.
+
+Приклад тимчасової кнопки:
+
+<Button
+  onClick={() => {
+    const result = canvasController.exportCurrentSchemeSvg?.({
+      download: false,
+    });
+
+    console.log(result?.svg);
+  }}
+>
+  Debug SVG
+</Button>
+
+
+============================================================
+PATCH 9
+ПЕРЕВІРКА FORMAT A4/A3
+============================================================
+
+SVG export автоматично буде A4/A3, якщо застосовано paper format sync patch.
+
+Очікування:
+
+A4 landscape:
+<svg width="1188" height="840" viewBox="0 0 1188 840">
+
+A3 landscape:
+<svg width="1680" height="1188" viewBox="0 0 1680 1188">
+
+A4 portrait:
+<svg width="840" height="1188" viewBox="0 0 840 1188">
+
+
+============================================================
+PATCH 10
+ПЕРЕВІРКА ЩО ВСЕ В SVG Є ВЕКТОРНИМ
+============================================================
+
+У згенерованому SVG мають бути:
+
+- frame:
+  <rect ... />
+
+- connectors:
+  <polyline ... />
+  <polygon ... /> для стрілок
+
+- callouts:
+  <path ... />
+  <text ... />
+
+- annotations:
+  <text ... />
+
+- specification tables:
+  <rect ... />
+  <line ... />
+  <text ... />
+
+- nodes:
+  <rect ... />
+  <path ... />
+  <polygon ... />
+
+Не повинно бути:
+- screenshot canvas;
+- data:image/png для всієї схеми;
+- html2canvas;
+- stage.toDataURL().
+
+
+============================================================
+PATCH 11
+ЯК ЗРОБИТИ ОКРЕМІ OPTIONS ДЛЯ SVG EXPORT
+============================================================
+
+Можна викликати:
+
+canvasController.exportCurrentSchemeSvg({
+  svgFileName: "scheme-clean.svg",
+  includePaperFrame: true,
+  includeNotes: false,
+  includeSpecificationTables: true,
+  includeDrawingAreaGuide: false,
+});
+
+
+Для debug frame:
+
+canvasController.exportCurrentSchemeSvg({
+  svgFileName: "scheme-debug.svg",
+  includeDrawingAreaGuide: true,
+});
+
+
+============================================================
+PATCH 12
+ТИПОВІ ПОМИЛКИ
+============================================================
+
+1. Кнопка SVG викликає PDF export.
+
+Перевірити:
+ExportSvgButton має викликати:
+
+canvasController.exportCurrentSchemeSvg?.()
+
+а не:
+
+canvasController.exportCurrentSchemePdf?.()
+
+
+2. SVG зберігається як .pdf.
+
+Перевірити:
+downloadSvg(svg, fileName)
+fileName має закінчуватись на .svg.
+
+
+3. SVG має старий формат A3 після переходу на A4.
+
+Перевірити:
+exportSchemeSvg(store) має будувати scene при кліку:
+
+const scene = buildExportScene(store, mergedOptions);
+
+а не брати scene з useMemo.
+
+
+4. У SVG немає рамки.
+
+Перевірити:
+includePaperFrame: true
+і renderSvg() містить renderPaperSvg(scene).
+
+
+5. У SVG немає стрілок.
+
+Перевірити:
+renderConnectorsSvg() використовує polygon-стрілки,
+а не тільки marker-start/marker-end.
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ з'явиться кнопка SVG
+✔ SVG генерується з тієї ж export scene, що PDF
+✔ формат A4/A3 збігається з поточним sheet
+✔ рамка і шапка експортуються
+✔ конектори, стрілки, виноски, тексти і таблиці експортуються
+✔ SVG лишається векторним
+✔ можна використовувати SVG як debug перед PDF
+✔ немає залежності від zoom/pan/viewport
+
+
+============================================================
+END PATCH
+============================================================

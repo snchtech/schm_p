@@ -1,0 +1,1016 @@
+PDF EXPORT CALLOUTS 1:1 PATCH
+================================
+
+МЕТА
+----
+Додати коректний SVG/PDF export для виносок так, щоб вони виглядали 1 в 1 як на Konva canvas.
+
+Типова виноска:
+
+фігура / конектор
+   |
+   | leader line
+   |
+   └──────────── shelf / полочка
+                 текст
+
+Проблема:
+- якщо виноска на canvas малюється через Konva Line + Text,
+  а PDF export малює її приблизно або тільки текстом, то 1:1 не буде;
+- export має брати не "attachedTo + приблизну позицію", а готову геометрію виноски;
+- callout має зберігати координати:
+  anchorX, anchorY, elbowX, elbowY, textX, textY, shelfEndX/shelfEndY або shelfLength.
+
+Головний принцип:
+- НЕ перераховувати виноску по-новому під час експорту;
+- НЕ робити auto layout в export;
+- export має малювати ті самі точки, які бачить canvas.
+
+Тобто:
+store.annotations[].callout
+  ->
+AnnotationsLayer.jsx
+  ->
+renderAnnotationsSvg.js
+  ->
+PDF
+
+мають використовувати одну геометрію.
+
+
+============================================================
+1. РЕКОМЕНДОВАНА МОДЕЛЬ CALLOUT
+============================================================
+
+Annotation callout має виглядати так:
+
+{
+  id: "annotation-1",
+  kind: "annotation",
+  annotationType: "callout",
+
+  attachedTo: {
+    type: "node" | "edge",
+    id: "target-id"
+  },
+
+  text: "Насос циркуляційний",
+
+  callout: {
+    anchorX: 300,
+    anchorY: 220,
+
+    elbowX: 340,
+    elbowY: 180,
+
+    textX: 430,
+    textY: 180,
+
+    shelfEndX: 520,
+    shelfEndY: 180,
+
+    side: "right"
+  },
+
+  style: {
+    fontFamily: "RobotoCondensed",
+    fontSize: 12,
+    fontWeight: 400,
+    fill: "#000000",
+    stroke: "#000000",
+    strokeWidth: 1,
+    textOrientation: "horizontal",
+    align: "left"
+  }
+}
+
+ВАЖЛИВО:
+- anchorX/anchorY — точка прив'язки на фігурі або конекторі;
+- elbowX/elbowY — коліно;
+- textX/textY — позиція тексту;
+- shelfEndX/shelfEndY — кінець полочки;
+- side — напрямок полочки: "right" або "left".
+
+Якщо shelfEndX/shelfEndY ще не зберігаються, їх можна добудувати з textX/textY + shelfLength.
+
+
+============================================================
+2. ЧОМУ НЕ ВАРТО МАЛЮВАТИ CALLOUT ЯК CONNECTOR
+============================================================
+
+Виноска не має бути connector/edge.
+
+Правильно:
+- connector = технологічний зв'язок на схемі;
+- callout = annotation;
+- callout має власну просту геометрію.
+
+Тому export для callout має бути всередині renderAnnotationsSvg.js,
+а не renderConnectorsSvg.js.
+
+
+============================================================
+PATCH 1
+FILE: src/lib/annotations/annotationModel.js
+============================================================
+
+Якщо у тебе вже є createAnnotation(), додай дефолтний callout.
+
+Знайти return object, де є:
+
+specification,
+
+Додати поруч:
+
+callout:
+  annotationType === "callout"
+    ? {
+        anchorX: callout?.anchorX ?? 0,
+        anchorY: callout?.anchorY ?? 0,
+        elbowX: callout?.elbowX ?? 0,
+        elbowY: callout?.elbowY ?? 0,
+        textX: callout?.textX ?? position.absoluteX ?? 0,
+        textY: callout?.textY ?? position.absoluteY ?? 0,
+        shelfEndX: callout?.shelfEndX ?? (callout?.textX ?? position.absoluteX ?? 0) + 90,
+        shelfEndY: callout?.shelfEndY ?? callout?.textY ?? position.absoluteY ?? 0,
+        side: callout?.side ?? "right",
+        shelfLength: callout?.shelfLength ?? 90,
+      }
+    : null,
+
+
+І в аргументи createAnnotation додати:
+
+callout = null,
+
+
+ПРИКЛАД ФРАГМЕНТА:
+
+export function createAnnotation({
+  id = crypto.randomUUID(),
+  annotationType = "label",
+  attachedTo = null,
+  text = "",
+  position = {},
+  style = {},
+  specification = null,
+  callout = null,
+}) {
+  return {
+    id,
+    kind: "annotation",
+    annotationType,
+    attachedTo,
+    text,
+
+    position: {
+      mode: position.mode || "top",
+      offsetX: position.offsetX || 0,
+      offsetY: position.offsetY || 0,
+      absoluteX: position.absoluteX || 0,
+      absoluteY: position.absoluteY || 0,
+    },
+
+    style: {
+      fontFamily: style.fontFamily || "RobotoCondensed",
+      fontSize: style.fontSize || 12,
+      fontWeight: style.fontWeight || 400,
+      fill: style.fill || "#111",
+      stroke: style.stroke || style.fill || "#111",
+      strokeWidth: style.strokeWidth || 1,
+      textOrientation: style.textOrientation || "horizontal",
+      align: style.align || "left",
+    },
+
+    specification,
+
+    callout:
+      annotationType === "callout"
+        ? {
+            anchorX: callout?.anchorX ?? 0,
+            anchorY: callout?.anchorY ?? 0,
+            elbowX: callout?.elbowX ?? 0,
+            elbowY: callout?.elbowY ?? 0,
+            textX: callout?.textX ?? position.absoluteX ?? 0,
+            textY: callout?.textY ?? position.absoluteY ?? 0,
+            shelfEndX:
+              callout?.shelfEndX ??
+              (callout?.textX ?? position.absoluteX ?? 0) +
+                (callout?.shelfLength ?? 90),
+            shelfEndY:
+              callout?.shelfEndY ??
+              callout?.textY ??
+              position.absoluteY ??
+              0,
+            side: callout?.side ?? "right",
+            shelfLength: callout?.shelfLength ?? 90,
+          }
+        : null,
+  };
+}
+
+
+============================================================
+PATCH 2
+CREATE FILE: src/lib/annotations/calloutGeometry.js
+============================================================
+
+Цей файл має бути спільним для canvas і export.
+
+export function normalizeCalloutGeometry(annotation) {
+  const c = annotation?.callout || {};
+  const style = annotation?.style || {};
+
+  const anchorX = Number(c.anchorX ?? 0);
+  const anchorY = Number(c.anchorY ?? 0);
+
+  const elbowX = Number(c.elbowX ?? anchorX);
+  const elbowY = Number(c.elbowY ?? anchorY);
+
+  const textX = Number(c.textX ?? elbowX + 90);
+  const textY = Number(c.textY ?? elbowY);
+
+  const side = c.side || (textX >= elbowX ? "right" : "left");
+  const shelfLength = Number(c.shelfLength ?? 90);
+
+  const shelfEndX = Number(
+    c.shelfEndX ??
+      (side === "left"
+        ? textX - shelfLength
+        : textX + shelfLength)
+  );
+
+  const shelfEndY = Number(c.shelfEndY ?? textY);
+
+  return {
+    anchorX,
+    anchorY,
+    elbowX,
+    elbowY,
+    textX,
+    textY,
+    shelfEndX,
+    shelfEndY,
+    side,
+    shelfLength,
+
+    stroke: style.stroke || style.fill || "#000000",
+    strokeWidth: Number(style.strokeWidth ?? 1),
+  };
+}
+
+export function getCalloutLinePoints(annotation) {
+  const c = normalizeCalloutGeometry(annotation);
+
+  return [
+    c.anchorX,
+    c.anchorY,
+    c.elbowX,
+    c.elbowY,
+    c.shelfEndX,
+    c.shelfEndY,
+  ];
+}
+
+export function getCalloutTextPosition(annotation) {
+  const c = normalizeCalloutGeometry(annotation);
+  const position = annotation?.position || {};
+
+  return {
+    x: c.textX + Number(position.offsetX ?? 0),
+    y: c.textY + Number(position.offsetY ?? 0),
+  };
+}
+
+export function getCalloutTextAlign(annotation) {
+  const c = normalizeCalloutGeometry(annotation);
+
+  if (annotation?.style?.align) {
+    return annotation.style.align;
+  }
+
+  return c.side === "left" ? "right" : "left";
+}
+
+
+============================================================
+PATCH 3
+FILE: src/components/canvas/AnnotationsLayer.jsx
+============================================================
+
+Ідея:
+- callout на canvas має рендеритись з normalizeCalloutGeometry();
+- це гарантує, що canvas і export читають ті самі точки.
+
+Якщо у тебе вже є AnnotationsLayer.jsx, в частину render callout додай таку логіку.
+
+IMPORT:
+
+import { Line, Text, Group } from "react-konva";
+import {
+  getCalloutLinePoints,
+  getCalloutTextPosition,
+  getCalloutTextAlign,
+  normalizeCalloutGeometry,
+} from "@/lib/annotations/calloutGeometry";
+
+
+ПРИКЛАД РЕНДЕРА CALLOUT:
+
+function AnnotationCallout({ annotation, isSelected }) {
+  const c = normalizeCalloutGeometry(annotation);
+  const linePoints = getCalloutLinePoints(annotation);
+  const textPos = getCalloutTextPosition(annotation);
+  const align = getCalloutTextAlign(annotation);
+
+  const fontSize = annotation.style?.fontSize || 12;
+  const fill = annotation.style?.fill || "#000000";
+  const fontFamily = annotation.style?.fontFamily || "Roboto Condensed";
+
+  return (
+    <Group>
+      <Line
+        points={linePoints}
+        stroke={c.stroke}
+        strokeWidth={c.strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+        listening={false}
+      />
+
+      <Text
+        x={textPos.x}
+        y={textPos.y}
+        text={annotation.text || ""}
+        fontFamily={fontFamily}
+        fontSize={fontSize}
+        fontStyle={Number(annotation.style?.fontWeight || 400) >= 500 ? "bold" : "normal"}
+        fill={fill}
+        align={align}
+        verticalAlign="middle"
+        offsetY={fontSize / 2}
+        listening
+      />
+
+      {isSelected && (
+        <Line
+          points={linePoints}
+          stroke="#2F80ED"
+          strokeWidth={1}
+          dash={[6, 4]}
+          listening={false}
+        />
+      )}
+    </Group>
+  );
+}
+
+
+У головному map:
+
+if (annotation.annotationType === "callout") {
+  return (
+    <AnnotationCallout
+      key={annotation.id}
+      annotation={annotation}
+      isSelected={selection?.type === "annotation" && selection?.id === annotation.id}
+    />
+  );
+}
+
+
+ВАЖЛИВО:
+- Text offsetY={fontSize / 2} потрібен, щоб y був центром тексту;
+- у SVG export ми використовуємо dominant-baseline="middle";
+- це зближує Konva і SVG позиціонування.
+
+
+============================================================
+PATCH 4
+FILE: src/lib/export/svgEscape.js
+============================================================
+
+Якщо ще немає path helper, додай.
+
+export function path(attrs = {}) {
+  return `<path ${svgAttrs(attrs)} />`;
+}
+
+
+ПОВНИЙ ФРАГМЕНТ:
+
+export function polyline(attrs = {}) {
+  return `<polyline ${svgAttrs(attrs)} />`;
+}
+
+export function polygon(attrs = {}) {
+  return `<polygon ${svgAttrs(attrs)} />`;
+}
+
+export function path(attrs = {}) {
+  return `<path ${svgAttrs(attrs)} />`;
+}
+
+
+============================================================
+PATCH 5
+FILE: src/lib/export/renderAnnotationsSvg.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Цей варіант:
+- label annotation малює як text;
+- callout annotation малює як path + text;
+- використовує ті самі callout points, що canvas;
+- враховує offsetX/offsetY для callout text;
+- не намагається перераховувати callout по attachedTo під час export.
+
+import { textNode, group, path } from "./svgEscape";
+import { EXPORT_FONT_FAMILY } from "./exportConstants";
+import { resolveAnnotationExportPosition } from "./annotationExportGeometry";
+import {
+  normalizeCalloutGeometry,
+  getCalloutTextPosition,
+  getCalloutTextAlign,
+} from "@/lib/annotations/calloutGeometry";
+
+function orientationToRotation(annotation) {
+  const orientation = annotation.style?.textOrientation || "horizontal";
+
+  if (orientation === "vertical-left") return -90;
+  if (orientation === "vertical-right") return 90;
+
+  return annotation.style?.rotation || 0;
+}
+
+function alignToTextAnchor(align) {
+  if (align === "left") return "start";
+  if (align === "right") return "end";
+  return "middle";
+}
+
+function getFontWeight(annotation) {
+  const weight = annotation.style?.fontWeight;
+
+  if (weight === "bold") return "bold";
+  if (Number(weight) >= 500) return "bold";
+
+  return "normal";
+}
+
+function renderCalloutSvg(annotation) {
+  const c = normalizeCalloutGeometry(annotation);
+  const textPos = getCalloutTextPosition(annotation);
+  const textAlign = getCalloutTextAlign(annotation);
+
+  const rotation = orientationToRotation(annotation);
+  const fontSize = annotation.style?.fontSize || 12;
+  const fill = annotation.style?.fill || "#000000";
+  const stroke = annotation.style?.stroke || fill;
+  const strokeWidth = annotation.style?.strokeWidth || c.strokeWidth || 1;
+
+  const d = [
+    `M ${c.anchorX} ${c.anchorY}`,
+    `L ${c.elbowX} ${c.elbowY}`,
+    `L ${c.shelfEndX} ${c.shelfEndY}`,
+  ].join(" ");
+
+  const content = [
+    path({
+      d,
+      fill: "none",
+      stroke,
+      "stroke-width": strokeWidth,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    }),
+
+    textNode(annotation.text || "", {
+      x: textPos.x,
+      y: textPos.y,
+      "font-family": EXPORT_FONT_FAMILY,
+      "font-size": fontSize,
+      "font-weight": getFontWeight(annotation),
+      fill,
+      "text-anchor": alignToTextAnchor(textAlign),
+      "dominant-baseline": "middle",
+      transform: rotation
+        ? `rotate(${rotation} ${textPos.x} ${textPos.y})`
+        : undefined,
+    }),
+  ].join("");
+
+  return group(content, {
+    id: `annotation-${annotation.id}`,
+    "data-annotation-type": "callout",
+  });
+}
+
+function renderLabelSvg(annotation, scene) {
+  const pos = resolveAnnotationExportPosition(annotation, scene);
+  const rotation = orientationToRotation(annotation);
+
+  const fontSize = annotation.style?.fontSize || 12;
+  const fill = annotation.style?.fill || "#000000";
+  const align = annotation.style?.align || "center";
+
+  const content = textNode(annotation.text || "", {
+    x: pos.x,
+    y: pos.y,
+    "font-family": EXPORT_FONT_FAMILY,
+    "font-size": fontSize,
+    "font-weight": getFontWeight(annotation),
+    fill,
+    "text-anchor": alignToTextAnchor(align),
+    "dominant-baseline": "middle",
+    transform: rotation ? `rotate(${rotation} ${pos.x} ${pos.y})` : undefined,
+  });
+
+  return group(content, {
+    id: `annotation-${annotation.id}`,
+    "data-annotation-type": annotation.annotationType || "label",
+  });
+}
+
+function renderOneAnnotation(annotation, scene) {
+  if (annotation.annotationType === "callout") {
+    return renderCalloutSvg(annotation);
+  }
+
+  return renderLabelSvg(annotation, scene);
+}
+
+export function renderAnnotationsSvg(scene) {
+  if (scene.options.includeAnnotations === false) return "";
+
+  return scene.annotations
+    .map((annotation) => renderOneAnnotation(annotation, scene))
+    .join("");
+}
+
+
+============================================================
+PATCH 6
+FILE: src/lib/export/annotationExportGeometry.js
+============================================================
+
+Якщо ти застосував попередній патч для offset, онови callout position.
+
+Знайти:
+
+function resolveCalloutAnnotationPosition(annotation) {
+  const position = annotation.position || {};
+  const { offsetX, offsetY } = normalizeOffset(position);
+
+  if (annotation.callout) {
+    return {
+      x: Number(annotation.callout.textX ?? 0) + offsetX,
+      y: Number(annotation.callout.textY ?? 0) + offsetY,
+    };
+  }
+
+  return resolveFreeAnnotationPosition(annotation);
+}
+
+Замінити на:
+
+import { getCalloutTextPosition } from "@/lib/annotations/calloutGeometry";
+
+...
+
+function resolveCalloutAnnotationPosition(annotation) {
+  if (annotation.callout) {
+    return getCalloutTextPosition(annotation);
+  }
+
+  return resolveFreeAnnotationPosition(annotation);
+}
+
+
+Але якщо renderAnnotationsSvg.js вже напряму використовує renderCalloutSvg(),
+цей resolveCalloutAnnotationPosition використовується тільки як fallback.
+
+
+============================================================
+PATCH 7
+FILE: src/controllers/canvasController.js
+============================================================
+
+Додати helper для створення callout.
+
+Це приклад. Можеш адаптувати під свій UX.
+
+ДОДАТИ всередину canvasController object:
+
+createCalloutForTarget({ attachedTo, anchor, textPoint, text = "Виноска" }) {
+  const store = useCanvasStore.getState();
+
+  if (!anchor || !textPoint) return null;
+
+  const side = textPoint.x >= anchor.x ? "right" : "left";
+  const shelfLength = 90;
+
+  const elbow = {
+    x: textPoint.x,
+    y: anchor.y,
+  };
+
+  const shelfEnd = {
+    x: side === "right"
+      ? textPoint.x + shelfLength
+      : textPoint.x - shelfLength,
+    y: textPoint.y,
+  };
+
+  const annotation = createAnnotation({
+    annotationType: "callout",
+    attachedTo,
+    text,
+
+    position: {
+      mode: "callout",
+      absoluteX: textPoint.x,
+      absoluteY: textPoint.y,
+      offsetX: 0,
+      offsetY: 0,
+    },
+
+    callout: {
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+
+      elbowX: elbow.x,
+      elbowY: elbow.y,
+
+      textX: textPoint.x,
+      textY: textPoint.y,
+
+      shelfEndX: shelfEnd.x,
+      shelfEndY: shelfEnd.y,
+
+      side,
+      shelfLength,
+    },
+
+    style: {
+      fontFamily: "RobotoCondensed",
+      fontSize: 12,
+      fontWeight: 400,
+      fill: "#000000",
+      stroke: "#000000",
+      strokeWidth: 1,
+      align: side === "right" ? "left" : "right",
+    },
+  });
+
+  store.addAnnotation?.(annotation);
+  store.setSelection?.({ type: "annotation", id: annotation.id });
+
+  return annotation;
+},
+
+
+IMPORT, якщо ще немає:
+
+import { createAnnotation } from "@/lib/annotations/annotationModel";
+
+
+============================================================
+8. РЕДАГУВАННЯ / DRAG CALLOUT
+============================================================
+
+Для 1:1 export важливо:
+коли користувач рухає виноску на canvas, потрібно оновлювати саме annotation.callout,
+а не тільки position.absoluteX/absoluteY.
+
+Рекомендована логіка:
+
+1. Drag text:
+- move textX/textY;
+- move shelfEndX/shelfEndY на той самий dx/dy;
+- якщо треба, elbowY = textY, щоб полочка була горизонтальна.
+
+2. Drag elbow:
+- move elbowX/elbowY;
+- anchor лишається;
+- shelfEnd/text можуть лишатись.
+
+3. Drag anchor:
+- move anchorX/anchorY;
+- elbow/text/shelf лишаються.
+
+Мінімальний helper:
+
+export function moveCalloutText(annotation, nextTextPoint) {
+  const c = annotation.callout;
+  if (!c) return annotation;
+
+  const dx = nextTextPoint.x - c.textX;
+  const dy = nextTextPoint.y - c.textY;
+
+  return {
+    ...annotation,
+    position: {
+      ...(annotation.position || {}),
+      absoluteX: nextTextPoint.x,
+      absoluteY: nextTextPoint.y,
+    },
+    callout: {
+      ...c,
+      textX: nextTextPoint.x,
+      textY: nextTextPoint.y,
+      shelfEndX: c.shelfEndX + dx,
+      shelfEndY: c.shelfEndY + dy,
+      elbowY: nextTextPoint.y,
+    },
+  };
+}
+
+
+============================================================
+PATCH 8
+CREATE FILE: src/lib/annotations/calloutEditing.js
+============================================================
+
+export function moveCalloutText(annotation, nextTextPoint) {
+  const c = annotation?.callout;
+  if (!c || !nextTextPoint) return annotation;
+
+  const dx = nextTextPoint.x - Number(c.textX ?? 0);
+  const dy = nextTextPoint.y - Number(c.textY ?? 0);
+
+  return {
+    ...annotation,
+    position: {
+      ...(annotation.position || {}),
+      absoluteX: nextTextPoint.x,
+      absoluteY: nextTextPoint.y,
+    },
+    callout: {
+      ...c,
+      textX: nextTextPoint.x,
+      textY: nextTextPoint.y,
+      shelfEndX: Number(c.shelfEndX ?? c.textX ?? 0) + dx,
+      shelfEndY: Number(c.shelfEndY ?? c.textY ?? 0) + dy,
+      elbowY: nextTextPoint.y,
+    },
+  };
+}
+
+export function moveCalloutAnchor(annotation, nextAnchorPoint) {
+  const c = annotation?.callout;
+  if (!c || !nextAnchorPoint) return annotation;
+
+  return {
+    ...annotation,
+    callout: {
+      ...c,
+      anchorX: nextAnchorPoint.x,
+      anchorY: nextAnchorPoint.y,
+    },
+  };
+}
+
+export function moveCalloutElbow(annotation, nextElbowPoint) {
+  const c = annotation?.callout;
+  if (!c || !nextElbowPoint) return annotation;
+
+  return {
+    ...annotation,
+    callout: {
+      ...c,
+      elbowX: nextElbowPoint.x,
+      elbowY: nextElbowPoint.y,
+    },
+  };
+}
+
+
+============================================================
+PATCH 9
+FILE: src/controllers/canvasController.js
+============================================================
+
+Додати метод для drag text виноски.
+
+IMPORT:
+
+import { moveCalloutText } from "@/lib/annotations/calloutEditing";
+
+
+ДОДАТИ в canvasController:
+
+moveCalloutText(annotationId, nextTextPoint) {
+  const store = useCanvasStore.getState();
+
+  const annotation = (store.annotations || []).find(
+    (item) => item.id === annotationId
+  );
+
+  if (!annotation || annotation.annotationType !== "callout") return;
+
+  const next = moveCalloutText(annotation, nextTextPoint);
+
+  store.replaceAnnotation?.(annotationId, next);
+},
+
+
+У Konva Text для callout:
+
+draggable
+onDragEnd={(e) => {
+  canvasController.moveCalloutText?.(annotation.id, {
+    x: e.target.x(),
+    y: e.target.y() + fontSize / 2,
+  });
+}}
+
+
+============================================================
+10. ПОРЯДОК ШАРІВ ДЛЯ 1:1
+============================================================
+
+Щоб export відповідав canvas, порядок рендеру має бути однаковий.
+
+Canvas:
+
+<PaperLayer />
+<ConnectorsLayer />
+<NodesLayer />
+<AnnotationsLayer />
+<SpecificationTablesLayer />
+
+Export renderSvg body:
+
+[
+  renderPaperSvg(scene),
+  renderConnectorsSvg(scene),
+  renderNodesSvg(scene),
+  renderAnnotationsSvg(scene),
+  renderSpecificationTablesSvg(scene),
+]
+
+Якщо виноска має бути поверх вузлів і конекторів:
+- AnnotationsLayer має бути після NodesLayer / ConnectorsLayer;
+- renderAnnotationsSvg має бути після renderNodesSvg / renderConnectorsSvg.
+
+Якщо полочка виноски має ховатися під таблицями:
+- renderSpecificationTablesSvg після annotations.
+
+
+============================================================
+11. ЯК ДОСЯГТИ 1:1 CANVAS -> SVG -> PDF
+============================================================
+
+Для 1:1 потрібна така дисципліна:
+
+1. Canvas не має бути джерелом правди.
+   Джерело правди — store model.
+
+2. Виноска не має обчислюватись окремо в Konva і окремо в SVG.
+   Обидва мають брати:
+   normalizeCalloutGeometry(annotation)
+
+3. Після кожного drag/update треба записувати нову геометрію у store.
+
+4. Export не повинен "здогадуватись", де має бути виноска.
+   Export тільки читає annotation.callout.
+
+5. Для тексту:
+   - canvas: y як центр тексту через offsetY={fontSize / 2}
+   - SVG: y як центр тексту через dominant-baseline="middle"
+
+6. Для шрифту:
+   - canvas/UI може використовувати "Roboto Condensed"
+   - PDF/SVG export має використовувати зареєстрований "RobotoCondensed"
+   - font metrics можуть трохи відрізнятись, але це мінімізує різницю.
+
+
+============================================================
+12. ПРИКЛАД ГОТОВОЇ CALLOUT ANNOTATION
+============================================================
+
+const callout = createAnnotation({
+  annotationType: "callout",
+
+  attachedTo: {
+    type: "node",
+    id: "pump-1",
+  },
+
+  text: "Насос Н-1",
+
+  position: {
+    mode: "callout",
+    absoluteX: 420,
+    absoluteY: 160,
+    offsetX: 0,
+    offsetY: 0,
+  },
+
+  callout: {
+    anchorX: 300,
+    anchorY: 220,
+
+    elbowX: 360,
+    elbowY: 160,
+
+    textX: 420,
+    textY: 160,
+
+    shelfEndX: 540,
+    shelfEndY: 160,
+
+    side: "right",
+    shelfLength: 120,
+  },
+
+  style: {
+    fontFamily: "RobotoCondensed",
+    fontSize: 12,
+    fontWeight: 400,
+    fill: "#000000",
+    stroke: "#000000",
+    strokeWidth: 1,
+    align: "left",
+  },
+});
+
+
+============================================================
+13. ПРИКЛАД SVG OUTPUT
+============================================================
+
+В export це має перетворитись на:
+
+<g id="annotation-..." data-annotation-type="callout">
+  <path
+    d="M 300 220 L 360 160 L 540 160"
+    fill="none"
+    stroke="#000000"
+    stroke-width="1"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <text
+    x="420"
+    y="160"
+    font-family="RobotoCondensed"
+    font-size="12"
+    font-weight="normal"
+    fill="#000000"
+    text-anchor="start"
+    dominant-baseline="middle"
+  >
+    Насос Н-1
+  </text>
+</g>
+
+
+============================================================
+14. ГОЛОВНА ПОМИЛКА, ЯКОЇ ТРЕБА УНИКНУТИ
+============================================================
+
+НЕ робити так в export:
+
+if attachedTo node:
+  find node center
+  draw callout from node center to label
+
+Це зламає 1:1.
+
+Правильно:
+
+const c = annotation.callout;
+
+draw:
+  M c.anchorX c.anchorY
+  L c.elbowX c.elbowY
+  L c.shelfEndX c.shelfEndY
+
+text:
+  c.textX c.textY
+
+
+============================================================
+15. РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ виноска є annotation, а не connector
+✔ callout має власну канонічну геометрію
+✔ canvas і export використовують один calloutGeometry.js
+✔ PDF/SVG малює leader line + elbow + shelf
+✔ текст виноски експортується окремо
+✔ offsetX/offsetY для тексту виноски враховується
+✔ drag text може оновлювати callout geometry
+✔ export не залежить від zoom/pan/viewport
+✔ SVG/PDF максимально наближений до Konva canvas 1:1
+
+
+============================================================
+END PATCH
+============================================================

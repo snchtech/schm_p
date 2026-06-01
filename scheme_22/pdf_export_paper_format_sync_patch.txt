@@ -1,0 +1,850 @@
+PDF EXPORT PAPER FORMAT SYNC PATCH
+==================================
+
+МЕТА
+----
+Виправити проблему, коли на canvas формат аркуша змінюється з A3 на A4,
+але SVG/PDF export повертає неправильний розмір або стару геометрію.
+
+Типовий симптом:
+- на canvas видно A4;
+- export SVG/PDF має не A4, а старий/дивний формат;
+- після повернення на A3 все виглядає коректно.
+
+Найчастіша причина:
+1. Canvas використовує актуальний sheet state.
+2. Export використовує:
+   - дефолт A3;
+   - старий cached geometry;
+   - options.width/options.height;
+   - scene.width/scene.height;
+   - неправильну конвертацію px -> mm;
+   - orientation, який не синхронізований із sheet.format.
+3. buildExportScene() або exportPdfFromSvg() не беруть формат напряму з store.sheet.
+
+
+============================================================
+ГОЛОВНИЙ ПРИНЦИП
+============================================================
+
+Для vector export джерело правди має бути тільки:
+
+store.sheet.format
+store.sheet.orientation
+
+НЕ:
+canvas width
+stage width
+viewport width
+zoom
+scale
+old scene.width
+old scene.page.width
+options.width
+options.height
+
+Правильний flow:
+
+store.sheet
+  ->
+buildSheetGeometry(sheet)
+  ->
+renderSvg(scene)
+  ->
+exportPdfFromSvg(svg, scene)
+
+І SVG, і PDF мають отримувати розмір з тієї самої geometry.
+
+
+============================================================
+PATCH 1
+FILE: src/lib/paper/paperFormats.js
+============================================================
+
+Перевірити, що формати задані в МІЛІМЕТРАХ:
+
+export const PAPER_FORMATS = {
+  A4: {
+    width: 297,
+    height: 210,
+  },
+
+  A3: {
+    width: 420,
+    height: 297,
+  },
+
+  A1: {
+    width: 841,
+    height: 594,
+  },
+};
+
+
+ВАЖЛИВО:
+- це landscape base sizes;
+- orientation застосовується в sheetGeometry;
+- не треба окремо робити A4 portrait тут.
+
+
+============================================================
+PATCH 2
+FILE: src/lib/paper/paperConstants.js
+============================================================
+
+Перевірити, що є єдиний коефіцієнт:
+
+export const MM_TO_PX = 4;
+
+ВАЖЛИВО:
+- SVG працює у внутрішніх export units, умовно px;
+- PDF працює у mm;
+- перетворення PDF size:
+  sheetRect.width / MM_TO_PX
+  sheetRect.height / MM_TO_PX
+
+Якщо в одному місці MM_TO_PX = 4, а в іншому захардкоджено / 3.7795 або / 1,
+формат буде ламатись.
+
+
+============================================================
+PATCH 3
+FILE: src/lib/paper/sheetGeometry.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Це гарантує, що A4/A3/A1 і portrait/landscape завжди рахуються однаково.
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+} from "./paperConstants";
+
+import { PAPER_FORMATS } from "./paperFormats";
+
+export function normalizeSheet(sheet = {}) {
+  return {
+    format: sheet.format || "A3",
+    orientation: sheet.orientation || "landscape",
+    titleBlock: sheet.titleBlock || {},
+    notes: Array.isArray(sheet.notes) ? sheet.notes : [],
+  };
+}
+
+export function getSheetSizeMm(sheet = {}) {
+  const normalizedSheet = normalizeSheet(sheet);
+  const format = PAPER_FORMATS[normalizedSheet.format] || PAPER_FORMATS.A3;
+  const isPortrait = normalizedSheet.orientation === "portrait";
+
+  return {
+    width: isPortrait ? format.height : format.width,
+    height: isPortrait ? format.width : format.height,
+  };
+}
+
+export function getSheetSizePx(sheet = {}) {
+  const sizeMm = getSheetSizeMm(sheet);
+
+  return {
+    width: sizeMm.width * MM_TO_PX,
+    height: sizeMm.height * MM_TO_PX,
+  };
+}
+
+export function buildSheetGeometry(sheet = {}) {
+  const normalizedSheet = normalizeSheet(sheet);
+  const sizePx = getSheetSizePx(normalizedSheet);
+
+  const sheetRect = {
+    x: 0,
+    y: 0,
+    width: sizePx.width,
+    height: sizePx.height,
+  };
+
+  const frameRect = {
+    x: FRAME_MARGIN,
+    y: FRAME_MARGIN,
+    width: sheetRect.width - FRAME_MARGIN * 2,
+    height: sheetRect.height - FRAME_MARGIN * 2,
+  };
+
+  const headerArea = {
+    x: frameRect.x,
+    y: frameRect.y,
+    width: frameRect.width,
+    height: HEADER_HEIGHT,
+  };
+
+  const titleBlockArea = {
+    x: frameRect.x,
+    y: frameRect.y + frameRect.height - TITLE_BLOCK_HEIGHT,
+    width: frameRect.width,
+    height: TITLE_BLOCK_HEIGHT,
+  };
+
+  const notesArea = {
+    x: frameRect.x,
+    y: titleBlockArea.y - NOTES_AREA_HEIGHT,
+    width: Math.min(420, frameRect.width),
+    height: NOTES_AREA_HEIGHT,
+  };
+
+  const drawingArea = {
+    x: frameRect.x,
+    y: frameRect.y + HEADER_HEIGHT,
+    width: frameRect.width,
+    height:
+      frameRect.height -
+      HEADER_HEIGHT -
+      NOTES_AREA_HEIGHT -
+      TITLE_BLOCK_HEIGHT,
+  };
+
+  return {
+    sheet: normalizedSheet,
+    sheetRect,
+    frameRect,
+    headerArea,
+    drawingArea,
+    titleBlockArea,
+    notesArea,
+  };
+}
+
+
+============================================================
+PATCH 4
+FILE: src/lib/export/buildExportScene.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Важливо:
+- sheet нормалізується один раз;
+- geometry будується під актуальний sheet;
+- export не бере width/height з options;
+- export не використовує стару scene/page geometry.
+
+import { buildSheetGeometry, normalizeSheet } from "@/lib/paper/sheetGeometry";
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+export function buildExportScene(store, options = {}) {
+  const sheet = normalizeSheet(store.sheet || {});
+  const geometry = buildSheetGeometry(sheet);
+
+  if (!geometry?.sheetRect?.width || !geometry?.sheetRect?.height) {
+    throw new Error("Cannot build export scene: invalid sheet geometry.");
+  }
+
+  const nodes = normalizeArray(store.nodes);
+
+  const edges = normalizeArray(store.edges).map((edge) => {
+    if (edge?.kind !== "connector") return edge;
+    return rebuildConnectorGeometry(edge, nodes);
+  });
+
+  return {
+    options,
+    sheet,
+    geometry,
+
+    nodes,
+    edges,
+
+    annotations: normalizeArray(store.annotations),
+    specificationTables: normalizeArray(store.specificationTables),
+    notes: normalizeArray(sheet.notes || store.notes),
+  };
+}
+
+
+============================================================
+PATCH 5
+FILE: src/lib/export/renderSvg.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Важливо:
+- SVG width/height/viewBox завжди з scene.geometry.sheetRect;
+- ніяких width/height з options;
+- ніякого старого page size.
+
+import { renderPaperSvg } from "./renderPaperSvg";
+import { renderConnectorsSvg } from "./renderConnectorsSvg";
+import { renderNodesSvg } from "./renderNodesSvg";
+import { renderAnnotationsSvg } from "./renderAnnotationsSvg";
+import { renderSpecificationTablesSvg } from "./renderSpecificationTablesSvg";
+
+export function renderSvg(scene) {
+  const { sheetRect } = scene.geometry;
+
+  const width = sheetRect.width;
+  const height = sheetRect.height;
+
+  const body = [
+    renderPaperSvg(scene),
+    renderConnectorsSvg(scene),
+    renderNodesSvg(scene),
+    renderAnnotationsSvg(scene),
+    renderSpecificationTablesSvg(scene),
+  ].join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${width}"
+     height="${height}"
+     viewBox="0 0 ${width} ${height}">
+  <style>
+    text {
+      font-family: RobotoCondensed;
+    }
+  </style>
+  ${body}
+</svg>`;
+}
+
+
+============================================================
+PATCH 6
+FILE: src/lib/export/exportPdf.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Важливо:
+- PDF format рахується з geometry.sheetRect / MM_TO_PX;
+- orientation рахується не тільки зі sheet.orientation, а також із фактичного size;
+- svg2pdf отримує width/height в mm;
+- jsPDF format теж в mm.
+
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+import {
+  registerPdfFonts,
+  PDF_FONT_FAMILY,
+} from "@/lib/export/fonts/registerPdfFonts";
+
+function getPdfFormatFromScene(scene) {
+  const { sheetRect } = scene.geometry;
+
+  return [
+    sheetRect.width / MM_TO_PX,
+    sheetRect.height / MM_TO_PX,
+  ];
+}
+
+function getPdfOrientationFromFormat(format) {
+  const [widthMm, heightMm] = format;
+  return widthMm >= heightMm ? "landscape" : "portrait";
+}
+
+export async function exportPdfFromSvg(svg, scene, options = {}) {
+  const format = getPdfFormatFromScene(scene);
+  const orientation = getPdfOrientationFromFormat(format);
+
+  const pdf = new jsPDF({
+    orientation,
+    unit: "mm",
+    format,
+    compress: true,
+    putOnlyUsedFonts: true,
+  });
+
+  registerPdfFonts(pdf);
+  pdf.setFont(PDF_FONT_FAMILY, "normal");
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "-100000px";
+  container.innerHTML = svg;
+  document.body.appendChild(container);
+
+  const svgElement = container.querySelector("svg");
+
+  if (!svgElement) {
+    container.remove();
+    throw new Error("SVG element was not created for PDF export.");
+  }
+
+  await svg2pdf(svgElement, pdf, {
+    x: 0,
+    y: 0,
+    width: format[0],
+    height: format[1],
+  });
+
+  container.remove();
+
+  const fileName = options.fileName || "scheme.pdf";
+  pdf.save(fileName);
+
+  return pdf;
+}
+
+
+============================================================
+PATCH 7
+FILE: src/lib/export/exportSchemePdf.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код.
+
+Важливо:
+- exportSchemePdf(store) завжди читає актуальний store;
+- makeFileName додає формат аркуша;
+- немає options.width/options.height.
+
+import { buildExportScene } from "./buildExportScene";
+import { renderSvg } from "./renderSvg";
+import { exportPdfFromSvg } from "./exportPdf";
+import { downloadSvg } from "./exportSvgFile";
+import { DEFAULT_EXPORT_OPTIONS } from "./exportConstants";
+
+function safeFilePart(value, fallback = "scheme") {
+  const normalized = String(value || fallback)
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]/g, "");
+
+  return normalized || fallback;
+}
+
+function makeFileName(scene) {
+  const tb = scene.sheet?.titleBlock || {};
+  const system = safeFilePart(tb.system, "scheme");
+  const sheetNumber = safeFilePart(tb.sheetNumber, "1");
+  const format = safeFilePart(scene.sheet?.format, "A3");
+
+  return `${system}_${sheetNumber}_${format}.pdf`;
+}
+
+export async function exportSchemePdf(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  await exportPdfFromSvg(svg, scene, {
+    fileName: mergedOptions.fileName || makeFileName(scene),
+  });
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+export function exportSchemeSvg(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  const svgFileName =
+    mergedOptions.svgFileName ||
+    makeFileName(scene).replace(/\.pdf$/i, ".svg");
+
+  downloadSvg(svg, svgFileName);
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+
+============================================================
+PATCH 8
+FILE: src/controllers/canvasController.js
+============================================================
+
+Переконатися, що export бере store в момент кліку,
+а не scene, який був зібраний раніше.
+
+IMPORT:
+
+import { exportSchemePdf, exportSchemeSvg } from "@/lib/export/exportSchemePdf";
+
+
+МЕТОДИ:
+
+async exportCurrentSchemePdf(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return await exportSchemePdf(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+exportCurrentSchemeSvg(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return exportSchemeSvg(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+    ...options,
+  });
+},
+
+
+ВАЖЛИВО:
+Не робити так:
+
+const scene = useMemo(() => buildExportScene(...), []);
+
+Не передавати в export збережений scene.
+Завжди читати useCanvasStore.getState() безпосередньо перед export.
+
+
+============================================================
+PATCH 9
+FILE: src/store/useCanvasStore.js
+============================================================
+
+Додати окремий метод зміни формату аркуша.
+
+Це допоможе гарантувати, що sheet оновлюється атомарно.
+
+setSheetFormat: (format) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      format,
+    },
+  })),
+
+setSheetOrientation: (orientation) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      orientation,
+    },
+  })),
+
+setSheetFormatAndOrientation: ({ format, orientation }) =>
+  set((s) => ({
+    sheet: {
+      ...(s.sheet || {}),
+      format: format || s.sheet?.format || "A3",
+      orientation: orientation || s.sheet?.orientation || "landscape",
+    },
+  })),
+
+
+ПРИКЛАД:
+
+export const useCanvasStore = create((set, get) => ({
+  ...
+
+  sheet: {
+    format: "A3",
+    orientation: "landscape",
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+    notes: [],
+  },
+
+  setSheetFormat: (format) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        format,
+      },
+    })),
+
+  setSheetOrientation: (orientation) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        orientation,
+      },
+    })),
+
+  setSheetFormatAndOrientation: ({ format, orientation }) =>
+    set((s) => ({
+      sheet: {
+        ...(s.sheet || {}),
+        format: format || s.sheet?.format || "A3",
+        orientation: orientation || s.sheet?.orientation || "landscape",
+      },
+    })),
+
+  ...
+}));
+
+
+============================================================
+PATCH 10
+FILE: компонент вибору формату аркуша
+============================================================
+
+Якщо зараз при зміні формату ти оновлюєш тільки canvas dimensions,
+потрібно змінити саме store.sheet.format.
+
+НЕПРАВИЛЬНО:
+
+setCanvasSize({
+  width: 1188,
+  height: 840,
+});
+
+ПРАВИЛЬНО:
+
+const setSheetFormatAndOrientation = useCanvasStore(
+  (s) => s.setSheetFormatAndOrientation
+);
+
+setSheetFormatAndOrientation({
+  format: "A4",
+  orientation: "landscape",
+});
+
+
+ПРИКЛАД:
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export function PaperFormatSelect() {
+  const sheet = useCanvasStore((s) => s.sheet);
+  const setSheetFormatAndOrientation = useCanvasStore(
+    (s) => s.setSheetFormatAndOrientation
+  );
+
+  return (
+    <select
+      value={sheet?.format || "A3"}
+      onChange={(e) => {
+        setSheetFormatAndOrientation({
+          format: e.target.value,
+          orientation: sheet?.orientation || "landscape",
+        });
+      }}
+    >
+      <option value="A4">A4</option>
+      <option value="A3">A3</option>
+      <option value="A1">A1</option>
+    </select>
+  );
+}
+
+
+============================================================
+PATCH 11
+FILE: src/components/canvas/PaperLayer.jsx
+============================================================
+
+PaperLayer теж має брати geometry з sheet, а не з окремих canvas width/height.
+
+ПРИКЛАД:
+
+const sheet = useCanvasStore((s) => s.sheet);
+const geometry = buildSheetGeometry(sheet || {});
+const { sheetRect, frameRect, headerArea } = geometry;
+
+<Rect
+  x={sheetRect.x}
+  y={sheetRect.y}
+  width={sheetRect.width}
+  height={sheetRect.height}
+/>
+
+НЕ використовувати:
+
+const width = useCanvasStore((s) => s.canvasWidth);
+const height = useCanvasStore((s) => s.canvasHeight);
+
+бо тоді canvas може бути A4, а export все ще A3.
+
+
+============================================================
+PATCH 12
+DEBUG HELPER
+FILE: src/lib/export/debugExportScene.js
+============================================================
+
+Створи файл для перевірки формату.
+
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+
+export function logExportSceneDebug(scene) {
+  const { sheetRect } = scene.geometry;
+
+  console.table({
+    format: scene.sheet?.format,
+    orientation: scene.sheet?.orientation,
+
+    svgWidthPx: sheetRect.width,
+    svgHeightPx: sheetRect.height,
+
+    pdfWidthMm: sheetRect.width / MM_TO_PX,
+    pdfHeightMm: sheetRect.height / MM_TO_PX,
+  });
+}
+
+
+У exportSchemePdf.js тимчасово:
+
+import { logExportSceneDebug } from "./debugExportScene";
+
+...
+
+const scene = buildExportScene(store, mergedOptions);
+logExportSceneDebug(scene);
+
+
+Очікування:
+
+A4 landscape:
+- svgWidthPx = 297 * 4 = 1188
+- svgHeightPx = 210 * 4 = 840
+- pdfWidthMm = 297
+- pdfHeightMm = 210
+
+A4 portrait:
+- svgWidthPx = 210 * 4 = 840
+- svgHeightPx = 297 * 4 = 1188
+- pdfWidthMm = 210
+- pdfHeightMm = 297
+
+A3 landscape:
+- svgWidthPx = 420 * 4 = 1680
+- svgHeightPx = 297 * 4 = 1188
+- pdfWidthMm = 420
+- pdfHeightMm = 297
+
+
+============================================================
+НАЙЧАСТІШІ ПРИЧИНИ САМЕ ТВОЄЇ ПОМИЛКИ
+============================================================
+
+1. buildExportScene() має fallback:
+
+const sheet = store.sheet || {};
+const geometry = buildSheetGeometry(sheet);
+
+Але store.sheet.format не оновлюється при зміні canvas A4.
+
+Рішення:
+- при зміні формату оновлювати store.sheet.format.
+
+2. exportPdfFromSvg() використовує:
+
+const orientation = scene.sheet.orientation === "portrait"
+  ? "portrait"
+  : "landscape";
+
+А scene.sheet.orientation старий або undefined.
+
+Рішення:
+- рахувати orientation з фактичного PDF format:
+  widthMm >= heightMm ? "landscape" : "portrait".
+
+3. renderSvg() використовує:
+
+const width = scene.width || 1200;
+const height = scene.height || 800;
+
+Рішення:
+- тільки scene.geometry.sheetRect.
+
+4. У canvas A4 змінюється через local component state,
+   але store.sheet лишається A3.
+
+Рішення:
+- прибрати local-only paper size;
+- все через store.sheet.
+
+5. Старий scene кешується:
+
+const exportScene = useMemo(..., []);
+
+Рішення:
+- будувати scene тільки при кліку export.
+
+
+============================================================
+ПЕРЕВІРКА
+============================================================
+
+1. Вибери A4 landscape в UI.
+
+2. Перед export перевір:
+
+console.log(useCanvasStore.getState().sheet);
+
+Очікувано:
+
+{
+  format: "A4",
+  orientation: "landscape",
+  ...
+}
+
+3. Запусти export.
+
+4. У debug table має бути:
+
+format: A4
+orientation: landscape
+svgWidthPx: 1188
+svgHeightPx: 840
+pdfWidthMm: 297
+pdfHeightMm: 210
+
+5. Відкрий PDF properties:
+- page size має бути A4 landscape.
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ A4 export буде реально A4
+✔ A3 export буде реально A3
+✔ SVG width/height/viewBox змінюються разом із sheet.format
+✔ PDF format у jsPDF змінюється разом із sheet.format
+✔ canvas і export використовують один buildSheetGeometry()
+✔ немає залежності від viewport/canvas dimensions
+✔ немає старої A3-геометрії після переходу на A4
+
+
+============================================================
+END PATCH
+============================================================

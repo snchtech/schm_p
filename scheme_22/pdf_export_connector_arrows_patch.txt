@@ -1,0 +1,452 @@
+PDF EXPORT CONNECTOR ARROWS PATCH
+==================================
+
+МЕТА
+----
+Виправити експорт конекторів у PDF/SVG так, щоб підтримувались:
+
+1. звичайна лінія без стрілок;
+2. лінія з однією стрілкою в кінці;
+3. лінія з однією стрілкою на початку;
+4. лінія з двома стрілками.
+
+Поточна причина проблеми:
+- на canvas стрілки малюються окремими Konva Line closed polygon через getArrowHeadPoints();
+- в експорті renderConnectorsSvg.js використовується <polyline> з marker-start / marker-end;
+- svg2pdf.js не завжди стабільно переносить SVG marker у PDF;
+- тому у PDF лишається проста лінія без стрілок.
+
+Рішення:
+- не використовувати SVG marker для стрілок;
+- експортувати стрілки як реальні SVG <polygon>;
+- використати ту саму геометрію, що і canvas: getArrowHeadPoints(),
+  getConnectorStartSegment(), getConnectorEndSegment().
+
+Це робить PDF стабільно векторним і незалежним від підтримки marker у svg2pdf.js.
+
+
+============================================================
+PATCH 1
+FILE: src/lib/export/svgEscape.js
+============================================================
+
+ДОДАТИ polygon helper.
+
+Було:
+
+export function polyline(attrs = {}) {
+  return `<polyline ${svgAttrs(attrs)} />`;
+}
+
+Додати після polyline:
+
+export function polygon(attrs = {}) {
+  return `<polygon ${svgAttrs(attrs)} />`;
+}
+
+
+ПОВНИЙ ФРАГМЕНТ:
+
+export function polyline(attrs = {}) {
+  return `<polyline ${svgAttrs(attrs)} />`;
+}
+
+export function polygon(attrs = {}) {
+  return `<polygon ${svgAttrs(attrs)} />`;
+}
+
+
+============================================================
+PATCH 2
+FILE: src/lib/export/renderConnectorsSvg.js
+============================================================
+
+ЗАМІНИТИ ВЕСЬ ФАЙЛ на цей код:
+
+import { polyline, polygon, group } from "./svgEscape";
+import {
+  getArrowHeadPoints,
+  getConnectorStartSegment,
+  getConnectorEndSegment,
+} from "@/lib/connectors/connectorMarkers";
+
+function pointsToString(points = []) {
+  const pairs = [];
+
+  for (let i = 0; i < points.length - 1; i += 2) {
+    pairs.push(`${points[i]},${points[i + 1]}`);
+  }
+
+  return pairs.join(" ");
+}
+
+function polygonPointsToString(points = []) {
+  const pairs = [];
+
+  for (let i = 0; i < points.length - 1; i += 2) {
+    pairs.push(`${points[i]},${points[i + 1]}`);
+  }
+
+  return pairs.join(" ");
+}
+
+function getConnectorStroke(connector) {
+  return connector.style?.stroke || "#000000";
+}
+
+function getConnectorStrokeWidth(connector) {
+  return connector.style?.strokeWidth || 2;
+}
+
+function getArrowSize(connector) {
+  return connector.style?.arrowSize || 12;
+}
+
+function getArrowWidth(connector) {
+  return connector.style?.arrowWidth || 8;
+}
+
+function renderConnectorArrow({
+  id,
+  segment,
+  stroke,
+  size,
+  width,
+}) {
+  if (!segment) return "";
+
+  const arrowPoints = getArrowHeadPoints(
+    segment.from,
+    segment.to,
+    size,
+    width
+  );
+
+  return polygon({
+    id,
+    points: polygonPointsToString(arrowPoints),
+    fill: stroke,
+    stroke,
+    "stroke-width": 1,
+  });
+}
+
+function renderConnectorStartArrow(connector, points, stroke) {
+  if (connector.endcaps?.start !== "arrow") return "";
+
+  const segment = getConnectorStartSegment(points);
+
+  return renderConnectorArrow({
+    id: `connector-${connector.id}-arrow-start`,
+    segment,
+    stroke,
+    size: getArrowSize(connector),
+    width: getArrowWidth(connector),
+  });
+}
+
+function renderConnectorEndArrow(connector, points, stroke) {
+  if (connector.endcaps?.end !== "arrow") return "";
+
+  const segment = getConnectorEndSegment(points);
+
+  return renderConnectorArrow({
+    id: `connector-${connector.id}-arrow-end`,
+    segment,
+    stroke,
+    size: getArrowSize(connector),
+    width: getArrowWidth(connector),
+  });
+}
+
+export function renderConnectorDefsSvg() {
+  // Стрілки експортуються як реальні polygon,
+  // тому defs/marker більше не потрібні.
+  return "";
+}
+
+export function renderConnectorsSvg(scene) {
+  if (scene.options.includeConnectors === false) return "";
+
+  return scene.edges
+    .filter((edge) => edge.kind === "connector")
+    .map((connector) => {
+      const points = connector.geometry?.points || [];
+      if (points.length < 4) return "";
+
+      const stroke = getConnectorStroke(connector);
+      const strokeWidth = getConnectorStrokeWidth(connector);
+
+      let content = "";
+
+      content += polyline({
+        points: pointsToString(points),
+        fill: "none",
+        stroke,
+        "stroke-width": strokeWidth,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      });
+
+      content += renderConnectorStartArrow(connector, points, stroke);
+      content += renderConnectorEndArrow(connector, points, stroke);
+
+      return group(content, { id: `connector-${connector.id}` });
+    })
+    .join("");
+}
+
+
+============================================================
+PATCH 3
+FILE: src/lib/connectors/connectorModel.js
+============================================================
+
+Цей патч НЕ обов'язковий, але рекомендований, якщо хочеш мати керування
+розміром стрілки на рівні style.
+
+Знайти:
+
+style: {
+  stroke: style?.stroke ?? "black",
+  strokeWidth: style?.strokeWidth ?? 2,
+},
+
+Замінити на:
+
+style: {
+  stroke: style?.stroke ?? "black",
+  strokeWidth: style?.strokeWidth ?? 2,
+
+  // Використовується і canvas, і SVG/PDF export.
+  arrowSize: style?.arrowSize ?? 12,
+  arrowWidth: style?.arrowWidth ?? 8,
+},
+
+
+============================================================
+PATCH 4
+FILE: src/components/canvas/ConnectorsLayer.jsx
+============================================================
+
+Цей патч також рекомендований, щоб canvas і export брали розмір стрілки
+з одного місця.
+
+Знайти:
+
+const startArrowPoints =
+  connector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+    : null;
+
+const endArrowPoints =
+  connector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+    : null;
+
+Замінити на:
+
+const arrowSize = connector.style?.arrowSize || 12;
+const arrowWidth = connector.style?.arrowWidth || 8;
+
+const startArrowPoints =
+  connector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, arrowSize, arrowWidth)
+    : null;
+
+const endArrowPoints =
+  connector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, arrowSize, arrowWidth)
+    : null;
+
+
+============================================================
+PATCH 5
+FILE: src/components/canvas/DraftConnectorLayer.jsx
+============================================================
+
+Щоб draft preview також використовував ті самі параметри.
+
+Знайти:
+
+const startArrowPoints =
+  draftConnector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, 12, 8)
+    : null;
+
+const endArrowPoints =
+  draftConnector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, 12, 8)
+    : null;
+
+Замінити на:
+
+const arrowSize = draftConnector.style?.arrowSize || 12;
+const arrowWidth = draftConnector.style?.arrowWidth || 8;
+
+const startArrowPoints =
+  draftConnector.endcaps?.start === "arrow" && startSegment
+    ? getArrowHeadPoints(startSegment.from, startSegment.to, arrowSize, arrowWidth)
+    : null;
+
+const endArrowPoints =
+  draftConnector.endcaps?.end === "arrow" && endSegment
+    ? getArrowHeadPoints(endSegment.from, endSegment.to, arrowSize, arrowWidth)
+    : null;
+
+
+============================================================
+ПЕРЕВІРКА ДАНИХ
+============================================================
+
+Твоя модель вже підтримує потрібні типи через:
+
+endcaps: {
+  start: "none" | "arrow",
+  end: "none" | "arrow",
+}
+
+Тобто окремий connector.type для стрілок створювати не треба.
+
+Приклади:
+
+1. Звичайна лінія:
+
+endcaps: {
+  start: "none",
+  end: "none",
+}
+
+2. Стрілка в кінці:
+
+endcaps: {
+  start: "none",
+  end: "arrow",
+}
+
+3. Стрілка на початку:
+
+endcaps: {
+  start: "arrow",
+  end: "none",
+}
+
+4. Подвійна стрілка:
+
+endcaps: {
+  start: "arrow",
+  end: "arrow",
+}
+
+
+============================================================
+ЧОМУ ЦЕ КРАЩЕ ЗА SVG MARKERS
+============================================================
+
+SVG markers:
+
+<marker>
+  ...
+</marker>
+
+працюють у браузері, але при конвертації SVG -> PDF через svg2pdf.js можуть
+відпрацювати нестабільно або взагалі не потрапити у PDF.
+
+Polygon-стрілки:
+
+<polygon points="..." />
+
+є звичайною SVG-геометрією.
+Вона стабільно конвертується у PDF як векторна фігура.
+
+
+============================================================
+ВАЖЛИВИЙ НЮАНС
+============================================================
+
+Цей патч експортує тільки те, що вже є в connector.geometry.points.
+
+Тому перед експортом у тебе має бути актуальна geometry:
+
+connector.geometry.points = [
+  x1, y1,
+  x2, y2,
+  ...
+]
+
+У твоїй архітектурі це вже робиться через rebuildConnectorGeometry().
+Якщо у майбутньому будеш експортувати схему після завантаження з БД,
+переконайся, що після hydrate/load ти або:
+
+1. зберігаєш geometry.points у БД;
+
+або
+
+2. перед експортом проганяєш всі edges через rebuildConnectorGeometry(edge, nodes).
+
+
+============================================================
+OPTIONAL HARDENING
+FILE: src/lib/export/buildExportScene.js
+============================================================
+
+Якщо є ризик, що geometry.points неактуальні після завантаження схеми,
+можна додати rebuild перед експортом.
+
+Було:
+
+return {
+  options,
+  sheet,
+  geometry,
+  nodes: normalizeArray(store.nodes),
+  edges: normalizeArray(store.edges),
+  annotations: normalizeArray(store.annotations),
+  specificationTables: normalizeArray(store.specificationTables),
+  notes: normalizeArray(sheet.notes || store.notes),
+};
+
+Замінити на:
+
+import { rebuildConnectorGeometry } from "@/lib/connectors/connectorGeometry";
+
+...
+
+const nodes = normalizeArray(store.nodes);
+
+const edges = normalizeArray(store.edges).map((edge) => {
+  if (edge?.kind !== "connector") return edge;
+  return rebuildConnectorGeometry(edge, nodes);
+});
+
+return {
+  options,
+  sheet,
+  geometry,
+  nodes,
+  edges,
+  annotations: normalizeArray(store.annotations),
+  specificationTables: normalizeArray(store.specificationTables),
+  notes: normalizeArray(sheet.notes || store.notes),
+};
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу PDF/SVG export підтримує:
+
+✔ free-straight без стрілок
+✔ free-straight зі стрілкою в кінці
+✔ free-straight з двома стрілками
+✔ orthogonal-straight зі стрілками
+✔ orthogonal-elbow зі стрілками
+✔ однакову геометрію стрілок у Konva canvas і PDF export
+✔ векторний PDF без raster/screenshot
+✔ без залежності від SVG marker support у svg2pdf.js
+
+
+============================================================
+END PATCH
+============================================================
