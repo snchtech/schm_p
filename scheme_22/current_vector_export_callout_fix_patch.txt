@@ -1,0 +1,622 @@
+SVG/PDF CALLOUT EXPORT PATCH FOR CURRENT VECTOR EXPORT
+======================================================
+
+МЕТА
+----
+Виправити експорт виносок у поточній SVG-first / vector PDF архітектурі.
+
+Зараз у тебе вже працює:
+- annotation text export;
+- free annotation export;
+- лінія від фігури або конектора до полички;
+- offset;
+- шрифт RobotoCondensed;
+- SVG -> PDF.
+
+Проблема з callout:
+- у AnnotationsLayer.js callout/free виноска формується через resolved pos + attachedTo;
+- у svgText.js ти повторюєш схожу логіку окремо;
+- через це canvas і SVG/PDF легко роз'їжджаються;
+- частина логіки була з попереднього screenshot export, а зараз потрібен чистий vector export.
+
+ГОЛОВНЕ РІШЕННЯ
+---------------
+Не робити окремий розрахунок callout у svgText.js.
+
+Потрібно винести геометрію виноски у спільний helper:
+
+annotation + nodes + edges
+  -> resolve text position
+  -> find source point on node/edge
+  -> build source -> elbow -> shelfEnd points
+
+І використовувати його одночасно у:
+- src/features/scheme/ui/canvas/AnnotationsLayer.js
+- src/features/scheme/lib/export/svg/svgText.js
+
+Так ти отримаєш однакову лінію на canvas і в SVG/PDF.
+
+============================================================
+PATCH 1
+CREATE FILE:
+src/features/scheme/lib/annotations/annotationCalloutGeometry.js
+============================================================
+
+import { resolveAnnotationPosition } from './annotationGeometry'
+
+function num(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function getAttrs(item) {
+  return item?.attrs || item || {}
+}
+
+function getData(item) {
+  const attrs = getAttrs(item)
+  return attrs.data || item?.data || {}
+}
+
+function getPosition(item) {
+  const attrs = getAttrs(item)
+  return attrs.position || item?.position || {}
+}
+
+function getNodeBox(node) {
+  const attrs = getAttrs(node)
+  const data = getData(node)
+  const position = getPosition(node)
+
+  const x = num(position.x, num(attrs.x, num(node?.x, 0)))
+  const y = num(position.y, num(attrs.y, num(node?.y, 0)))
+
+  const width = num(
+    data.width,
+    num(attrs.width, num(node?.width, num(attrs.w, num(node?.w, 0))))
+  )
+
+  const height = num(
+    data.height,
+    num(attrs.height, num(node?.height, num(attrs.h, num(node?.h, 0))))
+  )
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    centerX: x + width / 2,
+    centerY: y + height / 2,
+  }
+}
+
+function findNode(nodes = [], id) {
+  return nodes.find((node) => {
+    const attrs = getAttrs(node)
+    return node?.id === id || attrs.id === id
+  })
+}
+
+function findEdge(edges = [], id) {
+  return edges.find((edge) => {
+    const attrs = getAttrs(edge)
+    return edge?.id === id || attrs.id === id
+  })
+}
+
+function normalizeEdgePoints(edge) {
+  const attrs = getAttrs(edge)
+
+  const rawPoints =
+    attrs.geometry?.points ||
+    edge?.geometry?.points ||
+    attrs.points ||
+    attrs.path ||
+    []
+
+  const points = []
+  if (!Array.isArray(rawPoints)) return points
+
+  if (rawPoints.length && typeof rawPoints[0] === 'number') {
+    for (let i = 0; i < rawPoints.length - 1; i += 2) {
+      if (rawPoints[i] !== undefined && rawPoints[i + 1] !== undefined) {
+        points.push({
+          x: num(rawPoints[i]),
+          y: num(rawPoints[i + 1]),
+        })
+      }
+    }
+    return points
+  }
+
+  for (const point of rawPoints) {
+    if (!point) continue
+    points.push({
+      x: num(point.x),
+      y: num(point.y),
+    })
+  }
+
+  return points
+}
+
+function getPolylineCenterPoint(points = []) {
+  if (!points.length) return null
+  if (points.length === 1) return points[0]
+
+  let totalLength = 0
+  const segments = []
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p1 = points[i]
+    const p2 = points[i + 1]
+    const len = Math.hypot(p2.x - p1.x, p2.y - p1.y)
+
+    segments.push({ p1, p2, len })
+    totalLength += len
+  }
+
+  if (!segments.length || totalLength <= 0) return points[0]
+
+  const half = totalLength / 2
+  let cursor = 0
+
+  for (const seg of segments) {
+    if (cursor + seg.len >= half) {
+      const ratio = seg.len === 0 ? 0 : (half - cursor) / seg.len
+      return {
+        x: seg.p1.x + (seg.p2.x - seg.p1.x) * ratio,
+        y: seg.p1.y + (seg.p2.y - seg.p1.y) * ratio,
+      }
+    }
+
+    cursor += seg.len
+  }
+
+  return points[points.length - 1]
+}
+
+export function isCalloutLikeAnnotation(annotation) {
+  const attrs = getAttrs(annotation)
+  const data = getData(annotation)
+  const position = attrs.position || data.position || annotation?.position || {}
+  const type = attrs.annotationType || data.annotationType || annotation?.annotationType
+
+  return type === 'callout' || position.mode === 'free' || position.mode === 'callout'
+}
+
+export function getAnnotationSourcePoint(annotation, scene = {}) {
+  const attrs = getAttrs(annotation)
+  const data = getData(annotation)
+  const attachedTo = attrs.attachedTo || data.attachedTo || annotation?.attachedTo
+
+  const callout = attrs.callout || data.callout || annotation?.callout
+  if (callout?.anchorX !== undefined && callout?.anchorY !== undefined) {
+    return {
+      x: num(callout.anchorX),
+      y: num(callout.anchorY),
+    }
+  }
+
+  if (!attachedTo?.id) return null
+
+  if (attachedTo.type === 'node') {
+    const node = findNode(scene.nodes || [], attachedTo.id)
+    if (!node) return null
+
+    const box = getNodeBox(node)
+    return {
+      x: box.centerX,
+      y: box.centerY,
+    }
+  }
+
+  if (attachedTo.type === 'edge' || attachedTo.type === 'connector') {
+    const edge = findEdge(scene.edges || scene.connectors || [], attachedTo.id)
+    if (!edge) return null
+
+    const points = normalizeEdgePoints(edge)
+    return getPolylineCenterPoint(points)
+  }
+
+  return null
+}
+
+export function resolveAnnotationExportPosition(annotation, scene = {}) {
+  const attrs = getAttrs(annotation)
+  const data = getData(annotation)
+  const position = attrs.position || data.position || annotation?.position || {}
+
+  const resolved = resolveAnnotationPosition?.(
+    attrs,
+    scene.nodes || [],
+    scene.edges || scene.connectors || []
+  )
+
+  if (
+    resolved &&
+    Number.isFinite(Number(resolved.x)) &&
+    Number.isFinite(Number(resolved.y))
+  ) {
+    return {
+      x: num(resolved.x),
+      y: num(resolved.y),
+    }
+  }
+
+  return {
+    x: num(position.absoluteX, num(attrs.x, num(data.x, 0))) + num(position.offsetX),
+    y: num(position.absoluteY, num(attrs.y, num(data.y, 0))) + num(position.offsetY),
+  }
+}
+
+export function getAnnotationTextValue(annotation) {
+  const attrs = getAttrs(annotation)
+  const data = getData(annotation)
+  return String(data.text || attrs.text || annotation?.text || '')
+}
+
+export function getCalloutShelfHalfWidth(annotation, fontSize = 12) {
+  const attrs = getAttrs(annotation)
+  const style = attrs.style || annotation?.style || {}
+  const callout = attrs.callout || annotation?.callout || {}
+
+  const explicit =
+    style.calloutShelfHalfWidth ||
+    style.shelfHalfWidth ||
+    callout.shelfHalfWidth
+
+  if (explicit !== undefined && explicit !== null) {
+    return Math.max(12, num(explicit, 40))
+  }
+
+  const text = getAnnotationTextValue(annotation)
+  return Math.max(20, ((text.length || 1) * fontSize * 0.55) / 2)
+}
+
+export function getCalloutLinePoints(annotation, scene = {}, position = null, fontSize = 12) {
+  const source = getAnnotationSourcePoint(annotation, scene)
+  const pos = position || resolveAnnotationExportPosition(annotation, scene)
+
+  if (!source || !pos) return null
+
+  const halfWidth = getCalloutShelfHalfWidth(annotation, fontSize)
+  const shelfY = pos.y + 2
+
+  if (source.x < pos.x) {
+    return [
+      source.x,
+      source.y,
+      pos.x - halfWidth,
+      shelfY,
+      pos.x + halfWidth,
+      shelfY,
+    ]
+  }
+
+  return [
+    source.x,
+    source.y,
+    pos.x + halfWidth,
+    shelfY,
+    pos.x - halfWidth,
+    shelfY,
+  ]
+}
+
+export function calloutPointsToSegments(points) {
+  if (!points || points.length < 6) return []
+
+  return [
+    {
+      x1: points[0],
+      y1: points[1],
+      x2: points[2],
+      y2: points[3],
+    },
+    {
+      x1: points[2],
+      y1: points[3],
+      x2: points[4],
+      y2: points[5],
+    },
+  ]
+}
+
+============================================================
+PATCH 2
+UPDATE FILE:
+src/features/scheme/ui/canvas/AnnotationsLayer.js
+============================================================
+
+Додай import:
+
+import {
+  isCalloutLikeAnnotation,
+  getCalloutLinePoints,
+} from '@/features/scheme/lib/annotations/annotationCalloutGeometry'
+
+Знайди локальний блок, де рахується calloutLinePoints.
+Його треба замінити на:
+
+const isCalloutOrFree = isCalloutLikeAnnotation(annotation)
+
+const calloutLinePoints =
+  isCalloutOrFree && annotation.attachedTo
+    ? getCalloutLinePoints(
+        annotation,
+        {
+          nodes,
+          edges,
+        },
+        pos,
+        fontSize
+      )
+    : null
+
+Рендер Line залишити:
+
+{calloutLinePoints && (
+  <Line
+    points={calloutLinePoints}
+    stroke={isSelected ? '#007fff' : '#666666'}
+    strokeWidth={1}
+    listening={false}
+  />
+)}
+
+ВАЖЛИВО:
+Тепер canvas і export використовують одну геометрію.
+
+============================================================
+PATCH 3
+UPDATE FILE:
+src/features/scheme/lib/export/svg/svgText.js
+============================================================
+
+У svgText.js не потрібно ще раз рахувати sourceX/sourceY вручну.
+Потрібно імпортувати helper:
+
+import {
+  isCalloutLikeAnnotation,
+  getCalloutLinePoints,
+  calloutPointsToSegments,
+  resolveAnnotationExportPosition,
+} from '@/features/scheme/lib/annotations/annotationCalloutGeometry'
+
+Далі заміни/онови функцію textLinesToSvg:
+
+export function textLinesToSvg(node, context = {}) {
+  const nodeAttrs = node.attrs || node || {}
+  const data = nodeAttrs.data || node.data || {}
+  const style = nodeAttrs.style || node.style || data.style || {}
+
+  const isAnnotation =
+    nodeAttrs.kind === 'annotation' ||
+    node.kind === 'annotation' ||
+    data.kind === 'annotation' ||
+    nodeAttrs.attachedTo ||
+    data.attachedTo
+
+  if (!isAnnotation) return ''
+  if (!isCalloutLikeAnnotation(nodeAttrs)) return ''
+
+  const scene = {
+    nodes: context.nodes || Array.from(context.nodesById?.values?.() || []),
+    edges: context.edges || context.connectors || [],
+    connectors: context.connectors || context.edges || [],
+  }
+
+  const pos = resolveAnnotationExportPosition(nodeAttrs, scene)
+  const fontSize = num(style.fontSize, num(data.style?.fontSize, num(data.fontSize, 12)))
+
+  const points = getCalloutLinePoints(nodeAttrs, scene, pos, fontSize)
+  const segments = calloutPointsToSegments(points)
+
+  return segments
+    .map((seg, index) => {
+      return `<line ${attrs({
+        id: `${nodeAttrs.id || node.id || 'annotation'}-callout-line-${index}`,
+        'data-element-type': 'annotation-callout-line',
+        x1: seg.x1,
+        y1: seg.y1,
+        x2: seg.x2,
+        y2: seg.y2,
+        stroke: style.stroke || style.fill || data.style?.fill || '#666666',
+        'stroke-width': num(style.strokeWidth, num(data.style?.strokeWidth, 1)),
+        'stroke-linecap': 'round',
+        'stroke-linejoin': 'round',
+      })} />`
+    })
+    .join('\n')
+}
+
+І у textToSvg для annotation позицію теж бери через helper:
+
+const isAnnotation =
+  nodeAttrs.kind === 'annotation' ||
+  node.kind === 'annotation' ||
+  data.kind === 'annotation' ||
+  nodeAttrs.attachedTo ||
+  data.attachedTo
+
+let x = 0
+let y = 0
+
+if (isAnnotation) {
+  const scene = {
+    nodes: context.nodes || Array.from(context.nodesById?.values?.() || []),
+    edges: context.edges || context.connectors || [],
+    connectors: context.connectors || context.edges || [],
+  }
+
+  const pos = resolveAnnotationExportPosition(nodeAttrs, scene)
+  x = pos.x
+  y = pos.y
+} else {
+  const offsetX = num(position.offsetX, num(nodeAttrs.offsetX, 0))
+  const offsetY = num(position.offsetY, num(nodeAttrs.offsetY, 0))
+
+  x = num(position.absoluteX, num(nodeAttrs.absoluteX, num(nodeAttrs.x, num(data.x, 0)))) + offsetX
+  y = num(position.absoluteY, num(nodeAttrs.absoluteY, num(nodeAttrs.y, num(data.y, 0)))) + offsetY
+}
+
+Фінальна структура має бути:
+
+export function allTextLinesToSvg(texts = [], context = {}) {
+  return texts
+    .map((text) => textLinesToSvg(text, context))
+    .filter(Boolean)
+    .join('\n')
+}
+
+export function allTextsOnlyToSvg(texts = [], context = {}) {
+  return texts
+    .map((text) => textToSvg(text, context))
+    .filter(Boolean)
+    .join('\n')
+}
+
+export function textsToSvg(texts = [], context = {}) {
+  return `${allTextLinesToSvg(texts, context)}\n${allTextsOnlyToSvg(texts, context)}`
+}
+
+============================================================
+PATCH 4
+UPDATE FILE:
+src/features/scheme/lib/export/svg/sceneToSvg.js
+============================================================
+
+Потрібно передати annotations у svgText.js.
+
+У normalizeScene додай:
+
+annotations: scene.annotations || [],
+edges: scene.edges || [],
+connectors: scene.connectors || scene.edges || scene.lines || [],
+
+У sceneToSvg створи textItems:
+
+const textItems = [
+  ...(scene.texts || []),
+  ...(scene.annotations || []),
+]
+
+І заміни:
+
+textsToSvg(scene.texts)
+
+на:
+
+textsToSvg(textItems, {
+  nodes: scene.nodes,
+  edges: scene.edges || scene.connectors,
+  connectors: scene.connectors,
+  nodesById,
+})
+
+============================================================
+PATCH 5
+UPDATE EXPORT SCENE BUILDING
+============================================================
+
+Коли формуєш scene зі store, обов'язково передавай annotations:
+
+const scene = {
+  width: sheetGeometry.sheetRect.width,
+  height: sheetGeometry.sheetRect.height,
+  nodes: store.nodes,
+  edges: store.edges,
+  connectors: store.edges.filter((edge) => edge.kind === 'connector'),
+  annotations: store.annotations,
+  texts: store.texts || [],
+  frame: store.frame,
+  table: store.table,
+}
+
+Якщо annotations не потрапляють у scene, svgText.js не намалює callout.
+
+============================================================
+ЧОМУ САМЕ ТАК
+============================================================
+
+З фото видно, що у тебе AnnotationsLayer вже робить правильну логіку:
+- pos = resolveAnnotationPosition(annotation, nodes, edges)
+- isCalloutOrFree = annotation.annotationType === 'callout' || mode === 'free'
+- для node береться центр ноди;
+- для edge/connector шукається середина polyline;
+- поличка будується відносно pos і ширини тексту;
+- drag рухає annotation через delta.
+
+Тому не треба вигадувати нову модель тільки для export.
+Потрібно зробити так, щоб SVG export використовував цю саму геометрію.
+
+============================================================
+ВАЖЛИВИЙ НЮАНС ПРО CALLОUT ДО ФІГУРИ
+============================================================
+
+Зараз source point для node = центр node.
+Якщо тобі треба 1:1 саме з точкою кліку на фігурі, тоді при створенні callout зберігай:
+
+annotation.callout = {
+  anchorX: pointer.x,
+  anchorY: pointer.y,
+}
+
+У патчі це вже підтримано:
+якщо annotation.callout.anchorX/anchorY є, helper бере їх замість центру node.
+
+============================================================
+ВАЖЛИВИЙ НЮАНС ПРО FREE TEXT
+============================================================
+
+mode === 'free' без attachedTo не повинен мати лінію.
+Тому умова така:
+
+isCalloutLikeAnnotation(annotation) && annotation.attachedTo
+
+Це означає:
+- free attached annotation — з лінією;
+- callout attached annotation — з лінією;
+- просто free text — тільки текст.
+
+============================================================
+ПЕРЕВІРКА
+============================================================
+
+1. Callout до node:
+- canvas показує лінію від node до полички;
+- SVG/PDF показує таку саму лінію.
+
+2. Callout до connector:
+- лінія починається з середини polyline;
+- SVG/PDF повторює це.
+
+3. Free annotation attachedTo node:
+- export має лінію з поличкою.
+
+4. Free text без attachedTo:
+- export має тільки текст.
+
+5. Drag annotation:
+- після drag export має нову позицію і нову поличку.
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+✔ callout export працює у поточній vector SVG/PDF архітектурі
+✔ не використовується старий screenshot export підхід
+✔ canvas і SVG/PDF мають одну геометрію виноски
+✔ callout і free attached annotation експортуються однаково
+✔ line рендериться нижнім шаром
+✔ text рендериться верхнім шаром
+✔ offset і drag не конфліктують з export
+✔ можна поступово перейти до збереження anchorX/anchorY для ще точнішого 1:1
+
+============================================================
+END PATCH
+============================================================

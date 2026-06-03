@@ -1,0 +1,137 @@
+Так, але залежить від того, як саме у тебе зараз зберігається free-text.
+
+Зі скрінів бачу, що в `AnnotationsLayer.js` є перевірка:
+
+```js
+const isCalloutOrFree =
+  annotation.annotationType === 'callout' ||
+  mode === 'free'
+```
+
+Тобто зараз у тебе є два різних сценарії:
+
+### Варіант 1. Free-text без прив'язки до об'єкта
+
+Наприклад:
+
+```js
+{
+  id: 'a1',
+  annotationType: 'text',
+  text: 'Примітка',
+  position: {
+    mode: 'free',
+    absoluteX: 500,
+    absoluteY: 300
+  }
+}
+```
+
+або
+
+```js
+attachedTo: null
+```
+
+Такий елемент повинен експортуватись **тільки як текст**.
+
+Лінія не потрібна.
+
+У моєму патчі саме так і задумано:
+
+```js
+if (!attachedTo) {
+   return null
+}
+```
+
+для лінії.
+
+В результаті:
+
+```svg
+<text ...>Примітка</text>
+```
+
+без `<line>`.
+
+---
+
+### Варіант 2. Free annotation прив'язана до вузла
+
+Наприклад:
+
+```js
+{
+  annotationType: 'text',
+  position: {
+    mode: 'free'
+  },
+  attachedTo: {
+    type: 'node',
+    id: 'node1'
+  }
+}
+```
+
+Тоді вона поводиться як виноска:
+
+```text
+node ---- поличка ---- текст
+```
+
+і в SVG підуть:
+
+```svg
+<line ... />
+<line ... />
+<text ... />
+```
+
+---
+
+### Що я б рекомендував
+
+Щоб через рік самому не заплутатись, краще розділити поняття:
+
+```js
+annotationType: 'text'
+annotationType: 'callout'
+```
+
+а не покладатися на
+
+```js
+position.mode === 'free'
+```
+
+Тоді логіка експорту буде набагато очевиднішою:
+
+```js
+const isCallout =
+  annotation.annotationType === 'callout'
+```
+
+і все.
+
+---
+
+Я б навіть змінив функцію на:
+
+```js
+export function isCalloutLikeAnnotation(annotation) {
+  return annotation.annotationType === 'callout'
+}
+```
+
+а free-text залишив би окремим типом.
+
+Тоді:
+
+* `text` → експортується лише текст;
+* `callout` → текст + поличка + лінія;
+* `label` → звичайна прив'язана підписка до елемента.
+
+Це значно спростить і SVG, і PDF, і майбутній редактор властивостей анотацій.
+
+Якщо покажеш структуру одного реального об'єкта з `store.annotations`, я скажу точно, чи поточний патч експортуватиме твій free-text правильно, чи там треба ще підправити `isCalloutLikeAnnotation()`.
