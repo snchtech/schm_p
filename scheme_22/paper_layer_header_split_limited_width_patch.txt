@@ -1,0 +1,377 @@
+PAPER LAYER HEADER SPLIT + LIMITED WIDTH PATCH
+==============================================
+
+МЕТА
+----
+Виправити у PaperLayer.jsx дві речі:
+
+1. Розділити назву поля і його значення горизонтальною лінією.
+   Тобто кожна header-комірка має виглядати як таблиця:
+
+   ┌───────────────┐
+   │ Шифр альбому  │
+   ├───────────────┤
+   │ A-001         │
+   └───────────────┘
+
+2. Header frame має закінчуватись після останньої колонки "Аркуш",
+   а не тягнутись до правого краю аркуша.
+
+
+============================================================
+1. ОНОВИТИ paperConstants.js
+============================================================
+
+Додати константи для розділення header-комірки:
+
+export const HEADER_HEIGHT = 36;
+
+export const HEADER_LABEL_HEIGHT = 16;
+
+export const HEADER_VALUE_HEIGHT =
+  HEADER_HEIGHT - HEADER_LABEL_HEIGHT;
+
+export const HEADER_COLUMNS = [
+  {
+    key: "albumCode",
+    label: "Шифр альбому",
+    width: 180,
+  },
+  {
+    key: "unit",
+    label: "Unit",
+    width: 120,
+  },
+  {
+    key: "system",
+    label: "Система",
+    width: 140,
+  },
+  {
+    key: "title",
+    label: "Назва схеми",
+    width: 320,
+  },
+  {
+    key: "sheetNumber",
+    label: "Аркуш",
+    width: 80,
+  },
+];
+
+export const HEADER_TOTAL_WIDTH =
+  HEADER_COLUMNS.reduce((sum, column) => sum + column.width, 0);
+
+
+============================================================
+2. ОНОВИТИ sheetGeometry.js
+============================================================
+
+Важливо:
+headerArea.width має бути НЕ frameRect.width, а HEADER_TOTAL_WIDTH.
+
+Заміни import:
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+} from "./paperConstants";
+
+на:
+
+import {
+  MM_TO_PX,
+  FRAME_MARGIN,
+  TITLE_BLOCK_HEIGHT,
+  NOTES_AREA_HEIGHT,
+  HEADER_HEIGHT,
+  HEADER_TOTAL_WIDTH,
+} from "./paperConstants";
+
+
+У buildSheetGeometry заміни headerArea:
+
+Було:
+
+headerArea: {
+  x: frameMargin,
+  y: frameMargin,
+
+  width:
+    sheetWidth -
+    frameMargin * 2,
+
+  height: headerHeight,
+},
+
+Стало:
+
+headerArea: {
+  x: frameMargin,
+  y: frameMargin,
+  width: HEADER_TOTAL_WIDTH,
+  height: headerHeight,
+},
+
+
+ВАЖЛИВО:
+drawingArea може залишатись на всю ширину frameRect.
+Ми обмежуємо тільки верхню header-таблицю.
+
+
+============================================================
+3. ЗАМІНИТИ HEADER РЕНДЕР У PaperLayer.jsx
+============================================================
+
+Онови imports:
+
+import {
+  HEADER_COLUMNS,
+  HEADER_LABEL_HEIGHT,
+  HEADER_VALUE_HEIGHT,
+  HEADER_TOTAL_WIDTH,
+} from "@/lib/paper/paperConstants";
+
+
+Заміни блок:
+
+{/* HEADER FRAME */}
+
+<Rect
+  x={headerArea.x}
+  y={headerArea.y}
+
+  width={headerArea.width}
+  height={headerArea.height}
+
+  stroke="black"
+  strokeWidth={1}
+/>
+
+
+на:
+
+{/* HEADER FRAME - limited to sum of columns */}
+
+<Rect
+  x={headerArea.x}
+  y={headerArea.y}
+  width={HEADER_TOTAL_WIDTH}
+  height={headerArea.height}
+  stroke="black"
+  strokeWidth={1}
+/>
+
+
+Заміни блок HEADER COLUMNS на цей:
+
+{/* HEADER COLUMNS */}
+
+{(() => {
+  let offsetX = headerArea.x;
+
+  return HEADER_COLUMNS.map((column) => {
+    const columnX = offsetX;
+    offsetX += column.width;
+
+    return (
+      <Group key={column.key}>
+
+        {/* COLUMN BORDER */}
+
+        <Rect
+          x={columnX}
+          y={headerArea.y}
+          width={column.width}
+          height={headerArea.height}
+          stroke="black"
+          strokeWidth={1}
+        />
+
+        {/* HORIZONTAL DIVIDER BETWEEN LABEL AND VALUE */}
+
+        <Line
+          points={[
+            columnX,
+            headerArea.y + HEADER_LABEL_HEIGHT,
+            columnX + column.width,
+            headerArea.y + HEADER_LABEL_HEIGHT,
+          ]}
+          stroke="black"
+          strokeWidth={1}
+        />
+
+        {/* HEADER LABEL */}
+
+        <Text
+          x={columnX + 4}
+          y={headerArea.y}
+          width={column.width - 8}
+          height={HEADER_LABEL_HEIGHT}
+          align="center"
+          verticalAlign="middle"
+          text={column.label}
+          fontFamily="Roboto Condensed"
+          fontSize={10}
+          fontStyle="bold"
+          fill="black"
+        />
+
+        {/* VALUE */}
+
+        <Text
+          x={columnX + 4}
+          y={headerArea.y + HEADER_LABEL_HEIGHT}
+          width={column.width - 8}
+          height={HEADER_VALUE_HEIGHT}
+          align="center"
+          verticalAlign="middle"
+          text={titleBlock[column.key] || ""}
+          fontFamily="Roboto Condensed"
+          fontSize={11}
+          fill="black"
+        />
+      </Group>
+    );
+  });
+})()}
+
+
+============================================================
+4. ПОВНИЙ ФРАГМЕНТ PaperLayer.jsx ДЛЯ HEADER
+============================================================
+
+Ось готовий фрагмент, який можна вставити замість поточного header-блоку:
+
+{/* HEADER FRAME - limited to sum of columns */}
+
+<Rect
+  x={headerArea.x}
+  y={headerArea.y}
+  width={HEADER_TOTAL_WIDTH}
+  height={headerArea.height}
+  stroke="black"
+  strokeWidth={1}
+/>
+
+{/* HEADER COLUMNS */}
+
+{(() => {
+  let offsetX = headerArea.x;
+
+  return HEADER_COLUMNS.map((column) => {
+    const columnX = offsetX;
+    offsetX += column.width;
+
+    return (
+      <Group key={column.key}>
+        <Rect
+          x={columnX}
+          y={headerArea.y}
+          width={column.width}
+          height={headerArea.height}
+          stroke="black"
+          strokeWidth={1}
+        />
+
+        <Line
+          points={[
+            columnX,
+            headerArea.y + HEADER_LABEL_HEIGHT,
+            columnX + column.width,
+            headerArea.y + HEADER_LABEL_HEIGHT,
+          ]}
+          stroke="black"
+          strokeWidth={1}
+        />
+
+        <Text
+          x={columnX + 4}
+          y={headerArea.y}
+          width={column.width - 8}
+          height={HEADER_LABEL_HEIGHT}
+          align="center"
+          verticalAlign="middle"
+          text={column.label}
+          fontFamily="Roboto Condensed"
+          fontSize={10}
+          fontStyle="bold"
+          fill="black"
+        />
+
+        <Text
+          x={columnX + 4}
+          y={headerArea.y + HEADER_LABEL_HEIGHT}
+          width={column.width - 8}
+          height={HEADER_VALUE_HEIGHT}
+          align="center"
+          verticalAlign="middle"
+          text={titleBlock[column.key] || ""}
+          fontFamily="Roboto Condensed"
+          fontSize={11}
+          fill="black"
+        />
+      </Group>
+    );
+  });
+})()}
+
+
+============================================================
+5. ЩО НЕ ТРЕБА РОБИТИ
+============================================================
+
+Не треба після HEADER_COLUMNS додавати залишкову пусту колонку до правого краю:
+
+if (offsetX < headerArea.x + headerArea.width) {
+  ...
+}
+
+Саме цей принцип і створює лінію після "Аркуш" до правого краю.
+
+Тепер headerArea.width = HEADER_TOTAL_WIDTH,
+а не ширина всього frameRect.
+
+
+============================================================
+6. ЩО БУДЕ В РЕЗУЛЬТАТІ
+============================================================
+
+Було:
+
+┌──────────────────────────────────────────────────────────────┐
+│ Шифр | Unit | Система | Назва | Аркуш                        │
+└──────────────────────────────────────────────────────────────┘
+
+Стало:
+
+┌────────┬──────┬─────────┬──────────────┬───────┐
+│ Шифр   │ Unit │ Система │ Назва схеми  │ Аркуш │
+├────────┼──────┼─────────┼──────────────┼───────┤
+│ A-001  │ ТП-1 │ ОВ      │ Схема        │ 1     │
+└────────┴──────┴─────────┴──────────────┴───────┘
+
+І header закінчується відразу після "Аркуш".
+
+
+============================================================
+7. ВАЖЛИВО ДЛЯ SVG/PDF EXPORT
+============================================================
+
+Якщо в експорті є окремий renderPaperSvg.js,
+там треба зробити те саме:
+
+- імпортувати HEADER_LABEL_HEIGHT, HEADER_VALUE_HEIGHT, HEADER_TOTAL_WIDTH;
+- headerArea.width або header table width = HEADER_TOTAL_WIDTH;
+- не малювати залишкову колонку;
+- у кожній клітинці додати line на y + HEADER_LABEL_HEIGHT.
+
+Інакше canvas буде правильний, а SVG/PDF — старий.
+
+
+============================================================
+END PATCH
+============================================================

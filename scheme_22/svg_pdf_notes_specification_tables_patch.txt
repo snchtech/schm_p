@@ -1,0 +1,697 @@
+SVG/PDF EXPORT NOTES + SPECIFICATION TABLE PATCH
+================================================
+
+МЕТА
+----
+Додати до поточного vector export:
+
+1. Примітки.
+2. Таблицю специфікацій.
+3. Рендер у SVG scene.
+4. Подальший експорт у PDF через SVG -> PDF.
+5. Без screenshot.
+6. Без залежності від zoom/pan/viewport.
+
+Тобто має бути:
+
+store
+  ->
+buildExportScene()
+  ->
+sceneToSvg() / renderSvg()
+  ->
+renderNotesSvg()
+  ->
+renderSpecificationTablesSvg()
+  ->
+svgPdf()
+  ->
+PDF
+
+
+============================================================
+1. ВАЖЛИВА РІЗНИЦЯ МІЖ СТАРИМ І НОВИМ ПІДХОДОМ
+============================================================
+
+СТАРИЙ screenshot-підхід:
+- примітки / таблиця могли бути частиною Konva canvas;
+- або окремою HTML/Konva секцією;
+- export знімав все як картинку.
+
+НОВИЙ vector-підхід:
+- примітки і таблиці треба додати в export scene;
+- потім явно відмалювати їх SVG-елементами:
+  rect, line, text;
+- PDF отримає їх як вектор.
+
+Тому просто додати компонент на canvas недостатньо.
+Потрібен окремий SVG renderer для приміток і специфікацій.
+
+
+============================================================
+2. РЕКОМЕНДОВАНА СТРУКТУРА STORE
+============================================================
+
+У store бажано мати:
+
+{
+  sheet: {
+    format: "A3",
+    orientation: "landscape",
+
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+
+    notes: [
+      { id: "n1", text: "Примітка 1" },
+      { id: "n2", text: "Примітка 2" }
+    ],
+  },
+
+  specificationTables: [
+    {
+      id: "spec-1",
+      kind: "specification-table",
+
+      position: {
+        x: 80,
+        y: 720,
+      },
+
+      size: {
+        width: 560,
+      },
+
+      title: "Специфікація",
+
+      columns: [
+        { key: "positionNumber", label: "Поз.", width: 52, align: "center" },
+        { key: "title", label: "Найменування", width: 270, align: "left" },
+        { key: "quantity", label: "К-сть", width: 64, align: "center" },
+        { key: "unit", label: "Од.", width: 56, align: "center" },
+        { key: "note", label: "Примітка", width: 120, align: "left" },
+      ],
+
+      rows: [
+        {
+          id: "r1",
+          positionNumber: "1",
+          title: "Насос",
+          quantity: 1,
+          unit: "шт.",
+          note: "",
+        }
+      ],
+
+      style: {
+        fontSize: 10,
+        rowHeight: 24,
+        headerHeight: 28,
+        titleHeight: 28,
+        showTitle: true,
+      }
+    }
+  ]
+}
+
+
+============================================================
+3. ЯКЩО У ТЕБЕ Є ТІЛЬКИ ОДНА ТАБЛИЦЯ
+============================================================
+
+Навіть якщо зараз таблиця одна, краще все одно зберігати масивом:
+
+specificationTables: []
+
+Чому:
+- легко додати кілька таблиць;
+- export renderer однаковий;
+- canvas layer однаковий;
+- не треба міняти модель пізніше.
+
+
+============================================================
+PATCH 1
+FILE: src/features/scheme/lib/export/svg/svgUtils.js
+============================================================
+
+Переконайся, що є helpers:
+
+export function rectSvg(input = {}) {
+  return `<rect ${attrs(input)} />`
+}
+
+export function lineSvg(input = {}) {
+  return `<line ${attrs(input)} />`
+}
+
+export function textSvg(text, input = {}) {
+  return `<text ${attrs(input)}>${escapeXml(text)}</text>`
+}
+
+export function groupSvg(content, input = {}) {
+  return `<g ${attrs(input)}>${content}</g>`
+}
+
+
+============================================================
+PATCH 2
+CREATE FILE:
+src/features/scheme/lib/export/svg/svgNotes.js
+============================================================
+
+import { attrs, escapeXml, num } from './svgUtils'
+import { EXPORT_FONT_FAMILY } from './exportConstants'
+
+function normalizeNotes(notes = []) {
+  if (!Array.isArray(notes)) return []
+
+  return notes
+    .map((note, index) => {
+      if (typeof note === 'string') {
+        return {
+          id: `note-${index + 1}`,
+          text: note,
+        }
+      }
+
+      return {
+        id: note?.id || `note-${index + 1}`,
+        text: note?.text || '',
+      }
+    })
+    .filter((note) => note.text)
+}
+
+function getNotesLayout(scene, options = {}) {
+  const geometry = scene.geometry || {}
+  const notesArea = geometry.notesArea
+
+  if (notesArea) {
+    return {
+      x: notesArea.x,
+      y: notesArea.y,
+      width: notesArea.width,
+      height: notesArea.height,
+    }
+  }
+
+  const pageHeight = num(scene.height, num(scene.page?.height, 800))
+
+  return {
+    x: num(options.x, 40),
+    y: num(options.y, pageHeight - 180),
+    width: num(options.width, 360),
+    height: num(options.height, 90),
+  }
+}
+
+export function notesToSvg(notes = [], scene = {}, options = {}) {
+  if (options.includeNotes === false) return ''
+
+  const list = normalizeNotes(notes)
+  const layout = getNotesLayout(scene, options)
+
+  const style = {
+    fontFamily: options.fontFamily || EXPORT_FONT_FAMILY || 'RobotoCondensed',
+    fontSize: num(options.fontSize, 10),
+    titleFontSize: num(options.titleFontSize, 11),
+    rowHeight: num(options.rowHeight, 14),
+    titleHeight: num(options.titleHeight, 22),
+    paddingX: num(options.paddingX, 8),
+    paddingTop: num(options.paddingTop, 8),
+    fill: options.fill || '#000000',
+    stroke: options.stroke || '#000000',
+    strokeWidth: num(options.strokeWidth, 1),
+  }
+
+  let out = ''
+
+  out += `<rect ${attrs({
+    x: layout.x,
+    y: layout.y,
+    width: layout.width,
+    height: layout.height,
+    fill: 'none',
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  out += `<text ${attrs({
+    x: layout.x + style.paddingX,
+    y: layout.y + style.titleHeight / 2,
+    'font-family': style.fontFamily,
+    'font-size': style.titleFontSize,
+    'font-weight': 'bold',
+    fill: style.fill,
+    'dominant-baseline': 'middle',
+  })}>Примітки</text>`
+
+  const maxRows = Math.max(
+    0,
+    Math.floor((layout.height - style.titleHeight - style.paddingTop) / style.rowHeight)
+  )
+
+  list.slice(0, maxRows).forEach((note, index) => {
+    const rowY = layout.y + style.titleHeight + style.paddingTop + index * style.rowHeight
+
+    out += `<text ${attrs({
+      x: layout.x + style.paddingX,
+      y: rowY,
+      'font-family': style.fontFamily,
+      'font-size': style.fontSize,
+      fill: style.fill,
+      'dominant-baseline': 'middle',
+    })}>${escapeXml(`${index + 1}. ${note.text}`)}</text>`
+  })
+
+  return `<g ${attrs({
+    id: options.id || 'scheme-notes',
+    'data-element-type': 'notes',
+  })}>${out}</g>`
+}
+
+
+============================================================
+PATCH 3
+CREATE FILE:
+src/features/scheme/lib/export/svg/svgSpecificationTables.js
+============================================================
+
+import { attrs, escapeXml, num } from './svgUtils'
+import { EXPORT_FONT_FAMILY } from './exportConstants'
+
+const DEFAULT_COLUMNS = [
+  { key: 'positionNumber', label: 'Поз.', width: 52, align: 'center' },
+  { key: 'title', label: 'Найменування / примітка', width: 270, align: 'left' },
+  { key: 'quantity', label: 'К-сть', width: 64, align: 'center' },
+  { key: 'unit', label: 'Од.', width: 56, align: 'center' },
+  { key: 'note', label: 'Коментар', width: 120, align: 'left' },
+]
+
+function normalizeColumns(table) {
+  const width = num(table?.size?.width, num(table?.width, 560))
+  const columns = Array.isArray(table?.columns) && table.columns.length
+    ? table.columns
+    : DEFAULT_COLUMNS
+
+  const total = columns.reduce((sum, column) => sum + num(column.width, 0), 0)
+
+  if (!total) {
+    const each = width / columns.length
+    return columns.map((column) => ({ ...column, width: each }))
+  }
+
+  if (Math.abs(total - width) < 0.001) {
+    return columns.map((column) => ({ ...column }))
+  }
+
+  const scale = width / total
+
+  return columns.map((column) => ({
+    ...column,
+    width: Math.max(24, Math.round(num(column.width, 0) * scale)),
+  }))
+}
+
+function getRows(table, scene) {
+  return Array.isArray(table?.rows) ? table.rows : []
+}
+
+function getCellValue(row, key) {
+  const value = row?.[key]
+  if (value === undefined || value === null) return ''
+  return String(value)
+}
+
+function getTextAnchor(align = 'left') {
+  if (align === 'center') return 'middle'
+  if (align === 'right') return 'end'
+  return 'start'
+}
+
+function getTextX(cellX, width, align = 'left', paddingX = 6) {
+  if (align === 'center') return cellX + width / 2
+  if (align === 'right') return cellX + width - paddingX
+  return cellX + paddingX
+}
+
+function textElement(text, input = {}) {
+  return `<text ${attrs(input)}>${escapeXml(text)}</text>`
+}
+
+export function specificationTableToSvg(table, scene = {}, options = {}) {
+  if (!table) return ''
+
+  const columns = normalizeColumns(table)
+  const rows = getRows(table, scene)
+
+  const style = {
+    fontFamily:
+      options.fontFamily ||
+      table.style?.fontFamily ||
+      EXPORT_FONT_FAMILY ||
+      'RobotoCondensed',
+    fontSize: num(table.style?.fontSize, 10),
+    headerFontSize: num(table.style?.headerFontSize, 10),
+    titleFontSize: num(table.style?.titleFontSize, 12),
+    rowHeight: num(table.style?.rowHeight, 24),
+    headerHeight: num(table.style?.headerHeight, 28),
+    titleHeight:
+      table.options?.showTitle === false
+        ? 0
+        : num(table.style?.titleHeight, 28),
+    paddingX: num(table.style?.paddingX, 6),
+    stroke: table.style?.stroke || '#000000',
+    strokeWidth: num(table.style?.strokeWidth, 1),
+    fill: table.style?.fill || '#ffffff',
+    headerFill: table.style?.headerFill || '#ffffff',
+    titleFill: table.style?.titleFill || '#ffffff',
+    textFill: table.style?.textFill || '#000000',
+  }
+
+  const x = num(table.position?.x, num(table.x, 0))
+  const y = num(table.position?.y, num(table.y, 0))
+  const width = columns.reduce((sum, column) => sum + num(column.width, 0), 0)
+  const height = style.titleHeight + style.headerHeight + rows.length * style.rowHeight
+
+  let out = ''
+
+  out += `<rect ${attrs({
+    x,
+    y,
+    width,
+    height,
+    fill: style.fill,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  if (style.titleHeight > 0) {
+    out += `<rect ${attrs({
+      x,
+      y,
+      width,
+      height: style.titleHeight,
+      fill: style.titleFill,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    out += textElement(table.title || 'Специфікація', {
+      x: x + width / 2,
+      y: y + style.titleHeight / 2,
+      'font-family': style.fontFamily,
+      'font-size': style.titleFontSize,
+      'font-weight': 'bold',
+      fill: style.textFill,
+      'text-anchor': 'middle',
+      'dominant-baseline': 'middle',
+    })
+  }
+
+  const headerY = y + style.titleHeight
+
+  out += `<rect ${attrs({
+    x,
+    y: headerY,
+    width,
+    height: style.headerHeight,
+    fill: style.headerFill,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  let cellX = x
+
+  for (const column of columns) {
+    const colWidth = num(column.width, 0)
+    const align = column.align || 'center'
+
+    out += `<line ${attrs({
+      x1: cellX,
+      y1: headerY,
+      x2: cellX,
+      y2: y + height,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    out += textElement(column.label || '', {
+      x: getTextX(cellX, colWidth, align, style.paddingX),
+      y: headerY + style.headerHeight / 2,
+      'font-family': style.fontFamily,
+      'font-size': style.headerFontSize,
+      'font-weight': 'bold',
+      fill: style.textFill,
+      'text-anchor': getTextAnchor(align),
+      'dominant-baseline': 'middle',
+    })
+
+    cellX += colWidth
+  }
+
+  out += `<line ${attrs({
+    x1: x + width,
+    y1: headerY,
+    x2: x + width,
+    y2: y + height,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  rows.forEach((row, rowIndex) => {
+    const rowY = y + style.titleHeight + style.headerHeight + rowIndex * style.rowHeight
+
+    out += `<line ${attrs({
+      x1: x,
+      y1: rowY,
+      x2: x + width,
+      y2: rowY,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    let currentX = x
+
+    for (const column of columns) {
+      const colWidth = num(column.width, 0)
+      const align = column.align || 'left'
+      const value = getCellValue(row, column.key)
+
+      out += textElement(value, {
+        x: getTextX(currentX, colWidth, align, style.paddingX),
+        y: rowY + style.rowHeight / 2,
+        'font-family': style.fontFamily,
+        'font-size': style.fontSize,
+        fill: style.textFill,
+        'text-anchor': getTextAnchor(align),
+        'dominant-baseline': 'middle',
+      })
+
+      currentX += colWidth
+    }
+  })
+
+  out += `<line ${attrs({
+    x1: x,
+    y1: y + height,
+    x2: x + width,
+    y2: y + height,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  return `<g ${attrs({
+    id: table.id || 'specification-table',
+    'data-element-type': 'specification-table',
+  })}>${out}</g>`
+}
+
+export function specificationTablesToSvg(tables = [], scene = {}, options = {}) {
+  if (options.includeSpecificationTables === false) return ''
+  if (!Array.isArray(tables)) return ''
+
+  return tables
+    .map((table) => specificationTableToSvg(table, scene, options))
+    .filter(Boolean)
+    .join('\n')
+}
+
+
+============================================================
+PATCH 4
+UPDATE FILE:
+src/features/scheme/lib/export/svg/sceneToSvg.js
+============================================================
+
+Додай imports:
+
+import { notesToSvg } from './svgNotes'
+import { specificationTablesToSvg } from './svgSpecificationTables'
+
+У normalizeScene додай:
+
+notes: scene.notes || scene.sheet?.notes || [],
+specificationTables:
+  scene.specificationTables ||
+  scene.tables ||
+  scene.specifications ||
+  [],
+
+У content додай після annotations/texts:
+
+notesToSvg(scene.notes, scene, options),
+
+specificationTablesToSvg(scene.specificationTables, scene, options),
+
+
+============================================================
+PATCH 5
+UPDATE BUILD EXPORT SCENE
+============================================================
+
+У buildExportScene або місці, де збираєш scene для SVG/PDF, додай:
+
+notes: Array.isArray(sheet.notes)
+  ? sheet.notes
+  : Array.isArray(store.notes)
+    ? store.notes
+    : [],
+
+specificationTables: Array.isArray(store.specificationTables)
+  ? store.specificationTables
+  : [],
+
+Також бажано:
+
+sheet,
+geometry,
+width: geometry.sheetRect.width,
+height: geometry.sheetRect.height,
+
+
+============================================================
+PATCH 6
+OPTIONS
+============================================================
+
+У controller export methods має бути:
+
+includeNotes: true,
+includeSpecificationTables: true,
+
+Приклад:
+
+return exportSchemePdf(store, {
+  includeNodes: true,
+  includeConnectors: true,
+  includeAnnotations: true,
+  includeNotes: true,
+  includeSpecificationTables: true,
+  includePaperFrame: true,
+  ...options,
+})
+
+
+============================================================
+PATCH 7
+AUTO ROWS FROM ANNOTATIONS
+============================================================
+
+Якщо треба формувати специфікацію з annotations, створи:
+
+src/features/scheme/lib/specification/getSpecificationRowsForExport.js
+
+export function getSpecificationRowsForExport(table, annotations = []) {
+  const manualRows = Array.isArray(table.rows) ? table.rows : []
+
+  const linkedRows = annotations
+    .filter((annotation) => annotation?.specification?.tableId === table.id)
+    .map((annotation, index) => {
+      const spec = annotation.specification || {}
+
+      return {
+        id: spec.rowId || `row_${annotation.id}`,
+        positionNumber: spec.positionNumber || String(index + 1),
+        title: spec.title || annotation.text || '',
+        quantity: spec.quantity || 1,
+        unit: spec.unit || 'шт.',
+        note: spec.note || '',
+        source: 'annotation',
+        linkedAnnotationIds: [annotation.id],
+      }
+    })
+
+  const manualWithoutDuplicates = manualRows.filter((row) => {
+    if (row.source !== 'annotation') return true
+    return !linkedRows.some((linkedRow) => linkedRow.id === row.id)
+  })
+
+  return [...manualWithoutDuplicates, ...linkedRows].map((row, index) => ({
+    ...row,
+    positionNumber: row.positionNumber || String(index + 1),
+  }))
+}
+
+Потім у svgSpecificationTables.js заміни getRows на:
+
+import { getSpecificationRowsForExport } from '@/features/scheme/lib/specification/getSpecificationRowsForExport'
+
+function getRows(table, scene) {
+  if (table.options?.autoRowsFromAnnotations !== true) {
+    return Array.isArray(table?.rows) ? table.rows : []
+  }
+
+  return getSpecificationRowsForExport(table, scene.annotations || [])
+}
+
+
+============================================================
+ПОРЯДОК ШАРІВ
+============================================================
+
+Рекомендовано:
+
+1. paper/frame/header
+2. connectors
+3. nodes
+4. annotations/callouts
+5. notes
+6. specification tables
+
+Якщо таблиця має перекривати все інше - вона має йти в кінці.
+
+
+============================================================
+ВАЖЛИВО
+============================================================
+
+Не використовуй HTML table або foreignObject.
+
+Для vector SVG/PDF таблиця має бути тільки:
+- rect
+- line
+- text
+
+Інакше svg2pdf.js може некоректно перенести у PDF.
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+- примітки потрапляють у SVG scene;
+- примітки експортуються у PDF;
+- таблиця специфікацій потрапляє у SVG scene;
+- таблиця специфікацій експортується у PDF;
+- все залишається векторним;
+- export не залежить від Konva Stage;
+- можна експортувати SVG окремо для debug.

@@ -1,0 +1,500 @@
+PDF/SVG EXPORT ROBOTO CONDENSED FONT-WEIGHT 300 PATCH
+=====================================================
+
+МЕТА
+----
+Додати підтримку:
+
+font-weight: 300
+
+для SVG export і PDF export.
+
+Проблема:
+- якщо в SVG написати font-weight="300", але в jsPDF зареєстровано тільки RobotoCondensed 400,
+  то PDF все одно використає 400 або fallback;
+- для реального Light-weight потрібен окремий TTF:
+  RobotoCondensed-Light.ttf;
+- його треба перетворити в base64;
+- зареєструвати у jsPDF як fontStyle/weight;
+- у SVG текстах проставляти font-weight="300".
+
+
+============================================================
+1. ЯКІ TTF ПОТРІБНІ
+============================================================
+
+Потрібні окремі файли:
+
+src/features/scheme/lib/export/fonts/RobotoCondensed-Light.ttf
+src/features/scheme/lib/export/fonts/RobotoCondensed-Regular.ttf
+src/features/scheme/lib/export/fonts/RobotoCondensed-Bold.ttf
+
+Або якщо використовуєш src/assets/fonts:
+
+src/assets/fonts/RobotoCondensed-Light.ttf
+src/assets/fonts/RobotoCondensed-Regular.ttf
+src/assets/fonts/RobotoCondensed-Bold.ttf
+
+ВАЖЛИВО:
+- потрібен саме TTF;
+- WOFF/WOFF2 для jsPDF краще не використовувати;
+- файл має містити Cyrillic glyphs.
+
+
+============================================================
+2. GENERATE BASE64
+============================================================
+
+Створи script:
+
+FILE:
+scripts/generatePdfFontsBase64.js
+
+const fs = require('fs')
+const path = require('path')
+
+function readFont(fileName) {
+  return fs
+    .readFileSync(path.join(process.cwd(), 'src/assets/fonts', fileName))
+    .toString('base64')
+}
+
+const light = readFont('RobotoCondensed-Light.ttf')
+const regular = readFont('RobotoCondensed-Regular.ttf')
+const bold = readFont('RobotoCondensed-Bold.ttf')
+
+const out = `export const ROBOTO_CONDENSED_LIGHT_BASE64 = ${JSON.stringify(light)}
+
+export const ROBOTO_CONDENSED_REGULAR_BASE64 = ${JSON.stringify(regular)}
+
+export const ROBOTO_CONDENSED_BOLD_BASE64 = ${JSON.stringify(bold)}
+`
+
+fs.mkdirSync(
+  path.join(process.cwd(), 'src/features/scheme/lib/export/fonts'),
+  { recursive: true }
+)
+
+fs.writeFileSync(
+  path.join(process.cwd(), 'src/features/scheme/lib/export/fonts/robotoCondensedBase64.js'),
+  out
+)
+
+console.log('PDF fonts base64 generated.')
+
+
+У package.json:
+
+{
+  "scripts": {
+    "generate:pdf-fonts": "node scripts/generatePdfFontsBase64.js"
+  }
+}
+
+Запуск:
+
+npm run generate:pdf-fonts
+
+
+============================================================
+3. FONT BASE64 FILE
+============================================================
+
+Після генерації має бути файл:
+
+FILE:
+src/features/scheme/lib/export/fonts/robotoCondensedBase64.js
+
+export const ROBOTO_CONDENSED_LIGHT_BASE64 = "...base64..."
+
+export const ROBOTO_CONDENSED_REGULAR_BASE64 = "...base64..."
+
+export const ROBOTO_CONDENSED_BOLD_BASE64 = "...base64..."
+
+
+============================================================
+4. REGISTER PDF FONTS
+============================================================
+
+FILE:
+src/features/scheme/lib/export/fonts/registerPdfFonts.js
+
+Заміни або доповни файл:
+
+import {
+  ROBOTO_CONDENSED_LIGHT_BASE64,
+  ROBOTO_CONDENSED_REGULAR_BASE64,
+  ROBOTO_CONDENSED_BOLD_BASE64,
+} from './robotoCondensedBase64'
+
+export const PDF_FONT_FAMILY = 'RobotoCondensed'
+
+let registered = false
+
+export function registerPdfFonts(pdf) {
+  if (!pdf || registered) return
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Light.ttf',
+    ROBOTO_CONDENSED_LIGHT_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Light.ttf',
+    PDF_FONT_FAMILY,
+    'normal',
+    300
+  )
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Regular.ttf',
+    ROBOTO_CONDENSED_REGULAR_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Regular.ttf',
+    PDF_FONT_FAMILY,
+    'normal',
+    400
+  )
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Bold.ttf',
+    ROBOTO_CONDENSED_BOLD_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Bold.ttf',
+    PDF_FONT_FAMILY,
+    'bold',
+    700
+  )
+
+  pdf.setFont(PDF_FONT_FAMILY, 'normal', 400)
+
+  registered = true
+}
+
+
+ВАЖЛИВО:
+У деяких версіях jsPDF четвертий аргумент weight може не відпрацювати стабільно.
+Тому нижче є більш сумісний варіант.
+
+
+============================================================
+5. БІЛЬШ СУМІСНИЙ ВАРІАНТ ДЛЯ jsPDF
+============================================================
+
+Якщо font-weight 300 не підхоплюється через addFont(..., 300),
+використай різні style names:
+
+FILE:
+src/features/scheme/lib/export/fonts/registerPdfFonts.js
+
+import {
+  ROBOTO_CONDENSED_LIGHT_BASE64,
+  ROBOTO_CONDENSED_REGULAR_BASE64,
+  ROBOTO_CONDENSED_BOLD_BASE64,
+} from './robotoCondensedBase64'
+
+export const PDF_FONT_FAMILY = 'RobotoCondensed'
+
+let registered = false
+
+export function registerPdfFonts(pdf) {
+  if (!pdf || registered) return
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Light.ttf',
+    ROBOTO_CONDENSED_LIGHT_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Light.ttf',
+    PDF_FONT_FAMILY,
+    'light'
+  )
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Regular.ttf',
+    ROBOTO_CONDENSED_REGULAR_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Regular.ttf',
+    PDF_FONT_FAMILY,
+    'normal'
+  )
+
+  pdf.addFileToVFS(
+    'RobotoCondensed-Bold.ttf',
+    ROBOTO_CONDENSED_BOLD_BASE64
+  )
+
+  pdf.addFont(
+    'RobotoCondensed-Bold.ttf',
+    PDF_FONT_FAMILY,
+    'bold'
+  )
+
+  pdf.setFont(PDF_FONT_FAMILY, 'normal')
+
+  registered = true
+}
+
+Цей варіант часто стабільніший.
+
+
+============================================================
+6. SVG FONT-WEIGHT NORMALIZATION
+============================================================
+
+FILE:
+src/features/scheme/lib/export/svg/svgText.js
+
+Додай helper:
+
+function getSvgFontWeight(style = {}, dataStyle = {}) {
+  const weight =
+    style.fontWeight ??
+    dataStyle.fontWeight ??
+    400
+
+  if (weight === 'bold') return '700'
+  if (weight === 'light') return '300'
+
+  const n = Number(weight)
+
+  if (n <= 300) return '300'
+  if (n >= 700) return '700'
+
+  return '400'
+}
+
+Потім у textToSvg() заміни:
+
+'font-weight': getFontWeight(style),
+
+на:
+
+'font-weight': getSvgFontWeight(style, data.style || {}),
+
+
+============================================================
+7. PDF FONT STYLE MAPPING ДЛЯ svg2pdf
+============================================================
+
+svg2pdf читає SVG text і пробує підібрати шрифт через:
+- font-family
+- font-weight
+- font-style
+
+Але jsPDF краще працює з fontStyle: normal/bold/light.
+
+Тому у SVG можна додати ще data/pdf hint не треба.
+Головне, щоб було:
+
+<text
+  font-family="RobotoCondensed"
+  font-weight="300"
+>
+  ...
+</text>
+
+І щоб у registerPdfFonts був зареєстрований Light.
+
+
+============================================================
+8. ОНОВИТИ renderSvg STYLE ДЛЯ STANDALONE SVG
+============================================================
+
+FILE:
+src/features/scheme/lib/export/svg/sceneToSvg.js
+або renderSvg.js
+
+Якщо хочеш, щоб SVG сам відкривався з правильним 300/400/700,
+додай @font-face для кожного weight.
+
+IMPORT:
+
+import {
+  ROBOTO_CONDENSED_LIGHT_BASE64,
+  ROBOTO_CONDENSED_REGULAR_BASE64,
+  ROBOTO_CONDENSED_BOLD_BASE64,
+} from '../fonts/robotoCondensedBase64'
+
+У SVG style:
+
+<style>
+  @font-face {
+    font-family: 'RobotoCondensed';
+    src: url(data:font/truetype;charset=utf-8;base64,${ROBOTO_CONDENSED_LIGHT_BASE64}) format('truetype');
+    font-weight: 300;
+    font-style: normal;
+  }
+
+  @font-face {
+    font-family: 'RobotoCondensed';
+    src: url(data:font/truetype;charset=utf-8;base64,${ROBOTO_CONDENSED_REGULAR_BASE64}) format('truetype');
+    font-weight: 400;
+    font-style: normal;
+  }
+
+  @font-face {
+    font-family: 'RobotoCondensed';
+    src: url(data:font/truetype;charset=utf-8;base64,${ROBOTO_CONDENSED_BOLD_BASE64}) format('truetype');
+    font-weight: 700;
+    font-style: normal;
+  }
+
+  text {
+    font-family: RobotoCondensed, Arial, sans-serif;
+  }
+</style>
+
+
+============================================================
+9. MODEL / ANNOTATION STYLE
+============================================================
+
+Тепер annotation або text node може мати:
+
+style: {
+  fontFamily: 'RobotoCondensed',
+  fontSize: 12,
+  fontWeight: 300,
+  fill: '#111111',
+}
+
+або:
+
+style: {
+  fontWeight: '300'
+}
+
+Для bold:
+
+style: {
+  fontWeight: 700
+}
+
+
+============================================================
+10. CANVAS KONVA SIDE
+============================================================
+
+Konva Text не завжди ідеально працює з numeric fontWeight напряму.
+Якщо у тебе зараз:
+
+fontStyle={
+  annotation.style?.fontWeight >= 500 ? 'bold' : 'normal'
+}
+
+то 300 і 400 на canvas виглядатимуть однаково, бо Konva передає normal.
+
+Краще зробити helper:
+
+function getKonvaFontStyle(fontWeight) {
+  const n = Number(fontWeight)
+
+  if (fontWeight === 'bold' || n >= 700) return '700'
+  if (fontWeight === 'light' || n <= 300) return '300'
+
+  return '400'
+}
+
+І в Text:
+
+fontFamily="Roboto Condensed"
+fontStyle={getKonvaFontStyle(annotation.style?.fontWeight)}
+
+Але залежить від браузера. Для Konva часто достатньо, щоб Roboto Condensed 300 був завантажений через CSS/@font-face у UI.
+
+
+============================================================
+11. EXPORT PDF FILE
+============================================================
+
+FILE:
+src/features/scheme/lib/export/pdf/svgPdf.js
+або exportPdf.js
+
+Переконайся, що перед svg2pdf викликається:
+
+registerPdfFonts(pdf)
+
+Приклад:
+
+const pdf = new jsPDF({
+  orientation,
+  unit: 'mm',
+  format,
+  compress: true,
+  putOnlyUsedFonts: true,
+})
+
+registerPdfFonts(pdf)
+
+await svg2pdf(svgElement, pdf, {
+  x: 0,
+  y: 0,
+  width: format[0],
+  height: format[1],
+})
+
+
+============================================================
+12. ПЕРЕВІРКА
+============================================================
+
+1. Annotation:
+
+style: {
+  fontWeight: 300,
+  fontSize: 14,
+}
+
+2. SVG має містити:
+
+font-family="RobotoCondensed"
+font-weight="300"
+
+3. PDF має показувати тонший текст.
+
+4. Для порівняння створи три тексти:
+- fontWeight: 300
+- fontWeight: 400
+- fontWeight: 700
+
+Якщо 300 і 400 однакові в PDF:
+- перевір, чи реально Light.ttf потрапив у base64;
+- перевір registerPdfFonts;
+- спробуй сумісний варіант з style name 'light';
+- переконайся, що SVG text має font-weight="300".
+
+
+============================================================
+13. ВАЖЛИВИЙ НЮАНС
+============================================================
+
+font-weight не створює магічно новий шрифт.
+
+Якщо зареєстрований тільки Regular.ttf, то:
+font-weight="300"
+не стане тоншим.
+
+Потрібен реальний файл:
+RobotoCondensed-Light.ttf
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+- font-weight 300 підтримується у SVG;
+- font-weight 300 підтримується у PDF;
+- кирилиця лишається коректною;
+- 300/400/700 можна використовувати у annotation.style;
+- standalone SVG теж може мати embedded font-face для 300/400/700.
