@@ -1,0 +1,631 @@
+PDF EXPORT VS PRINT UX PATCH
+============================
+
+МЕТА
+----
+Правильно організувати новий vector SVG -> PDF export для двох сценаріїв:
+
+1. Експорт PDF.
+2. Друк.
+
+Проблема:
+- технічно PDF може бути правильний A4/A3 1:1;
+- але звичайний офісний принтер може обрізати рамку через фізичні поля;
+- користувач не має вручну виставляти масштаб у print preview.
+
+Правильний UX:
+- "PDF" або "PDF 1:1" — технічний файл, точний формат, для архіву/плотера.
+- "Друк" — print-safe PDF, який уже підготовлений під недруковані поля принтера.
+
+
+============================================================
+1. РЕКОМЕНДОВАНА ЛОГІКА ДЛЯ КОРИСТУВАЧА
+============================================================
+
+У toolbar краще зробити так:
+
+[Друк] [PDF] [SVG]
+
+Де:
+
+Друк:
+- генерує PDF того самого формату A4/A3;
+- але content масштабується всередину safe margin;
+- автоматично відкриває print dialog;
+- користувач просто натискає "Друк".
+
+PDF:
+- завантажує технічний PDF 1:1;
+- рамка точно 20/5/5/5;
+- підходить для архіву, передачі, плотера.
+
+SVG:
+- debug/export векторного SVG.
+
+
+============================================================
+2. ЧОМУ НЕ ОДНА КНОПКА
+============================================================
+
+Бо це різні задачі:
+
+PDF 1:1:
+- точність;
+- стандартна рамка;
+- може обрізатися на офісному принтері.
+
+Друк:
+- практичність;
+- без обрізання;
+- контент трохи менший;
+- працює з коробки.
+
+Тому для користувача краще явно:
+
+"Друк" = безпечний для принтера.
+"PDF" = точний файл.
+
+
+============================================================
+3. EXPORT MODES
+============================================================
+
+У системі варто мати два режими:
+
+exportMode: "technical"
+exportMode: "print-safe"
+
+technical:
+- svg2pdf x = 0
+- svg2pdf y = 0
+- svg2pdf width = pageWidth
+- svg2pdf height = pageHeight
+
+print-safe:
+- svg2pdf x/y/width/height беруться з getPrintSafePlacement()
+- safeMarginMm за замовчуванням 8 або 10
+
+
+============================================================
+PATCH 1
+CREATE FILE:
+src/features/scheme/lib/export/pdf/printSafe.js
+або src/lib/export/printSafe.js
+============================================================
+
+export const DEFAULT_PRINT_SAFE_MARGIN_MM = 8;
+
+export function getPrintSafePlacement({
+  pageWidthMm,
+  pageHeightMm,
+  safeMarginMm = DEFAULT_PRINT_SAFE_MARGIN_MM,
+}) {
+  const safeWidth = pageWidthMm - safeMarginMm * 2;
+  const safeHeight = pageHeightMm - safeMarginMm * 2;
+
+  const scale = Math.min(
+    safeWidth / pageWidthMm,
+    safeHeight / pageHeightMm
+  );
+
+  const width = pageWidthMm * scale;
+  const height = pageHeightMm * scale;
+
+  return {
+    x: (pageWidthMm - width) / 2,
+    y: (pageHeightMm - height) / 2,
+    width,
+    height,
+    scale,
+  };
+}
+
+
+============================================================
+PATCH 2
+UPDATE FILE:
+src/features/scheme/lib/export/pdf/exportPdf.js
+або твій svgPdf.js
+============================================================
+
+Додай підтримку:
+- exportMode
+- safeMarginMm
+- output: "download" | "blob"
+
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { MM_TO_PX } from "@/lib/paper/paperConstants";
+import { getPrintSafePlacement } from "./printSafe";
+import {
+  registerPdfFonts,
+  PDF_FONT_FAMILY,
+} from "./fonts/registerPdfFonts";
+
+function getPdfFormatFromScene(scene) {
+  const { sheetRect } = scene.geometry;
+
+  return [
+    sheetRect.width / MM_TO_PX,
+    sheetRect.height / MM_TO_PX,
+  ];
+}
+
+function getPdfOrientationFromFormat(format) {
+  const [widthMm, heightMm] = format;
+  return widthMm >= heightMm ? "landscape" : "portrait";
+}
+
+export async function exportPdfFromSvg(svg, scene, options = {}) {
+  const format = getPdfFormatFromScene(scene);
+  const orientation = getPdfOrientationFromFormat(format);
+
+  const pdf = new jsPDF({
+    orientation,
+    unit: "mm",
+    format,
+    compress: true,
+    putOnlyUsedFonts: true,
+  });
+
+  registerPdfFonts(pdf);
+  pdf.setFont(PDF_FONT_FAMILY, "normal");
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "-100000px";
+  container.innerHTML = svg;
+  document.body.appendChild(container);
+
+  const svgElement = container.querySelector("svg");
+
+  if (!svgElement) {
+    container.remove();
+    throw new Error("SVG element was not created for PDF export.");
+  }
+
+  const exportMode = options.exportMode || "technical";
+
+  const placement =
+    exportMode === "print-safe"
+      ? getPrintSafePlacement({
+          pageWidthMm: format[0],
+          pageHeightMm: format[1],
+          safeMarginMm: options.safeMarginMm ?? 8,
+        })
+      : {
+          x: 0,
+          y: 0,
+          width: format[0],
+          height: format[1],
+          scale: 1,
+        };
+
+  await svg2pdf(svgElement, pdf, {
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
+  });
+
+  container.remove();
+
+  if (options.output === "blob") {
+    return pdf.output("blob");
+  }
+
+  if (options.output === "dataurlnewwindow") {
+    pdf.output("dataurlnewwindow");
+    return pdf;
+  }
+
+  const fileName = options.fileName || "scheme.pdf";
+  pdf.save(fileName);
+
+  return pdf;
+}
+
+
+============================================================
+PATCH 3
+UPDATE FILE:
+src/features/scheme/lib/export/exportSchemePdf.js
+============================================================
+
+Додати дві функції:
+- exportSchemePdf()
+- createSchemePrintPdfBlob()
+
+import { buildExportScene } from "./buildExportScene";
+import { renderSvg } from "./svg/renderSvg";
+import { exportPdfFromSvg } from "./pdf/exportPdf";
+import { DEFAULT_EXPORT_OPTIONS } from "./exportConstants";
+
+function makeFileName(scene) {
+  const tb = scene.sheet?.titleBlock || {};
+  const system = String(tb.system || "scheme")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]/g, "");
+
+  const sheetNumber = String(tb.sheetNumber || "1")
+    .trim()
+    .replace(/\s+/g, "_");
+
+  return `${system || "scheme"}_${sheetNumber || "1"}.pdf`;
+}
+
+export async function exportSchemePdf(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+
+    // PDF button = technical 1:1
+    exportMode: "technical",
+
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  await exportPdfFromSvg(svg, scene, {
+    fileName: mergedOptions.fileName || makeFileName(scene),
+    exportMode: mergedOptions.exportMode,
+    safeMarginMm: mergedOptions.safeMarginMm,
+    output: "download",
+  });
+
+  return {
+    scene,
+    svg,
+  };
+}
+
+export async function createSchemePrintPdfBlob(store, options = {}) {
+  const mergedOptions = {
+    ...DEFAULT_EXPORT_OPTIONS,
+
+    // Print button = print-safe
+    exportMode: "print-safe",
+    safeMarginMm: 8,
+
+    ...options,
+  };
+
+  const scene = buildExportScene(store, mergedOptions);
+  const svg = renderSvg(scene);
+
+  const blob = await exportPdfFromSvg(svg, scene, {
+    fileName: mergedOptions.fileName || makeFileName(scene),
+    exportMode: mergedOptions.exportMode,
+    safeMarginMm: mergedOptions.safeMarginMm,
+    output: "blob",
+  });
+
+  return {
+    scene,
+    svg,
+    blob,
+  };
+}
+
+
+============================================================
+PATCH 4
+CREATE FILE:
+src/features/scheme/lib/export/pdf/printPdfBlob.js
+============================================================
+
+Цей helper відкриває PDF у прихованому iframe і викликає print.
+
+export function printPdfBlob(blob) {
+  if (!blob) return;
+
+  const url = URL.createObjectURL(blob);
+
+  const iframe = document.createElement("iframe");
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  iframe.src = url;
+
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch (error) {
+      console.error("Print failed", error);
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      iframe.remove();
+    }, 60_000);
+  };
+
+  document.body.appendChild(iframe);
+}
+
+
+ВАЖЛИВО:
+- браузер може блокувати автоматичний print, якщо виклик не йде з user click;
+- тому цей helper треба викликати прямо у onClick кнопки.
+
+
+============================================================
+PATCH 5
+UPDATE FILE:
+src/controllers/canvasController.js
+============================================================
+
+Imports:
+
+import {
+  exportSchemePdf,
+  createSchemePrintPdfBlob,
+} from "@/features/scheme/lib/export/exportSchemePdf";
+
+import { printPdfBlob } from "@/features/scheme/lib/export/pdf/printPdfBlob";
+
+
+Методи:
+
+async exportCurrentSchemePdf(options = {}) {
+  const store = useCanvasStore.getState();
+
+  return await exportSchemePdf(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+
+    // точний PDF
+    exportMode: "technical",
+
+    ...options,
+  });
+},
+
+async printCurrentScheme(options = {}) {
+  const store = useCanvasStore.getState();
+
+  const result = await createSchemePrintPdfBlob(store, {
+    includeNodes: true,
+    includeConnectors: true,
+    includeAnnotations: true,
+    includeSpecificationTables: true,
+    includeNotes: true,
+    includePaperFrame: true,
+    includeDrawingAreaGuide: false,
+
+    // друк без обрізання
+    exportMode: "print-safe",
+    safeMarginMm: 8,
+
+    ...options,
+  });
+
+  printPdfBlob(result.blob);
+
+  return result;
+},
+
+
+============================================================
+PATCH 6
+CREATE FILE:
+src/features/scheme/ui/toolbar/PrintSchemeButton.jsx
+============================================================
+
+"use client";
+
+import React, { useState } from "react";
+import { Button } from "@mui/material";
+import PrintIcon from "@mui/icons-material/Print";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function PrintSchemeButton() {
+  const [loading, setLoading] = useState(false);
+
+  return (
+    <Button
+      variant="contained"
+      size="small"
+      startIcon={<PrintIcon fontSize="small" />}
+      disabled={loading}
+      onClick={async () => {
+        if (loading) return;
+
+        try {
+          setLoading(true);
+
+          await canvasController.printCurrentScheme?.({
+            safeMarginMm: 8,
+          });
+        } catch (error) {
+          console.error("Print failed", error);
+          alert("Не вдалося підготувати документ до друку. Деталі в console.");
+        } finally {
+          setLoading(false);
+        }
+      }}
+    >
+      {loading ? "Підготовка..." : "Друк"}
+    </Button>
+  );
+}
+
+
+============================================================
+PATCH 7
+UPDATE PDF BUTTON
+============================================================
+
+PDF button тепер має бути technical 1:1:
+
+"use client";
+
+import React, { useState } from "react";
+import { Button } from "@mui/material";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function ExportPdfButton() {
+  const [loading, setLoading] = useState(false);
+
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      startIcon={<PictureAsPdfIcon fontSize="small" />}
+      disabled={loading}
+      onClick={async () => {
+        if (loading) return;
+
+        try {
+          setLoading(true);
+
+          await canvasController.exportCurrentSchemePdf?.({
+            exportMode: "technical",
+          });
+        } catch (error) {
+          console.error("PDF export failed", error);
+          alert("Не вдалося сформувати PDF. Деталі в console.");
+        } finally {
+          setLoading(false);
+        }
+      }}
+    >
+      {loading ? "Формування..." : "PDF"}
+    </Button>
+  );
+}
+
+
+============================================================
+PATCH 8
+TOOLBAR UX
+============================================================
+
+У toolbar:
+
+import PrintSchemeButton from "@/features/scheme/ui/toolbar/PrintSchemeButton";
+import ExportPdfButton from "@/features/scheme/ui/toolbar/ExportPdfButton";
+import ExportSvgButton from "@/features/scheme/ui/toolbar/ExportSvgButton";
+
+<Stack direction="row" spacing={1}>
+  <PrintSchemeButton />
+  <ExportPdfButton />
+  <ExportSvgButton />
+</Stack>
+
+
+Рекомендовані назви:
+
+Друк
+PDF
+SVG
+
+Або більш явно:
+
+Друк
+PDF 1:1
+SVG
+
+
+============================================================
+9. ЯК ПОЯСНИТИ КОРИСТУВАЧУ
+============================================================
+
+У tooltip:
+
+Для "Друк":
+"Підготувати PDF для звичайного принтера без обрізання рамки."
+
+Для "PDF":
+"Завантажити точний PDF 1:1 для архіву або професійного друку."
+
+Для "SVG":
+"Завантажити векторний SVG."
+
+
+============================================================
+10. ЧОМУ ТАК ПРАВИЛЬНО
+============================================================
+
+У більшості CAD/BIM/diagram систем фактично є різниця між:
+- export;
+- print.
+
+Export:
+- точність;
+- файл;
+- 1:1.
+
+Print:
+- адаптація до пристрою;
+- printable area;
+- fit/safe margins.
+
+Тому одна кнопка "PDF" не повинна одночасно вирішувати:
+- і архівний 1:1 PDF;
+- і безпечний друк на будь-якому офісному принтері.
+
+Це різні use cases.
+
+
+============================================================
+11. ЩО БУДЕ З ФОРМАТОМ АРКУША
+============================================================
+
+Print-safe PDF все одно має сторінку A4/A3.
+
+Наприклад:
+- page size = A4 portrait;
+- content scale = приблизно 94-95%;
+- рамка не обрізається;
+- користувач нічого не налаштовує.
+
+Technical PDF:
+- page size = A4 portrait;
+- content scale = 100%;
+- рамка 20/5/5/5;
+- може обрізатися на офісному принтері.
+
+
+============================================================
+12. DEFAULT РЕКОМЕНДАЦІЯ
+============================================================
+
+Для звичайних користувачів:
+
+Кнопка "Друк" — перша і основна.
+
+Кнопка "PDF" — друга, як експорт файлу.
+
+safeMarginMm:
+- 8 мм за замовчуванням;
+- 10 мм якщо багато старих принтерів.
+
+
+============================================================
+РЕЗУЛЬТАТ
+============================================================
+
+Після патчу:
+
+- новий vector export не ламається;
+- PDF 1:1 залишається доступним;
+- друк працює без ручного масштабування;
+- користувач бачить зрозумілу різницю:
+  "Друк" — для принтера,
+  "PDF" — файл 1:1,
+  "SVG" — векторний файл.
