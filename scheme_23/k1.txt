@@ -1,0 +1,131 @@
+Так, краще не брати таблицю так:
+
+```js
+const tableData = useCanvasStore((s) => s.specificationTables?.[0])
+```
+
+Бо це прив’язка до першої таблиці, а не до конкретної таблиці на схемі.
+
+Правильніше: кожна таблиця специфікації має мати свій `id` і `schemeId`, а компонент `SpecificationTableShape` має отримувати `tableId`.
+
+```js
+export function SpecificationTableShape({ frameRect, tableId }) {
+  const tableData = useCanvasStore((s) =>
+    s.specificationTables.find((t) => t.id === tableId)
+  )
+
+  const rows = useCanvasStore((s) =>
+    s.tableRowsByTableId?.[tableId] ?? []
+  )
+
+  if (!tableData) return null
+}
+```
+
+А ще краще — зберігати не масив, а словник:
+
+```js
+specificationTables: {
+  "table-1": {
+    id: "table-1",
+    schemeId: "scheme-123",
+    x: 100,
+    y: 200,
+    size: { width: 300, height: 120 }
+  }
+}
+```
+
+Тоді вибір буде швидкий:
+
+```js
+const tableData = useCanvasStore((s) => s.specificationTables[tableId])
+const rows = useCanvasStore((s) => s.specificationRowsByTableId[tableId] ?? [])
+```
+
+---
+
+Щодо `useEffect`.
+
+Те, що в тебе два `useEffect`, саме по собі нормально. Навіть краще, що вони розділені по відповідальності:
+
+1. Один синхронізує структуру таблиці після зміни кількості рядків.
+2. Другий після реального рендера Konva заміряє висоту і притискає таблицю до рамки.
+
+Але важливо, щоб вони **не створювали цикл оновлень**.
+
+У тебе вже правильна ідея:
+
+```js
+const isHeightDiff = Math.abs(currentHeight - realHeight) > 0.5
+const isYDiff = Math.abs(currentY - targetY) > 0.5
+const isXDiff = Math.abs(currentX - targetX) > 0.5
+
+if (isHeightDiff || isYDiff || isXDiff) {
+  updateTableGeometry(...)
+}
+```
+
+Це добре, бо ти не оновлюєш store на кожен render.
+
+---
+
+Я би структурував так:
+
+```js
+const tableData = useCanvasStore((s) => s.specificationTablesById[tableId])
+const rows = useCanvasStore((s) => s.specificationRowsByTableId[tableId] ?? [])
+
+const syncTableStructure = useCanvasStore((s) => s.syncSpecificationTableStructure)
+const updateTableGeometry = useCanvasStore((s) => s.updateTableGeometry)
+```
+
+І передавати `tableId` явно:
+
+```jsx
+<SpecificationTableShape
+  tableId={table.id}
+  frameRect={frameRect}
+/>
+```
+
+---
+
+По продуктивності для Next.js + Konva:
+
+Такі `useEffect` не будуть проблемою, якщо:
+
+```js
+useEffect(() => {
+  // sync structure
+}, [tableId, rows.length, frameRect])
+```
+
+а не так:
+
+```js
+useEffect(() => {
+  // ...
+}, [rows])
+```
+
+Бо `rows` як масив може змінювати посилання частіше, ніж треба.
+
+Для другого ефекту краще залежати від конкретних величин:
+
+```js
+useEffect(() => {
+  // measure real height and update geometry
+}, [
+  tableId,
+  finalCanvasHeight,
+  tableWidth,
+  sheetSize?.width,
+  sheetSize?.height,
+  frameRect
+])
+```
+
+---
+
+Головна рекомендація: не прив’язуй компонент таблиці до `specificationTables[0]`. Таблиця на canvas має бути таким самим об’єктом, як node: має `id`, `x`, `y`, `width`, `height`, `schemeId`, і компонент рендериться по конкретному `tableId`.

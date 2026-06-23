@@ -1,0 +1,65 @@
+Так, зможеш. Але треба розділити два режими:
+
+```js
+table.positionMode = 'auto-bottom' | 'manual'
+```
+
+Поки таблиця не рухалась вручну:
+
+```js
+positionMode: 'auto-bottom'
+```
+
+Тоді при експорті:
+
+```js
+y = frameRect.y + frameRect.height - totalTableHeight
+```
+
+Коли користувач перетягнув таблицю:
+
+```js
+positionMode: 'manual'
+x = newX
+y = newY
+```
+
+І тоді при експорті:
+
+```js
+y = table.y
+```
+
+Приклад для Konva:
+
+```jsx
+<Group
+  x={table.x}
+  y={table.y}
+  draggable
+  onDragEnd={(e) => {
+    updateTableGeometry(table.id, {
+      x: e.target.x(),
+      y: e.target.y(),
+      positionMode: 'manual',
+    })
+  }}
+>
+  {/* table shapes */}
+</Group>
+```
+
+А в експортній геометрії:
+
+```js
+const shouldSnapToBottom =
+  table.positionMode !== 'manual' &&
+  options.snapToBottom &&
+  options.frameRect
+
+const y = shouldSnapToBottom
+  ? options.frameRect.y + options.frameRect.height - totalHeight
+  : num(table.position?.y, num(table.y, 0))
+```
+
+Тобто поточна конфігурація нормальна, але не роби “завжди притискати до низу”. Зроби **auto-bottom до першого ручного перетягування**.

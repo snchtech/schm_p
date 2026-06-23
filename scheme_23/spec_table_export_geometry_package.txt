@@ -1,0 +1,697 @@
+ПАКЕТ ДЛЯ УНІФІКОВАНОГО РОЗРАХУНКУ ГЕОМЕТРІЇ ТАБЛИЦІ СПЕЦИФІКАЦІЙ
+Next.js + Konva + SVG/PDF export
+
+Мета:
+- не змішувати table.y з динамічною висотою таблиці;
+- однаково рахувати x/y/height/rowPositions для SVG і jsPDF;
+- при експорті притискати таблицю специфікації до нижньої рамки аркуша;
+- залишити окремий рендер для Konva, SVG і jsPDF.
+
+============================================================
+1. Створи файл:
+src/features/scheme/lib/export/specificationTableGeometry.js
+============================================================
+
+// src/features/scheme/lib/export/specificationTableGeometry.js
+
+const DEFAULT_STYLE = {
+  fontFamily: 'RobotoCondensed, sans-serif',
+  fontSize: 10,
+  headerFontSize: 10,
+  titleFontSize: 12,
+  rowHeight: 32,
+  headerHeight: 32,
+  titleHeight: 28,
+  paddingX: 6,
+  textLineHeight: 1.2,
+  cellVerticalPadding: 8,
+}
+
+export function num(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+export function normalizeSpecificationTableStyle(table = {}, options = {}) {
+  const tableStyle = table.style || {}
+  const optionStyle = options.style || {}
+
+  return {
+    ...DEFAULT_STYLE,
+    ...tableStyle,
+    ...optionStyle,
+    fontSize: num(optionStyle.fontSize ?? tableStyle.fontSize, DEFAULT_STYLE.fontSize),
+    headerFontSize: num(optionStyle.headerFontSize ?? tableStyle.headerFontSize, DEFAULT_STYLE.headerFontSize),
+    titleFontSize: num(optionStyle.titleFontSize ?? tableStyle.titleFontSize, DEFAULT_STYLE.titleFontSize),
+    rowHeight: num(optionStyle.rowHeight ?? tableStyle.rowHeight, DEFAULT_STYLE.rowHeight),
+    headerHeight: num(optionStyle.headerHeight ?? tableStyle.headerHeight, DEFAULT_STYLE.headerHeight),
+    titleHeight: num(optionStyle.titleHeight ?? tableStyle.titleHeight, DEFAULT_STYLE.titleHeight),
+    paddingX: num(optionStyle.paddingX ?? tableStyle.paddingX, DEFAULT_STYLE.paddingX),
+    textLineHeight: num(optionStyle.textLineHeight ?? tableStyle.textLineHeight, DEFAULT_STYLE.textLineHeight),
+    cellVerticalPadding: num(optionStyle.cellVerticalPadding ?? tableStyle.cellVerticalPadding, DEFAULT_STYLE.cellVerticalPadding),
+  }
+}
+
+export function getTableX(table = {}) {
+  return num(table.position?.x, num(table.x, 0))
+}
+
+export function getTableY(table = {}) {
+  return num(table.position?.y, num(table.y, 0))
+}
+
+export function getCellValue(row, key) {
+  if (!row || !key) return ''
+  const value = row[key] ?? row.values?.[key] ?? row.cells?.[key] ?? ''
+  return value == null ? '' : String(value)
+}
+
+export function normalizeColumns(table = {}) {
+  const columns = table.columns || table.specificationColumns || []
+
+  return columns
+    .map((column, index) => ({
+      ...column,
+      key: column.key || column.id || String(index),
+      label: column.label || column.title || column.name || column.key || '',
+      width: num(column.width, 0),
+      align: column.align || 'left',
+    }))
+    .filter((column) => column.width > 0)
+}
+
+export function getTableRows(table = {}, scene = {}) {
+  if (Array.isArray(table.rows)) return table.rows
+  if (Array.isArray(table.tableRows)) return table.tableRows
+
+  if (table.id && scene.specificationRowsByTableId?.[table.id]) {
+    return scene.specificationRowsByTableId[table.id]
+  }
+
+  if (Array.isArray(scene.tableRows)) return scene.tableRows
+  if (Array.isArray(scene.specificationRows)) return scene.specificationRows
+
+  return []
+}
+
+export function getTextLines({ value, width, fontSize, fontFamily, wrapText }) {
+  const text = value == null ? '' : String(value)
+
+  if (typeof wrapText === 'function') {
+    const result = wrapText(text, width, fontSize, fontFamily)
+    return Array.isArray(result) && result.length > 0 ? result : ['']
+  }
+
+  return fallbackWrapText(text, width, fontSize)
+}
+
+function fallbackWrapText(text, width, fontSize) {
+  if (!text) return ['']
+
+  const avgCharWidth = fontSize * 0.55
+  const maxChars = Math.max(1, Math.floor(width / avgCharWidth))
+  const words = String(text).split(/\s+/)
+  const lines = []
+  let line = ''
+
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word
+    if (next.length > maxChars && line) {
+      lines.push(line)
+      line = word
+    } else {
+      line = next
+    }
+  }
+
+  if (line) lines.push(line)
+  return lines.length > 0 ? lines : ['']
+}
+
+export function calculateSpecificationTableGeometry({
+  table,
+  scene = {},
+  frameRect = null,
+  columns: inputColumns,
+  rows: inputRows,
+  style: inputStyle,
+  snapToBottom = false,
+  wrapText,
+} = {}) {
+  if (!table) return null
+
+  const style = normalizeSpecificationTableStyle(table, { style: inputStyle })
+  const columns = inputColumns || normalizeColumns(table)
+  const rows = inputRows || getTableRows(table, scene)
+
+  const width = columns.reduce((sum, column) => sum + num(column.width, 0), 0)
+  const x = getTableX(table)
+
+  const calculatedRowHeights = rows.map((row) => {
+    let maxRowHeight = style.rowHeight
+
+    for (const column of columns) {
+      const value = getCellValue(row, column.key)
+      const usableWidth = Math.max(1, num(column.width, 0) - style.paddingX * 2)
+      const fontSize = num(column.fontSize, style.fontSize)
+      const lineHeightPx = fontSize * style.textLineHeight
+
+      const textLines = getTextLines({
+        value,
+        width: usableWidth,
+        fontSize,
+        fontFamily: style.fontFamily,
+        wrapText,
+      })
+
+      const measuredHeight = textLines.length * lineHeightPx + style.cellVerticalPadding
+      maxRowHeight = Math.max(maxRowHeight, measuredHeight)
+    }
+
+    return maxRowHeight
+  })
+
+  const rowsHeight = calculatedRowHeights.reduce((sum, height) => sum + height, 0)
+  const totalHeight = style.titleHeight + style.headerHeight + rowsHeight
+
+  const fallbackY = getTableY(table)
+  const frameBottomY = frameRect
+    ? num(frameRect.y, 0) + num(frameRect.height, 0)
+    : null
+
+  const y = snapToBottom && frameBottomY != null
+    ? frameBottomY - totalHeight
+    : fallbackY
+
+  let currentY = y + style.titleHeight + style.headerHeight
+
+  const rowPositions = calculatedRowHeights.map((height, rowIndex) => {
+    const rowY = currentY
+    currentY += height
+    return {
+      rowIndex,
+      y: rowY,
+      height,
+      bottomY: rowY + height,
+    }
+  })
+
+  let currentX = x
+  const columnPositions = columns.map((column, columnIndex) => {
+    const columnX = currentX
+    const columnWidth = num(column.width, 0)
+    currentX += columnWidth
+    return {
+      columnIndex,
+      key: column.key,
+      label: column.label,
+      align: column.align || 'left',
+      x: columnX,
+      width: columnWidth,
+      rightX: columnX + columnWidth,
+    }
+  })
+
+  return {
+    x,
+    y,
+    width,
+    height: totalHeight,
+    totalHeight,
+    bottomY: y + totalHeight,
+    titleY: y,
+    headerY: y + style.titleHeight,
+    bodyY: y + style.titleHeight + style.headerHeight,
+    titleHeight: style.titleHeight,
+    headerHeight: style.headerHeight,
+    rowHeights: calculatedRowHeights,
+    rowPositions,
+    columnPositions,
+    columns,
+    rows,
+    style,
+  }
+}
+
+============================================================
+2. Зміни SVG export:
+src/features/scheme/lib/export/svg/svgSpecificationTables.js
+або твій файл svgSpecificationTables.js
+============================================================
+
+Ідея: на початку specificationTableToSvg спочатку рахуємо geometry, а вже потім малюємо.
+
+Додай імпорт:
+
+import {
+  calculateSpecificationTableGeometry,
+  getCellValue,
+  num,
+} from '../specificationTableGeometry'
+
+Якщо шлях інший — підлаштуй під свою структуру.
+
+Приклад оновленої основи функції:
+
+export function specificationTableToSvg(table, scene = {}, options = {}) {
+  if (!table) return ''
+
+  const geometry = calculateSpecificationTableGeometry({
+    table,
+    scene,
+    frameRect: options.frameRect,
+    snapToBottom: options.snapToBottom ?? true,
+    wrapText,
+  })
+
+  if (!geometry) return ''
+
+  const {
+    x,
+    y,
+    width,
+    totalHeight,
+    titleHeight,
+    headerHeight,
+    headerY,
+    rowPositions,
+    columnPositions,
+    rows,
+    columns,
+    style,
+  } = geometry
+
+  let out = ''
+
+  out += `<rect ${attrs({
+    x,
+    y,
+    width,
+    height: totalHeight,
+    fill: table.style?.fill || '#ffffff',
+    stroke: table.style?.stroke || '#000000',
+    'stroke-width': table.style?.strokeWidth || 1,
+  })} />`
+
+  if (titleHeight > 0) {
+    out += `<text ${attrs({
+      x: x + width / 2,
+      y: y + titleHeight / 2,
+      'font-family': style.fontFamily,
+      'font-size': style.titleFontSize,
+      fill: table.style?.titleFill || '#000000',
+      'text-anchor': 'middle',
+      'dominant-baseline': 'middle',
+    })}>${escapeXml(table.title || 'Специфікація')}</text>`
+  }
+
+  out += `<rect ${attrs({
+    x,
+    y: headerY,
+    width,
+    height: headerHeight,
+    fill: table.style?.headerFill || '#ffffff',
+    stroke: table.style?.stroke || '#000000',
+    'stroke-width': table.style?.strokeWidth || 1,
+  })} />`
+
+  for (const column of columnPositions) {
+    out += `<line ${attrs({
+      x1: column.x,
+      y1: headerY,
+      x2: column.x,
+      y2: y + totalHeight,
+      stroke: table.style?.stroke || '#000000',
+      'stroke-width': table.style?.strokeWidth || 1,
+    })} />`
+
+    const headerLines = wrapText(
+      column.label || '',
+      Math.max(1, column.width - style.paddingX * 2),
+      style.headerFontSize,
+      style.fontFamily
+    )
+
+    out += renderSvgMultilineText({
+      x: column.x,
+      y: headerY,
+      width: column.width,
+      height: headerHeight,
+      lines: headerLines,
+      fontFamily: style.fontFamily,
+      fontSize: style.headerFontSize,
+      lineHeight: style.headerFontSize * style.textLineHeight,
+      align: 'center',
+      paddingX: style.paddingX,
+      fill: table.style?.textFill || '#000000',
+    })
+  }
+
+  out += `<line ${attrs({
+    x1: x + width,
+    y1: headerY,
+    x2: x + width,
+    y2: y + totalHeight,
+    stroke: table.style?.stroke || '#000000',
+    'stroke-width': table.style?.strokeWidth || 1,
+  })} />`
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]
+    const rowPos = rowPositions[rowIndex]
+
+    out += `<line ${attrs({
+      x1: x,
+      y1: rowPos.y,
+      x2: x + width,
+      y2: rowPos.y,
+      stroke: table.style?.stroke || '#000000',
+      'stroke-width': table.style?.strokeWidth || 1,
+    })} />`
+
+    for (const column of columnPositions) {
+      const value = getCellValue(row, column.key)
+      const fontSize = style.fontSize
+      const lines = wrapText(
+        value,
+        Math.max(1, column.width - style.paddingX * 2),
+        fontSize,
+        style.fontFamily
+      )
+
+      out += renderSvgMultilineText({
+        x: column.x,
+        y: rowPos.y,
+        width: column.width,
+        height: rowPos.height,
+        lines,
+        fontFamily: style.fontFamily,
+        fontSize,
+        lineHeight: fontSize * style.textLineHeight,
+        align: column.align || 'left',
+        paddingX: style.paddingX,
+        fill: table.style?.textFill || '#000000',
+      })
+    }
+  }
+
+  out += `<line ${attrs({
+    x1: x,
+    y1: y + totalHeight,
+    x2: x + width,
+    y2: y + totalHeight,
+    stroke: table.style?.stroke || '#000000',
+    'stroke-width': table.style?.strokeWidth || 1,
+  })} />`
+
+  return `<g id="${escapeXml(table.id || 'specification-table')}" data-element-type="specification-table">${out}</g>`
+}
+
+function renderSvgMultilineText({
+  x,
+  y,
+  width,
+  height,
+  lines,
+  fontFamily,
+  fontSize,
+  lineHeight,
+  align = 'left',
+  paddingX = 6,
+  fill = '#000000',
+}) {
+  const safeLines = Array.isArray(lines) && lines.length > 0 ? lines : ['']
+  const textHeight = safeLines.length * lineHeight
+  const textY = y + (height - textHeight) / 2
+  const textX = getSvgTextX(x, width, align, paddingX)
+  const anchor = getSvgTextAnchor(align)
+
+  const tspans = safeLines.map((line, index) => {
+    const dy = index === 0 ? 0 : lineHeight
+    return `<tspan x="${textX}" dy="${dy}">${escapeXml(line)}</tspan>`
+  }).join('')
+
+  return `<text ${attrs({
+    x: textX,
+    y: textY,
+    'font-family': fontFamily,
+    'font-size': fontSize,
+    fill,
+    'text-anchor': anchor,
+    'dominant-baseline': 'hanging',
+  })}>${tspans}</text>`
+}
+
+function getSvgTextX(x, width, align, paddingX) {
+  if (align === 'center') return x + width / 2
+  if (align === 'right') return x + width - paddingX
+  return x + paddingX
+}
+
+function getSvgTextAnchor(align) {
+  if (align === 'center') return 'middle'
+  if (align === 'right') return 'end'
+  return 'start'
+}
+
+function escapeXml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+}
+
+ВАЖЛИВО:
+- прибери з SVG коду ручне `+ fontSizeNum / 1.4` для вертикального позиціювання;
+- y має братися з geometry.y;
+- нижня лінія має бути y + totalHeight;
+- rowY має братися з geometry.rowPositions[rowIndex].y.
+
+============================================================
+3. Виклик SVG export з frameRect
+============================================================
+
+Там, де ти формуєш SVG сцени:
+
+const tableSvg = specificationTableToSvg(table, scene, {
+  frameRect,
+  snapToBottom: true,
+})
+
+frameRect має бути внутрішньою рамкою аркуша, не розміром всього паперу.
+Наприклад, якщо рамка вже враховує поля 20/5/5/5, то використовуй саме її:
+
+const frameRect = {
+  x: innerFrameX,
+  y: innerFrameY,
+  width: innerFrameWidth,
+  height: innerFrameHeight,
+}
+
+Тоді низ таблиці буде:
+
+geometry.y + geometry.totalHeight === frameRect.y + frameRect.height
+
+============================================================
+4. jsPDF export
+============================================================
+
+Для jsPDF не треба переносити SVG-рендер. Треба використати ту саму geometry.
+
+import {
+  calculateSpecificationTableGeometry,
+  getCellValue,
+} from '../specificationTableGeometry'
+
+export function renderSpecificationTableToPdf(doc, table, scene = {}, options = {}) {
+  const geometry = calculateSpecificationTableGeometry({
+    table,
+    scene,
+    frameRect: options.frameRect,
+    snapToBottom: options.snapToBottom ?? true,
+    wrapText: options.wrapText,
+    style: options.style,
+  })
+
+  if (!geometry) return
+
+  const {
+    x,
+    y,
+    width,
+    totalHeight,
+    titleHeight,
+    headerHeight,
+    headerY,
+    rowPositions,
+    columnPositions,
+    rows,
+    style,
+  } = geometry
+
+  doc.setDrawColor(0, 0, 0)
+  doc.setLineWidth(table.style?.strokeWidth || 0.2)
+  doc.rect(x, y, width, totalHeight)
+
+  if (titleHeight > 0) {
+    doc.setFontSize(style.titleFontSize)
+    doc.text(table.title || 'Специфікація', x + width / 2, y + titleHeight / 2, {
+      align: 'center',
+      baseline: 'middle',
+    })
+  }
+
+  doc.rect(x, headerY, width, headerHeight)
+
+  for (const column of columnPositions) {
+    doc.line(column.x, headerY, column.x, y + totalHeight)
+
+    renderPdfMultilineText(doc, {
+      text: column.label || '',
+      x: column.x,
+      y: headerY,
+      width: column.width,
+      height: headerHeight,
+      fontSize: style.headerFontSize,
+      lineHeight: style.headerFontSize * style.textLineHeight,
+      align: 'center',
+      paddingX: style.paddingX,
+      splitTextToSize: true,
+    })
+  }
+
+  doc.line(x + width, headerY, x + width, y + totalHeight)
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]
+    const rowPos = rowPositions[rowIndex]
+
+    doc.line(x, rowPos.y, x + width, rowPos.y)
+
+    for (const column of columnPositions) {
+      const value = getCellValue(row, column.key)
+
+      renderPdfMultilineText(doc, {
+        text: value,
+        x: column.x,
+        y: rowPos.y,
+        width: column.width,
+        height: rowPos.height,
+        fontSize: style.fontSize,
+        lineHeight: style.fontSize * style.textLineHeight,
+        align: column.align || 'left',
+        paddingX: style.paddingX,
+        splitTextToSize: true,
+      })
+    }
+  }
+
+  doc.line(x, y + totalHeight, x + width, y + totalHeight)
+}
+
+function renderPdfMultilineText(doc, {
+  text,
+  x,
+  y,
+  width,
+  height,
+  fontSize,
+  lineHeight,
+  align = 'left',
+  paddingX = 6,
+  splitTextToSize = true,
+}) {
+  doc.setFontSize(fontSize)
+
+  const usableWidth = Math.max(1, width - paddingX * 2)
+  const lines = splitTextToSize && typeof doc.splitTextToSize === 'function'
+    ? doc.splitTextToSize(String(text ?? ''), usableWidth)
+    : [String(text ?? '')]
+
+  const totalTextHeight = lines.length * lineHeight
+  const startY = y + (height - totalTextHeight) / 2 + fontSize * 0.75
+
+  let textX = x + paddingX
+  if (align === 'center') textX = x + width / 2
+  if (align === 'right') textX = x + width - paddingX
+
+  doc.text(lines, textX, startY, {
+    align,
+    lineHeightFactor: lineHeight / fontSize,
+  })
+}
+
+ВАЖЛИВО ДЛЯ jsPDF:
+- lineHeightFactor може лишатися 1.2;
+- але y таблиці має бути geometry.y;
+- bottom таблиці має бути geometry.y + geometry.totalHeight;
+- не рахуй y повторно в PDF-рендері.
+
+============================================================
+5. Контрольний debug
+============================================================
+
+Після розрахунку geometry можна тимчасово додати:
+
+console.log('SPEC_TABLE_EXPORT_GEOMETRY', {
+  tableId: table.id,
+  y: geometry.y,
+  totalHeight: geometry.totalHeight,
+  bottomY: geometry.bottomY,
+  frameBottomY: options.frameRect
+    ? options.frameRect.y + options.frameRect.height
+    : null,
+  diff: options.frameRect
+    ? geometry.bottomY - (options.frameRect.y + options.frameRect.height)
+    : null,
+})
+
+Очікуваний результат:
+
+diff: 0
+
+Або дуже близько до нуля:
+
+0.0000001
+
+Якщо diff не 0, значить десь після geometry ти ще раз змінюєш y або height.
+
+============================================================
+6. Що саме треба прибрати зі старого SVG-коду
+============================================================
+
+Прибрати або не використовувати:
+
+const y = num(table.position?.y, num(table.y, 0))
+
+як основний y для експорту.
+
+Замість нього:
+
+const y = geometry.y
+
+Також небажано:
+
+const startY = rowY + (rowHeight - totalTextHeight) / 2 + fontSizeNum / 1.4
+
+Краще:
+
+const startY = rowY + (rowHeight - totalTextHeight) / 2
+
+і SVG text:
+
+'dominant-baseline': 'hanging'
+
+============================================================
+7. Головна формула
+============================================================
+
+Для таблиці, яка має бути притиснута до нижньої рамки:
+
+const totalTableHeight = titleHeight + headerHeight + sum(rowHeights)
+const exportY = frameRect.y + frameRect.height - totalTableHeight
+
+Це має бути єдине місце, де визначається y для експорту.
+

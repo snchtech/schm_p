@@ -1,0 +1,91 @@
+Так, проблема в `svgNotes.js`: зараз кожна примітка рендериться одним `<text>`, тому SVG не переносить рядки автоматично.
+
+Треба додати `wrapText()` і рендерити через `<tspan>`.
+
+### Що змінити в `svgNotes.js`
+
+Заголовок по центру:
+
+```js
+out += `<text ${attrs({
+  x: layout.x + layout.width / 2,
+  y: layout.y + style.titleHeight / 2,
+  'font-family': style.fontFamily,
+  'font-size': style.titleFontSize,
+  'font-weight': 'bold',
+  fill: style.fill,
+  'text-anchor': 'middle',
+  'dominant-baseline': 'middle',
+})}>Примітки</text>`
+```
+
+Додай функцію переносу:
+
+```js
+function estimateTextWidth(text, fontSize) {
+  return String(text).length * fontSize * 0.55
+}
+
+function wrapText(text, maxWidth, fontSize) {
+  const words = String(text || '').split(/\s+/).filter(Boolean)
+  const lines = []
+  let current = ''
+
+  for (const word of words) {
+    const test = current ? `${current} ${word}` : word
+
+    if (estimateTextWidth(test, fontSize) <= maxWidth) {
+      current = test
+    } else {
+      if (current) lines.push(current)
+      current = word
+    }
+  }
+
+  if (current) lines.push(current)
+
+  return lines.length ? lines : ['']
+}
+```
+
+І заміни рендер приміток:
+
+```js
+let currentY = layout.y + style.titleHeight + style.paddingTop
+const maxTextWidth = layout.width - style.paddingX * 2
+const lineHeight = style.fontSize * 1.2
+
+list.forEach((note, index) => {
+  const text = `${index + 1}. ${note.text}`
+  const lines = wrapText(text, maxTextWidth, style.fontSize)
+
+  const blockHeight = lines.length * lineHeight
+
+  if (currentY + blockHeight > layout.y + layout.height) {
+    return
+  }
+
+  const tspans = lines
+    .map((line, lineIndex) => {
+      return `<tspan ${attrs({
+        x: layout.x + style.paddingX,
+        dy: lineIndex === 0 ? 0 : lineHeight,
+      })}>${escapeXml(line)}</tspan>`
+    })
+    .join('')
+
+  out += `<text ${attrs({
+    x: layout.x + style.paddingX,
+    y: currentY,
+    'font-family': style.fontFamily,
+    'font-size': style.fontSize,
+    fill: style.fill,
+    'text-anchor': 'start',
+    'dominant-baseline': 'hanging',
+  })}>${tspans}</text>`
+
+  currentY += blockHeight + 4
+})
+```
+
+У твоєму патчі примітки справді зараз рендеряться одним рядком через `escapeXml(`${index + 1}. ${note.text}`)`, тому текст і виходить за межі SVG/PDF. Також заголовок стоїть по `x: layout.x + style.paddingX`, тому він зліва, а не по центру. 

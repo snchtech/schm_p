@@ -1,0 +1,756 @@
+# Пакет реалізації налаштування колонок таблиці специфікацій
+
+Мета пакета:
+- дозволити для кожної таблиці специфікацій мати власні колонки;
+- редагувати назви колонок, ширину, видимість, вирівнювання і порядок;
+- використовувати ті самі колонки у Konva, SVG та PDF експорті;
+- не ламати існуючі рядки таблиці.
+
+---
+
+## 1. Структура даних таблиці
+
+Кожна таблиця специфікації має зберігати власний список колонок.
+
+```js
+const DEFAULT_SPECIFICATION_COLUMNS = [
+  {
+    id: 'position',
+    key: 'position',
+    title: 'Поз.',
+    width: 40,
+    align: 'center',
+    visible: true,
+    editable: false,
+    order: 10,
+  },
+  {
+    id: 'name',
+    key: 'name',
+    title: 'Найменування',
+    width: 180,
+    align: 'left',
+    visible: true,
+    editable: false,
+    order: 20,
+  },
+  {
+    id: 'quantity',
+    key: 'quantity',
+    title: 'К-сть',
+    width: 50,
+    align: 'center',
+    visible: true,
+    editable: false,
+    order: 30,
+  },
+  {
+    id: 'note',
+    key: 'note',
+    title: 'Примітка',
+    width: 100,
+    align: 'left',
+    visible: true,
+    editable: false,
+    order: 40,
+  },
+]
+```
+
+При створенні таблиці:
+
+```js
+function createSpecificationTable({ schemeId, x = 0, y = 0 }) {
+  return {
+    id: crypto.randomUUID(),
+    schemeId,
+    title: 'Специфікація',
+    x,
+    y,
+    positionMode: 'auto-bottom',
+    columns: DEFAULT_SPECIFICATION_COLUMNS.map((column) => ({ ...column })),
+    style: {
+      fontFamily: 'Arial',
+      fontSize: 10,
+      lineHeight: 1.2,
+      rowHeight: 22,
+      titleHeight: 24,
+      headerHeight: 22,
+      paddingX: 4,
+      paddingY: 3,
+    },
+  }
+}
+```
+
+---
+
+## 2. Нормалізація колонок
+
+Файл: `features/specificationTable/model/normalizeSpecificationColumns.js`
+
+```js
+export const DEFAULT_SPECIFICATION_COLUMNS = [
+  { id: 'position', key: 'position', title: 'Поз.', width: 40, align: 'center', visible: true, editable: false, order: 10 },
+  { id: 'name', key: 'name', title: 'Найменування', width: 180, align: 'left', visible: true, editable: false, order: 20 },
+  { id: 'quantity', key: 'quantity', title: 'К-сть', width: 50, align: 'center', visible: true, editable: false, order: 30 },
+  { id: 'note', key: 'note', title: 'Примітка', width: 100, align: 'left', visible: true, editable: false, order: 40 },
+]
+
+const ALLOWED_ALIGN = new Set(['left', 'center', 'right'])
+
+export function normalizeSpecificationColumns(table) {
+  const source = Array.isArray(table?.columns) && table.columns.length > 0
+    ? table.columns
+    : DEFAULT_SPECIFICATION_COLUMNS
+
+  return source
+    .map((column, index) => ({
+      id: String(column.id || column.key || `column-${index}`),
+      key: String(column.key || column.id || `column_${index}`),
+      title: String(column.title || column.label || column.key || ''),
+      width: Math.max(20, Number(column.width || 60)),
+      align: ALLOWED_ALIGN.has(column.align) ? column.align : 'left',
+      visible: column.visible !== false,
+      editable: column.editable !== false,
+      order: Number.isFinite(Number(column.order)) ? Number(column.order) : index * 10,
+    }))
+    .filter((column) => column.visible)
+    .sort((a, b) => a.order - b.order)
+}
+
+export function getSpecificationTableWidth(table) {
+  return normalizeSpecificationColumns(table)
+    .reduce((sum, column) => sum + Number(column.width || 0), 0)
+}
+```
+
+---
+
+## 3. Zustand actions
+
+Додай у store окремі actions для колонок.
+
+```js
+import { DEFAULT_SPECIFICATION_COLUMNS } from '@/features/specificationTable/model/normalizeSpecificationColumns'
+
+const cloneDefaultColumns = () =>
+  DEFAULT_SPECIFICATION_COLUMNS.map((column) => ({ ...column }))
+
+export const createSpecificationTableSlice = (set, get) => ({
+  specificationTables: {},
+
+  addSpecificationTable: ({ schemeId, x = 0, y = 0 }) => {
+    const id = crypto.randomUUID()
+
+    set((state) => ({
+      specificationTables: {
+        ...state.specificationTables,
+        [id]: {
+          id,
+          schemeId,
+          title: 'Специфікація',
+          x,
+          y,
+          positionMode: 'auto-bottom',
+          columns: cloneDefaultColumns(),
+          style: {
+            fontFamily: 'Arial',
+            fontSize: 10,
+            lineHeight: 1.2,
+            rowHeight: 22,
+            titleHeight: 24,
+            headerHeight: 22,
+            paddingX: 4,
+            paddingY: 3,
+          },
+        },
+      },
+    }))
+
+    return id
+  },
+
+  updateSpecificationTableColumn: (tableId, columnId, patch) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: table.columns.map((column) =>
+              column.id === columnId
+                ? sanitizeColumnPatch(column, patch)
+                : column
+            ),
+          },
+        },
+      }
+    })
+  },
+
+  addSpecificationTableColumn: (tableId) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      const nextIndex = table.columns.length + 1
+      const nextId = `custom-${crypto.randomUUID()}`
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: [
+              ...table.columns,
+              {
+                id: nextId,
+                key: nextId,
+                title: `Колонка ${nextIndex}`,
+                width: 80,
+                align: 'left',
+                visible: true,
+                editable: true,
+                order: nextIndex * 10,
+              },
+            ],
+          },
+        },
+      }
+    })
+  },
+
+  removeSpecificationTableColumn: (tableId, columnId) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: table.columns.filter((column) => column.id !== columnId),
+          },
+        },
+      }
+    })
+  },
+
+  toggleSpecificationTableColumn: (tableId, columnId) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: table.columns.map((column) =>
+              column.id === columnId
+                ? { ...column, visible: column.visible === false }
+                : column
+            ),
+          },
+        },
+      }
+    })
+  },
+
+  reorderSpecificationTableColumns: (tableId, orderedColumnIds) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      const orderMap = new Map(
+        orderedColumnIds.map((id, index) => [id, (index + 1) * 10])
+      )
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: table.columns.map((column) => ({
+              ...column,
+              order: orderMap.get(column.id) ?? column.order,
+            })),
+          },
+        },
+      }
+    })
+  },
+
+  resetSpecificationTableColumns: (tableId) => {
+    set((state) => {
+      const table = state.specificationTables[tableId]
+      if (!table) return state
+
+      return {
+        specificationTables: {
+          ...state.specificationTables,
+          [tableId]: {
+            ...table,
+            columns: cloneDefaultColumns(),
+          },
+        },
+      }
+    })
+  },
+})
+
+function sanitizeColumnPatch(column, patch) {
+  const next = { ...column }
+
+  if ('title' in patch) next.title = String(patch.title ?? '')
+
+  if ('width' in patch) {
+    next.width = Math.max(20, Math.min(500, Number(patch.width || 20)))
+  }
+
+  if ('align' in patch && ['left', 'center', 'right'].includes(patch.align)) {
+    next.align = patch.align
+  }
+
+  if ('visible' in patch) next.visible = Boolean(patch.visible)
+
+  return next
+}
+```
+
+---
+
+## 4. Компонент вкладки колонок
+
+Файл: `features/specificationTable/ui/SpecificationColumnsPanel.jsx`
+
+```jsx
+'use client'
+
+import { useMemo } from 'react'
+import { useCanvasStore } from '@/store/useCanvasStore'
+
+export function SpecificationColumnsPanel({ tableId }) {
+  const table = useCanvasStore((state) => state.specificationTables[tableId])
+
+  const updateColumn = useCanvasStore((state) => state.updateSpecificationTableColumn)
+  const addColumn = useCanvasStore((state) => state.addSpecificationTableColumn)
+  const removeColumn = useCanvasStore((state) => state.removeSpecificationTableColumn)
+  const resetColumns = useCanvasStore((state) => state.resetSpecificationTableColumns)
+  const reorderColumns = useCanvasStore((state) => state.reorderSpecificationTableColumns)
+
+  const columns = useMemo(() => {
+    return [...(table?.columns ?? [])].sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+  }, [table?.columns])
+
+  if (!table) return null
+
+  const moveColumn = (columnId, direction) => {
+    const ids = columns.map((column) => column.id)
+    const index = ids.indexOf(columnId)
+    const nextIndex = index + direction
+
+    if (index < 0 || nextIndex < 0 || nextIndex >= ids.length) return
+
+    const nextIds = [...ids]
+    const temp = nextIds[index]
+    nextIds[index] = nextIds[nextIndex]
+    nextIds[nextIndex] = temp
+
+    reorderColumns(tableId, nextIds)
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">Колонки таблиці</h3>
+
+        <div className="flex gap-2">
+          <button type="button" onClick={() => addColumn(tableId)}>
+            + Додати колонку
+          </button>
+
+          <button type="button" onClick={() => resetColumns(tableId)}>
+            Скинути
+          </button>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              <th>Порядок</th>
+              <th>Назва</th>
+              <th>Ширина</th>
+              <th>Вирівнювання</th>
+              <th>Видима</th>
+              <th></th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {columns.map((column, index) => (
+              <tr key={column.id}>
+                <td>
+                  <button
+                    type="button"
+                    disabled={index === 0}
+                    onClick={() => moveColumn(column.id, -1)}
+                  >
+                    ↑
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={index === columns.length - 1}
+                    onClick={() => moveColumn(column.id, 1)}
+                  >
+                    ↓
+                  </button>
+                </td>
+
+                <td>
+                  <input
+                    value={column.title ?? ''}
+                    onChange={(event) =>
+                      updateColumn(tableId, column.id, { title: event.target.value })
+                    }
+                  />
+                </td>
+
+                <td>
+                  <input
+                    type="number"
+                    min="20"
+                    max="500"
+                    value={column.width ?? 60}
+                    onChange={(event) =>
+                      updateColumn(tableId, column.id, { width: event.target.value })
+                    }
+                  />
+                </td>
+
+                <td>
+                  <select
+                    value={column.align ?? 'left'}
+                    onChange={(event) =>
+                      updateColumn(tableId, column.id, { align: event.target.value })
+                    }
+                  >
+                    <option value="left">Зліва</option>
+                    <option value="center">По центру</option>
+                    <option value="right">Справа</option>
+                  </select>
+                </td>
+
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={column.visible !== false}
+                    onChange={(event) =>
+                      updateColumn(tableId, column.id, { visible: event.target.checked })
+                    }
+                  />
+                </td>
+
+                <td>
+                  {column.editable !== false && (
+                    <button
+                      type="button"
+                      onClick={() => removeColumn(tableId, column.id)}
+                    >
+                      Видалити
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+```
+
+---
+
+## 5. Модалка або панель таблиці з вкладками
+
+Файл: `features/specificationTable/ui/SpecificationTablePanel.jsx`
+
+```jsx
+'use client'
+
+import { useState } from 'react'
+import { SpecificationColumnsPanel } from './SpecificationColumnsPanel'
+import { SpecificationRowsPanel } from './SpecificationRowsPanel'
+import { SpecificationTableSettingsPanel } from './SpecificationTableSettingsPanel'
+
+export function SpecificationTablePanel({ tableId, onClose }) {
+  const [activeTab, setActiveTab] = useState('rows')
+
+  return (
+    <div className="rounded border bg-white p-4 shadow-lg">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            data-active={activeTab === 'rows'}
+            onClick={() => setActiveTab('rows')}
+          >
+            Рядки
+          </button>
+
+          <button
+            type="button"
+            data-active={activeTab === 'columns'}
+            onClick={() => setActiveTab('columns')}
+          >
+            Колонки
+          </button>
+
+          <button
+            type="button"
+            data-active={activeTab === 'settings'}
+            onClick={() => setActiveTab('settings')}
+          >
+            Налаштування
+          </button>
+        </div>
+
+        <button type="button" onClick={onClose}>
+          Закрити
+        </button>
+      </div>
+
+      {activeTab === 'rows' && <SpecificationRowsPanel tableId={tableId} />}
+      {activeTab === 'columns' && <SpecificationColumnsPanel tableId={tableId} />}
+      {activeTab === 'settings' && <SpecificationTableSettingsPanel tableId={tableId} />}
+    </div>
+  )
+}
+```
+
+---
+
+## 6. Використання колонок у Konva-компоненті
+
+У компоненті таблиці більше не використовуй захардкожений список колонок.
+
+```jsx
+import { normalizeSpecificationColumns, getSpecificationTableWidth } from '@/features/specificationTable/model/normalizeSpecificationColumns'
+
+export function SpecificationTableShape({ tableId, frameRect }) {
+  const table = useCanvasStore((state) => state.specificationTables[tableId])
+  const rows = useCanvasStore((state) => state.specificationRowsByTableId[tableId] ?? [])
+
+  if (!table) return null
+
+  const columns = normalizeSpecificationColumns(table)
+  const tableWidth = getSpecificationTableWidth(table)
+
+  return (
+    <Group x={table.x} y={table.y}>
+      {/* title */}
+      {/* header */}
+      {columns.map((column) => {
+        // Rect + Text для header
+      })}
+
+      {rows.map((row) => {
+        return columns.map((column) => {
+          const value = row[column.key] ?? ''
+          // Rect + Text для cell
+        })
+      })}
+    </Group>
+  )
+}
+```
+
+---
+
+## 7. Використання колонок у SVG експорті
+
+```js
+import { normalizeSpecificationColumns } from '@/features/specificationTable/model/normalizeSpecificationColumns'
+import { calculateSpecificationTableGeometry } from '@/features/specificationTable/model/calculateSpecificationTableGeometry'
+
+export function specificationTableToSvg(table, rows, options) {
+  const columns = normalizeSpecificationColumns(table)
+
+  const geometry = calculateSpecificationTableGeometry({
+    table,
+    rows,
+    columns,
+    frameRect: options.frameRect,
+    snapToBottom: options.snapToBottom,
+  })
+
+  let svg = ''
+
+  svg += renderTableOuterRect(geometry)
+  svg += renderTableTitle(table, geometry)
+  svg += renderTableHeader(columns, geometry)
+  svg += renderTableRows(rows, columns, geometry)
+
+  return svg
+}
+```
+
+Головне правило:
+
+```js
+const columns = normalizeSpecificationColumns(table)
+```
+
+має бути однаковим для Konva, SVG і PDF.
+
+---
+
+## 8. Використання колонок у jsPDF експорті
+
+```js
+import { normalizeSpecificationColumns } from '@/features/specificationTable/model/normalizeSpecificationColumns'
+import { calculateSpecificationTableGeometry } from '@/features/specificationTable/model/calculateSpecificationTableGeometry'
+
+export function drawSpecificationTablePdf(doc, table, rows, options) {
+  const columns = normalizeSpecificationColumns(table)
+
+  const geometry = calculateSpecificationTableGeometry({
+    table,
+    rows,
+    columns,
+    frameRect: options.frameRect,
+    snapToBottom: options.snapToBottom,
+  })
+
+  doc.rect(geometry.x, geometry.y, geometry.width, geometry.totalHeight)
+
+  drawPdfTableTitle(doc, table, geometry)
+  drawPdfTableHeader(doc, columns, geometry)
+  drawPdfTableRows(doc, rows, columns, geometry)
+}
+```
+
+---
+
+## 9. Підтримка кастомних колонок у рядках
+
+Якщо користувач додає нову колонку, її `key` буде типу:
+
+```js
+custom-550e8400-e29b-41d4-a716-446655440000
+```
+
+У рядках значення можна зберігати напряму по цьому ключу:
+
+```js
+{
+  id: 'row-1',
+  position: '1',
+  name: 'Вимикач',
+  quantity: '2',
+  note: '',
+  'custom-550e8400-e29b-41d4-a716-446655440000': 'Додаткове значення'
+}
+```
+
+У таблиці рядків для редагування треба будувати input-и по `columns`:
+
+```jsx
+{columns.map((column) => (
+  <input
+    key={column.id}
+    value={row[column.key] ?? ''}
+    onChange={(event) =>
+      updateSpecificationRow(tableId, row.id, {
+        [column.key]: event.target.value,
+      })
+    }
+  />
+))}
+```
+
+---
+
+## 10. Рекомендований UX
+
+Не створюй окрему кнопку тільки для колонок. Краще використовувати вже існуючу кнопку таблиці.
+
+Після натискання на кнопку відкривається панель або модалка:
+
+```txt
+Специфікація
+
+[ Рядки ] [ Колонки ] [ Налаштування ]
+
+Вкладка Рядки:
+- редагування значень рядків;
+- додавання рядка;
+- видалення рядка;
+- зміна порядку рядків.
+
+Вкладка Колонки:
+- назва колонки;
+- ширина;
+- вирівнювання;
+- видимість;
+- порядок;
+- додати колонку;
+- скинути до стандартних.
+
+Вкладка Налаштування:
+- назва таблиці;
+- режим позиції: auto-bottom/manual;
+- розмір шрифту;
+- lineHeight;
+- мінімальна висота рядка.
+```
+
+---
+
+## 11. Важливі правила
+
+1. `key` колонки не бажано редагувати звичайному користувачу.
+   Користувач редагує `title`, а не `key`.
+
+2. `width` має бути у тих самих одиницях, що і canvas/export.
+
+3. SVG/PDF/Konva мають брати один і той самий список колонок:
+
+```js
+const columns = normalizeSpecificationColumns(table)
+```
+
+4. Ширина таблиці має рахуватись із колонок:
+
+```js
+const tableWidth = columns.reduce((sum, column) => sum + column.width, 0)
+```
+
+5. Якщо таблиця у режимі `auto-bottom`, після зміни ширини колонок `x` можна не змінювати, а `y` треба перераховувати від низу рамки.
+
+6. Якщо таблиця у режимі `manual`, експорт має використовувати `table.x` і `table.y`, а не притискати таблицю до низу.
+
+---
+
+## 12. Мінімальний план інтеграції
+
+1. Додати `columns` у модель таблиці.
+2. Створити `normalizeSpecificationColumns.js`.
+3. Замінити всі захардкожені колонки на `normalizeSpecificationColumns(table)`.
+4. Додати Zustand actions для колонок.
+5. Додати вкладку `Колонки` у поточну модалку/панель таблиці.
+6. Перевірити Konva-рендер.
+7. Перевірити SVG-експорт.
+8. Перевірити jsPDF-експорт.
+9. Перевірити зміну ширини, приховування і перейменування колонок.
+10. Перевірити режим `auto-bottom` після зміни висоти рядків.

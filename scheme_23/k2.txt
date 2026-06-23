@@ -1,0 +1,135 @@
+Проблема не в самому `lineHeight * 1.2`, а в тому, що **експорт сам рахує висоту таблиці**, а потім ще використовує старий `y`.
+
+Правильна логіка така:
+
+```js
+const totalTableHeight = calculateTableHeight(...)
+const targetBottomY = frameRect.y + frameRect.height
+const y = targetBottomY - totalTableHeight
+```
+
+Тобто при SVG/PDF експорті **не треба довіряти `table.y`**, якщо таблиця має бути притиснута до низу рамки.
+
+Зроби так:
+
+```js
+const tableHeight = totalTableHeight
+
+const x = num(table.position?.x, num(table.x, 0))
+
+const y =
+  options?.snapToBottom && options?.frameRect
+    ? options.frameRect.y + options.frameRect.height - tableHeight
+    : num(table.position?.y, num(table.y, 0))
+```
+
+І викликай:
+
+```js
+specificationTableToSvg(table, scene, {
+  frameRect,
+  snapToBottom: true,
+})
+```
+
+---
+
+Важливий момент: спочатку треба порахувати всі `rowHeights`, `rowPositions`, `totalTableHeight`, і тільки **після цього** визначати `y`.
+
+Не так:
+
+```js
+const y = table.y
+const rowPositions = ...
+const totalTableHeight = ...
+```
+
+А так:
+
+```js
+const calculatedRowHeights = ...
+const totalTableHeight = ...
+
+const y = frameRect.y + frameRect.height - totalTableHeight
+
+let currentYPosition = y + style.titleHeight + style.headerHeight
+```
+
+---
+
+Ще одна причина зміщення — різниця між Konva Text і SVG `<text>`.
+
+У Konva `lineHeight={1.2}` — це множник від `fontSize`.
+
+У SVG ти сам робиш:
+
+```js
+const lineHeight = fontSizeNum * 1.2
+```
+
+Це нормально, але для вертикального центрування не треба додавати магічне:
+
+```js
++ fontSizeNum / 1.4
+```
+
+Ось це якраз може давати плаваюче зміщення:
+
+```js
+const startY = rowY + (rowHeight - totalTextHeight) / 2 + fontSizeNum / 1.4
+```
+
+Краще стабільніше:
+
+```js
+const startY = rowY + (rowHeight - totalTextHeight) / 2
+```
+
+А в `tspan` використовуй `dominant-baseline="hanging"` або просто працюй через `dy`.
+
+Наприклад:
+
+```js
+out += `<text ${attrs({
+  x: getTextX(currentX, colWidth, align, style.paddingX),
+  y: startY,
+  'font-family': style.fontFamily,
+  'font-size': style.fontSize,
+  fill: style.textFill,
+  'text-anchor': getTextAnchor(align),
+})}>${tspanElements}</text>`
+```
+
+```js
+const dyValue = index === 0 ? 0 : lineHeight
+```
+
+---
+
+Я б виніс розрахунок геометрії в одну спільну функцію і використовував її і для Konva, і для SVG:
+
+```js
+const geometry = calculateSpecificationTableGeometry({
+  table,
+  rows,
+  columns,
+  frameRect,
+  snapToBottom: true,
+})
+```
+
+Щоб не було ситуації: на canvas таблиця рахується одним способом, а в SVG/PDF — трохи іншим.
+
+Головне правило:
+
+```js
+exportY = frameBottomY - calculatedExportTableHeight
+```
+
+А не:
+
+```js
+exportY = table.y
+```
+
+Тоді зміна `lineHeight` буде змінювати висоту таблиці, але низ таблиці завжди залишиться притиснутим до рамки.
