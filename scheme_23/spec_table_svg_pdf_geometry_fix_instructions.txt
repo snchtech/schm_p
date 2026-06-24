@@ -1,0 +1,682 @@
+ПАКЕТ ВИПРАВЛЕННЯ ГЕОМЕТРІЇ ТА SVG/PDF ЕКСПОРТУ ТАБЛИЦІ СПЕЦИФІКАЦІЙ
+================================================================================
+
+ПРОБЛЕМА
+--------
+У поточному коді змішані різні системи координат:
+
+1. calculateTableRowsGeometry() повертає rowPositions не від 0, а вже зі зміщенням на baseRowHeight / шапку.
+2. В SVG-експорті додатково додається extraHeadersHeight.
+3. Потім це ще компенсується через - style.rowHeight.
+4. realTableHeight рахується як finalTableHeight + extraHeadersHeight - style.rowHeight.
+5. Для тексту використовуються емпіричні коефіцієнти типу 0.82, 0.15, +5.
+
+Через це для одного рядка похибка майже непомітна, а коли з'являються рядки з переносом тексту, висота і y-позиції починають розходитись. Таблиця не піднімається вгору при збільшенні висоти, рядки отримують зайві паддінги знизу, а останні рядки можуть вилітати за межі аркуша.
+
+
+ГОЛОВНЕ ПРАВИЛО
+---------------
+Треба мати одну чисту модель геометрії:
+
+bodyHeight = сума висот усіх рядків
+
+totalTableHeight = titleHeight + headerHeight + bodyHeight
+
+tableY = frameY + frameHeight - totalTableHeight - padding
+
+bodyStartY = tableY + titleHeight + headerHeight
+
+rowY = bodyStartY + rowPosition.y
+
+rowPosition.y завжди має бути відносно початку тіла таблиці, тобто від 0.
+
+
+================================================================================
+1. ВИПРАВИТИ calculateTableRowsGeometry
+================================================================================
+
+Файл:
+src/features/scheme/lib/specification/specificationTableGeometry.js
+
+Зараз у тебе логіка приблизно така:
+
+let currentY = baseRowHeight
+
+const rowPositions = rowHeights.map((height) => {
+  const y = currentY
+  currentY += height
+  return { y, height }
+})
+
+Це неправильно для спільної геометрії, бо rowPositions вже містять зміщення.
+
+Заміни на таку логіку:
+
+export function calculateTableRowsGeometry(
+  rows = [],
+  columns = [],
+  baseRowHeight = 32,
+  fontFamily = 'Roboto Condensed',
+  fontSize = 11
+) {
+  const rowHeights = rows.map((row) =>
+    calculateRowHeight(row, columns, baseRowHeight, fontSize, fontFamily)
+  )
+
+  let currentY = 0
+
+  const rowPositions = rowHeights.map((height) => {
+    const y = currentY
+    currentY += height
+
+    return {
+      y,
+      height,
+    }
+  })
+
+  return {
+    rowPositions,
+    bodyHeight: currentY,
+    finalTableHeight: currentY,
+  }
+}
+
+ВАЖЛИВО:
+- rowPositions[0].y має бути 0.
+- finalTableHeight тут означає тільки висоту тіла таблиці, без titleHeight і headerHeight.
+- Для ясності краще використовувати назву bodyHeight.
+
+
+================================================================================
+2. ВИПРАВИТИ calculateRowHeight
+================================================================================
+
+У calculateRowHeight не додавай випадкові компенсації, які потім треба буде віднімати.
+
+Рекомендований варіант:
+
+const calculateRowHeight = (row, columns, defaultHeight, fontSize, fontFamily) => {
+  let maxHeight = defaultHeight
+
+  columns.forEach((col) => {
+    const textValue = String(row[col.key] || '')
+    if (!textValue) return
+
+    const textNode = new Konva.Text({
+      text: textValue,
+      fontSize,
+      fontFamily: fontFamily || 'Roboto Condensed',
+      width: col.width - 10,
+      wrap: 'word',
+      padding: 0,
+      lineHeight: 1.2,
+    })
+
+    const measuredHeight = textNode.getHeight()
+
+    if (measuredHeight > maxHeight) {
+      maxHeight = measuredHeight
+    }
+
+    textNode.destroy()
+  })
+
+  return Math.max(defaultHeight, Math.ceil(maxHeight + 8))
+}
+
+Пояснення:
+- Konva рахує реальну висоту тексту.
+- +8 дає 4px зверху і 4px знизу.
+- Не треба окремо додавати +12, +fontSize, lineHeight вручну, якщо ти вже використовуєш Konva.Text.getHeight().
+
+
+================================================================================
+3. ВИПРАВИТИ getTableCoordinates
+================================================================================
+
+Файл:
+src/features/scheme/lib/specification/specificationTableGeometry.js
+
+Функція getTableCoordinates має отримувати вже готову повну висоту таблиці.
+
+Зроби її такою:
+
+const MM_TO_PX = 4
+
+export function getTableCoordinates({
+  tableData,
+  frameRect,
+  tableWidth,
+  realTableHeight,
+}) {
+  const frameX = frameRect?.x ?? 0
+  const frameY = frameRect?.y ?? 0
+  const frameWidth = frameRect?.width ?? 1200
+  const frameHeight = frameRect?.height ?? 800
+
+  const padding = 5 * MM_TO_PX
+
+  const defaultStartX = frameX + frameWidth - tableWidth - padding
+  const defaultStartY = frameY + frameHeight - realTableHeight - padding
+
+  const isManual = tableData?.positionMode === 'manual'
+
+  const currentX = isManual
+    ? tableData?.x ?? tableData?.position?.x ?? defaultStartX
+    : defaultStartX
+
+  const currentY = isManual
+    ? tableData?.y ?? tableData?.position?.y ?? defaultStartY
+    : defaultStartY
+
+  return {
+    currentX,
+    currentY,
+  }
+}
+
+Пояснення:
+- Якщо таблиця не перетягувалась вручну, вона завжди притискається до низу рамки.
+- Якщо в майбутньому буде draggable, тоді positionMode: 'manual' дозволить використовувати table.x/table.y.
+- realTableHeight має бути повною висотою таблиці: заголовок + шапка + рядки.
+
+
+================================================================================
+4. ВИПРАВИТИ specificationTableToSvg: РОЗРАХУНОК ВИСОТИ
+================================================================================
+
+Файл:
+src/features/scheme/lib/export/svg/svgSpecificationTables.js
+
+Заміни блок, де ти рахуєш finalTableHeight, extraHeadersHeight, realTableHeight.
+
+НЕ ТРЕБА так:
+
+const extraHeadersHeight = style.titleHeight + style.headerHeight
+const realTableHeight = table.size?.height
+  ? num(table.size.height)
+  : finalTableHeight + extraHeadersHeight - style.rowHeight
+
+Це треба прибрати.
+
+ПРАВИЛЬНО так:
+
+const {
+  rowPositions: rawRowPositions,
+  bodyHeight,
+} = calculateTableRowsGeometry(
+  rows,
+  columns,
+  style.rowHeight,
+  style.fontFamily,
+  style.fontSize
+)
+
+const totalTableHeight =
+  style.titleHeight +
+  style.headerHeight +
+  bodyHeight
+
+const exportFrameRect = scene.frameRect ||
+  options.frameRect ||
+  {
+    x: 0,
+    y: 0,
+    width: num(scene.sheetSize?.width, 1200),
+    height: num(scene.sheetSize?.height, 800),
+  }
+
+const { currentX, currentY } = getTableCoordinates({
+  tableData: table,
+  frameRect: exportFrameRect,
+  tableWidth: width,
+  realTableHeight: totalTableHeight,
+})
+
+const x = currentX
+const y = currentY
+const bodyStartY = y + style.titleHeight + style.headerHeight
+
+const svgRowPositions = rawRowPositions.map((pos) => ({
+  rowY: bodyStartY + pos.y,
+  rowHeight: pos.height,
+}))
+
+ВАЖЛИВО:
+- Не використовуй table.size.height для експорту.
+- Не додавай extraHeadersHeight - style.rowHeight.
+- Не перераховуй rowY через y + extraHeadersHeight + (pos.y - style.rowHeight).
+
+
+================================================================================
+5. ВИПРАВИТИ РЕНДЕР РЯДКІВ У SVG
+================================================================================
+
+Заміни поточний блок:
+
+const { rowY, rowHeight } = svgRowPositions[rowIndex]
+
+Якщо у тебе зараз є:
+
+rowY: y + extraHeadersHeight + (pos.y - style.rowHeight)
+
+це треба прибрати.
+
+Правильний варіант:
+
+rows.forEach((row, rowIndex) => {
+  const { rowY, rowHeight } = svgRowPositions[rowIndex]
+
+  out += `<line ${attrs({
+    x1: x,
+    y1: rowY,
+    x2: x + width,
+    y2: rowY,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  let currentX = x
+
+  for (const column of columns) {
+    const colWidth = num(column.width, 0)
+    const align = column.align || 'left'
+    const value = getCellValue(row, column.key)
+
+    renderCellText({
+      value,
+      x: currentX,
+      y: rowY,
+      width: colWidth,
+      height: rowHeight,
+      align,
+      style,
+    })
+
+    currentX += colWidth
+  }
+})
+
+Нижня лінія таблиці:
+
+out += `<line ${attrs({
+  x1: x,
+  y1: y + totalTableHeight,
+  x2: x + width,
+  y2: y + totalTableHeight,
+  stroke: style.stroke,
+  'stroke-width': style.strokeWidth,
+})} />`
+
+
+================================================================================
+6. ВИПРАВИТИ ВЕРТИКАЛЬНЕ ВИРІВНЮВАННЯ ТЕКСТУ В SVG
+================================================================================
+
+Прибери всі магічні коефіцієнти:
+
+fontSizeNum * 0.82
+fontSizeNum * 0.15
++5
+/fontSizeNum / 1.4
+
+Для SVG стабільніше використовувати dominant-baseline='hanging' і абсолютні y для tspan.
+
+Додай helper:
+
+function renderMultilineText({
+  value,
+  cellX,
+  cellY,
+  cellWidth,
+  cellHeight,
+  align = 'left',
+  style,
+}) {
+  const fontSizeNum = parseFloat(style.fontSize) || 11
+  const lineHeight = fontSizeNum * 1.2
+  const usableWidth = cellWidth - 10
+  const textLines = wrapText(value, usableWidth, fontSizeNum, style.fontFamily)
+
+  if (!textLines.length) return ''
+
+  const textHeight = textLines.length * lineHeight
+  const startY = cellY + (cellHeight - textHeight) / 2
+
+  const x = getTextX(cellX, cellWidth, align, style.paddingX)
+
+  const tspans = textLines
+    .map((line, index) => {
+      return `<tspan ${attrs({
+        x,
+        y: startY + index * lineHeight,
+      })}>${escapeXml(line)}</tspan>`
+    })
+    .join('')
+
+  return `<text ${attrs({
+    'font-family': style.fontFamily,
+    'font-size': style.fontSize,
+    fill: style.textFill,
+    'text-anchor': getTextAnchor(align),
+    'dominant-baseline': 'hanging',
+  })}>${tspans}</text>`
+}
+
+І в циклі рендера комірок використовуй:
+
+out += renderMultilineText({
+  value,
+  cellX: currentX,
+  cellY: rowY,
+  cellWidth: colWidth,
+  cellHeight: rowHeight,
+  align,
+  style,
+})
+
+
+================================================================================
+7. ВИПРАВИТИ РЕНДЕР HEADER-ТЕКСТУ
+================================================================================
+
+Для шапки таблиці використовуй таку саму логіку, тільки cellY = headerY, cellHeight = style.headerHeight.
+
+Приклад:
+
+out += renderMultilineText({
+  value: column.label || column.title || '',
+  cellX,
+  cellY: headerY,
+  cellWidth: colWidth,
+  cellHeight: style.headerHeight,
+  align: column.align || 'center',
+  style: {
+    ...style,
+    fontSize: style.headerFontSize,
+  },
+})
+
+Так ти прибереш проблему, коли заголовок колонки не по центру або при переносі тексту в шапці зміщується.
+
+
+================================================================================
+8. ПЕРЕВІРИТИ РОЗРАХУНОК ШИРИНИ
+================================================================================
+
+У specificationTableToSvg ширина має рахуватися з колонок:
+
+const width = columns.reduce(
+  (sum, column) => sum + num(column.width, 0),
+  0
+)
+
+Не використовуй table.size.width як джерело фактичної ширини, якщо колонки можуть масштабуватись або редагуватись.
+
+
+================================================================================
+9. ЩО ПРИБРАТИ З ПОТОЧНОГО КОДУ
+================================================================================
+
+Потрібно прибрати або більше не використовувати такі речі:
+
+1. extraHeadersHeight - style.rowHeight
+2. pos.y - style.rowHeight
+3. table.size.height як основну висоту для SVG/PDF
+4. startY з коефіцієнтами 0.82, 0.15, +5
+5. Різні формули для одного рядка і для багаторядкового тексту
+6. Будь-яке накопичення rowY, яке стартує з baseRowHeight
+
+
+================================================================================
+10. ЯК ПЕРЕВІРИТИ ПІСЛЯ ВИПРАВЛЕННЯ
+================================================================================
+
+Додай тимчасовий debug перед рендером SVG:
+
+console.table({
+  titleHeight: style.titleHeight,
+  headerHeight: style.headerHeight,
+  bodyHeight,
+  totalTableHeight,
+  tableY: y,
+  bottom: y + totalTableHeight,
+  frameBottom: exportFrameRect.y + exportFrameRect.height,
+})
+
+console.log('rows', svgRowPositions)
+
+Очікуваний результат:
+
+1. Якщо додаєш один рядок:
+   - bodyHeight = висота одного рядка.
+   - totalTableHeight = titleHeight + headerHeight + bodyHeight.
+   - bottom = frameBottom - padding.
+
+2. Якщо додаєш другий рядок з переносом:
+   - bodyHeight збільшується.
+   - totalTableHeight збільшується.
+   - tableY стає меншим, тобто таблиця піднімається вверх.
+   - bottom залишається frameBottom - padding.
+
+3. Якщо додаєш третій рядок:
+   - bottom не має змінюватись.
+   - таблиця має рости вверх, а не вниз.
+
+
+================================================================================
+11. МІНІМАЛЬНИЙ ФІНАЛЬНИЙ ПРИКЛАД СТРУКТУРИ specificationTableToSvg
+================================================================================
+
+export function specificationTableToSvg(table, scene = {}, options = {}) {
+  if (!table) return ''
+
+  const columns = normalizeColumns(table)
+  const rows = getRows(table, scene) || []
+
+  const style = {
+    fontFamily: options.fontFamily || table.style?.fontFamily || 'Roboto Condensed',
+    fontSize: num(table.style?.fontSize, 11),
+    headerFontSize: num(table.style?.headerFontSize, 11),
+    titleFontSize: num(table.style?.titleFontSize, 12),
+    rowHeight: num(table.style?.rowHeight, 32),
+    headerHeight: num(table.style?.headerHeight, 32),
+    titleHeight: table.options?.showTitle === true ? num(table.style?.titleHeight, 28) : 0,
+    paddingX: num(table.style?.paddingX, 6),
+    stroke: table.style?.stroke || '#000000',
+    strokeWidth: num(table.style?.strokeWidth, 1),
+    fill: table.style?.fill || '#ffffff',
+    headerFill: table.style?.headerFill || '#ffffff',
+    titleFill: table.style?.titleFill || '#ffffff',
+    textFill: table.style?.textFill || '#000000',
+  }
+
+  const width = columns.reduce((sum, column) => sum + num(column.width, 0), 0)
+
+  const { rowPositions, bodyHeight } = calculateTableRowsGeometry(
+    rows,
+    columns,
+    style.rowHeight,
+    style.fontFamily,
+    style.fontSize
+  )
+
+  const totalTableHeight = style.titleHeight + style.headerHeight + bodyHeight
+
+  const frameRect = scene.frameRect || options.frameRect || {
+    x: 0,
+    y: 0,
+    width: num(scene.sheetSize?.width, 1200),
+    height: num(scene.sheetSize?.height, 800),
+  }
+
+  const { currentX, currentY } = getTableCoordinates({
+    tableData: table,
+    frameRect,
+    tableWidth: width,
+    realTableHeight: totalTableHeight,
+  })
+
+  const x = currentX
+  const y = currentY
+  const headerY = y + style.titleHeight
+  const bodyStartY = y + style.titleHeight + style.headerHeight
+
+  let out = ''
+
+  out += `<rect ${attrs({
+    x,
+    y,
+    width,
+    height: totalTableHeight,
+    fill: style.fill,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  if (style.titleHeight > 0) {
+    out += `<rect ${attrs({
+      x,
+      y,
+      width,
+      height: style.titleHeight,
+      fill: style.titleFill,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    out += renderMultilineText({
+      value: table.title || 'Специфікація',
+      cellX: x,
+      cellY: y,
+      cellWidth: width,
+      cellHeight: style.titleHeight,
+      align: 'center',
+      style: {
+        ...style,
+        fontSize: style.titleFontSize,
+      },
+    })
+  }
+
+  out += `<rect ${attrs({
+    x,
+    y: headerY,
+    width,
+    height: style.headerHeight,
+    fill: style.headerFill,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  let cellX = x
+
+  for (const column of columns) {
+    const colWidth = num(column.width, 0)
+
+    out += `<line ${attrs({
+      x1: cellX,
+      y1: headerY,
+      x2: cellX,
+      y2: y + totalTableHeight,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    out += renderMultilineText({
+      value: column.label || column.title || '',
+      cellX,
+      cellY: headerY,
+      cellWidth: colWidth,
+      cellHeight: style.headerHeight,
+      align: column.align || 'center',
+      style: {
+        ...style,
+        fontSize: style.headerFontSize,
+      },
+    })
+
+    cellX += colWidth
+  }
+
+  out += `<line ${attrs({
+    x1: x + width,
+    y1: headerY,
+    x2: x + width,
+    y2: y + totalTableHeight,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  rows.forEach((row, rowIndex) => {
+    const pos = rowPositions[rowIndex]
+    const rowY = bodyStartY + pos.y
+    const rowHeight = pos.height
+
+    out += `<line ${attrs({
+      x1: x,
+      y1: rowY,
+      x2: x + width,
+      y2: rowY,
+      stroke: style.stroke,
+      'stroke-width': style.strokeWidth,
+    })} />`
+
+    let currentX = x
+
+    for (const column of columns) {
+      const colWidth = num(column.width, 0)
+      const value = getCellValue(row, column.key)
+
+      out += renderMultilineText({
+        value,
+        cellX: currentX,
+        cellY: rowY,
+        cellWidth: colWidth,
+        cellHeight: rowHeight,
+        align: column.align || 'left',
+        style,
+      })
+
+      currentX += colWidth
+    }
+  })
+
+  out += `<line ${attrs({
+    x1: x,
+    y1: y + totalTableHeight,
+    x2: x + width,
+    y2: y + totalTableHeight,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  return `<g ${attrs({
+    id: table.id || 'specification-table',
+    'data-element-type': 'specification-table',
+  })}>${out}</g>`
+}
+
+
+================================================================================
+12. ПІДСУМОК
+================================================================================
+
+Тобі треба не підбирати коефіцієнти для SVG-тексту, а прибрати змішування координат.
+
+Правильний порядок:
+
+1. Порахувати висоту кожного рядка.
+2. Порахувати bodyHeight.
+3. Порахувати totalTableHeight.
+4. Порахувати tableY від нижньої рамки.
+5. Рендерити рядки від bodyStartY.
+6. Рендерити текст всередині кожної комірки відносно її rowY і rowHeight.
+
+Після цього таблиця буде поводитись однаково:
+- на 1 рядок;
+- на 2 рядки;
+- на рядки з переносом;
+- при збільшенні кількості рядків;
+- при SVG/PDF експорті.

@@ -1,0 +1,218 @@
+Таке зміщення майже точно виникає через **подвійний/різний розрахунок висоти рядків**.
+
+У тебе зараз є небезпечна логіка:
+
+```js
+finalTableHeight + extraHeadersHeight - style.rowHeight
+```
+
+і потім ще:
+
+```js
+rowY: y + extraHeadersHeight + (pos.y - style.rowHeight)
+```
+
+Це виглядає як компенсація “на око”. Саме вона й дає ефект: 1 рядок нормально, 2 рядки — з’їжджає, 3 рядки — вилазить за аркуш.
+
+Правильна схема має бути така:
+
+```js
+bodyHeight = sum(rowHeights)
+
+totalTableHeight =
+  titleHeight +
+  headerHeight +
+  bodyHeight
+
+tableY =
+  frameY + frameHeight - totalTableHeight - padding
+```
+
+І далі рядки:
+
+```js
+let rowY = tableY + titleHeight + headerHeight
+
+for (row of rows) {
+  drawRow(rowY, rowHeight)
+  rowY += rowHeight
+}
+```
+
+Без `- style.rowHeight`, без `extraHeadersHeight - rowHeight`, без додаткових зміщень.
+
+---
+
+У твоєму випадку треба переробити `calculateTableRowsGeometry`.
+
+Не так:
+
+```js
+let currentY = baseRowHeight
+
+const rowPositions = rowHeights.map((height) => {
+  const y = currentY
+  currentY += height
+  return { y, height }
+})
+```
+
+А так:
+
+```js
+export function calculateTableRowsGeometry(rows, columns, baseRowHeight, fontFamily, fontSize = 11) {
+  const rowHeights = rows.map((row) =>
+    calculateRowHeight(row, columns, baseRowHeight, fontSize, fontFamily)
+  )
+
+  let currentY = 0
+
+  const rowPositions = rowHeights.map((height) => {
+    const y = currentY
+    currentY += height
+    return { y, height }
+  })
+
+  return {
+    rowPositions,
+    bodyHeight: currentY,
+  }
+}
+```
+
+Тобто `rowPositions` мають бути **відносно тіла таблиці**, а не відносно шапки.
+
+---
+
+В `specificationTableToSvg` має бути так:
+
+```js
+const { rowPositions, bodyHeight } = calculateTableRowsGeometry(
+  rows,
+  columns,
+  style.rowHeight,
+  style.fontFamily,
+  style.fontSize
+)
+
+const totalTableHeight =
+  style.titleHeight +
+  style.headerHeight +
+  bodyHeight
+
+const { currentX, currentY } = getTableCoordinates({
+  tableData: table,
+  frameRect: exportFrameRect,
+  tableWidth: width,
+  realTableHeight: totalTableHeight,
+})
+
+const x = currentX
+const y = currentY
+
+const bodyStartY = y + style.titleHeight + style.headerHeight
+```
+
+А рендер рядків:
+
+```js
+rows.forEach((row, rowIndex) => {
+  const pos = rowPositions[rowIndex]
+
+  const rowY = bodyStartY + pos.y
+  const rowHeight = pos.height
+
+  // line
+  out += `<line ${attrs({
+    x1: x,
+    y1: rowY,
+    x2: x + width,
+    y2: rowY,
+    stroke: style.stroke,
+    'stroke-width': style.strokeWidth,
+  })} />`
+
+  // cells...
+})
+```
+
+Нижня лінія:
+
+```js
+out += `<line ${attrs({
+  x1: x,
+  y1: y + totalTableHeight,
+  x2: x + width,
+  y2: y + totalTableHeight,
+  stroke: style.stroke,
+  'stroke-width': style.strokeWidth,
+})} />`
+```
+
+---
+
+Також прибери це:
+
+```js
+const realTableHeight = table.size?.height
+  ? num(table.size.height)
+  : finalTableHeight + extraHeadersHeight - style.rowHeight
+```
+
+Має бути:
+
+```js
+const realTableHeight = totalTableHeight
+```
+
+А `table.size.height` краще не використовувати для експорту, бо воно може бути застарілим після переносів тексту.
+
+---
+
+Для SVG-тексту в комірках не треба підбирати `0.82`, `0.15`, `+5`. Краще так:
+
+```js
+const lineHeight = fontSizeNum * 1.2
+const totalTextHeight =
+  textLines.length * lineHeight
+
+const startY =
+  rowY + (rowHeight - totalTextHeight) / 2
+```
+
+І `tspan`:
+
+```js
+const tspanElements = textLines.map((line, index) => {
+  return `<tspan ${attrs({
+    x: getTextX(currentX, colWidth, align, style.paddingX),
+    y: startY + index * lineHeight,
+  })}>${escapeXml(line)}</tspan>`
+}).join('')
+```
+
+А сам `<text>`:
+
+```js
+out += `<text ${attrs({
+  'font-family': style.fontFamily,
+  'font-size': style.fontSize,
+  fill: style.textFill,
+  'text-anchor': getTextAnchor(align),
+  'dominant-baseline': 'hanging',
+})}>${tspanElements}</text>`
+```
+
+---
+
+Головне виправлення:
+
+```txt
+rowPositions рахуються від 0
+bodyStartY = tableY + titleHeight + headerHeight
+rowY = bodyStartY + rowPositions[index].y
+totalTableHeight = titleHeight + headerHeight + bodyHeight
+tableY = frameBottom - totalTableHeight - padding
+```
+
+Зараз у тебе змішані координати: частина рахується від шапки, частина від всієї таблиці, а потім це компенсується через `- style.rowHeight`. Через це при кожному новому рядку похибка накопичується.
