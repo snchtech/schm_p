@@ -1,0 +1,259 @@
+Таку логіку краще винести в **єдину функцію геометрії**, яку використовують і `Layer`, і `SVG export`.
+
+Проблема зараз у тебе тут:
+
+```js
+y: num(options.y, pageHeight - 180)
+```
+
+Це фіксована висота. Тому блок приміток стає “десь внизу”, але не враховує:
+
+1. висоту самої таблиці приміток;
+2. висоту таблиці специфікації;
+3. нижній відступ рамки;
+4. чи блок уже був переміщений мишкою.
+
+Правильна формула має бути така:
+
+```js
+notesY = specTableY - notesHeight - gap
+```
+
+А якщо специфікації немає:
+
+```js
+notesY = pageBottom - notesHeight
+```
+
+Тобто примітки мають “притискатися” не своїм верхом, а **низом**.
+
+---
+
+## Як я б зробив
+
+Створи файл, наприклад:
+
+```txt
+src/features/scheme/lib/export/geometry/notesGeometry.js
+```
+
+```js
+export function getNotesGeometry(scene = {}, options = {}) {
+  const page = scene.page || {}
+
+  const pageWidth = Number(scene.width || page.width || 1200)
+  const pageHeight = Number(scene.height || page.height || 800)
+
+  const marginRight = Number(options.marginRight ?? 5)
+  const marginBottom = Number(options.marginBottom ?? 5)
+
+  const gap = Number(options.gap ?? 8)
+
+  const defaultWidth = Number(options.width ?? 360)
+
+  const notesBlock = scene.notesBlock || {}
+
+  const specTable = Array.isArray(scene.specificationTables)
+    ? scene.specificationTables[0]
+    : null
+
+  const specX = specTable?.x ?? specTable?.position?.x
+  const specY = specTable?.y ?? specTable?.position?.y
+  const specWidth = specTable?.width ?? specTable?.size?.width
+  const specHeight = specTable?.height ?? specTable?.size?.height
+
+  const width = Number(
+    notesBlock.width ??
+    specWidth ??
+    defaultWidth
+  )
+
+  const height = Number(
+    notesBlock.height ??
+    options.height ??
+    90
+  )
+
+  const defaultX = Number(
+    specX ??
+    pageWidth - marginRight - width
+  )
+
+  let defaultY
+
+  if (specTable) {
+    const specificationTop = Number(
+      specY ??
+      pageHeight - marginBottom - Number(specHeight || 160)
+    )
+
+    defaultY = specificationTop - height - gap
+  } else {
+    defaultY = pageHeight - marginBottom - height
+  }
+
+  const x = Number(notesBlock.x ?? defaultX)
+  const y = Number(notesBlock.y ?? defaultY)
+
+  return {
+    x,
+    y,
+    width,
+    height,
+  }
+}
+```
+
+---
+
+## Головна ідея
+
+Якщо користувач **ще не рухав** блок приміток, тоді координати автоматичні:
+
+```js
+x = справа
+y = над специфікацією
+```
+
+Якщо користувач **перетягнув мишкою**, тоді в `scene.notesBlock` зберігаються:
+
+```js
+notesBlock: {
+  x: 720,
+  y: 480,
+  width: 360,
+  height: 120
+}
+```
+
+І тоді автоматичний розрахунок більше не застосовується.
+
+---
+
+## У Layer треба використовувати ту саму функцію
+
+У `PaperNotesLayer.js`:
+
+```js
+import { getNotesGeometry } from '@/features/scheme/lib/export/geometry/notesGeometry'
+
+const geometry = getNotesGeometry(scene)
+
+<Group
+  x={geometry.x}
+  y={geometry.y}
+  draggable
+  onDragEnd={(e) => {
+    updateNotesBlock({
+      x: e.target.x(),
+      y: e.target.y(),
+      width: geometry.width,
+      height: geometry.height,
+    })
+  }}
+>
+  ...
+</Group>
+```
+
+Тобто `Layer` не має сам рахувати `pageHeight - 180`.
+
+---
+
+## У SVG export теж саме
+
+У `svgNotes.js`:
+
+```js
+import { getNotesGeometry } from '../geometry/notesGeometry'
+
+export function notesToSvg(notes = [], scene = {}, options = {}) {
+  const layout = getNotesGeometry(scene, options)
+
+  const x = layout.x
+  const y = layout.y
+  const blockWidth = layout.width
+  const blockHeight = layout.height
+
+  ...
+}
+```
+
+Тоді canvas і SVG завжди будуть однакові.
+
+---
+
+## Що конкретно виправити у твоєму коді
+
+Оцей фрагмент:
+
+```js
+const pageHeight = num(scene.height, num(scene.page?.height, 800))
+
+return {
+  x: num(options.x, 40),
+  y: num(options.y, pageHeight - 180),
+  width: num(options.width, 360),
+  height: num(options.height, 90),
+}
+```
+
+замінити на логіку:
+
+```js
+const pageWidth = num(scene.width, num(scene.page?.width, 1200))
+const pageHeight = num(scene.height, num(scene.page?.height, 800))
+
+const notesBlock = scene.notesBlock || {}
+
+const specTable = Array.isArray(scene.specificationTables)
+  ? scene.specificationTables[0]
+  : null
+
+const blockWidth = num(
+  notesBlock.width,
+  specTable?.size?.width,
+  360
+)
+
+const blockHeight = num(
+  notesBlock.height,
+  options.height,
+  90
+)
+
+const marginRight = 5
+const marginBottom = 5
+const gap = 8
+
+const defaultX =
+  specTable?.x !== undefined
+    ? Number(specTable.x)
+    : pageWidth - marginRight - blockWidth
+
+const specY =
+  specTable?.y !== undefined
+    ? Number(specTable.y)
+    : pageHeight - marginBottom - num(specTable?.size?.height, 160)
+
+const defaultY = specTable
+  ? specY - blockHeight - gap
+  : pageHeight - marginBottom - blockHeight
+
+return {
+  x: num(notesBlock.x, defaultX),
+  y: num(notesBlock.y, defaultY),
+  width: blockWidth,
+  height: blockHeight,
+}
+```
+
+---
+
+Найважливіше: **не ставити `y = pageHeight - 180`**. Треба ставити:
+
+```js
+y = bottomTarget - actualBlockHeight
+```
+
+Бо блок приміток має вирівнюватися по низу або стояти над специфікацією.

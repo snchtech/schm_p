@@ -1,0 +1,513 @@
+ПАКЕТ: Централізована геометрія для блоку приміток
+====================================================
+
+Мета пакету
+-----------
+Зробити так, щоб блок «Примітки» мав однакову геометрію на Canvas Layer і в SVG/PDF export.
+
+Правила розміщення:
+1. Якщо є таблиця специфікації — примітки автоматично стають НАД нею.
+2. Якщо таблиці специфікації немає — примітки стають справа внизу аркуша.
+3. Якщо користувач перетягнув блок мишкою — використовуються збережені координати notesBlock.x/y.
+4. І Canvas, і SVG export беруть координати з однієї функції getNotesGeometry().
+
+
+СТРУКТУРА ФАЙЛІВ
+----------------
+
+Додати файл:
+
+src/features/scheme/lib/export/geometry/notesGeometry.js
+
+Внести зміни у:
+
+src/features/scheme/lib/export/svg/svgNotes.js
+src/features/scheme/ui/canvas/layers/PaperNotesLayer.js
+src/features/scheme/store/useCanvasStore.js
+
+Назви шляхів можеш адаптувати під свій проєкт.
+
+
+====================================================
+1. ФАЙЛ notesGeometry.js
+====================================================
+
+Створити файл:
+
+src/features/scheme/lib/export/geometry/notesGeometry.js
+
+Код:
+
+----------------------------------------------------
+
+function num(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue
+
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+
+  return 0
+}
+
+function readPosition(entity = {}) {
+  return {
+    x: entity.x ?? entity.position?.x,
+    y: entity.y ?? entity.position?.y,
+  }
+}
+
+function readSize(entity = {}) {
+  return {
+    width: entity.width ?? entity.size?.width ?? entity.data?.width,
+    height: entity.height ?? entity.size?.height ?? entity.data?.height,
+  }
+}
+
+export function getFirstSpecificationTable(scene = {}) {
+  if (Array.isArray(scene.specificationTables) && scene.specificationTables.length > 0) {
+    return scene.specificationTables[0]
+  }
+
+  if (scene.specificationTable) {
+    return scene.specificationTable
+  }
+
+  return null
+}
+
+export function getNotesGeometry(scene = {}, options = {}) {
+  const page = scene.page || {}
+
+  const pageWidth = num(scene.width, page.width, options.pageWidth, 1200)
+  const pageHeight = num(scene.height, page.height, options.pageHeight, 800)
+
+  const marginRight = num(options.marginRight, 5)
+  const marginBottom = num(options.marginBottom, 5)
+  const gap = num(options.gap, 8)
+
+  const fallbackWidth = num(options.width, 360)
+  const fallbackHeight = num(options.height, 90)
+
+  const notesBlock = scene.notesBlock || {}
+  const specTable = getFirstSpecificationTable(scene)
+
+  const specPosition = readPosition(specTable || {})
+  const specSize = readSize(specTable || {})
+
+  const notesWidth = num(
+    notesBlock.width,
+    notesBlock.size?.width,
+    specSize.width,
+    fallbackWidth
+  )
+
+  const notesHeight = num(
+    notesBlock.height,
+    notesBlock.size?.height,
+    options.height,
+    fallbackHeight
+  )
+
+  const defaultX = specTable
+    ? num(specPosition.x, pageWidth - marginRight - notesWidth)
+    : pageWidth - marginRight - notesWidth
+
+  let defaultY
+
+  if (specTable) {
+    const specHeight = num(specSize.height, options.specFallbackHeight, 160)
+    const specY = num(
+      specPosition.y,
+      pageHeight - marginBottom - specHeight
+    )
+
+    defaultY = specY - notesHeight - gap
+  } else {
+    defaultY = pageHeight - marginBottom - notesHeight
+  }
+
+  const x = num(notesBlock.x, notesBlock.position?.x, defaultX)
+  const y = num(notesBlock.y, notesBlock.position?.y, defaultY)
+
+  return {
+    x,
+    y,
+    width: notesWidth,
+    height: notesHeight,
+    pageWidth,
+    pageHeight,
+    gap,
+    hasSpecificationTable: Boolean(specTable),
+  }
+}
+
+export function updateNotesBlockAfterDrag(scene = {}, position = {}, currentGeometry = {}) {
+  return {
+    ...(scene.notesBlock || {}),
+    x: num(position.x, currentGeometry.x),
+    y: num(position.y, currentGeometry.y),
+    width: num(currentGeometry.width, scene.notesBlock?.width, 360),
+    height: num(currentGeometry.height, scene.notesBlock?.height, 90),
+    manuallyPositioned: true,
+  }
+}
+
+----------------------------------------------------
+
+
+====================================================
+2. ВИКОРИСТАННЯ У svgNotes.js
+====================================================
+
+У файлі:
+
+src/features/scheme/lib/export/svg/svgNotes.js
+
+прибрати локальний розрахунок типу:
+
+----------------------------------------------------
+const pageHeight = num(scene.height, num(scene.page?.height, 800))
+
+return {
+  x: num(options.x, 40),
+  y: num(options.y, pageHeight - 180),
+  width: num(options.width, 360),
+  height: num(options.height, 90),
+}
+----------------------------------------------------
+
+і замінити на централізовану геометрію.
+
+На початку файлу додати:
+
+----------------------------------------------------
+import { getNotesGeometry } from '../geometry/notesGeometry'
+----------------------------------------------------
+
+Далі у notesToSvg:
+
+----------------------------------------------------
+export function notesToSvg(notes = [], scene = {}, options = {}) {
+  if (options.includeNotes === false) return ''
+
+  const list = normalizeNotes(notes)
+  if (list.length === 0) return ''
+
+  const layout = getNotesGeometry(scene, options)
+
+  const x = layout.x
+  const y = layout.y
+  const blockWidth = layout.width
+  const blockHeight = layout.height
+
+  // далі залишаєш свою поточну логіку рендера SVG,
+  // але замість локальних x/y/width/height використовуєш layout
+}
+----------------------------------------------------
+
+Важливо:
+- не дублювати розрахунок y;
+- не ставити pageHeight - 180;
+- SVG має брати ті самі x/y/width/height, що і Canvas.
+
+
+====================================================
+3. ВИКОРИСТАННЯ У PaperNotesLayer.js
+====================================================
+
+У файлі Canvas Layer:
+
+src/features/scheme/ui/canvas/layers/PaperNotesLayer.js
+
+додати імпорт:
+
+----------------------------------------------------
+import { getNotesGeometry, updateNotesBlockAfterDrag } from '@/features/scheme/lib/export/geometry/notesGeometry'
+----------------------------------------------------
+
+У компоненті отримати scene і метод оновлення notesBlock зі store.
+
+Приклад:
+
+----------------------------------------------------
+const notes = useCanvasStore((state) => state.notes)
+const scene = useCanvasStore((state) => ({
+  width: state.width,
+  height: state.height,
+  page: state.page,
+  notesBlock: state.notesBlock,
+  specificationTables: state.specificationTables,
+}))
+
+const setNotesBlock = useCanvasStore((state) => state.setNotesBlock)
+
+const layout = getNotesGeometry(scene, {
+  width: 360,
+  height: 90,
+  marginRight: 5,
+  marginBottom: 5,
+  gap: 8,
+})
+----------------------------------------------------
+
+Далі Group для приміток:
+
+----------------------------------------------------
+<Group
+  x={layout.x}
+  y={layout.y}
+  draggable
+  onDragEnd={(e) => {
+    const nextNotesBlock = updateNotesBlockAfterDrag(
+      scene,
+      {
+        x: e.target.x(),
+        y: e.target.y(),
+      },
+      layout
+    )
+
+    setNotesBlock(nextNotesBlock)
+  }}
+>
+  {/* поточний рендер прямокутника, заголовка і тексту приміток */}
+</Group>
+----------------------------------------------------
+
+Важливо:
+- всередині Group малювати елементи відносно 0,0;
+- тобто Rect має бути x={0}, y={0};
+- Text також має бути відносно блоку;
+- координати самого блоку задає Group.
+
+Правильно:
+
+----------------------------------------------------
+<Group x={layout.x} y={layout.y}>
+  <Rect x={0} y={0} width={layout.width} height={layout.height} />
+  <Text x={0} y={0} width={layout.width} text="Примітки" />
+</Group>
+----------------------------------------------------
+
+Неправильно:
+
+----------------------------------------------------
+<Group x={layout.x} y={layout.y}>
+  <Rect x={layout.x} y={layout.y} ... />
+</Group>
+----------------------------------------------------
+
+Бо тоді координати будуть застосовані двічі.
+
+
+====================================================
+4. ОНОВЛЕННЯ useCanvasStore.js
+====================================================
+
+У store додати поле:
+
+----------------------------------------------------
+notesBlock: null,
+----------------------------------------------------
+
+або:
+
+----------------------------------------------------
+notesBlock: {
+  x: undefined,
+  y: undefined,
+  width: 360,
+  height: 90,
+  manuallyPositioned: false,
+},
+----------------------------------------------------
+
+Додати action:
+
+----------------------------------------------------
+setNotesBlock: (notesBlock) =>
+  set((state) => ({
+    notesBlock: {
+      ...(state.notesBlock || {}),
+      ...(notesBlock || {}),
+    },
+  })),
+----------------------------------------------------
+
+Якщо у тебе використовується інша структура scene.geometry.notesArea, можна зберігати там. Головне, щоб Layer і SVG export читали одне й те саме поле.
+
+
+====================================================
+5. ЯК МАЄ ВИГЛЯДАТИ scene
+====================================================
+
+Приклад сцени без ручного переміщення:
+
+----------------------------------------------------
+{
+  width: 1200,
+  height: 800,
+  page: {
+    width: 1200,
+    height: 800
+  },
+  specificationTables: [
+    {
+      x: 835,
+      y: 610,
+      size: {
+        width: 360,
+        height: 160
+      }
+    }
+  ],
+  notesBlock: {
+    width: 360,
+    height: 90
+  }
+}
+----------------------------------------------------
+
+Результат:
+
+----------------------------------------------------
+notes.x = 835
+notes.y = 610 - 90 - 8 = 512
+----------------------------------------------------
+
+Тобто примітки стануть прямо над таблицею специфікації.
+
+
+Приклад після ручного переміщення:
+
+----------------------------------------------------
+{
+  notesBlock: {
+    x: 700,
+    y: 420,
+    width: 360,
+    height: 90,
+    manuallyPositioned: true
+  }
+}
+----------------------------------------------------
+
+Результат:
+
+----------------------------------------------------
+notes.x = 700
+notes.y = 420
+----------------------------------------------------
+
+Автоматичне розміщення вже не перетирає ручні координати.
+
+
+====================================================
+6. ЯКЩО ВИСОТА ПРИМІТОК ДИНАМІЧНА
+====================================================
+
+Якщо висота залежить від кількості рядків, краще додати окрему функцію:
+
+----------------------------------------------------
+export function calculateNotesHeight(notes = [], options = {}) {
+  const titleHeight = num(options.titleHeight, 22)
+  const rowHeight = num(options.rowHeight, 14)
+  const gap = num(options.noteGap, 12)
+  const minHeight = num(options.minHeight, 90)
+
+  if (!Array.isArray(notes) || notes.length === 0) return minHeight
+
+  const estimatedRows = notes.length
+  const height = titleHeight + estimatedRows * rowHeight + Math.max(0, estimatedRows - 1) * gap + 12
+
+  return Math.max(minHeight, height)
+}
+----------------------------------------------------
+
+Тоді перед getNotesGeometry можна передати height:
+
+----------------------------------------------------
+const dynamicHeight = calculateNotesHeight(notes, {
+  minHeight: 90,
+  rowHeight: 14,
+  titleHeight: 22,
+  noteGap: 12,
+})
+
+const layout = getNotesGeometry(scene, {
+  height: dynamicHeight,
+})
+----------------------------------------------------
+
+Але якщо у тебе вже є точний розрахунок висоти всередині notesToSvg або Layer, краще винести його також у спільну geometry-функцію, щоб не було різниці між Canvas і SVG.
+
+
+====================================================
+7. ГОЛОВНЕ ПРАВИЛО ДЛЯ ТВОГО ВИПАДКУ
+====================================================
+
+Не використовувати:
+
+----------------------------------------------------
+y = pageHeight - 180
+----------------------------------------------------
+
+Правильно:
+
+----------------------------------------------------
+якщо є специфікація:
+  y = specificationTable.y - notesHeight - gap
+
+якщо специфікації немає:
+  y = pageHeight - marginBottom - notesHeight
+----------------------------------------------------
+
+Тобто блок приміток треба позиціонувати не по верхній фіксованій координаті, а по нижньому краю відносно аркуша або відносно таблиці специфікації.
+
+
+====================================================
+8. ПЕРЕВІРКА ПІСЛЯ ВПРОВАДЖЕННЯ
+====================================================
+
+1. Додати одну примітку.
+   Очікування: блок справа внизу або над специфікацією.
+
+2. Додати таблицю специфікації.
+   Очікування: примітки автоматично стануть над нею.
+
+3. Перемістити примітки мишкою.
+   Очікування: координати збережуться у notesBlock.x/y.
+
+4. Зробити SVG/PDF export.
+   Очікування: примітки будуть у тому самому місці, що і на Canvas.
+
+5. Змінити формат A4/A3.
+   Очікування: якщо notesBlock не має ручних координат, блок перерахується відносно нового розміру аркуша.
+
+
+====================================================
+9. ДОДАТКОВО: СКИДАННЯ РУЧНОГО ПОЛОЖЕННЯ
+====================================================
+
+Можна додати кнопку «Повернути примітки на місце».
+
+Action у store:
+
+----------------------------------------------------
+resetNotesBlockPosition: () =>
+  set((state) => ({
+    notesBlock: {
+      ...(state.notesBlock || {}),
+      x: undefined,
+      y: undefined,
+      manuallyPositioned: false,
+    },
+  })),
+----------------------------------------------------
+
+Після цього getNotesGeometry знову автоматично поставить блок:
+- над специфікацією;
+- або справа внизу аркуша.
+
