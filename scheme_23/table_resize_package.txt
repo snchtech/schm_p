@@ -1,0 +1,297 @@
+=== 1. ОНОВЛЕННЯ ДЛЯ ZUSTAND STORE (Actions) ===
+
+Додайте або оновіть у вашому Zustand сторі (наприклад, у `useCanvasStore`) метод для зміни ширини колонок або загальної ширини таблиці.
+Оскільки у вас вже є метод `updateTableGeometry`, ми можемо розширити логіку, або додати окремий екшен для інтерактивного ресайзу колонок (що набагато зручніше для специфікацій).
+
+Варіант А: Збереження кастомних ширин колонок у геометрії таблиці стору:
+```typescript
+// Додайте в інтерфейс таблиці поле columnWidths?: { [key: string]: number }
+
+updateColumnWidth: (tableId: string, columnKey: string, newWidth: number) => {
+  set((state) => ({
+    specificationTables: (state.specificationTables || []).map((table) => {
+      if (table.id === tableId) {
+        const currentWidths = table.columnWidths || {};
+        const updatedWidths = { ...currentWidths, [columnKey]: Math.max(30, newWidth) };
+        
+        // Перераховуємо загальну ширину таблиці на основі базових ширин та кастомних змін
+        const totalWidth = DEFAULT_SPEC_COLUMNS.reduce((sum, col) => {
+          return sum + (updatedWidths[col.key] || col.width);
+        }, 0);
+
+        return {
+          ...table,
+          columnWidths: updatedWidths,
+          size: {
+            ...table.size,
+            width: totalWidth
+          }
+        };
+      }
+      return table;
+    })
+  }));
+}
+```
+
+
+=== 2. МОДИФІКОВАНИЙ КОМПОНЕНТ SpecificationTableShape ===
+
+Нижче наведено готовий код з інтеграцією ресайз-хедлерів (повзунків) для кожної колонки у шапці таблиці. Користувач зможе потягнути за край колонки, щоб змінити її ширину!
+
+```tsx
+import React, { useRef, useState, useMemo, useEffect } from 'react';
+import { Group, Rect, Text, Circle } from 'react-konva';
+
+export function SpecificationTableShape({ frameRect }) {
+  const groupRef = useRef(null);
+  
+  // Дістаємо дані зі стору
+  const rows = useCanvasStore((s) => s.tableRows || []);
+  const tableData = useCanvasStore((s) => s.specificationTables?.[0]); // або за ID
+  const updateTableGeometry = useCanvasStore((s) => s.updateTableGeometry);
+  const updateColumnWidth = useCanvasStore((s) => s.updateColumnWidth); // наш новий екшен
+  
+  const [isTableHovered, setIsTableHovered] = useState(false);
+  const [resizingColKey, setResizingColKey] = useState<string | null>(null);
+  const [startX, setStartX] = useState(0);
+  const [startWidth, setStartWidth] = useState(0);
+
+  if (rows.length === 0) return null;
+
+  const tableId = tableData?.id || 'main-spec-table';
+  const currentRowsHeight = Number(tableData?.style?.rowHeight ?? 32);
+
+  // Динамічно вираховуємо ширину кожної колонки з урахуванням кастомних змін зі стору
+  const columnsWithWidths = useMemo(() => {
+    return DEFAULT_SPEC_COLUMNS.map(col => ({
+      ...col,
+      width: tableData?.columnWidths?.[col.key] || col.width
+    }));
+  }, [tableData?.columnWidths]);
+
+  // Загальна ширина таблиці тепер динамічна
+  const tableWidth = useMemo(() => {
+    return columnsWithWidths.reduce((sum, col) => sum + col.width, 0);
+  }, [columnsWithWidths]);
+
+  // 1. Обчислюємо геометрію рядків та фінальну висоту
+  const { rowPositions, finalTableHeight } = useMemo(() => {
+    const fontFamily = tableData?.style?.fontFamily || 'Roboto Condensed';
+    return calculateTableRowsGeometry(rows, columnsWithWidths, currentRowsHeight);
+  }, [rows, columnsWithWidths, currentRowsHeight, tableData]);
+
+  const realTableHeight = tableData?.size?.height ? Number(tableData.size.height) : finalTableHeight;
+
+  // 2. Обчислюємо точні координати прив'язки
+  const { currentX, currentY } = useMemo(() => {
+    return getTableCoordinates({ tableData, frameRect, tableWidth, realTableHeight });
+  }, [tableData, frameRect, tableWidth, realTableHeight]);
+
+  // Хендлер для початку перетягування межі колонки (Resize Start)
+  const handleResizeStart = (e: any, colKey: string, currentWidth: number) => {
+    e.cancelBubble = true; // Зупиняємо drag всієї таблиці
+    setResizingColKey(colKey);
+    
+    const stage = e.target.getStage();
+    const pointerPos = stage.getPointerPosition();
+    if (pointerPos) {
+      setStartX(pointerPos.x);
+      setStartWidth(currentWidth);
+    }
+  };
+
+  // Глобальне відслідковування руху миші під час ресайзу
+  useEffect(() => {
+    if (!resizingColKey) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const stage = groupRef.current?.getStage();
+      if (!stage) return;
+      
+      const pointerPos = stage.getPointerPosition();
+      if (pointerPos) {
+        const deltaX = pointerPos.x - startX;
+        // Можна застосувати коефіцієнт зуму сцени, якщо у вас є функція масштабування (zoom):
+        // const zoom = stage.scaleX();
+        // const actualDeltaX = deltaX / zoom;
+        
+        const newWidth = Math.max(40, startWidth + deltaX);
+        updateColumnWidth(tableId, resizingColKey, newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setResizingColKey(null);
+      document.body.style.cursor = 'default';
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [resizingColKey, startX, startWidth, tableId]);
+
+  return (
+    <Group
+      ref={groupRef}
+      x={currentX}
+      y={currentY}
+      draggable={resizingColKey === null} // вимикаємо drag таблиці під час ресайзу колонок
+      onMouseEnter={() => setIsTableHovered(true)}
+      onMouseLeave={(e) => {
+        if (!resizingColKey) {
+          setIsTableHovered(false);
+          const stage = e.target.getStage();
+          if (stage) stage.container().style.cursor = 'default';
+        }
+      }}
+      onMouseMove={(e) => {
+        if (resizingColKey) return;
+        const stage = e.target.getStage();
+        if (!stage) return;
+
+        // Ваша стара логіка зміни курсору на 'move' для шапки
+        const localY = e.target.y();
+        if (localY >= 0 && localY <= currentRowsHeight) {
+          stage.container().style.cursor = 'move';
+        } else {
+          stage.container().style.cursor = 'default';
+        }
+      }}
+      onDragEnd={(e) => {
+        if (e.target !== groupRef.current) return;
+        const node = e.target;
+        
+        updateTableGeometry(tableId, {
+          x: node.x(),
+          y: node.y(),
+          width: tableWidth,
+          height: realTableHeight,
+          isUserDragged: true
+        });
+      }}
+    >
+      {/* ШАПКА ТАБЛИЦІ */}
+      {(() => {
+        let currentXOffset = 0;
+        return columnsWithWidths.map((col, colIndex) => {
+          const colX = currentXOffset;
+          currentXOffset += col.width;
+          const isFirstColumn = colIndex === 0;
+
+          return (
+            <Group key={`head-group-${col.key || colIndex}`}>
+              {/* Комірка шапки */}
+              <Rect
+                x={colX}
+                y={0}
+                width={col.width}
+                height={currentRowsHeight}
+                stroke="black"
+                strokeWidth={1}
+                fill="#f5f5f5"
+              />
+
+              {/* Текст шапки з вашим вирівнюванням */}
+              <Text
+                x={colX + (isFirstColumn && isTableHovered ? 20 : 10)}
+                y={currentRowsHeight / 2 - 6}
+                width={col.width - (isFirstColumn && isTableHovered ? 30 : 20)}
+                text={col.label || ''}
+                fontSize={11}
+                fontStyle="bold"
+                fontFamily="Roboto Condensed"
+                fill="black"
+                align="center"
+                wrap="word"
+                ellipsis={true}
+              />
+
+              {/* Grip Handle Іконка (крапки для перетягування всієї таблиці) */}
+              {isFirstColumn && isTableHovered && (
+                <Group x={colX + 6} y={currentRowsHeight / 2 - 8}>
+                  <Circle x={0} y={3} radius={1.2} fill="#888888" />
+                  <Circle x={0} y={8} radius={1.2} fill="#888888" />
+                  <Circle x={0} y={13} radius={1.2} fill="#888888" />
+                  <Circle x={4} y={3} radius={1.2} fill="#888888" />
+                  <Circle x={4} y={8} radius={1.2} fill="#888888" />
+                  <Circle x={4} y={13} radius={1.2} fill="#888888" />
+                </Group>
+              )}
+
+              {/* ІНТЕРАКТИВНА ЗОНА ДЛЯ ЗМІНИ ШИРИНИ (RESIZE HANDLE) */}
+              <Rect
+                x={colX + col.width - 4} // розміщуємо на правій межі колонки
+                y={0}
+                width={8}
+                height={currentRowsHeight}
+                fill="transparent"
+                style={{ cursor: 'col-resize' }}
+                onMouseEnter={(e) => {
+                  const stage = e.target.getStage();
+                  if (stage) stage.container().style.cursor = 'col-resize';
+                }}
+                onMouseLeave={(e) => {
+                  if (!resizingColKey) {
+                    const stage = e.target.getStage();
+                    if (stage) stage.container().style.cursor = 'default';
+                  }
+                }}
+                onMouseDown={(e) => handleResizeStart(e, col.key, col.width)}
+              />
+            </Group>
+          );
+        });
+      })()}
+
+      {/* РЯДКИ З ДАНИМИ (використовують оновлені динамічні ширини) */}
+      {rows.map((row, rowIndex) => {
+        const { rowY, height: calculatedHeight } = rowPositions[rowIndex];
+        let currentXOffset = 0;
+        const rowKey = row.id || row.position || `row-idx-${rowIndex}`;
+
+        return (
+          <Group key={`row-group-${rowKey}`} y={rowY}>
+            {columnsWithWidths.map((col, colIndex) => {
+              const colX = currentXOffset;
+              currentXOffset += col.width;
+              const value = String(row[col.key] || '');
+
+              return (
+                <Group key={`cell-group-${rowKey}-${col.key || colIndex}`}>
+                  {/* Границі комірки */}
+                  <Rect
+                    x={colX}
+                    y={0}
+                    width={col.width}
+                    height={calculatedHeight}
+                    stroke="black"
+                    strokeWidth={1}
+                    fill="white"
+                  />
+                  
+                  {/* Текст комірки */}
+                  <Text
+                    x={colX + 5}
+                    y={4} // Або ваша логіка вирівнювання alignedRowY
+                    width={col.width - 10}
+                    text={value}
+                    fontSize={11}
+                    fontFamily="Roboto Condensed"
+                    fill="black"
+                    align={col.align || 'left'}
+                    wrap="word"
+                  />
+                </Group>
+              );
+            })}
+          </Group>
+        );
+      })}
+    </Group>
+  );
+}
+```

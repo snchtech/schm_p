@@ -1,0 +1,168 @@
+=== ОПТИМІЗАЦІЯ UI ТА ВИПРАВЛЕННЯ БАГУ ЗМІНИ ШИРИНИ БЛОКУ ПРИМІТОК ===
+
+ЧОМУ ВИНИКАЛА ПРОБЛЕМА СТРИБКІВ (СПРАВА НАЛІВО):
+У вашому коді ресайзер знаходиться в точці `x={currentWidth}` і має атрибут `draggable`. Коли ви починаєте його тягнути, подія `onDragMove` змінює `currentWidth`. Компонент перерендериться, базова координата `x` ресайзера збільшується, але внутрішній зсув Konva від драгу також накладається поверх цього. Через це виникає подвійне зміщення («ефект зворотного зв'язку»), а спроби скинути координати через `e.target.x(0)` змушують маркер хаотично стрибати ліворуч-праворуч та зникати з-під курсора.
+
+ЯК ЦЕ ВИПРАВЛЕНО:
+1. Замість використання нестабільного локального `e.target.x()`, розрахунок нової ширини тепер базується на абсолютному положенні курсора на стейджі: `stage.getPointerPosition().x`. Це повністю усуває будь-які стрибки!
+2. Зона захоплення (хотспот) зроблена ширшою (12px), щоб по ній було зручно клікати, але візуально вона відображається як тонка елегантна вертикальна лінія або підсвічується лише при наведенні.
+3. Додано чітку фіксацію курсору `ew-resize` під час перетягування, щоб він не зникав при виході за межі лінії.
+
+Нижче наведено чистий, виправлений та готовий до використання пакет коду.
+
+```tsx
+import React, { useState, useRef } from 'react';
+import { Group, Rect, Line, Text } from 'react-konva';
+
+export function NotesBlock({ currentWidth, geometry, startX, startY, updateNotesGeometry }) {
+  const [isResizing, setIsResizing] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const resizerRef = useRef(null);
+
+  // Висота шапки приміток
+  const titleHeight = geometry?.titleHeight || 24;
+  const blockHeight = geometry?.height || 200;
+
+  return (
+    <Group
+      x={startX}
+      y={startY}
+    >
+      {/* 1. ГОЛОВНИЙ КОНТЕЙНЕР БЛОКУ ПРИМІТОК */}
+      <Rect
+        x={0}
+        y={0}
+        width={currentWidth}
+        height={blockHeight}
+        fill="#f9f9f9"
+        stroke="#ccc"
+        strokeWidth={1}
+      />
+
+      {/* 2. ШАПКА БЛОКУ (ХЕДЕР) */}
+      <Group x={0} y={0}>
+        <Rect
+          x={0}
+          y={0}
+          width={currentWidth}
+          height={titleHeight}
+          fill="#eaeaea"
+        />
+        <Text
+          x={0}
+          y={6}
+          width={currentWidth}
+          text="Примітки"
+          align="center"
+          fontFamily="Roboto Condensed"
+          fontSize={13}
+          fontStyle="bold"
+          fill="#333"
+        />
+        <Line
+          points={[0, titleHeight, currentWidth, titleHeight]}
+          stroke="#ccc"
+          strokeWidth={1}
+        />
+      </Group>
+
+      {/* ================================================================= */}
+      {/* 3. ОПТИМІЗОВАНИЙ І СТАБІЛЬНИЙ ІНСТРУМЕНТ РЕГУЛЮВАННЯ ШИРИНИ (RESIZER) */}
+      {/* ================================================================= */}
+      <Group
+        ref={resizerRef}
+        x={currentWidth} // Завжди чітко прив'язаний до правого краю блоку
+        y={0}
+        draggable
+        // Блокуємо рух по осі Y, дозволяємо Konva рухати його лише по X віртуально
+        dragBoundFunc={(pos) => {
+          return {
+            x: pos.x,
+            y: resizerRef.current ? resizerRef.current.getAbsolutePosition().y : pos.y
+          };
+        }}
+        onMouseEnter={(e) => {
+          setIsHovered(true);
+          const stage = e.target.getStage();
+          if (stage) stage.container().style.cursor = 'ew-resize';
+        }}
+        onMouseLeave={(e) => {
+          if (!isResizing) {
+            setIsHovered(false);
+            const stage = e.target.getStage();
+            if (stage) stage.container().style.cursor = 'default';
+          }
+        }}
+        onDragStart={() => {
+          setIsResizing(true);
+        }}
+        onDragMove={(e) => {
+          e.cancelBubble = true; // Запобігаємо перетягуванню всього блоку анотацій
+          
+          const stage = e.target.getStage();
+          if (!stage) return;
+
+          // Отримуємо абсолютну позицію мишки на полотні
+          const pointerPos = stage.getPointerPosition();
+          if (!pointerPos) return;
+
+          // Отримуємо абсолютну початкову координату X нашого блоку приміток на Stage
+          const blockAbsoluteX = e.target.getParent().getAbsolutePosition().x;
+
+          // Нова ширина — це різниця між мишкою та лівим краєм блоку
+          let targetWidth = pointerPos.x - blockAbsoluteX;
+
+          // Задаємо жорсткі межі (наприклад, від 200px до 800px)
+          if (targetWidth < 200) targetWidth = 200;
+          if (targetWidth > 800) targetWidth = 800;
+
+          // Оновлюємо стейт/стор геометрії
+          updateNotesGeometry({
+            width: targetWidth,
+            isUserDragged: true
+          });
+        }}
+        onDragEnd={(e) => {
+          setIsResizing(false);
+          setIsHovered(false);
+          e.cancelBubble = true;
+
+          const stage = e.target.getStage();
+          if (stage) stage.container().style.cursor = 'default';
+
+          // Скидаємо внутрішній локальний зсув Konva в 0, 
+          // тому що позиція компонента знову повністю керується пропсом x={currentWidth}
+          e.target.x(0);
+          e.target.y(0);
+          e.target.getLayer().batchDraw();
+        }}
+      >
+        {/* ІНТЕРАКТИВНА ЗОНА ХОТСПОРТА (Широка невидима область для легкого попадання мишкою) */}
+        <Rect
+          x={-6} // Центруємо відносно правої межі блоку (-6px вліво, +6px вправо)
+          y={0}
+          width={12} // Ширина зони кліку 12 пікселів — тепер промахнутися неможливо
+          height={blockHeight}
+          fill={isHovered || isResizing ? 'rgba(0, 150, 255, 0.08)' : 'transparent'}
+        />
+
+        {/* СТИЛЬНА ВІЗУАЛЬНА ЛІНІЯ-МАРКЕР РЕСАЙЗЕРА */}
+        {/* Вона підсвічується красивим синім/блакитним кольором при наведенні чи активному драгу */}
+        <Line
+          points={[0, 0, 0, blockHeight]}
+          stroke={isHovered || isResizing ? '#0096ff' : '#cccccc'}
+          strokeWidth={isHovered || isResizing ? 2 : 1}
+        />
+
+        {/* НЕОБОВ'ЯЗКОВО: Невеличкий класичний маркер (дві крапки або насічки посередині ресайзера) */}
+        {(isHovered || isResizing) && (
+          <Group x={-2} y={blockHeight / 2 - 10}>
+            <Line points={[0, 0, 0, 20]} stroke="#0096ff" strokeWidth={1} />
+            <Line points={[4, 0, 4, 20]} stroke="#0096ff" strokeWidth={1} />
+          </Group>
+        )}
+      </Group>
+    </Group>
+  );
+}
+```

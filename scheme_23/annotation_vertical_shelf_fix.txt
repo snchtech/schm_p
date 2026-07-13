@@ -1,0 +1,141 @@
+=== КОМПЛЕКСНЕ РІШЕННЯ ДЛЯ ПОВЕРТАННЯ ПОЛИЧКИ АНОТАЦІЇ ===
+
+Проблема полягає в тому, що компонент, який малює лінію-виноску (Callout Line / Shelf) для анотації, розраховує координати лінії статично (горизонтально), використовуючи лише початкові `textWidth` без урахування `textOrientation` ('vertical-left' / 'vertical-right'). 
+
+Коли текст перевертається на 90 або -90 градусів, його фактичні габарити міняються місцями (ширина стає висотою, а висота — шириною), а поличка повинна малюватися або вгору/вниз, або адаптувати свій напрямок.
+
+Нижче наведено готовий пакет змін для вашого Konva-компонента, який рендерить виносні лінії анотацій.
+
+=== 1. МОДИФІКАЦІЯ ЛОГІКИ МАЛЮВАННЯ ПОЛИЧКИ (КОМПОНЕНТ АНОТАЦІЇ) ===
+
+Залежно від того, як у вас реалізовано малювання лінії (через компонент <Line /> або <Shape /> у Konva), вам потрібно адаптувати кінцеву точку полички. 
+
+Приклад інтеграції у ваш рендер анотації:
+
+```tsx
+import React, { useMemo } from 'react';
+import { Group, Line, Text, Shape } from 'react-konva';
+
+export function AnnotationCalloutShape({ annotation }) {
+  const { text, position, style } = annotation;
+  const orientation = style?.textOrientation || 'horizontal';
+
+  // Припустимо, у вас є базові координати початку лінії (точки прив'язки до об'єкта)
+  // та координати самого тексту після зсуву (offsetX, offsetY)
+  const targetX = 0; // Точка на об'єкті
+  const targetY = 0; 
+  
+  const textX = position?.offsetX || 60;
+  const textY = position?.offsetY || -40;
+
+  // Вимірюємо віртуальні габарити під текст (або беремо статичні значення)
+  const fontSizeNum = style?.fontSize || 12;
+  const textLength = text ? text.length * (fontSizeNum * 0.6) : 30; 
+  const textHeight = fontSizeNum * 1.2;
+
+  // ОБЧИСЛЕННЯ ГЕОМЕТРІЇ ПОЛИЧКИ ЗАЛЕЖНО ВІД ОРІЄНТАЦІЇ ТЕКСТУ
+  const { shelfPoints, textRotation, textXOffset, textYOffset } = useMemo(() => {
+    let endX = textX;
+    let endY = textY;
+    let rotation = 0;
+    let tX = 0;
+    let tY = 0;
+
+    switch (orientation) {
+      case 'vertical-left': // Текст іде знизу вгору (-90 градусів)
+        rotation = -90;
+        // Поличка має йти вертикально вгору вздовж тексту
+        endX = textX;
+        endY = textY - textLength;
+        
+        // Зсуви для компонента <Text>, щоб він правильно став відносно лінії
+        tX = -textHeight / 2; 
+        tY = 0;
+        break;
+
+      case 'vertical-right': // Текст іде зверху вниз (90 градусів)
+        rotation = 90;
+        // Поличка йде вертикально вниз вздовж тексту
+        endX = textX;
+        endY = textY + textLength;
+
+        tX = textHeight / 2;
+        tY = 0;
+        break;
+
+      case 'horizontal':
+      default:
+        rotation = 0;
+        // Стандартна горизонтальна поличка (вправо)
+        endX = textX + textLength;
+        endY = textY;
+        
+        tX = 0;
+        tY = -textHeight - 2; // Текст над поличкою
+        break;
+    }
+
+    // Повертаємо масив точок для ламаної лінії Konva: 
+    // [Точка_Об'єкта_Х, Точка_Об'єкта_У, Початок_Полички_Х, Початок_Полички_У, Кінець_Полички_Х, Кінець_Полички_У]
+    return {
+      shelfPoints: [targetX, targetY, textX, textY, endX, endY],
+      textRotation: rotation,
+      textXOffset: tX,
+      textYOffset: tY
+    };
+  }, [orientation, textX, textY, textLength, textHeight]);
+
+  return (
+    <Group>
+      {/* Лінія виноски разом із адаптивною поличкою */}
+      <Line
+        points={shelfPoints}
+        stroke={style?.fill || '#111'}
+        strokeWidth={1.5}
+        lineCap="round"
+        lineJoin="round"
+      />
+
+      {/* Текст анотації з динамічним поворотом та зсувом */}
+      <Text
+        x={textX + textXOffset}
+        y={textY + textYOffset}
+        text={text}
+        fontSize={fontSizeNum}
+        fontFamily={style?.fontFamily || 'Roboto Condensed'}
+        fill={style?.fill || '#111'}
+        rotation={textRotation}
+        align="left"
+      />
+    </Group>
+  );
+}
+```
+
+=== 2. СЦЕНАРІЙ ДЛЯ КОРЕКТНОГО ВІДОБРАЖЕННЯ (ПРИКЛАД З SHAPE) ===
+
+Якщо лінія малюється єдиним кастомним вектором через компонент `<Shape />`, логіку `sceneFunc` слід змінити так:
+
+```tsx
+<Shape
+  sceneFunc={(context, shape) => {
+    context.beginPath();
+    // 1. Ведемо лінію від об'єкта до початку тексту
+    context.moveTo(0, 0);
+    context.lineTo(textX, textY);
+
+    // 2. Малюємо поличку відповідно до орієнтації
+    if (orientation === 'vertical-left') {
+      context.lineTo(textX, textY - textLength); // Вгору
+    } else if (orientation === 'vertical-right') {
+      context.lineTo(textX, textY + textLength); // Вниз
+    } else {
+      context.lineTo(textX + textLength, textY); // Горизонтально вправо
+    }
+
+    context.strokeShape(shape);
+  }}
+  stroke={style?.fill || 'black'}
+  strokeWidth={1.5}
+/>
+```
