@@ -1,0 +1,556 @@
+# Пакет реалізації вкладки "Налаштування" для таблиці специфікації
+
+## Мета
+
+Додати третю вкладку "Налаштування" у модальне вікно керування таблицею специфікації.
+
+На першому етапі вкладка повинна підтримувати:
+
+1. Чекбокс "Відображати заголовок".
+2. За замовчуванням чекбокс увімкнений.
+3. Поле для редагування тексту заголовка.
+4. При відкритті існуючої таблиці поле має містити поточний текст заголовка.
+5. Зміни повинні одразу записуватись у Zustand Store.
+6. Konva, SVG і PDF повинні враховувати параметр відображення заголовка.
+
+====================================================================
+1. Оновлення моделі таблиці
+====================================================================
+
+У кожній таблиці специфікації повинні бути поля:
+
+    title: 'Специфікація',
+    showTitle: true,
+
+Приклад структури:
+
+    {
+      id,
+      schemeId,
+      title: 'Специфікація',
+      showTitle: true,
+      x,
+      y,
+      positionMode: 'auto-bottom',
+      columns: [],
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 10,
+        lineHeight: 1.2,
+        rowHeight: 22,
+        titleHeight: 24,
+        headerHeight: 22,
+        paddingX: 4,
+        paddingY: 3,
+      },
+    }
+
+Важливо:
+
+    showTitle: true
+
+має бути встановлено під час створення будь-якого типу таблиці:
+- таблиці зі зноски;
+- порожньої таблиці;
+- таблиці, створеної вручну.
+
+====================================================================
+2. Нормалізація legacy-таблиць
+====================================================================
+
+Старі таблиці можуть не мати поля showTitle.
+
+Тому при завантаженні або нормалізації таблиці потрібно використовувати:
+
+    showTitle: table?.showTitle !== false
+
+Це означає:
+- якщо showTitle === false, заголовок прихований;
+- якщо showTitle === true, заголовок показаний;
+- якщо showTitle відсутній, заголовок показаний.
+
+Приклад:
+
+    export function normalizeSpecificationTable(table) {
+      return {
+        ...table,
+        title: String(table?.title ?? 'Специфікація'),
+        showTitle: table?.showTitle !== false,
+      }
+    }
+
+Не використовувати:
+
+    showTitle: Boolean(table?.showTitle)
+
+Тому що для старої таблиці без поля showTitle це дасть false.
+
+====================================================================
+3. Zustand action
+====================================================================
+
+Файл:
+
+    store/slices/createSpecificationTableSlice.js
+
+Рекомендована реалізація:
+
+    updateSpecificationTable: (tableId, patch) => {
+      set((state) => {
+        const table = state.specificationTables[tableId]
+
+        if (!table) {
+          return state
+        }
+
+        const nextTable = {
+          ...table,
+        }
+
+        if ('title' in patch) {
+          nextTable.title = String(patch.title ?? '')
+        }
+
+        if ('showTitle' in patch) {
+          nextTable.showTitle = Boolean(patch.showTitle)
+        }
+
+        return {
+          specificationTables: {
+            ...state.specificationTables,
+            [tableId]: nextTable,
+          },
+        }
+      })
+    },
+
+====================================================================
+4. Створення нової таблиці
+====================================================================
+
+Оновити addSpecificationTable:
+
+    addSpecificationTable: ({
+      schemeId,
+      x = 0,
+      y = 0,
+      withDefaultColumns = false,
+      source = 'manual',
+    }) => {
+      const id = crypto.randomUUID()
+
+      const columns = withDefaultColumns
+        ? cloneDefaultColumns()
+        : []
+
+      set((state) => ({
+        specificationTables: {
+          ...state.specificationTables,
+          [id]: {
+            id,
+            schemeId,
+            source,
+            title: 'Специфікація',
+            showTitle: true,
+            x,
+            y,
+            positionMode: 'auto-bottom',
+            columns,
+            style: createDefaultSpecificationTableStyle(),
+          },
+        },
+
+        specificationRowsByTableId: {
+          ...state.specificationRowsByTableId,
+          [id]: [],
+        },
+      }))
+
+      return id
+    },
+
+====================================================================
+5. Компонент вкладки "Налаштування"
+====================================================================
+
+Файл:
+
+    features/specificationTable/ui/SpecificationTableSettingsPanel.jsx
+
+Готова реалізація:
+
+    'use client'
+
+    import { useCanvasStore } from '@/store/useCanvasStore'
+
+    export function SpecificationTableSettingsPanel({ tableId }) {
+      const table = useCanvasStore(
+        (state) => state.specificationTables[tableId]
+      )
+
+      const updateTable = useCanvasStore(
+        (state) => state.updateSpecificationTable
+      )
+
+      if (!table) {
+        return null
+      }
+
+      const showTitle = table.showTitle !== false
+      const title = String(table.title ?? '')
+
+      return (
+        <div className="space-y-4">
+          <h3 className="text-sm font-semibold">
+            Налаштування таблиці
+          </h3>
+
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showTitle}
+              onChange={(event) => {
+                updateTable(tableId, {
+                  showTitle: event.target.checked,
+                })
+              }}
+            />
+
+            <span>Відображати заголовок</span>
+          </label>
+
+          <label className="block space-y-1">
+            <span className="block text-sm">
+              Заголовок таблиці
+            </span>
+
+            <input
+              type="text"
+              value={title}
+              disabled={!showTitle}
+              onChange={(event) => {
+                updateTable(tableId, {
+                  title: event.target.value,
+                })
+              }}
+              placeholder="Введіть заголовок таблиці"
+              className="w-full rounded border px-3 py-2"
+            />
+          </label>
+        </div>
+      )
+    }
+
+====================================================================
+6. Підтягування поточного заголовка при редагуванні
+====================================================================
+
+Не створювати локальний useState з порожнім значенням.
+
+Правильно:
+
+    const title = String(table.title ?? '')
+
+    <input
+      value={title}
+      onChange={(event) => {
+        updateTable(tableId, {
+          title: event.target.value,
+        })
+      }}
+    />
+
+Так поле автоматично отримує заголовок саме тієї таблиці,
+яка зараз редагується.
+
+Якщо локальний draft-стан все ж потрібен:
+
+    const [draftTitle, setDraftTitle] = useState(
+      String(table?.title ?? '')
+    )
+
+    useEffect(() => {
+      setDraftTitle(String(table?.title ?? ''))
+    }, [tableId, table?.title])
+
+Але для поточного сценарію локальний стан не потрібен.
+
+====================================================================
+7. Підключення вкладки
+====================================================================
+
+Файл:
+
+    features/specificationTable/ui/SpecificationTablePanel.jsx
+
+Додати імпорт:
+
+    import { SpecificationTableSettingsPanel }
+      from './SpecificationTableSettingsPanel'
+
+Додати кнопку:
+
+    <button
+      type="button"
+      data-active={activeTab === 'settings'}
+      onClick={() => setActiveTab('settings')}
+    >
+      Налаштування
+    </button>
+
+Додати контент:
+
+    {activeTab === 'settings' && (
+      <SpecificationTableSettingsPanel tableId={tableId} />
+    )}
+
+====================================================================
+8. Konva: умовний рендер заголовка
+====================================================================
+
+Потрібно:
+
+    const showTitle = table.showTitle !== false
+
+    const titleHeight = showTitle
+      ? Number(table.style?.titleHeight ?? 24)
+      : 0
+
+Приклад:
+
+    return (
+      <Group x={geometry.x} y={geometry.y}>
+        {showTitle && (
+          <>
+            <Rect
+              x={0}
+              y={0}
+              width={geometry.width}
+              height={titleHeight}
+              stroke="black"
+              strokeWidth={1}
+            />
+
+            <Text
+              x={0}
+              y={0}
+              width={geometry.width}
+              height={titleHeight}
+              text={String(table.title ?? '')}
+              align="center"
+              verticalAlign="middle"
+              fontSize={Number(table.style?.fontSize ?? 10)}
+            />
+          </>
+        )}
+
+        <Group y={titleHeight}>
+          {/* header колонок та рядки */}
+        </Group>
+      </Group>
+    )
+
+====================================================================
+9. Геометрія таблиці
+====================================================================
+
+Оновити calculateSpecificationTableGeometry:
+
+    export function calculateSpecificationTableGeometry({
+      table,
+      rows,
+      columns,
+      frameRect,
+      snapToBottom,
+    }) {
+      const style = table.style ?? {}
+
+      const showTitle = table.showTitle !== false
+
+      const titleHeight = showTitle
+        ? Number(style.titleHeight ?? 24)
+        : 0
+
+      const headerHeight = Number(style.headerHeight ?? 22)
+      const rowHeight = Number(style.rowHeight ?? 22)
+
+      const width = columns.reduce(
+        (sum, column) => sum + Number(column.width || 0),
+        0
+      )
+
+      const rowsHeight = rows.length * rowHeight
+
+      const totalHeight =
+        titleHeight +
+        headerHeight +
+        rowsHeight
+
+      return {
+        x: table.x,
+        y: table.y,
+        width,
+        titleHeight,
+        headerHeight,
+        rowHeight,
+        rowsHeight,
+        totalHeight,
+      }
+    }
+
+Якщо заголовок прихований:
+
+    geometry.titleHeight === 0
+
+====================================================================
+10. SVG
+====================================================================
+
+    if (table.showTitle !== false) {
+      svg += renderTableTitle(table, geometry)
+    }
+
+renderTableHeader і renderTableRows повинні використовувати
+geometry.titleHeight для вертикального зміщення.
+
+====================================================================
+11. PDF
+====================================================================
+
+    if (table.showTitle !== false) {
+      drawPdfTableTitle(doc, table, geometry)
+    }
+
+PDF також має використовувати geometry.titleHeight.
+
+====================================================================
+12. Рекомендована поведінка
+====================================================================
+
+Чекбокс увімкнений:
+- поле активне;
+- заголовок показується;
+- текст можна редагувати.
+
+Чекбокс вимкнений:
+- заголовок не показується;
+- поле disabled;
+- title не видаляється.
+
+Не очищати title при вимкненні showTitle.
+
+Погано:
+
+    updateTable(tableId, {
+      showTitle: false,
+      title: '',
+    })
+
+Правильно:
+
+    updateTable(tableId, {
+      showTitle: false,
+    })
+
+====================================================================
+13. Варіант для Material UI
+====================================================================
+
+    import Checkbox from '@mui/material/Checkbox'
+    import FormControlLabel from '@mui/material/FormControlLabel'
+    import TextField from '@mui/material/TextField'
+
+    export function SpecificationTableSettingsPanel({ tableId }) {
+      const table = useCanvasStore(
+        (state) => state.specificationTables[tableId]
+      )
+
+      const updateTable = useCanvasStore(
+        (state) => state.updateSpecificationTable
+      )
+
+      if (!table) {
+        return null
+      }
+
+      const showTitle = table.showTitle !== false
+      const title = String(table.title ?? '')
+
+      return (
+        <div className="space-y-4">
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={showTitle}
+                onChange={(event) => {
+                  updateTable(tableId, {
+                    showTitle: event.target.checked,
+                  })
+                }}
+              />
+            }
+            label="Відображати заголовок"
+          />
+
+          <TextField
+            fullWidth
+            label="Заголовок таблиці"
+            value={title}
+            disabled={!showTitle}
+            onChange={(event) => {
+              updateTable(tableId, {
+                title: event.target.value,
+              })
+            }}
+          />
+        </div>
+      )
+    }
+
+====================================================================
+14. Важливі правила
+====================================================================
+
+1. showTitle за замовчуванням true.
+2. Для legacy-таблиць використовувати table.showTitle !== false.
+3. Не очищати title при вимкненні чекбокса.
+4. Поле title повинно читати table.title поточної таблиці.
+5. Усі оновлення повинні містити tableId.
+6. Konva, SVG і PDF мають використовувати одне showTitle.
+7. Геометрія повинна враховувати titleHeight = 0.
+8. При auto-bottom після зміни висоти потрібно перерахувати y.
+
+====================================================================
+15. План інтеграції
+====================================================================
+
+1. Додати showTitle: true у фабрику таблиці.
+2. Додати fallback table.showTitle !== false.
+3. Додати updateSpecificationTable у Zustand Store.
+4. Створити SpecificationTableSettingsPanel.jsx.
+5. Підключити вкладку "Налаштування".
+6. Прив'язати checkbox до table.showTitle.
+7. Прив'язати input до table.title.
+8. Оновити Konva.
+9. Оновити геометрію.
+10. Оновити SVG.
+11. Оновити PDF.
+12. Перевірити legacy-таблиці.
+13. Перевірити повторне відкриття модалки.
+14. Перевірити приховування та повторне показування заголовка.
+15. Перевірити auto-bottom.
+
+====================================================================
+16. Очікуваний результат
+====================================================================
+
+Після інтеграції:
+
+- з'явиться вкладка "Налаштування";
+- чекбокс буде увімкнений за замовчуванням;
+- поточний title автоматично підтягуватиметься у поле;
+- користувач зможе змінювати заголовок;
+- при вимкненні чекбокса заголовок зникатиме;
+- текст заголовка зберігатиметься;
+- після повторного увімкнення заголовок відновлюватиметься;
+- Konva, SVG і PDF показуватимуть однаковий результат.

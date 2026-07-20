@@ -1,0 +1,2024 @@
+// ============================================================================
+// FILE: multiple_notes_blocks_migration_package.txt
+// PURPOSE:
+// Готовий пакет для переходу від одного глобального блоку приміток на схемі
+// до декількох незалежних блоків приміток за аналогією з specificationTables.
+//
+// ОСНОВНА ІДЕЯ:
+// - раніше sheet.notes був масивом рядків одного глобального блоку;
+// - тепер notesBlocks є окремою колекцією блоків;
+// - кожен блок має власні:
+//   - id;
+//   - schemeId;
+//   - title;
+//   - showTitle;
+//   - positionMode;
+//   - x / y;
+//   - width;
+//   - style;
+//   - notes;
+// - NotesBlocksLayer рендерить усі блоки поточної схеми;
+// - NotesBlockShape рендерить один конкретний блок;
+// - editor працює через blockId і, за потреби, noteId;
+// - усі actions у Zustand приймають blockId.
+//
+// РЕКОМЕНДОВАНА СТРУКТУРА:
+// notesBlocks: {
+//   [blockId]: {
+//     id,
+//     schemeId,
+//     title,
+//     showTitle,
+//     x,
+//     y,
+//     width,
+//     positionMode,
+//     notes,
+//     style,
+//   }
+// }
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 1. FILE: src/lib/paper/notesBlockModel.js
+// ============================================================================
+
+export const DEFAULT_NOTES_BLOCK_STYLE = {
+  fontFamily: "Roboto Condensed",
+  fontSize: 12,
+  fill: "black",
+  fontWeight: 300,
+  rowHeight: 24,
+  titleHeight: 26,
+  padding: 10,
+};
+
+export function cloneNotesBlockStyle(style = {}) {
+  return {
+    ...DEFAULT_NOTES_BLOCK_STYLE,
+    ...style,
+  };
+}
+
+export function createNotesBlock({
+  id = crypto.randomUUID(),
+  schemeId,
+  title = "Примітки",
+  showTitle = true,
+  x = 0,
+  y = 0,
+  width = 360,
+  positionMode = "manual",
+  notes = [],
+  createdAt = Date.now(),
+  updatedAt = Date.now(),
+  style = {},
+} = {}) {
+  return {
+    id,
+    schemeId,
+    kind: "notes-block",
+    title: String(title ?? "Примітки"),
+    showTitle: showTitle !== false,
+    x: Number(x || 0),
+    y: Number(y || 0),
+    width: Math.max(120, Number(width || 360)),
+    positionMode,
+    notes: Array.isArray(notes)
+      ? notes.map((note) => normalizeNotesBlockItem(note))
+      : [],
+    createdAt,
+    updatedAt,
+    style: cloneNotesBlockStyle(style),
+  };
+}
+
+export function normalizeNotesBlockItem(note = {}) {
+  return {
+    id: String(note.id || crypto.randomUUID()),
+    text: String(note.text || ""),
+    createdAt: Number(note.createdAt || Date.now()),
+    updatedAt: Number(note.updatedAt || Date.now()),
+    style: {
+      fontFamily:
+        note.style?.fontFamily ||
+        DEFAULT_NOTES_BLOCK_STYLE.fontFamily,
+      fontSize:
+        Number(note.style?.fontSize) ||
+        DEFAULT_NOTES_BLOCK_STYLE.fontSize,
+      fill:
+        note.style?.fill ||
+        DEFAULT_NOTES_BLOCK_STYLE.fill,
+      fontWeight:
+        Number(note.style?.fontWeight) ||
+        DEFAULT_NOTES_BLOCK_STYLE.fontWeight,
+    },
+  };
+}
+
+export function updateNotesBlock(block, patch = {}) {
+  const next = {
+    ...block,
+    ...patch,
+    updatedAt: Date.now(),
+  };
+
+  if ("title" in patch) {
+    next.title = String(patch.title ?? "");
+  }
+
+  if ("showTitle" in patch) {
+    next.showTitle = Boolean(patch.showTitle);
+  }
+
+  if ("x" in patch) {
+    next.x = Number(patch.x || 0);
+  }
+
+  if ("y" in patch) {
+    next.y = Number(patch.y || 0);
+  }
+
+  if ("width" in patch) {
+    next.width = Math.max(120, Number(patch.width || 120));
+  }
+
+  if ("style" in patch) {
+    next.style = {
+      ...(block.style || DEFAULT_NOTES_BLOCK_STYLE),
+      ...(patch.style || {}),
+    };
+  }
+
+  return next;
+}
+
+export function createNotesBlockItem({
+  id = crypto.randomUUID(),
+  text = "",
+  createdAt = Date.now(),
+  updatedAt = Date.now(),
+  style = {},
+} = {}) {
+  return normalizeNotesBlockItem({
+    id,
+    text,
+    createdAt,
+    updatedAt,
+    style,
+  });
+}
+
+export function updateNotesBlockItem(note, patch = {}) {
+  return normalizeNotesBlockItem({
+    ...note,
+    ...patch,
+    style: {
+      ...(note.style || {}),
+      ...(patch.style || {}),
+    },
+    updatedAt: Date.now(),
+  });
+}
+
+
+
+// ============================================================================
+// 2. FILE: src/lib/paper/notesBlockGeometry.js
+// ============================================================================
+
+export function splitTextToLines(text, maxChars = 58) {
+  const words = String(text || "")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length > maxChars && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines.length ? lines : [""];
+}
+
+export function calculateNotesBlockGeometry(block) {
+  const style = block?.style || {};
+
+  const width = Math.max(120, Number(block?.width || 360));
+  const padding = Number(style.padding ?? 10);
+  const titleHeight =
+    block?.showTitle !== false
+      ? Number(style.titleHeight ?? 26)
+      : 0;
+  const rowHeight = Number(style.rowHeight ?? 24);
+
+  const notes = Array.isArray(block?.notes)
+    ? block.notes
+    : [];
+
+  let currentY = titleHeight + padding;
+
+  const itemGeometries = notes.map((note, index) => {
+    const fontSize = Number(note.style?.fontSize || style.fontSize || 12);
+    const approxChars = Math.max(
+      12,
+      Math.floor((width - padding * 2) / Math.max(fontSize * 0.55, 1))
+    );
+
+    const lines = splitTextToLines(note.text, approxChars);
+    const contentHeight = Math.max(
+      rowHeight,
+      lines.length * fontSize * 1.2 + 6
+    );
+
+    const item = {
+      note,
+      index,
+      x: padding,
+      y: currentY,
+      width: width - padding * 2,
+      height: contentHeight,
+      lines,
+    };
+
+    currentY += contentHeight;
+
+    return item;
+  });
+
+  const height = Math.max(
+    titleHeight + padding * 2 + rowHeight,
+    currentY + padding
+  );
+
+  return {
+    x: Number(block?.x || 0),
+    y: Number(block?.y || 0),
+    width,
+    height,
+    titleHeight,
+    padding,
+    rowHeight,
+    notes: itemGeometries,
+  };
+}
+
+
+
+// ============================================================================
+// 3. FILE: src/store/slices/createNotesBlocksSlice.js
+// ============================================================================
+
+import {
+  createNotesBlock,
+  createNotesBlockItem,
+  updateNotesBlock,
+  updateNotesBlockItem,
+} from "@/lib/paper/notesBlockModel";
+
+export const createNotesBlocksSlice = (set, get) => ({
+  notesBlocks: {},
+
+  notesBlockEditor: null,
+
+  selectedNotesBlockId: null,
+
+  addNotesBlock: ({
+    schemeId,
+    x = 0,
+    y = 0,
+    title = "Примітки",
+    showTitle = true,
+    width = 360,
+    positionMode = "manual",
+    notes = [],
+    style = {},
+  }) => {
+    const block = createNotesBlock({
+      schemeId,
+      x,
+      y,
+      title,
+      showTitle,
+      width,
+      positionMode,
+      notes,
+      style,
+    });
+
+    set((state) => ({
+      notesBlocks: {
+        ...state.notesBlocks,
+        [block.id]: block,
+      },
+      selectedNotesBlockId: block.id,
+      selection: {
+        type: "notes-block",
+        id: block.id,
+      },
+    }));
+
+    return block.id;
+  },
+
+  updateNotesBlock: (blockId, patch) => {
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, patch),
+        },
+      };
+    });
+  },
+
+  updateNotesBlockPosition: (blockId, position) => {
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, {
+            x: Number(position?.x || 0),
+            y: Number(position?.y || 0),
+            positionMode: "manual",
+          }),
+        },
+      };
+    });
+  },
+
+  removeNotesBlock: (blockId) => {
+    set((state) => {
+      if (!state.notesBlocks[blockId]) {
+        return state;
+      }
+
+      const nextBlocks = {
+        ...state.notesBlocks,
+      };
+
+      delete nextBlocks[blockId];
+
+      const isSelected =
+        state.selection?.type === "notes-block" &&
+        state.selection?.id === blockId;
+
+      const editorBelongsToBlock =
+        state.notesBlockEditor?.blockId === blockId;
+
+      return {
+        notesBlocks: nextBlocks,
+        selectedNotesBlockId:
+          state.selectedNotesBlockId === blockId
+            ? null
+            : state.selectedNotesBlockId,
+        selection: isSelected
+          ? null
+          : state.selection,
+        notesBlockEditor: editorBelongsToBlock
+          ? null
+          : state.notesBlockEditor,
+      };
+    });
+  },
+
+  addNoteToBlock: (blockId, payload) => {
+    const note = createNotesBlockItem(payload);
+
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, {
+            notes: [
+              ...(block.notes || []),
+              note,
+            ],
+          }),
+        },
+      };
+    });
+
+    return note.id;
+  },
+
+  updateNoteInBlock: (blockId, noteId, patch) => {
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, {
+            notes: (block.notes || []).map((note) =>
+              note.id === noteId
+                ? updateNotesBlockItem(note, patch)
+                : note
+            ),
+          }),
+        },
+      };
+    });
+  },
+
+  removeNoteFromBlock: (blockId, noteId) => {
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      const isSelectedNote =
+        state.selection?.type === "notes-block-note" &&
+        state.selection?.blockId === blockId &&
+        state.selection?.id === noteId;
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, {
+            notes: (block.notes || []).filter(
+              (note) => note.id !== noteId
+            ),
+          }),
+        },
+        selection: isSelectedNote
+          ? {
+              type: "notes-block",
+              id: blockId,
+            }
+          : state.selection,
+      };
+    });
+  },
+
+  clearNotesBlockItems: (blockId) => {
+    set((state) => {
+      const block = state.notesBlocks[blockId];
+
+      if (!block) {
+        return state;
+      }
+
+      return {
+        notesBlocks: {
+          ...state.notesBlocks,
+          [blockId]: updateNotesBlock(block, {
+            notes: [],
+          }),
+        },
+      };
+    });
+  },
+
+  setNotesBlockEditor: (editor) =>
+    set({
+      notesBlockEditor: editor,
+    }),
+
+  clearNotesBlockEditor: () =>
+    set({
+      notesBlockEditor: null,
+    }),
+
+  selectNotesBlock: (blockId) =>
+    set({
+      selectedNotesBlockId: blockId,
+      selection: {
+        type: "notes-block",
+        id: blockId,
+      },
+    }),
+
+  selectNoteInBlock: (blockId, noteId) =>
+    set({
+      selectedNotesBlockId: blockId,
+      selection: {
+        type: "notes-block-note",
+        blockId,
+        id: noteId,
+      },
+    }),
+});
+
+
+
+// ============================================================================
+// 4. FILE: src/store/useCanvasStore.js
+// ============================================================================
+
+import { create } from "zustand";
+import { createNotesBlocksSlice } from "./slices/createNotesBlocksSlice";
+
+export const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+  annotations: [],
+
+  selection: null,
+
+  sheet: {
+    format: "A3",
+    orientation: "landscape",
+    scale: 1,
+    frame: true,
+
+    titleBlock: {
+      albumCode: "",
+      unit: "",
+      system: "",
+      title: "",
+      sheetNumber: "1",
+    },
+
+    // Старе поле notes прибирається після міграції.
+    // notes: [],
+  },
+
+  ...createNotesBlocksSlice(set, get),
+}));
+
+
+
+// ============================================================================
+// 5. FILE: src/controllers/canvasController.js
+// ============================================================================
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+
+export const canvasController = {
+  createNotesBlock({
+    schemeId,
+    x = 0,
+    y = 0,
+  }) {
+    const store = useCanvasStore.getState();
+
+    const blockId = store.addNotesBlock?.({
+      schemeId,
+      x,
+      y,
+      title: "Примітки",
+      showTitle: true,
+      width: 360,
+      positionMode: "manual",
+      notes: [],
+    });
+
+    if (!blockId) {
+      return null;
+    }
+
+    store.setNotesBlockEditor?.({
+      mode: "create-note",
+      blockId,
+      noteId: null,
+      initialText: "",
+    });
+
+    return blockId;
+  },
+
+  openNotesBlockEditor(blockId) {
+    const store = useCanvasStore.getState();
+    const block = store.notesBlocks?.[blockId];
+
+    if (!block) {
+      return;
+    }
+
+    store.setNotesBlockEditor?.({
+      mode: "block-settings",
+      blockId,
+      noteId: null,
+      initialText: "",
+    });
+  },
+
+  openNotesBlockNoteEditor(blockId, noteId = null) {
+    const store = useCanvasStore.getState();
+    const block = store.notesBlocks?.[blockId];
+
+    if (!block) {
+      return;
+    }
+
+    const existing = noteId
+      ? (block.notes || []).find(
+          (note) => note.id === noteId
+        )
+      : null;
+
+    store.setNotesBlockEditor?.({
+      mode: existing ? "edit-note" : "create-note",
+      blockId,
+      noteId: existing?.id || null,
+      initialText: existing?.text || "",
+    });
+  },
+
+  closeNotesBlockEditor() {
+    const store = useCanvasStore.getState();
+    store.clearNotesBlockEditor?.();
+  },
+
+  submitNotesBlockNoteEditor(text) {
+    const store = useCanvasStore.getState();
+    const editor = store.notesBlockEditor;
+
+    if (!editor?.blockId) {
+      return;
+    }
+
+    const value = String(text || "").trim();
+
+    if (!value) {
+      store.clearNotesBlockEditor?.();
+      return;
+    }
+
+    if (
+      editor.mode === "edit-note" &&
+      editor.noteId
+    ) {
+      store.updateNoteInBlock?.(
+        editor.blockId,
+        editor.noteId,
+        {
+          text: value,
+        }
+      );
+
+      store.selectNoteInBlock?.(
+        editor.blockId,
+        editor.noteId
+      );
+
+      store.clearNotesBlockEditor?.();
+      return;
+    }
+
+    const noteId = store.addNoteToBlock?.(
+      editor.blockId,
+      {
+        text: value,
+      }
+    );
+
+    if (noteId) {
+      store.selectNoteInBlock?.(
+        editor.blockId,
+        noteId
+      );
+    }
+
+    store.clearNotesBlockEditor?.();
+  },
+
+  deleteNotesBlock(blockId) {
+    const store = useCanvasStore.getState();
+
+    if (!blockId) {
+      return;
+    }
+
+    store.removeNotesBlock?.(blockId);
+  },
+
+  deleteNoteFromBlock(blockId, noteId) {
+    const store = useCanvasStore.getState();
+
+    if (!blockId || !noteId) {
+      return;
+    }
+
+    store.removeNoteFromBlock?.(
+      blockId,
+      noteId
+    );
+  },
+
+  selectNotesBlock(blockId) {
+    const store = useCanvasStore.getState();
+
+    if (!blockId) {
+      return;
+    }
+
+    store.selectNotesBlock?.(blockId);
+  },
+
+  selectNoteInBlock(blockId, noteId) {
+    const store = useCanvasStore.getState();
+
+    if (!blockId || !noteId) {
+      return;
+    }
+
+    store.selectNoteInBlock?.(
+      blockId,
+      noteId
+    );
+  },
+};
+
+
+
+// ============================================================================
+// 6. FILE: src/components/paper/NotesBlocksLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Group } from "react-konva";
+import { useShallow } from "zustand/react/shallow";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import NotesBlockShape from "./NotesBlockShape";
+
+export default function NotesBlocksLayer({
+  schemeId,
+}) {
+  const blockIds = useCanvasStore(
+    useShallow((state) =>
+      Object.values(state.notesBlocks || {})
+        .filter(
+          (block) =>
+            block?.schemeId === schemeId
+        )
+        .sort(
+          (a, b) =>
+            Number(a.zIndex || 0) -
+            Number(b.zIndex || 0)
+        )
+        .map((block) => block.id)
+    )
+  );
+
+  if (blockIds.length === 0) {
+    return null;
+  }
+
+  return (
+    <Group name="notes-blocks-layer">
+      {blockIds.map((blockId) => (
+        <NotesBlockShape
+          key={blockId}
+          blockId={blockId}
+        />
+      ))}
+    </Group>
+  );
+}
+
+
+
+// ============================================================================
+// 7. FILE: src/components/paper/NotesBlockShape.jsx
+// ============================================================================
+
+"use client";
+
+import React, { useMemo } from "react";
+import {
+  Group,
+  Rect,
+  Text,
+  Line,
+} from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { calculateNotesBlockGeometry } from "@/lib/paper/notesBlockGeometry";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function NotesBlockShape({
+  blockId,
+}) {
+  const block = useCanvasStore(
+    (state) => state.notesBlocks?.[blockId]
+  );
+
+  const selection = useCanvasStore(
+    (state) => state.selection
+  );
+
+  const updatePosition = useCanvasStore(
+    (state) => state.updateNotesBlockPosition
+  );
+
+  const geometry = useMemo(() => {
+    if (!block) {
+      return null;
+    }
+
+    return calculateNotesBlockGeometry(block);
+  }, [block]);
+
+  if (!block || !geometry) {
+    return null;
+  }
+
+  const isBlockSelected =
+    selection?.type === "notes-block" &&
+    selection?.id === blockId;
+
+  const selectedNoteId =
+    selection?.type === "notes-block-note" &&
+    selection?.blockId === blockId
+      ? selection.id
+      : null;
+
+  const showTitle =
+    block.showTitle !== false;
+
+  return (
+    <Group
+      id={`notes-block-${blockId}`}
+      name="notes-block"
+      x={geometry.x}
+      y={geometry.y}
+      draggable={
+        block.positionMode === "manual"
+      }
+      onMouseDown={(event) => {
+        event.cancelBubble = true;
+        canvasController.selectNotesBlock?.(
+          blockId
+        );
+      }}
+      onTap={(event) => {
+        event.cancelBubble = true;
+        canvasController.selectNotesBlock?.(
+          blockId
+        );
+      }}
+      onDblClick={(event) => {
+        event.cancelBubble = true;
+        canvasController.openNotesBlockEditor?.(
+          blockId
+        );
+      }}
+      onDragEnd={(event) => {
+        updatePosition?.(blockId, {
+          x: event.target.x(),
+          y: event.target.y(),
+        });
+      }}
+    >
+      <Rect
+        x={0}
+        y={0}
+        width={geometry.width}
+        height={geometry.height}
+        fill="white"
+        stroke={
+          isBlockSelected
+            ? "#2F80ED"
+            : "black"
+        }
+        strokeWidth={
+          isBlockSelected ? 2 : 1
+        }
+      />
+
+      {showTitle && (
+        <>
+          <Line
+            points={[
+              0,
+              geometry.titleHeight,
+              geometry.width,
+              geometry.titleHeight,
+            ]}
+            stroke="black"
+            strokeWidth={1}
+          />
+
+          <Text
+            x={0}
+            y={5}
+            width={geometry.width}
+            height={geometry.titleHeight}
+            align="center"
+            text={String(block.title || "")}
+            fontFamily={
+              block.style?.fontFamily ||
+              "Roboto Condensed"
+            }
+            fontSize={13}
+            fontStyle="bold"
+            fill="black"
+            listening={false}
+          />
+        </>
+      )}
+
+      {geometry.notes.map((item) => {
+        const note = item.note;
+
+        const isSelected =
+          selectedNoteId === note.id;
+
+        const visibleText =
+          `${item.index + 1}. ` +
+          item.lines.join("\n   ");
+
+        return (
+          <Group
+            key={note.id}
+            onMouseDown={(event) => {
+              event.cancelBubble = true;
+
+              canvasController.selectNoteInBlock?.(
+                blockId,
+                note.id
+              );
+            }}
+            onDblClick={(event) => {
+              event.cancelBubble = true;
+
+              canvasController.openNotesBlockNoteEditor?.(
+                blockId,
+                note.id
+              );
+            }}
+          >
+            {isSelected && (
+              <Rect
+                x={item.x - 4}
+                y={item.y - 3}
+                width={item.width + 8}
+                height={item.height}
+                fill="rgba(47,128,237,0.08)"
+                stroke="#2F80ED"
+                strokeWidth={1}
+              />
+            )}
+
+            <Text
+              x={item.x}
+              y={item.y}
+              width={item.width}
+              height={item.height}
+              text={visibleText}
+              fontFamily={
+                note.style?.fontFamily ||
+                block.style?.fontFamily ||
+                "Roboto Condensed"
+              }
+              fontSize={
+                note.style?.fontSize ||
+                block.style?.fontSize ||
+                12
+              }
+              fontStyle={
+                note.style?.fontWeight >= 500
+                  ? "bold"
+                  : "normal"
+              }
+              fill={
+                note.style?.fill ||
+                block.style?.fill ||
+                "black"
+              }
+              lineHeight={1.15}
+            />
+          </Group>
+        );
+      })}
+    </Group>
+  );
+}
+
+
+
+// ============================================================================
+// 8. FILE: src/components/paper/NotesBlockEditorModal.jsx
+// ============================================================================
+
+"use client";
+
+import React, {
+  useEffect,
+  useState,
+} from "react";
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function NotesBlockEditorModal() {
+  const editor = useCanvasStore(
+    (state) => state.notesBlockEditor
+  );
+
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    if (!editor) {
+      setText("");
+      return;
+    }
+
+    setText(editor.initialText || "");
+  }, [
+    editor?.blockId,
+    editor?.noteId,
+    editor?.mode,
+    editor?.initialText,
+  ]);
+
+  const open =
+    editor?.mode === "create-note" ||
+    editor?.mode === "edit-note";
+
+  return (
+    <Dialog
+      open={Boolean(open)}
+      onClose={() =>
+        canvasController.closeNotesBlockEditor?.()
+      }
+      fullWidth
+      maxWidth="sm"
+    >
+      <DialogTitle>
+        {editor?.mode === "edit-note"
+          ? "Редагувати примітку"
+          : "Додати примітку"}
+      </DialogTitle>
+
+      <DialogContent>
+        <TextField
+          autoFocus
+          multiline
+          minRows={5}
+          fullWidth
+          margin="dense"
+          label="Текст примітки"
+          value={text}
+          onChange={(event) =>
+            setText(event.target.value)
+          }
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button
+          onClick={() =>
+            canvasController.closeNotesBlockEditor?.()
+          }
+        >
+          Скасувати
+        </Button>
+
+        <Button
+          variant="contained"
+          onClick={() =>
+            canvasController.submitNotesBlockNoteEditor?.(
+              text
+            )
+          }
+        >
+          Зберегти
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// 9. FILE: src/components/paper/NotesBlockSettingsModal.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Checkbox,
+  FormControlLabel,
+  TextField,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export default function NotesBlockSettingsModal() {
+  const editor = useCanvasStore(
+    (state) => state.notesBlockEditor
+  );
+
+  const block = useCanvasStore(
+    (state) =>
+      editor?.blockId
+        ? state.notesBlocks?.[editor.blockId]
+        : null
+  );
+
+  const updateBlock = useCanvasStore(
+    (state) => state.updateNotesBlock
+  );
+
+  const open =
+    editor?.mode === "block-settings" &&
+    Boolean(block);
+
+  if (!block) {
+    return null;
+  }
+
+  return (
+    <Dialog
+      open={Boolean(open)}
+      onClose={() =>
+        canvasController.closeNotesBlockEditor?.()
+      }
+      fullWidth
+      maxWidth="sm"
+    >
+      <DialogTitle>
+        Налаштування блоку приміток
+      </DialogTitle>
+
+      <DialogContent>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={block.showTitle !== false}
+              onChange={(event) =>
+                updateBlock?.(block.id, {
+                  showTitle:
+                    event.target.checked,
+                })
+              }
+            />
+          }
+          label="Відображати заголовок"
+        />
+
+        <TextField
+          fullWidth
+          margin="dense"
+          label="Заголовок"
+          value={String(block.title || "")}
+          disabled={block.showTitle === false}
+          onChange={(event) =>
+            updateBlock?.(block.id, {
+              title: event.target.value,
+            })
+          }
+        />
+
+        <TextField
+          fullWidth
+          margin="dense"
+          type="number"
+          label="Ширина"
+          inputProps={{
+            min: 120,
+            max: 1200,
+          }}
+          value={Number(block.width || 360)}
+          onChange={(event) =>
+            updateBlock?.(block.id, {
+              width: event.target.value,
+            })
+          }
+        />
+      </DialogContent>
+
+      <DialogActions>
+        <Button
+          color="error"
+          onClick={() => {
+            canvasController.deleteNotesBlock?.(
+              block.id
+            );
+            canvasController.closeNotesBlockEditor?.();
+          }}
+        >
+          Видалити блок
+        </Button>
+
+        <Button
+          onClick={() =>
+            canvasController.closeNotesBlockEditor?.()
+          }
+        >
+          Закрити
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// 10. FILE: src/components/tools/NotesButton.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import {
+  Button,
+} from "@mui/material";
+
+import NotesIcon from "@mui/icons-material/Notes";
+
+import { canvasController } from "@/controllers/canvasController";
+
+export default function NotesButton({
+  schemeId,
+  defaultX = 100,
+  defaultY = 100,
+}) {
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      startIcon={
+        <NotesIcon fontSize="small" />
+      }
+      onClick={() => {
+        canvasController.createNotesBlock?.({
+          schemeId,
+          x: defaultX,
+          y: defaultY,
+        });
+      }}
+      sx={{
+        justifyContent: "flex-start",
+      }}
+    >
+      Додати блок приміток
+    </Button>
+  );
+}
+
+
+
+// ============================================================================
+// 11. FILE: src/components/paper/PaperLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import {
+  Layer,
+  Rect,
+  Group,
+  Text,
+} from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { buildSheetGeometry } from "@/lib/paper/sheetGeometry";
+import NotesBlocksLayer from "./NotesBlocksLayer";
+
+export default function PaperLayer({
+  schemeId,
+}) {
+  const sheet = useCanvasStore(
+    (state) => state.sheet
+  );
+
+  const viewport = useCanvasStore(
+    (state) => state.viewport
+  );
+
+  const geometry = buildSheetGeometry(sheet);
+
+  if (!geometry) {
+    return null;
+  }
+
+  return (
+    <Layer
+      scaleX={viewport?.finalScale || 1}
+      scaleY={viewport?.finalScale || 1}
+      x={viewport?.offsetX || 0}
+      y={viewport?.offsetY || 0}
+    >
+      {/* існуючий sheet background */}
+      {/* frame */}
+      {/* header */}
+      {/* drawing area */}
+      {/* title block */}
+
+      <NotesBlocksLayer
+        schemeId={schemeId}
+      />
+    </Layer>
+  );
+}
+
+
+
+// ============================================================================
+// 12. FILE: src/components/canvas/EditorCanvas.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import { Stage } from "react-konva";
+
+import PaperLayer from "@/components/paper/PaperLayer";
+import NotesBlockEditorModal from "@/components/paper/NotesBlockEditorModal";
+import NotesBlockSettingsModal from "@/components/paper/NotesBlockSettingsModal";
+
+export default function EditorCanvas({
+  schemeId,
+}) {
+  return (
+    <>
+      <Stage
+        width={window.innerWidth}
+        height={window.innerHeight}
+      >
+        <PaperLayer
+          schemeId={schemeId}
+        />
+
+        {/*
+          інші layers
+        */}
+      </Stage>
+
+      <NotesBlockEditorModal />
+      <NotesBlockSettingsModal />
+    </>
+  );
+}
+
+
+
+// ============================================================================
+// 13. МІГРАЦІЯ ЗІ СТАРОГО sheet.notes
+// ============================================================================
+
+// Старий формат:
+//
+// sheet: {
+//   notes: [
+//     { id, text, ... },
+//     { id, text, ... },
+//   ]
+// }
+//
+// Новий формат:
+//
+// notesBlocks: {
+//   [blockId]: {
+//     id,
+//     schemeId,
+//     title: "Примітки",
+//     showTitle: true,
+//     x,
+//     y,
+//     width,
+//     notes: [...],
+//   }
+// }
+//
+// Одноразова функція міграції:
+
+import {
+  createNotesBlock,
+} from "@/lib/paper/notesBlockModel";
+
+export function migrateLegacySheetNotes({
+  sheet,
+  schemeId,
+  defaultX,
+  defaultY,
+}) {
+  const oldNotes = Array.isArray(sheet?.notes)
+    ? sheet.notes
+    : [];
+
+  if (oldNotes.length === 0) {
+    return {
+      notesBlocks: {},
+      nextSheet: {
+        ...sheet,
+      },
+    };
+  }
+
+  const block = createNotesBlock({
+    schemeId,
+    title: "Примітки",
+    showTitle: true,
+    x: Number(defaultX || 0),
+    y: Number(defaultY || 0),
+    width: 360,
+    positionMode: "manual",
+    notes: oldNotes,
+  });
+
+  const nextSheet = {
+    ...sheet,
+  };
+
+  delete nextSheet.notes;
+
+  return {
+    notesBlocks: {
+      [block.id]: block,
+    },
+    nextSheet,
+  };
+}
+
+
+
+// ============================================================================
+// 14. МІГРАЦІЯ У ZUSTAND HYDRATION
+// ============================================================================
+
+export function migrateCanvasState(
+  persistedState,
+  version
+) {
+  const state = {
+    ...persistedState,
+  };
+
+  if (
+    version < 2 &&
+    Array.isArray(state.sheet?.notes)
+  ) {
+    const schemeId =
+      state.activeSchemeId ||
+      state.schemeId ||
+      "legacy-scheme";
+
+    const migrated =
+      migrateLegacySheetNotes({
+        sheet: state.sheet,
+        schemeId,
+        defaultX: 100,
+        defaultY: 100,
+      });
+
+    state.sheet = migrated.nextSheet;
+
+    state.notesBlocks = {
+      ...(state.notesBlocks || {}),
+      ...migrated.notesBlocks,
+    };
+  }
+
+  return state;
+}
+
+// При persist:
+
+import {
+  persist,
+} from "zustand/middleware";
+
+const useCanvasStore = create(
+  persist(
+    (set, get) => ({
+      // store
+    }),
+    {
+      name: "canvas-store",
+      version: 2,
+      migrate: migrateCanvasState,
+    }
+  )
+);
+
+
+
+// ============================================================================
+// 15. HOTKEYS
+// ============================================================================
+
+"use client";
+
+import { useEffect } from "react";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+
+export function useNotesBlocksHotkeys() {
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const store =
+        useCanvasStore.getState();
+
+      const selection =
+        store.selection;
+
+      if (
+        selection?.type === "notes-block"
+      ) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+
+          canvasController.openNotesBlockEditor?.(
+            selection.id
+          );
+        }
+
+        if (
+          event.key === "Delete" ||
+          event.key === "Backspace"
+        ) {
+          event.preventDefault();
+
+          canvasController.deleteNotesBlock?.(
+            selection.id
+          );
+        }
+
+        return;
+      }
+
+      if (
+        selection?.type === "notes-block-note"
+      ) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+
+          canvasController.openNotesBlockNoteEditor?.(
+            selection.blockId,
+            selection.id
+          );
+        }
+
+        if (
+          event.key === "Delete" ||
+          event.key === "Backspace"
+        ) {
+          event.preventDefault();
+
+          canvasController.deleteNoteFromBlock?.(
+            selection.blockId,
+            selection.id
+          );
+        }
+      }
+    };
+
+    window.addEventListener(
+      "keydown",
+      onKeyDown
+    );
+
+    return () => {
+      window.removeEventListener(
+        "keydown",
+        onKeyDown
+      );
+    };
+  }, []);
+}
+
+
+
+// ============================================================================
+// 16. SVG EXPORT
+// ============================================================================
+
+import {
+  calculateNotesBlockGeometry,
+} from "@/lib/paper/notesBlockGeometry";
+
+function escapeXml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+export function notesBlockToSvg(block) {
+  const geometry =
+    calculateNotesBlockGeometry(block);
+
+  let svg = "";
+
+  svg += `
+    <rect
+      x="${geometry.x}"
+      y="${geometry.y}"
+      width="${geometry.width}"
+      height="${geometry.height}"
+      fill="white"
+      stroke="black"
+      stroke-width="1"
+    />
+  `;
+
+  if (block.showTitle !== false) {
+    svg += `
+      <line
+        x1="${geometry.x}"
+        y1="${geometry.y + geometry.titleHeight}"
+        x2="${geometry.x + geometry.width}"
+        y2="${geometry.y + geometry.titleHeight}"
+        stroke="black"
+        stroke-width="1"
+      />
+    `;
+
+    svg += `
+      <text
+        x="${geometry.x + geometry.width / 2}"
+        y="${geometry.y + geometry.titleHeight / 2 + 4}"
+        text-anchor="middle"
+        font-size="13"
+        font-weight="700"
+      >
+        ${escapeXml(block.title)}
+      </text>
+    `;
+  }
+
+  for (const item of geometry.notes) {
+    item.lines.forEach((line, lineIndex) => {
+      const prefix =
+        lineIndex === 0
+          ? `${item.index + 1}. `
+          : "   ";
+
+      svg += `
+        <text
+          x="${geometry.x + item.x}"
+          y="${
+            geometry.y +
+            item.y +
+            14 +
+            lineIndex * 15
+          }"
+          font-size="${
+            item.note.style?.fontSize ||
+            block.style?.fontSize ||
+            12
+          }"
+        >
+          ${escapeXml(prefix + line)}
+        </text>
+      `;
+    });
+  }
+
+  return svg;
+}
+
+export function notesBlocksToSvg({
+  notesBlocks,
+  schemeId,
+}) {
+  return Object.values(
+    notesBlocks || {}
+  )
+    .filter(
+      (block) =>
+        block.schemeId === schemeId
+    )
+    .sort(
+      (a, b) =>
+        Number(a.zIndex || 0) -
+        Number(b.zIndex || 0)
+    )
+    .map(notesBlockToSvg)
+    .join("");
+}
+
+
+
+// ============================================================================
+// 17. PDF EXPORT
+// ============================================================================
+
+import {
+  calculateNotesBlockGeometry,
+} from "@/lib/paper/notesBlockGeometry";
+
+export function drawNotesBlockPdf(
+  doc,
+  block
+) {
+  const geometry =
+    calculateNotesBlockGeometry(block);
+
+  doc.rect(
+    geometry.x,
+    geometry.y,
+    geometry.width,
+    geometry.height
+  );
+
+  if (block.showTitle !== false) {
+    doc.line(
+      geometry.x,
+      geometry.y + geometry.titleHeight,
+      geometry.x + geometry.width,
+      geometry.y + geometry.titleHeight
+    );
+
+    doc.text(
+      String(block.title || ""),
+      geometry.x + geometry.width / 2,
+      geometry.y + geometry.titleHeight / 2,
+      {
+        align: "center",
+      }
+    );
+  }
+
+  for (const item of geometry.notes) {
+    const lines =
+      item.lines.map(
+        (line, index) =>
+          index === 0
+            ? `${item.index + 1}. ${line}`
+            : `   ${line}`
+      );
+
+    doc.text(
+      lines,
+      geometry.x + item.x,
+      geometry.y + item.y + 12
+    );
+  }
+}
+
+export function drawNotesBlocksPdf({
+  doc,
+  notesBlocks,
+  schemeId,
+}) {
+  Object.values(
+    notesBlocks || {}
+  )
+    .filter(
+      (block) =>
+        block.schemeId === schemeId
+    )
+    .sort(
+      (a, b) =>
+        Number(a.zIndex || 0) -
+        Number(b.zIndex || 0)
+    )
+    .forEach((block) => {
+      drawNotesBlockPdf(
+        doc,
+        block
+      );
+    });
+}
+
+
+
+// ============================================================================
+// 18. ВАЖЛИВІ ПРАВИЛА
+// ============================================================================
+//
+// 1. Не зберігати всі примітки у sheet.notes.
+//
+// 2. Зберігати блоки у:
+//
+//      notesBlocks[blockId]
+//
+// 3. Кожен блок містить власний notes[].
+//
+// 4. Усі actions повинні приймати blockId.
+//
+// 5. Рендерити всі блоки поточної схеми через:
+//
+//      Object.values(notesBlocks)
+//        .filter(block => block.schemeId === schemeId)
+//        .map(...)
+//
+// 6. Не використовувати selectedNotesBlockId для визначення,
+//    який єдиний блок треба рендерити.
+//
+// 7. selectedNotesBlockId потрібен тільки для:
+//    - підсвічування;
+//    - відкриття редактора;
+//    - видалення;
+//    - налаштувань.
+//
+// 8. Не використовувати index як React key.
+//
+// 9. Для key використовувати block.id і note.id.
+//
+// 10. NotesBlockShape має підписуватись тільки на свій blockId.
+//
+// 11. SVG і PDF повинні використовувати ту саму geometry,
+//     що і Konva.
+//
+// 12. Старий sheet.notes треба одноразово перетворити
+//     в один notesBlock під час hydration.
+//
+// 13. Після міграції sheet.notes треба видалити.
+//
+// 14. Для декількох схем обов'язково зберігати schemeId у кожному блоці.
+//
+// 15. Якщо кілька блоків мають однакові x/y,
+//     вони будуть накладатись. Для нових блоків можна давати offset.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 19. АВТОМАТИЧНИЙ OFFSET ДЛЯ НОВИХ БЛОКІВ
+// ============================================================================
+
+export function getNextNotesBlockPosition({
+  notesBlocks,
+  schemeId,
+  startX = 100,
+  startY = 100,
+  offset = 24,
+}) {
+  const count = Object.values(
+    notesBlocks || {}
+  ).filter(
+    (block) =>
+      block.schemeId === schemeId
+  ).length;
+
+  return {
+    x: startX + count * offset,
+    y: startY + count * offset,
+  };
+}
+
+// У controller:
+
+createNotesBlock({
+  schemeId,
+}) {
+  const store =
+    useCanvasStore.getState();
+
+  const position =
+    getNextNotesBlockPosition({
+      notesBlocks:
+        store.notesBlocks,
+      schemeId,
+    });
+
+  return store.addNotesBlock?.({
+    schemeId,
+    x: position.x,
+    y: position.y,
+    title: "Примітки",
+    showTitle: true,
+    notes: [],
+  });
+}
+
+
+
+// ============================================================================
+// 20. МІНІМАЛЬНИЙ ПЛАН ІНТЕГРАЦІЇ
+// ============================================================================
+//
+// 1. Створити notesBlockModel.js.
+//
+// 2. Створити notesBlockGeometry.js.
+//
+// 3. Додати notesBlocks у Zustand Store.
+//
+// 4. Перенести старі sheet.notes у notesBlocks.
+//
+// 5. Додати actions:
+//    - addNotesBlock;
+//    - updateNotesBlock;
+//    - removeNotesBlock;
+//    - addNoteToBlock;
+//    - updateNoteInBlock;
+//    - removeNoteFromBlock.
+//
+// 6. Переробити canvasController,
+//    щоб він працював через blockId.
+//
+// 7. Замінити PaperNotesLayer на:
+//    - NotesBlocksLayer;
+//    - NotesBlockShape.
+//
+// 8. Кнопку "Примітки" змінити на
+//    "Додати блок приміток".
+//
+// 9. Додати modal для тексту примітки.
+//
+// 10. Додати modal налаштувань блоку.
+//
+// 11. Підключити selection:
+//     - notes-block;
+//     - notes-block-note.
+//
+// 12. Додати drag для кожного блоку.
+//
+// 13. Оновити SVG export.
+//
+// 14. Оновити PDF export.
+//
+// 15. Перевірити persist migration.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// RESULT
+// ============================================================================
+//
+// ✔ На одній схемі можна створювати багато блоків приміток.
+//
+// ✔ Кожен блок має власні:
+//   - position;
+//   - title;
+//   - showTitle;
+//   - width;
+//   - notes;
+//   - style.
+//
+// ✔ Редагування одного блоку не змінює інші блоки.
+//
+// ✔ Кожен блок можна перетягувати незалежно.
+//
+// ✔ Кожен блок рендериться через окремий NotesBlockShape.
+//
+// ✔ NotesBlocksLayer рендерить усі блоки поточної схеми.
+//
+// ✔ Підтримується вибір:
+//   - цілого блоку;
+//   - окремої примітки.
+//
+// ✔ Старий sheet.notes мігрує в один початковий блок.
+//
+// ✔ SVG і PDF можуть рендерити всі блоки.
+//
+// ✔ Архітектура аналогічна specificationTables.
+//
+// ============================================================================

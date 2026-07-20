@@ -1,0 +1,559 @@
+При кількох таблицях `SpecificationTableLayer` має рендерити **масив таблиць поточної схеми**, а не одну `activeTable` або одну глобальну таблицю.
+
+Базова схема така:
+
+```txt
+SpecificationTableLayer
+  ├─ SpecificationTableShape tableId="table-1"
+  ├─ SpecificationTableShape tableId="table-2"
+  └─ SpecificationTableShape tableId="table-3"
+```
+
+Кожен `SpecificationTableShape` сам отримує зі Store:
+
+* свою таблицю за `tableId`;
+* свої рядки за `tableId`;
+* свої колонки;
+* свої налаштування заголовка;
+* свою позицію.
+
+## Рекомендована структура Store
+
+```js
+{
+  specificationTables: {
+    'table-1': {
+      id: 'table-1',
+      schemeId: 'scheme-1',
+      title: 'Таблиця 1',
+      showTitle: true,
+      x: 100,
+      y: 500,
+      columns: [],
+      style: {},
+    },
+
+    'table-2': {
+      id: 'table-2',
+      schemeId: 'scheme-1',
+      title: 'Таблиця 2',
+      showTitle: true,
+      x: 500,
+      y: 500,
+      columns: [],
+      style: {},
+    },
+  },
+
+  specificationRowsByTableId: {
+    'table-1': [],
+    'table-2': [],
+  },
+}
+```
+
+## Готовий `SpecificationTableLayer`
+
+```jsx
+'use client'
+
+import { useMemo } from 'react'
+import { Layer } from 'react-konva'
+import { useCanvasStore } from '@/store/useCanvasStore'
+import { SpecificationTableShape } from './SpecificationTableShape'
+
+export function SpecificationTableLayer({
+  schemeId,
+  frameRect,
+  listening = true,
+}) {
+  const specificationTables = useCanvasStore(
+    (state) => state.specificationTables
+  )
+
+  const tableIds = useMemo(() => {
+    return Object.values(specificationTables ?? {})
+      .filter((table) => {
+        return table?.schemeId === schemeId
+      })
+      .sort((a, b) => {
+        const orderA = Number(a.order ?? 0)
+        const orderB = Number(b.order ?? 0)
+
+        return orderA - orderB
+      })
+      .map((table) => table.id)
+  }, [specificationTables, schemeId])
+
+  if (tableIds.length === 0) {
+    return null
+  }
+
+  return (
+    <Layer listening={listening}>
+      {tableIds.map((tableId) => (
+        <SpecificationTableShape
+          key={tableId}
+          tableId={tableId}
+          frameRect={frameRect}
+        />
+      ))}
+    </Layer>
+  )
+}
+```
+
+Головне тут:
+
+```jsx
+{tableIds.map((tableId) => (
+  <SpecificationTableShape
+    key={tableId}
+    tableId={tableId}
+    frameRect={frameRect}
+  />
+))}
+```
+
+`key` і `tableId` мають бути стабільними ID таблиці. Не використовуйте `index`.
+
+## Варіант без `useMemo`
+
+Можна простіше:
+
+```jsx
+export function SpecificationTableLayer({
+  schemeId,
+  frameRect,
+}) {
+  const tables = useCanvasStore((state) =>
+    Object.values(state.specificationTables ?? {}).filter(
+      (table) => table.schemeId === schemeId
+    )
+  )
+
+  return (
+    <Layer>
+      {tables.map((table) => (
+        <SpecificationTableShape
+          key={table.id}
+          tableId={table.id}
+          frameRect={frameRect}
+        />
+      ))}
+    </Layer>
+  )
+}
+```
+
+Але такий selector створює новий масив при кожному виклику Store і може спричиняти зайві ререндери. Для кількох таблиць краще або використовувати `useShallow`, або зберігати `tableIdsBySchemeId`.
+
+## Оптимізований варіант із `useShallow`
+
+```jsx
+'use client'
+
+import { Layer } from 'react-konva'
+import { useShallow } from 'zustand/react/shallow'
+import { useCanvasStore } from '@/store/useCanvasStore'
+import { SpecificationTableShape } from './SpecificationTableShape'
+
+export function SpecificationTableLayer({
+  schemeId,
+  frameRect,
+}) {
+  const tableIds = useCanvasStore(
+    useShallow((state) =>
+      Object.values(state.specificationTables ?? {})
+        .filter((table) => table.schemeId === schemeId)
+        .sort(
+          (a, b) =>
+            Number(a.order ?? 0) -
+            Number(b.order ?? 0)
+        )
+        .map((table) => table.id)
+    )
+  )
+
+  if (tableIds.length === 0) {
+    return null
+  }
+
+  return (
+    <Layer>
+      {tableIds.map((tableId) => (
+        <SpecificationTableShape
+          key={tableId}
+          tableId={tableId}
+          frameRect={frameRect}
+        />
+      ))}
+    </Layer>
+  )
+}
+```
+
+## `SpecificationTableShape`
+
+Всередину компонента треба передавати тільки `tableId`, а дані отримувати окремими селекторами:
+
+```jsx
+'use client'
+
+import { useMemo } from 'react'
+import { Group, Rect, Text } from 'react-konva'
+import { useCanvasStore } from '@/store/useCanvasStore'
+import {
+  normalizeSpecificationColumns,
+} from '../model/normalizeSpecificationColumns'
+import {
+  calculateSpecificationTableGeometry,
+} from '../model/calculateSpecificationTableGeometry'
+
+export function SpecificationTableShape({
+  tableId,
+  frameRect,
+}) {
+  const table = useCanvasStore(
+    (state) => state.specificationTables[tableId]
+  )
+
+  const rows = useCanvasStore(
+    (state) =>
+      state.specificationRowsByTableId[tableId] ?? []
+  )
+
+  const selectTable = useCanvasStore(
+    (state) => state.selectSpecificationTable
+  )
+
+  const selectedTableId = useCanvasStore(
+    (state) => state.selectedSpecificationTableId
+  )
+
+  const columns = useMemo(() => {
+    if (!table) {
+      return []
+    }
+
+    return normalizeSpecificationColumns(table)
+  }, [table])
+
+  const geometry = useMemo(() => {
+    if (!table) {
+      return null
+    }
+
+    return calculateSpecificationTableGeometry({
+      table,
+      rows,
+      columns,
+      frameRect,
+      snapToBottom: table.positionMode === 'auto-bottom',
+    })
+  }, [table, rows, columns, frameRect])
+
+  if (!table || !geometry) {
+    return null
+  }
+
+  const isSelected = selectedTableId === tableId
+  const showTitle = table.showTitle !== false
+
+  return (
+    <Group
+      id={`specification-table-${tableId}`}
+      name="specification-table"
+      x={geometry.x}
+      y={geometry.y}
+      draggable={table.positionMode === 'manual'}
+      onClick={(event) => {
+        event.cancelBubble = true
+        selectTable(tableId)
+      }}
+      onTap={(event) => {
+        event.cancelBubble = true
+        selectTable(tableId)
+      }}
+    >
+      <Rect
+        x={0}
+        y={0}
+        width={geometry.width}
+        height={geometry.totalHeight}
+        stroke={isSelected ? '#1976d2' : '#000000'}
+        strokeWidth={isSelected ? 2 : 1}
+      />
+
+      {showTitle && (
+        <Text
+          x={0}
+          y={0}
+          width={geometry.width}
+          height={geometry.titleHeight}
+          text={String(table.title ?? '')}
+          align="center"
+          verticalAlign="middle"
+          fontSize={Number(table.style?.fontSize ?? 10)}
+        />
+      )}
+
+      {/* Заголовки колонок */}
+
+      {/* Рядки таблиці */}
+    </Group>
+  )
+}
+```
+
+## Не підписуйте `Shape` на весь Store
+
+Небажано:
+
+```jsx
+const {
+  specificationTables,
+  specificationRowsByTableId,
+  selectedSpecificationTableId,
+} = useCanvasStore()
+```
+
+Тоді зміна однієї таблиці може спричинити ререндер усіх таблиць.
+
+Краще:
+
+```jsx
+const table = useCanvasStore(
+  (state) => state.specificationTables[tableId]
+)
+
+const rows = useCanvasStore(
+  (state) => state.specificationRowsByTableId[tableId] ?? []
+)
+```
+
+У такому разі редагування `table-1` не повинно без потреби перемальовувати `table-2`.
+
+## Перетягування конкретної таблиці
+
+У `onDragEnd` обов’язково передавайте її `tableId`:
+
+```jsx
+const updateTablePosition = useCanvasStore(
+  (state) => state.updateSpecificationTablePosition
+)
+
+<Group
+  draggable={table.positionMode === 'manual'}
+  onDragEnd={(event) => {
+    updateTablePosition(tableId, {
+      x: event.target.x(),
+      y: event.target.y(),
+    })
+  }}
+>
+```
+
+Store:
+
+```js
+updateSpecificationTablePosition: (
+  tableId,
+  position
+) => {
+  set((state) => {
+    const table = state.specificationTables[tableId]
+
+    if (!table) {
+      return state
+    }
+
+    return {
+      specificationTables: {
+        ...state.specificationTables,
+        [tableId]: {
+          ...table,
+          x: Number(position.x ?? table.x),
+          y: Number(position.y ?? table.y),
+          positionMode: 'manual',
+        },
+      },
+    }
+  })
+}
+```
+
+## Важливий нюанс `auto-bottom`
+
+Коли кілька таблиць мають:
+
+```js
+positionMode: 'auto-bottom'
+```
+
+вони не можуть усі автоматично стояти в одній координаті. Інакше вони накладуться одна на одну.
+
+Є два коректних підходи.
+
+### Підхід 1: кожна таблиця має власні `x` і `y`
+
+`auto-bottom` визначає тільки `y`, а `x` зберігається у таблиці:
+
+```js
+const y =
+  frameRect.y +
+  frameRect.height -
+  geometry.totalHeight -
+  bottomOffset
+
+const x = table.x
+```
+
+Користувач розставляє таблиці по горизонталі.
+
+### Підхід 2: автоматичне компонування всіх таблиць
+
+`SpecificationTableLayer` спочатку розраховує layout:
+
+```jsx
+const layouts = useMemo(() => {
+  let currentX = frameRect.x + 20
+
+  return tables.map((table) => {
+    const columns =
+      normalizeSpecificationColumns(table)
+
+    const rows =
+      specificationRowsByTableId[table.id] ?? []
+
+    const geometry =
+      calculateSpecificationTableGeometry({
+        table,
+        rows,
+        columns,
+        frameRect,
+        snapToBottom: true,
+      })
+
+    const layout = {
+      tableId: table.id,
+      x: currentX,
+      y:
+        frameRect.y +
+        frameRect.height -
+        geometry.totalHeight -
+        20,
+    }
+
+    currentX += geometry.width + 20
+
+    return layout
+  })
+}, [
+  tables,
+  specificationRowsByTableId,
+  frameRect,
+])
+```
+
+Потім:
+
+```jsx
+{layouts.map((layout) => (
+  <SpecificationTableShape
+    key={layout.tableId}
+    tableId={layout.tableId}
+    frameRect={frameRect}
+    layoutOverride={{
+      x: layout.x,
+      y: layout.y,
+    }}
+  />
+))}
+```
+
+Проте для редактора схем рекомендую перший варіант: кожна таблиця має власну позицію, бо автоматичний layout може несподівано пересувати інші таблиці після додавання рядка або зміни ширини колонки.
+
+## Порядок накладання таблиць
+
+Konva малює елементи у порядку масиву. Остання таблиця буде зверху.
+
+Додайте:
+
+```js
+zIndex: 0
+```
+
+або:
+
+```js
+order: 10
+```
+
+У Layer:
+
+```jsx
+const tableIds = Object.values(specificationTables)
+  .filter((table) => table.schemeId === schemeId)
+  .sort(
+    (a, b) =>
+      Number(a.zIndex ?? 0) -
+      Number(b.zIndex ?? 0)
+  )
+  .map((table) => table.id)
+```
+
+Не викликайте `node.moveToTop()` без оновлення Store, інакше порядок Konva та persisted state розійдеться.
+
+## Найкраща фінальна структура
+
+```jsx
+export function SpecificationTableLayer({
+  schemeId,
+  frameRect,
+}) {
+  const tableIds = useCanvasStore(
+    useShallow((state) =>
+      Object.values(state.specificationTables ?? {})
+        .filter((table) => table.schemeId === schemeId)
+        .sort(
+          (a, b) =>
+            Number(a.zIndex ?? 0) -
+            Number(b.zIndex ?? 0)
+        )
+        .map((table) => table.id)
+    )
+  )
+
+  return (
+    <Layer name="specification-table-layer">
+      {tableIds.map((tableId) => (
+        <SpecificationTableShape
+          key={tableId}
+          tableId={tableId}
+          frameRect={frameRect}
+        />
+      ))}
+    </Layer>
+  )
+}
+```
+
+Тобто відповідальність розподіляється так:
+
+```txt
+SpecificationTableLayer
+  фільтрує таблиці за schemeId
+  визначає порядок
+  виконує map
+
+SpecificationTableShape
+  читає table за tableId
+  читає rows за tableId
+  нормалізує columns
+  рахує власну geometry
+  рендерить одну таблицю
+  обробляє вибір і drag
+```
+
+Критично: `selectedSpecificationTableId` використовується лише для підсвічування та редагування. Він не повинен визначати, яка єдина таблиця рендериться. На canvas мають рендеритися всі таблиці поточної схеми.
