@@ -1,0 +1,602 @@
+Так, дві таблиці будуть рендеритися, але лише якщо `SpecificationTableLayer` проходить через **весь масив**, а не бере одну таблицю за `selectedTableId`.
+
+Головна проблема початкового положення: якщо кожна нова таблиця створюється з однаковими координатами:
+
+```js
+x: 120,
+y: 120,
+```
+
+вони рендеряться одна поверх одної. Візуально здаватиметься, що таблиця одна.
+
+## Як має працювати Layer
+
+```jsx
+export function SpecificationTableLayer({
+  schemeId,
+  frameRect,
+}) {
+  const specificationTables = useCanvasStore(
+    (state) => state.specificationTables
+  )
+
+  const tables = Array.isArray(
+    specificationTables
+  )
+    ? specificationTables.filter(
+        (table) =>
+          !schemeId ||
+          table.schemeId === schemeId
+      )
+    : []
+
+  return (
+    <Group name="specification-tables">
+      {tables.map((table) => (
+        <SpecificationTableShape
+          key={table.id}
+          tableId={table.id}
+          frameRect={frameRect}
+        />
+      ))}
+    </Group>
+  )
+}
+```
+
+Критично:
+
+```jsx
+tables.map(...)
+```
+
+а не:
+
+```jsx
+const table = tables[0]
+```
+
+і не:
+
+```jsx
+const table = tables.find(
+  (table) => table.id === selectedTableId
+)
+```
+
+`selectedTableId` потрібен лише для підсвічування та редагування, а не для визначення, що рендерити.
+
+---
+
+# Початкове положення нової таблиці
+
+Є три нормальні стратегії.
+
+## Варіант 1. Каскадний зсув
+
+Найпростіший і найзручніший варіант.
+
+Перша таблиця:
+
+```txt
+x = 120
+y = 120
+```
+
+Друга:
+
+```txt
+x = 150
+y = 150
+```
+
+Третя:
+
+```txt
+x = 180
+y = 180
+```
+
+Функція:
+
+```js
+export function getNextSpecificationTablePosition({
+  tables,
+  schemeId,
+  startX = 120,
+  startY = 120,
+  offset = 30,
+}) {
+  const schemeTables = (
+    Array.isArray(tables)
+      ? tables
+      : []
+  ).filter(
+    (table) =>
+      !schemeId ||
+      table.schemeId === schemeId
+  )
+
+  const index = schemeTables.length
+
+  return {
+    x: startX + index * offset,
+    y: startY + index * offset,
+  }
+}
+```
+
+У кнопці:
+
+```js
+const handleCreateSpecificationTable = (
+  event
+) => {
+  event?.stopPropagation?.()
+
+  const store =
+    useCanvasStore.getState()
+
+  const schemeId =
+    store.currentScheme?.id ??
+    store.currentSchemeId
+
+  const position =
+    getNextSpecificationTablePosition({
+      tables:
+        store.specificationTables,
+      schemeId,
+      startX: 120,
+      startY: 120,
+      offset: 30,
+    })
+
+  const newTable =
+    createSpecificationTable({
+      isTemplate: false,
+      schemeId,
+      x: position.x,
+      y: position.y,
+    })
+
+  const tableId =
+    store.addSpecificationTable(
+      newTable
+    )
+
+  useCanvasStore
+    .getState()
+    .openModal?.(
+      'editTable',
+      {
+        tableId,
+        initialTab: 'columns',
+      }
+    )
+}
+```
+
+Це гарантує, що нова таблиця не накриє попередню повністю.
+
+---
+
+# Варіант 2. Розміщення праворуч від останньої таблиці
+
+Краще для технічної схеми.
+
+```js
+export function getNextTablePosition({
+  tables,
+  schemeId,
+  frameRect,
+  defaultWidth = 300,
+  gap = 20,
+}) {
+  const schemeTables = (
+    Array.isArray(tables)
+      ? tables
+      : []
+  ).filter(
+    (table) =>
+      table.schemeId === schemeId
+  )
+
+  if (schemeTables.length === 0) {
+    return {
+      x: frameRect.x + 20,
+      y: frameRect.y + 80,
+    }
+  }
+
+  const lastTable =
+    schemeTables[
+      schemeTables.length - 1
+    ]
+
+  const lastWidth =
+    Number(lastTable.width) ||
+    defaultWidth
+
+  let nextX =
+    Number(lastTable.x || 0) +
+    lastWidth +
+    gap
+
+  let nextY =
+    Number(lastTable.y || 0)
+
+  const rightLimit =
+    frameRect.x +
+    frameRect.width
+
+  if (
+    nextX +
+    defaultWidth >
+    rightLimit
+  ) {
+    nextX =
+      frameRect.x + 20
+
+    nextY =
+      Number(lastTable.y || 0) +
+      120 +
+      gap
+  }
+
+  return {
+    x: nextX,
+    y: nextY,
+  }
+}
+```
+
+Але тут потрібно знати ширину і висоту попередньої таблиці.
+
+---
+
+# Варіант 3. Користувач клацає місце на canvas
+
+Найкращий UX для редактора схем:
+
+1. Натискає «Додати таблицю».
+2. Активується режим розміщення.
+3. Користувач клацає по схемі.
+4. Таблиця створюється у координатах кліку.
+
+Store:
+
+```js
+draftSpecificationTable: null,
+
+startSpecificationTablePlacement: () =>
+  set({
+    draftSpecificationTable: {
+      active: true,
+    },
+  }),
+
+finishSpecificationTablePlacement: (
+  x,
+  y
+) => {
+  const store = get()
+
+  const table =
+    createSpecificationTable({
+      isTemplate: false,
+      schemeId:
+        store.currentScheme?.id,
+      x,
+      y,
+    })
+
+  store.addSpecificationTable(
+    table
+  )
+
+  set({
+    draftSpecificationTable: null,
+  })
+
+  return table.id
+},
+```
+
+У Stage:
+
+```jsx
+onMouseDown={(event) => {
+  const store =
+    useCanvasStore.getState()
+
+  if (
+    !store
+      .draftSpecificationTable
+      ?.active
+  ) {
+    return
+  }
+
+  const stage =
+    event.target.getStage()
+
+  const pointer =
+    stage.getPointerPosition()
+
+  const scale =
+    store.viewport.finalScale || 1
+
+  const x =
+    (
+      pointer.x -
+      (store.viewport.offsetX || 0)
+    ) / scale
+
+  const y =
+    (
+      pointer.y -
+      (store.viewport.offsetY || 0)
+    ) / scale
+
+  const tableId =
+    store.finishSpecificationTablePlacement(
+      x,
+      y
+    )
+
+  store.openModal?.(
+    'editTable',
+    {
+      tableId,
+      initialTab: 'columns',
+    }
+  )
+}}
+```
+
+Але на першому етапі каскадного offset достатньо.
+
+---
+
+# `SpecificationTableShape` для масиву
+
+Оскільки Store містить масив, таблицю потрібно шукати через `.find()`:
+
+```jsx
+export function SpecificationTableShape({
+  tableId,
+  frameRect,
+}) {
+  const table = useCanvasStore(
+    (state) =>
+      state.specificationTables.find(
+        (item) =>
+          item.id === tableId
+      ) ?? null
+  )
+
+  const updateTablePosition =
+    useCanvasStore(
+      (state) =>
+        state
+          .updateSpecificationTablePosition
+    )
+
+  if (!table) {
+    return null
+  }
+
+  const columns =
+    normalizeSpecificationColumns(
+      table
+    )
+
+  const rows =
+    Array.isArray(table.rows)
+      ? table.rows
+      : []
+
+  const geometry =
+    calculateSpecificationTableGeometry({
+      table,
+      rows,
+      columns,
+      frameRect,
+      snapToBottom:
+        table.positionMode ===
+        'auto-bottom',
+    })
+
+  return (
+    <Group
+      x={geometry.x}
+      y={geometry.y}
+      draggable={
+        table.positionMode ===
+        'manual'
+      }
+      onDragEnd={(event) => {
+        updateTablePosition(
+          tableId,
+          event.target.x(),
+          event.target.y()
+        )
+      }}
+    >
+      {/* render table */}
+    </Group>
+  )
+}
+```
+
+Store action:
+
+```js
+updateSpecificationTablePosition: (
+  tableId,
+  x,
+  y
+) => {
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.map(
+        (table) =>
+          table.id === tableId
+            ? {
+                ...table,
+                x: Number(x || 0),
+                y: Number(y || 0),
+                positionMode:
+                  'manual',
+              }
+            : table
+      ),
+  }))
+},
+```
+
+---
+
+# Важливий нюанс `auto-bottom`
+
+Якщо дві таблиці мають:
+
+```js
+positionMode: 'auto-bottom'
+```
+
+і їх `x` однаковий, то обидві отримають той самий `y` і накладуться.
+
+Для додаткових таблиць краще відразу встановлювати:
+
+```js
+positionMode: 'manual'
+```
+
+Наприклад:
+
+```js
+createSpecificationTable({
+  isTemplate: false,
+  x,
+  y,
+  positionMode: 'manual',
+})
+```
+
+А таблицю, яка створюється зі зносок, можна залишити:
+
+```js
+positionMode: 'auto-bottom'
+```
+
+Тобто:
+
+```txt
+таблиця зі зносок:
+  auto-bottom
+
+додаткова ручна таблиця:
+  manual
+```
+
+---
+
+# Рекомендована фабрика
+
+```js
+export function createSpecificationTable({
+  isTemplate = false,
+  schemeId,
+  x = 120,
+  y = 120,
+  positionMode = 'manual',
+}) {
+  return {
+    id: uuidv4(),
+    schemeId,
+    title: 'Специфікація',
+    showTitle: true,
+    isTemplate,
+    x,
+    y,
+    positionMode,
+    columns: isTemplate
+      ? cloneDefaultColumns()
+      : [],
+    rows: [],
+    style: {
+      fontFamily: 'Arial',
+      fontSize: 10,
+      rowHeight: 22,
+      titleHeight: 24,
+      headerHeight: 22,
+    },
+  }
+}
+```
+
+---
+
+# Як перевірити, чи дві таблиці справді рендеряться
+
+Додайте тимчасово в Layer:
+
+```jsx
+console.log(
+  'TABLES FOR RENDER:',
+  tables.map((table) => ({
+    id: table.id,
+    x: table.x,
+    y: table.y,
+  }))
+)
+```
+
+Очікувано:
+
+```js
+[
+  {
+    id: 'table-1',
+    x: 120,
+    y: 120,
+  },
+  {
+    id: 'table-2',
+    x: 150,
+    y: 150,
+  },
+]
+```
+
+Якщо є два записи, але видно одну таблицю, значить вони накладені.
+
+Якщо є один запис, проблема у фільтрації за `schemeId` або друга таблиця не записана у Store.
+
+## Підсумок
+
+Так, дві таблиці рендеритимуться, якщо:
+
+```jsx
+specificationTables
+  .filter(...)
+  .map(...)
+```
+
+рендерить усі елементи.
+
+Для нових таблиць задавайте різні координати. Найпростіше:
+
+```js
+x = 120 + tablesCount * 30
+y = 120 + tablesCount * 30
+```
+
+І для додаткових таблиць використовуйте:
+
+```js
+positionMode: 'manual'
+```
+
+Інакше кілька `auto-bottom` таблиць можуть опинитися в одному місці.

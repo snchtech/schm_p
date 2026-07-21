@@ -1,0 +1,793 @@
+Тоді масив залишаємо. Ваш `return` у `set()` виглядає коректно: Zustand оновлює стан синхронно. Якщо після виконання action таблиці справді немає, причина, найімовірніше, не в конструкції:
+
+```js
+return {
+  specificationTables: [...currentTables, table],
+}
+```
+
+а в одному з таких місць:
+
+* стан одразу перезаписується іншим action або `useEffect`;
+* у проєкті використовуються два різні екземпляри `useCanvasStore`;
+* поле `specificationTables` пізніше перезаписує завантаження схеми;
+* модалка шукає таблицю як об’єкт через `[tableId]`, хоча у вас масив;
+* у Store є друге оголошення `specificationTables` або `addSpecificationTable`, яке перекриває перше.
+
+## 1. Замініть action на діагностичну версію
+
+```js
+addSpecificationTable: (table) => {
+  if (!table?.id) {
+    console.error(
+      '[addSpecificationTable] Таблиця або її id відсутні:',
+      table
+    )
+
+    return null
+  }
+
+  console.log(
+    '[addSpecificationTable] BEFORE:',
+    get().specificationTables
+  )
+
+  set(
+    (state) => {
+      const currentTables = Array.isArray(
+        state.specificationTables
+      )
+        ? state.specificationTables
+        : []
+
+      const existingIndex =
+        currentTables.findIndex(
+          (item) => item.id === table.id
+        )
+
+      let nextTables
+
+      if (existingIndex >= 0) {
+        nextTables = currentTables.map(
+          (item, index) =>
+            index === existingIndex
+              ? {
+                  ...item,
+                  ...table,
+                }
+              : item
+        )
+      } else {
+        nextTables = [
+          ...currentTables,
+          {
+            ...table,
+          },
+        ]
+      }
+
+      console.log(
+        '[addSpecificationTable] NEXT INSIDE SET:',
+        nextTables
+      )
+
+      return {
+        specificationTables: nextTables,
+      }
+    },
+    false,
+    'canvas/addSpecificationTable'
+  )
+
+  const result = get().specificationTables
+
+  console.log(
+    '[addSpecificationTable] AFTER SET:',
+    result
+  )
+
+  const addedTable = result.find(
+    (item) => item.id === table.id
+  )
+
+  console.log(
+    '[addSpecificationTable] ADDED TABLE:',
+    addedTable
+  )
+
+  return addedTable?.id ?? null
+},
+```
+
+Ключова перевірка:
+
+```js
+console.log(
+  '[addSpecificationTable] AFTER SET:',
+  get().specificationTables
+)
+```
+
+Вона виконується **в самому Store**, одразу після `set()`.
+
+### Можливі результати
+
+Якщо `AFTER SET` уже містить таблицю, Store працює правильно. Тоді проблема у компоненті, модалці або подальшому перезаписі.
+
+Якщо `NEXT INSIDE SET` містить таблицю, а `AFTER SET` не містить — перевіряйте інший Store або middleware.
+
+Якщо `AFTER SET` містить таблицю, але через кілька мілісекунд вона зникає — інший action перезаписує `specificationTables`.
+
+---
+
+## 2. Перевірте результат у кнопці
+
+```js
+const handleCreateSpecificationTable = (
+  event
+) => {
+  event?.stopPropagation?.()
+
+  const newCustomTable =
+    createSpecificationTable({
+      isTemplate: false,
+      x: 120,
+      y: 120,
+    })
+
+  if (!newCustomTable?.id) {
+    console.error(
+      'Фабрика не створила таблицю',
+      newCustomTable
+    )
+
+    return
+  }
+
+  const tableId =
+    useCanvasStore
+      .getState()
+      .addSpecificationTable(
+        newCustomTable
+      )
+
+  console.log(
+    '[TOOLBAR] returned tableId:',
+    tableId
+  )
+
+  const stateAfterAdd =
+    useCanvasStore.getState()
+
+  const addedTable =
+    stateAfterAdd.specificationTables.find(
+      (table) =>
+        table.id === tableId
+    )
+
+  console.log(
+    '[TOOLBAR] table after add:',
+    addedTable
+  )
+
+  console.log(
+    '[TOOLBAR] all tables:',
+    stateAfterAdd.specificationTables
+  )
+
+  if (!addedTable) {
+    console.error(
+      'Таблиця не знайдена у Store після додавання',
+      {
+        tableId,
+        newCustomTable,
+        specificationTables:
+          stateAfterAdd.specificationTables,
+      }
+    )
+
+    return
+  }
+
+  useCanvasStore
+    .getState()
+    .openModal?.('editTable', {
+      tableId,
+      initialTab: 'columns',
+    })
+}
+```
+
+Не використовуйте для відкриття модалки старий snapshot:
+
+```js
+const store = useCanvasStore.getState()
+
+store.addSpecificationTable(...)
+store.openModal(...)
+```
+
+Це зазвичай працює, але під час діагностики краще щоразу звертатися до актуального Store:
+
+```js
+useCanvasStore.getState().addSpecificationTable(...)
+useCanvasStore.getState().openModal(...)
+```
+
+---
+
+## 3. Модалка повинна шукати таблицю через `find`
+
+Оскільки `specificationTables` — масив, неправильно:
+
+```js
+state.specificationTables?.[tableId]
+```
+
+`tableId` у вас UUID, а масив читається через числовий індекс.
+
+Правильно:
+
+```js
+const table = useCanvasStore(
+  (state) =>
+    state.specificationTables.find(
+      (item) => item.id === tableId
+    ) ?? null
+)
+```
+
+У `SpecificationColumnsPanel`:
+
+```jsx
+export function SpecificationColumnsPanel({
+  tableId,
+}) {
+  const table = useCanvasStore(
+    (state) =>
+      state.specificationTables.find(
+        (item) =>
+          item.id === tableId
+      ) ?? null
+  )
+
+  const addColumn = useCanvasStore(
+    (state) =>
+      state.addSpecificationTableColumn
+  )
+
+  if (!table) {
+    return (
+      <div>
+        Таблицю не знайдено.
+        <br />
+        ID: {tableId}
+      </div>
+    )
+  }
+
+  const columns = Array.isArray(
+    table.columns
+  )
+    ? table.columns
+    : []
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() =>
+          addColumn(tableId)
+        }
+      >
+        Додати колонку
+      </button>
+
+      {columns.map((column) => (
+        <div key={column.id}>
+          {column.title}
+        </div>
+      ))}
+    </div>
+  )
+}
+```
+
+На вашому фото порожня вкладка дуже схожа саме на ситуацію, коли компонент виконує:
+
+```js
+specificationTables[tableId]
+```
+
+і отримує `undefined`.
+
+При цьому таблиця може бути у Store:
+
+```js
+specificationTables = [
+  {
+    id: '7b...',
+    columns: [],
+  },
+]
+```
+
+але доступ:
+
+```js
+specificationTables['7b...']
+```
+
+нічого не поверне.
+
+---
+
+## 4. Усі actions колонок також повинні працювати через `findIndex`
+
+Додавання колонки:
+
+```js
+addSpecificationTableColumn: (
+  tableId
+) => {
+  const columnId =
+    `custom-${uuidv4()}`
+
+  set((state) => {
+    const tableIndex =
+      state.specificationTables.findIndex(
+        (table) =>
+          table.id === tableId
+      )
+
+    if (tableIndex < 0) {
+      console.error(
+        '[addColumn] Таблицю не знайдено:',
+        tableId
+      )
+
+      return state
+    }
+
+    const table =
+      state.specificationTables[
+        tableIndex
+      ]
+
+    const columns = Array.isArray(
+      table.columns
+    )
+      ? table.columns
+      : []
+
+    const maxOrder =
+      columns.reduce(
+        (max, column) =>
+          Math.max(
+            max,
+            Number(column.order) || 0
+          ),
+        0
+      )
+
+    const newColumn = {
+      id: columnId,
+      key: columnId,
+      title:
+        `Колонка ${columns.length + 1}`,
+      width: 100,
+      align: 'left',
+      visible: true,
+      editable: true,
+      order: maxOrder + 10,
+    }
+
+    return {
+      specificationTables:
+        state.specificationTables.map(
+          (currentTable, index) =>
+            index === tableIndex
+              ? {
+                  ...currentTable,
+                  columns: [
+                    ...columns,
+                    newColumn,
+                  ],
+                }
+              : currentTable
+        ),
+    }
+  })
+
+  return columnId
+},
+```
+
+Оновлення колонки:
+
+```js
+updateSpecificationTableColumn: (
+  tableId,
+  columnId,
+  patch
+) => {
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.map(
+        (table) => {
+          if (table.id !== tableId) {
+            return table
+          }
+
+          return {
+            ...table,
+            columns: (
+              Array.isArray(
+                table.columns
+              )
+                ? table.columns
+                : []
+            ).map((column) =>
+              column.id === columnId
+                ? {
+                    ...column,
+                    ...patch,
+                  }
+                : column
+            ),
+          }
+        }
+      ),
+  }))
+},
+```
+
+---
+
+## 5. Перевірте, чи таблиці не перезаписуються при відкритті модалки
+
+Знайдіть усі місця:
+
+```js
+specificationTables:
+```
+
+Особливо небезпечні конструкції:
+
+```js
+set({
+  specificationTables: [],
+})
+```
+
+```js
+set((state) => ({
+  ...state,
+  specificationTables:
+    currentScheme.specificationTables || [],
+}))
+```
+
+```js
+setCurrentScheme: (scheme) =>
+  set({
+    currentScheme: scheme,
+    specificationTables:
+      scheme.specificationTables || [],
+  })
+```
+
+Можливий сценарій:
+
+```txt
+1. addSpecificationTable додає таблицю.
+2. openModal змінює modalState.
+3. Через зміну компонента спрацьовує useEffect.
+4. useEffect повторно завантажує currentScheme.
+5. specificationTables замінюється старим масивом із backend.
+```
+
+Додайте тимчасове логування у кожен action, який записує `specificationTables`.
+
+---
+
+## 6. Підпишіться на зміни `specificationTables`
+
+Тимчасово додайте у файл Store після його створення:
+
+```js
+if (
+  process.env.NODE_ENV ===
+  'development'
+) {
+  useCanvasStore.subscribe(
+    (state, previousState) => {
+      if (
+        state.specificationTables !==
+        previousState.specificationTables
+      ) {
+        console.group(
+          '[STORE] specificationTables changed'
+        )
+
+        console.log(
+          'BEFORE:',
+          previousState.specificationTables
+        )
+
+        console.log(
+          'AFTER:',
+          state.specificationTables
+        )
+
+        console.trace(
+          'Change stack'
+        )
+
+        console.groupEnd()
+      }
+    }
+  )
+}
+```
+
+Якщо ваша версія Zustand не передає `previousState`, використайте:
+
+```js
+let previousTables =
+  useCanvasStore
+    .getState()
+    .specificationTables
+
+useCanvasStore.subscribe(
+  (state) => {
+    if (
+      state.specificationTables !==
+      previousTables
+    ) {
+      console.log(
+        '[STORE TABLES CHANGE]',
+        {
+          before: previousTables,
+          after:
+            state.specificationTables,
+        }
+      )
+
+      console.trace()
+
+      previousTables =
+        state.specificationTables
+    }
+  }
+)
+```
+
+Так буде видно:
+
+```txt
+[] → [newTable] → []
+```
+
+Якщо стан змінюється саме так, `addSpecificationTable` справний, а якийсь наступний action очищає масив.
+
+---
+
+## 7. Перевірте, чи немає двох Store
+
+Це дуже поширено після перенесення файлів.
+
+Наприклад, одна частина імпортує:
+
+```js
+import { useCanvasStore }
+  from '@/features/scheme/model/store/useCanvasStore'
+```
+
+а інша:
+
+```js
+import { useCanvasStore }
+  from '@/store/useCanvasStore'
+```
+
+Навіть якщо файли схожі, це можуть бути два різні Zustand Store.
+
+Додайте у файл Store:
+
+```js
+console.log(
+  '[useCanvasStore module loaded]',
+  import.meta?.url
+)
+```
+
+Для Next/Webpack без `import.meta`:
+
+```js
+console.log(
+  '[useCanvasStore module loaded]'
+)
+```
+
+І додайте тимчасовий маркер:
+
+```js
+export const CANVAS_STORE_INSTANCE_ID =
+  Math.random()
+    .toString(36)
+    .slice(2)
+
+console.log(
+  'CANVAS_STORE_INSTANCE_ID:',
+  CANVAS_STORE_INSTANCE_ID
+)
+```
+
+У `ToolPalette`:
+
+```js
+import {
+  useCanvasStore,
+  CANVAS_STORE_INSTANCE_ID,
+} from '...'
+
+console.log(
+  '[ToolPalette store]',
+  CANVAS_STORE_INSTANCE_ID
+)
+```
+
+У модалці:
+
+```js
+console.log(
+  '[Modal store]',
+  CANVAS_STORE_INSTANCE_ID
+)
+```
+
+ID мають бути однаковими.
+
+---
+
+## 8. Перевірте дубль властивості в об’єкті Store
+
+У JavaScript остання властивість перезаписує попередню:
+
+```js
+const store = {
+  specificationTables: [],
+
+  addSpecificationTable: () => {
+    // правильний action
+  },
+
+  // багато коду
+
+  specificationTables: [],
+
+  addSpecificationTable: () => {
+    // інший action
+  },
+}
+```
+
+Також це може статись через spread:
+
+```js
+{
+  specificationTables: [],
+  addSpecificationTable,
+
+  ...someSlice,
+}
+```
+
+Якщо `someSlice` містить:
+
+```js
+specificationTables: []
+```
+
+воно перекриє попереднє поле.
+
+Або навпаки:
+
+```js
+{
+  ...someSlice,
+
+  specificationTables: [],
+}
+```
+
+Знайдіть у проєкті:
+
+```txt
+specificationTables:
+addSpecificationTable:
+```
+
+Кожен із них має бути визначений у Store лише один раз або свідомо об’єднаний.
+
+---
+
+## 9. Найкоротша правильна реалізація для масиву
+
+```js
+specificationTables: [],
+
+addSpecificationTable: (table) => {
+  if (!table?.id) {
+    return null
+  }
+
+  set((state) => {
+    const tables = Array.isArray(
+      state.specificationTables
+    )
+      ? state.specificationTables
+      : []
+
+    const exists = tables.some(
+      (item) => item.id === table.id
+    )
+
+    return {
+      specificationTables: exists
+        ? tables.map((item) =>
+            item.id === table.id
+              ? {
+                  ...item,
+                  ...table,
+                }
+              : item
+          )
+        : [
+            ...tables,
+            {
+              ...table,
+            },
+          ],
+    }
+  })
+
+  return table.id
+},
+```
+
+І читання:
+
+```js
+const table = useCanvasStore(
+  (state) =>
+    state.specificationTables.find(
+      (item) =>
+        item.id === tableId
+    ) ?? null
+)
+```
+
+## Найімовірніший діагноз у вашому випадку
+
+Ваш `addSpecificationTable` на фото виглядає робочим. Тому перевіряти потрібно в такому порядку:
+
+1. Чи є таблиця в `get().specificationTables` **усередині action після `set()`**.
+2. Чи модалка використовує `.find()`, а не `[tableId]`.
+3. Чи якийсь `useEffect` після відкриття модалки не повертає таблиці зі старої `currentScheme`.
+4. Чи ToolPalette і модалка імпортують один і той самий `useCanvasStore`.
+5. Чи немає другого `specificationTables` або `addSpecificationTable` у Store.
+
+Сам `return`:
+
+```js
+return {
+  specificationTables: [
+    ...currentTables,
+    table,
+  ],
+}
+```
+
+для масиву правильний і повинен оновити Zustand синхронно.

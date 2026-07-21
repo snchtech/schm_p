@@ -1,0 +1,623 @@
+Так, це майже напевно означає, що перехід на масив виконаний не повністю. Сам `addSpecificationTable` на фото для масиву написаний правильно:
+
+```js
+return {
+  specificationTables: [...currentTables, table],
+}
+```
+
+Але в тому самому Store на фото нижче видно стару об’єктну логіку:
+
+```js
+if (!s.specificationTables?.[id]) return s
+```
+
+Для масиву `id` — це UUID, а не числовий індекс. Тому:
+
+```js
+s.specificationTables[id]
+```
+
+завжди дає `undefined`.
+
+## Що, найімовірніше, відбувається
+
+Послідовність може бути такою:
+
+1. `addSpecificationTable()` справді додає таблицю в масив.
+2. Відкривається модалка.
+3. Модалка або її дочірній компонент шукає таблицю старим способом:
+
+```js
+state.specificationTables[tableId]
+```
+
+4. Отримує `undefined`.
+5. Інший action або ефект синхронізації вважає таблицю відсутньою та перезаписує масив старими даними.
+
+Тобто проблема не в додаванні, а в тому, що після додавання код усе ще частково працює з `specificationTables` як з об’єктом.
+
+---
+
+# 1. Залиште `addSpecificationTable` суто масивним
+
+```js
+addSpecificationTable: (table) => {
+  if (!table?.id) {
+    console.error(
+      '[addSpecificationTable] table.id відсутній',
+      table
+    )
+
+    return null
+  }
+
+  set((state) => {
+    const currentTables = Array.isArray(
+      state.specificationTables
+    )
+      ? state.specificationTables
+      : []
+
+    const tableExists = currentTables.some(
+      (currentTable) =>
+        currentTable.id === table.id
+    )
+
+    const nextTables = tableExists
+      ? currentTables.map((currentTable) =>
+          currentTable.id === table.id
+            ? {
+                ...currentTable,
+                ...table,
+              }
+            : currentTable
+        )
+      : [
+          ...currentTables,
+          {
+            ...table,
+          },
+        ]
+
+    return {
+      specificationTables: nextTables,
+    }
+  })
+
+  const addedTable = get()
+    .specificationTables
+    .find(
+      (currentTable) =>
+        currentTable.id === table.id
+    )
+
+  console.log(
+    '[addSpecificationTable] AFTER:',
+    get().specificationTables
+  )
+
+  return addedTable?.id ?? null
+},
+```
+
+Це правильна реалізація для:
+
+```js
+specificationTables: []
+```
+
+---
+
+# 2. Переробіть `replaceSpecificationTable`
+
+На фото у вас залишилася така перевірка:
+
+```js
+if (!s.specificationTables?.[id]) return s
+```
+
+Її потрібно повністю прибрати.
+
+Правильно для масиву:
+
+```js
+replaceSpecificationTable: (
+  tableId,
+  nextTable
+) => {
+  if (!tableId || !nextTable) {
+    return
+  }
+
+  set((state) => {
+    const tableExists =
+      state.specificationTables.some(
+        (table) =>
+          table.id === tableId
+      )
+
+    if (!tableExists) {
+      console.warn(
+        '[replaceSpecificationTable] Таблицю не знайдено',
+        tableId
+      )
+
+      return state
+    }
+
+    return {
+      specificationTables:
+        state.specificationTables.map(
+          (table) =>
+            table.id === tableId
+              ? {
+                  ...table,
+                  ...nextTable,
+                  id: tableId,
+                }
+              : table
+        ),
+    }
+  })
+},
+```
+
+---
+
+# 3. Пошук таблиці тільки через `.find()`
+
+У всьому застосунку замініть:
+
+```js
+state.specificationTables[tableId]
+```
+
+на:
+
+```js
+state.specificationTables.find(
+  (table) =>
+    table.id === tableId
+)
+```
+
+Наприклад, у `SpecificationColumnsPanel`:
+
+```jsx
+const table = useCanvasStore(
+  (state) =>
+    state.specificationTables.find(
+      (currentTable) =>
+        currentTable.id === tableId
+    ) ?? null
+)
+```
+
+У `SpecificationRowsPanel`:
+
+```jsx
+const table = useCanvasStore(
+  (state) =>
+    state.specificationTables.find(
+      (currentTable) =>
+        currentTable.id === tableId
+    ) ?? null
+)
+```
+
+У налаштуваннях:
+
+```jsx
+const table = useCanvasStore(
+  (state) =>
+    state.specificationTables.find(
+      (currentTable) =>
+        currentTable.id === tableId
+    ) ?? null
+)
+```
+
+---
+
+# 4. Оновлення таблиці через `.map()`
+
+```js
+updateSpecificationTable: (
+  tableId,
+  patch
+) => {
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.map(
+        (table) =>
+          table.id === tableId
+            ? {
+                ...table,
+                ...patch,
+              }
+            : table
+      ),
+  }))
+},
+```
+
+Не використовувати:
+
+```js
+{
+  ...state.specificationTables,
+  [tableId]: ...
+}
+```
+
+Це перетворює масив на об’єкт із числовими ключами.
+
+---
+
+# 5. Додавання колонки до таблиці-масиву
+
+```js
+addSpecificationTableColumn: (
+  tableId
+) => {
+  const columnId =
+    `custom-${uuidv4()}`
+
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.map(
+        (table) => {
+          if (table.id !== tableId) {
+            return table
+          }
+
+          const columns = Array.isArray(
+            table.columns
+          )
+            ? table.columns
+            : []
+
+          const maxOrder =
+            columns.reduce(
+              (max, column) =>
+                Math.max(
+                  max,
+                  Number(column.order) || 0
+                ),
+              0
+            )
+
+          return {
+            ...table,
+            columns: [
+              ...columns,
+              {
+                id: columnId,
+                key: columnId,
+                title:
+                  `Колонка ${columns.length + 1}`,
+                width: 100,
+                align: 'left',
+                visible: true,
+                editable: true,
+                order: maxOrder + 10,
+              },
+            ],
+          }
+        }
+      ),
+  }))
+
+  return columnId
+},
+```
+
+---
+
+# 6. Оновлення колонки
+
+```js
+updateSpecificationTableColumn: (
+  tableId,
+  columnId,
+  patch
+) => {
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.map(
+        (table) => {
+          if (table.id !== tableId) {
+            return table
+          }
+
+          return {
+            ...table,
+            columns: (
+              Array.isArray(
+                table.columns
+              )
+                ? table.columns
+                : []
+            ).map((column) =>
+              column.id === columnId
+                ? sanitizeColumnPatch(
+                    column,
+                    patch
+                  )
+                : column
+            ),
+          }
+        }
+      ),
+  }))
+},
+```
+
+---
+
+# 7. Видалення таблиці
+
+```js
+removeSpecificationTable: (
+  tableId
+) => {
+  set((state) => ({
+    specificationTables:
+      state.specificationTables.filter(
+        (table) =>
+          table.id !== tableId
+      ),
+  }))
+},
+```
+
+---
+
+# 8. Перевірте відкриття модалки
+
+Ваш код створення таблиці краще записати так:
+
+```js
+const handleCreateSpecificationTable = (
+  event
+) => {
+  event?.stopPropagation?.()
+
+  const newCustomTable =
+    createSpecificationTable({
+      isTemplate: false,
+      x: 120,
+      y: 120,
+    })
+
+  if (!newCustomTable?.id) {
+    console.error(
+      'Не вдалося створити таблицю',
+      newCustomTable
+    )
+
+    return
+  }
+
+  const tableId =
+    useCanvasStore
+      .getState()
+      .addSpecificationTable(
+        newCustomTable
+      )
+
+  const addedTable =
+    useCanvasStore
+      .getState()
+      .specificationTables
+      .find(
+        (table) =>
+          table.id === tableId
+      )
+
+  console.log(
+    'TABLE IN STORE:',
+    addedTable
+  )
+
+  if (!addedTable) {
+    console.error(
+      'Таблиця не додалась у Store'
+    )
+
+    return
+  }
+
+  useCanvasStore
+    .getState()
+    .openModal?.(
+      'editTable',
+      {
+        tableId,
+        initialTab: 'columns',
+      }
+    )
+}
+```
+
+---
+
+# 9. Перевірте `openModal`
+
+Сам `openModal` не повинен повертати неповний стан.
+
+Небезпечно:
+
+```js
+openModal: (name, payload) =>
+  set(() => ({
+    modalState: {
+      openModalName: name,
+      payload,
+    },
+    specificationTables: [],
+  }))
+```
+
+Правильно:
+
+```js
+openModal: (
+  openModalName,
+  payload = {}
+) => {
+  set((state) => ({
+    modalState: {
+      ...state.modalState,
+      openModalName,
+      ...payload,
+    },
+  }))
+},
+```
+
+Також перевірте, чи `openModal` не записує:
+
+```js
+currentScheme
+```
+
+або не запускає завантаження схеми, яке потім повертає старий список таблиць.
+
+---
+
+# 10. Додайте точний трекер перезапису
+
+```js
+let previousTables =
+  useCanvasStore
+    .getState()
+    .specificationTables
+
+useCanvasStore.subscribe(
+  (state) => {
+    if (
+      state.specificationTables !==
+      previousTables
+    ) {
+      console.group(
+        'SPECIFICATION TABLES CHANGED'
+      )
+
+      console.log(
+        'BEFORE:',
+        previousTables
+      )
+
+      console.log(
+        'AFTER:',
+        state.specificationTables
+      )
+
+      console.trace()
+
+      console.groupEnd()
+
+      previousTables =
+        state.specificationTables
+    }
+  }
+)
+```
+
+Після натискання кнопки дивіться послідовність.
+
+### Нормальний результат
+
+```txt
+BEFORE: []
+AFTER: [newTable]
+```
+
+### Якщо бачите
+
+```txt
+BEFORE: []
+AFTER: [newTable]
+
+BEFORE: [newTable]
+AFTER: []
+```
+
+тоді `addSpecificationTable` працює, але наступний action очищає масив.
+
+---
+
+# 11. Найважливіше місце на ваших фото
+
+У вас уже видно залишок старого формату:
+
+```js
+if (!s.specificationTables?.[id]) return s
+```
+
+Для масиву це неправильно.
+
+Навіть якщо додавання працює, будь-який наступний action із такою перевіркою не знайде таблицю.
+
+Повинно бути:
+
+```js
+const tableExists =
+  s.specificationTables.some(
+    (table) =>
+      table.id === id
+  )
+
+if (!tableExists) {
+  return s
+}
+```
+
+Або:
+
+```js
+const table =
+  s.specificationTables.find(
+    (table) =>
+      table.id === id
+  )
+
+if (!table) {
+  return s
+}
+```
+
+## Висновок
+
+Ви правильно змінили головне поле на масив:
+
+```js
+specificationTables: []
+```
+
+але у Store та компонентах ще залишилися операції від старого об’єктного формату:
+
+```js
+specificationTables[id]
+```
+
+```js
+{
+  ...specificationTables,
+  [id]: table
+}
+```
+
+Саме через це після переходу створення виглядає зламаним. Для масиву скрізь мають використовуватися лише:
+
+```js
+.find()
+.some()
+.findIndex()
+.map()
+.filter()
+```
+
+Першим виправте `replaceSpecificationTable` із фотографії та selector таблиці у `SpecificationColumnsPanel`. Це найбільш імовірні місця, які зараз руйнують ланцюжок після успішного `addSpecificationTable`.
