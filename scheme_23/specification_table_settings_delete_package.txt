@@ -1,0 +1,792 @@
+# Пакет: налаштування заголовка та видалення таблиці специфікації
+
+## Мета
+
+Додати у вкладку "Налаштування":
+
+1. Поле редагування заголовка.
+2. Чекбокс "Відображати заголовок".
+3. Умовний рендер заголовка у Konva.
+4. Кнопку "Видалити таблицю".
+5. Видалення таблиці зі Zustand Store за `tableId`.
+6. Закриття модального вікна після видалення.
+
+Пакет розрахований на структуру:
+
+    specificationTables: []
+
+тобто таблиці зберігаються у масиві.
+
+====================================================================
+1. Модель таблиці
+====================================================================
+
+Кожна таблиця повинна містити:
+
+    {
+      id,
+      schemeId,
+      title: 'Специфікація',
+      showTitle: true,
+      x,
+      y,
+      positionMode: 'manual',
+      columns: [],
+      rows: [],
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 10,
+        titleHeight: 24,
+        headerHeight: 22,
+        rowHeight: 22,
+      },
+    }
+
+У фабриці створення нової таблиці додати:
+
+    showTitle: true
+
+Приклад:
+
+    export function createSpecificationTable({
+      schemeId,
+      isTemplate = false,
+      x = 120,
+      y = 120,
+      positionMode = 'manual',
+    }) {
+      return {
+        id: crypto.randomUUID(),
+        schemeId,
+        isTemplate,
+        title: 'Специфікація',
+        showTitle: true,
+        x,
+        y,
+        positionMode,
+        columns: isTemplate
+          ? cloneDefaultColumns()
+          : [],
+        rows: [],
+        style: {
+          fontFamily: 'Arial',
+          fontSize: 10,
+          titleHeight: 24,
+          headerHeight: 22,
+          rowHeight: 22,
+        },
+      }
+    }
+
+====================================================================
+2. Legacy fallback
+====================================================================
+
+Старі таблиці можуть не мати поля showTitle.
+
+Тому використовувати:
+
+    const showTitle = table.showTitle !== false
+
+Це означає:
+
+    undefined -> true
+    true      -> true
+    false     -> false
+
+Не використовувати:
+
+    Boolean(table.showTitle)
+
+бо для старої таблиці без showTitle це дасть false.
+
+====================================================================
+3. Zustand action для оновлення таблиці
+====================================================================
+
+Файл:
+
+    src/store/useCanvasStore.js
+
+або відповідний slice.
+
+Додати:
+
+    updateSpecificationTable: (tableId, patch) => {
+      if (!tableId || !patch) {
+        return
+      }
+
+      set((state) => {
+        const tables = Array.isArray(
+          state.specificationTables
+        )
+          ? state.specificationTables
+          : []
+
+        const tableExists = tables.some(
+          (table) => table.id === tableId
+        )
+
+        if (!tableExists) {
+          console.warn(
+            '[updateSpecificationTable] Таблицю не знайдено:',
+            tableId
+          )
+
+          return state
+        }
+
+        return {
+          specificationTables: tables.map(
+            (table) => {
+              if (table.id !== tableId) {
+                return table
+              }
+
+              const nextTable = {
+                ...table,
+              }
+
+              if ('title' in patch) {
+                nextTable.title = String(
+                  patch.title ?? ''
+                )
+              }
+
+              if ('showTitle' in patch) {
+                nextTable.showTitle = Boolean(
+                  patch.showTitle
+                )
+              }
+
+              if ('style' in patch) {
+                nextTable.style = {
+                  ...(table.style || {}),
+                  ...(patch.style || {}),
+                }
+              }
+
+              return nextTable
+            }
+          ),
+        }
+      })
+    },
+
+====================================================================
+4. Zustand action для видалення таблиці
+====================================================================
+
+Додати:
+
+    removeSpecificationTable: (tableId) => {
+      if (!tableId) {
+        return
+      }
+
+      set((state) => {
+        const tables = Array.isArray(
+          state.specificationTables
+        )
+          ? state.specificationTables
+          : []
+
+        const nextTables = tables.filter(
+          (table) => table.id !== tableId
+        )
+
+        const nextRowsByTableId = {
+          ...(state.specificationRowsByTableId || {}),
+        }
+
+        delete nextRowsByTableId[tableId]
+
+        const isSelected =
+          state.selectedSpecificationTableId === tableId
+
+        const isSelection =
+          state.selection?.type === 'specification-table' &&
+          state.selection?.id === tableId
+
+        return {
+          specificationTables: nextTables,
+
+          specificationRowsByTableId:
+            nextRowsByTableId,
+
+          selectedSpecificationTableId:
+            isSelected
+              ? null
+              : state.selectedSpecificationTableId,
+
+          selection:
+            isSelection
+              ? null
+              : state.selection,
+        }
+      })
+    },
+
+Якщо рядки зберігаються всередині table.rows,
+блок specificationRowsByTableId можна прибрати.
+
+Мінімальний варіант:
+
+    removeSpecificationTable: (tableId) => {
+      set((state) => ({
+        specificationTables:
+          state.specificationTables.filter(
+            (table) => table.id !== tableId
+          ),
+      }))
+    },
+
+====================================================================
+5. Вкладка "Налаштування"
+====================================================================
+
+Файл:
+
+    SpecificationTableSettingsPanel.jsx
+
+Готовий варіант на Material UI:
+
+    'use client'
+
+    import React from 'react'
+
+    import {
+      Box,
+      Button,
+      Checkbox,
+      Divider,
+      FormControlLabel,
+      Stack,
+      TextField,
+      Typography,
+    } from '@mui/material'
+
+    import DeleteOutlineIcon
+      from '@mui/icons-material/DeleteOutline'
+
+    import { useCanvasStore }
+      from '@/store/useCanvasStore'
+
+    export function SpecificationTableSettingsPanel({
+      tableId,
+      onClose,
+    }) {
+      const table = useCanvasStore(
+        (state) =>
+          state.specificationTables.find(
+            (item) => item.id === tableId
+          ) ?? null
+      )
+
+      const updateTable = useCanvasStore(
+        (state) =>
+          state.updateSpecificationTable
+      )
+
+      const removeTable = useCanvasStore(
+        (state) =>
+          state.removeSpecificationTable
+      )
+
+      if (!table) {
+        return (
+          <Box sx={{ p: 2 }}>
+            <Typography
+              variant="body2"
+              color="text.secondary"
+            >
+              Таблицю не знайдено.
+            </Typography>
+          </Box>
+        )
+      }
+
+      const showTitle =
+        table.showTitle !== false
+
+      const title =
+        String(table.title ?? '')
+
+      const handleDelete = () => {
+        const confirmed = window.confirm(
+          'Видалити цю таблицю?'
+        )
+
+        if (!confirmed) {
+          return
+        }
+
+        removeTable(tableId)
+        onClose?.()
+      }
+
+      return (
+        <Stack spacing={3}>
+          <Box>
+            <Typography
+              variant="subtitle2"
+              sx={{ mb: 1.5 }}
+            >
+              Заголовок таблиці
+            </Typography>
+
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={showTitle}
+                  onChange={(event) => {
+                    updateTable(tableId, {
+                      showTitle:
+                        event.target.checked,
+                    })
+                  }}
+                />
+              }
+              label="Відображати заголовок"
+            />
+
+            <TextField
+              fullWidth
+              margin="dense"
+              label="Текст заголовка"
+              value={title}
+              disabled={!showTitle}
+              onChange={(event) => {
+                updateTable(tableId, {
+                  title:
+                    event.target.value,
+                })
+              }}
+            />
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography
+              variant="subtitle2"
+              color="error"
+              sx={{ mb: 1 }}
+            >
+              Небезпечна зона
+            </Typography>
+
+            <Button
+              color="error"
+              variant="outlined"
+              startIcon={
+                <DeleteOutlineIcon />
+              }
+              onClick={handleDelete}
+            >
+              Видалити таблицю
+            </Button>
+          </Box>
+        </Stack>
+      )
+    }
+
+====================================================================
+6. Якщо не використовується Material UI
+====================================================================
+
+    export function SpecificationTableSettingsPanel({
+      tableId,
+      onClose,
+    }) {
+      const table = useCanvasStore(
+        (state) =>
+          state.specificationTables.find(
+            (item) => item.id === tableId
+          ) ?? null
+      )
+
+      const updateTable = useCanvasStore(
+        (state) =>
+          state.updateSpecificationTable
+      )
+
+      const removeTable = useCanvasStore(
+        (state) =>
+          state.removeSpecificationTable
+      )
+
+      if (!table) {
+        return null
+      }
+
+      const showTitle =
+        table.showTitle !== false
+
+      return (
+        <div className="space-y-4">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showTitle}
+              onChange={(event) => {
+                updateTable(tableId, {
+                  showTitle:
+                    event.target.checked,
+                })
+              }}
+            />
+
+            <span>
+              Відображати заголовок
+            </span>
+          </label>
+
+          <label className="block">
+            <span>
+              Заголовок таблиці
+            </span>
+
+            <input
+              type="text"
+              value={String(
+                table.title ?? ''
+              )}
+              disabled={!showTitle}
+              onChange={(event) => {
+                updateTable(tableId, {
+                  title:
+                    event.target.value,
+                })
+              }}
+            />
+          </label>
+
+          <button
+            type="button"
+            onClick={() => {
+              const confirmed =
+                window.confirm(
+                  'Видалити цю таблицю?'
+                )
+
+              if (!confirmed) {
+                return
+              }
+
+              removeTable(tableId)
+              onClose?.()
+            }}
+          >
+            Видалити таблицю
+          </button>
+        </div>
+      )
+    }
+
+====================================================================
+7. Підключення до модалки
+====================================================================
+
+У компоненті модального вікна:
+
+    {activeTab === 'settings' && (
+      <SpecificationTableSettingsPanel
+        tableId={tableId}
+        onClose={closeModal}
+      />
+    )}
+
+Якщо closeModal зберігається у Store:
+
+    const closeModal = useCanvasStore(
+      (state) => state.closeModal
+    )
+
+====================================================================
+8. Умовний рендер заголовка у Konva
+====================================================================
+
+Файл:
+
+    SpecificationTableShape.jsx
+
+Перед return:
+
+    const showTitle =
+      table.showTitle !== false
+
+    const titleHeight =
+      showTitle
+        ? Number(
+            table.style?.titleHeight ?? 24
+          )
+        : 0
+
+У return:
+
+    return (
+      <Group
+        x={geometry.x}
+        y={geometry.y}
+      >
+        <Rect
+          x={0}
+          y={0}
+          width={geometry.width}
+          height={geometry.totalHeight}
+          fill="white"
+          stroke="black"
+          strokeWidth={1}
+        />
+
+        {showTitle && (
+          <>
+            <Rect
+              x={0}
+              y={0}
+              width={geometry.width}
+              height={titleHeight}
+              stroke="black"
+              strokeWidth={1}
+            />
+
+            <Text
+              x={0}
+              y={0}
+              width={geometry.width}
+              height={titleHeight}
+              text={String(
+                table.title ?? ''
+              )}
+              align="center"
+              verticalAlign="middle"
+              fontFamily={
+                table.style?.fontFamily ||
+                'Arial'
+              }
+              fontSize={
+                Number(
+                  table.style?.fontSize
+                ) || 10
+              }
+              fontStyle="bold"
+              listening={false}
+            />
+          </>
+        )}
+
+        <Group y={titleHeight}>
+          {/* header колонок */}
+          {/* rows */}
+        </Group>
+      </Group>
+    )
+
+====================================================================
+9. Геометрія таблиці
+====================================================================
+
+Оновити calculateSpecificationTableGeometry:
+
+    export function calculateSpecificationTableGeometry({
+      table,
+      columns,
+      rows,
+    }) {
+      const style =
+        table.style || {}
+
+      const showTitle =
+        table.showTitle !== false
+
+      const titleHeight =
+        showTitle
+          ? Number(
+              style.titleHeight ?? 24
+            )
+          : 0
+
+      const headerHeight =
+        Number(
+          style.headerHeight ?? 22
+        )
+
+      const rowHeight =
+        Number(
+          style.rowHeight ?? 22
+        )
+
+      const width =
+        columns.reduce(
+          (sum, column) =>
+            sum +
+            Number(
+              column.width || 0
+            ),
+          0
+        )
+
+      const rowsHeight =
+        rows.length * rowHeight
+
+      const totalHeight =
+        titleHeight +
+        headerHeight +
+        rowsHeight
+
+      return {
+        x: Number(table.x || 0),
+        y: Number(table.y || 0),
+        width,
+        titleHeight,
+        headerHeight,
+        rowHeight,
+        rowsHeight,
+        totalHeight,
+      }
+    }
+
+Якщо showTitle === false:
+
+    titleHeight === 0
+
+====================================================================
+10. Зміщення header та rows
+====================================================================
+
+Header колонок:
+
+    const headerY =
+      geometry.titleHeight
+
+Rows:
+
+    const rowsY =
+      geometry.titleHeight +
+      geometry.headerHeight
+
+Тобто після вимкнення showTitle
+весь вміст таблиці автоматично піднімається вгору.
+
+====================================================================
+11. SVG export
+====================================================================
+
+    const showTitle =
+      table.showTitle !== false
+
+    if (showTitle) {
+      svg += renderTableTitle(
+        table,
+        geometry
+      )
+    }
+
+Header та rows повинні використовувати:
+
+    geometry.titleHeight
+
+====================================================================
+12. PDF export
+====================================================================
+
+    const showTitle =
+      table.showTitle !== false
+
+    if (showTitle) {
+      drawPdfTableTitle(
+        doc,
+        table,
+        geometry
+      )
+    }
+
+Header та rows також повинні враховувати:
+
+    geometry.titleHeight
+
+====================================================================
+13. Видалення таблиці з canvas
+====================================================================
+
+Якщо SpecificationTableLayer рендерить:
+
+    const tables = useCanvasStore(
+      (state) =>
+        state.specificationTables
+    )
+
+    return (
+      <Group>
+        {tables.map((table) => (
+          <SpecificationTableShape
+            key={table.id}
+            tableId={table.id}
+          />
+        ))}
+      </Group>
+    )
+
+то після:
+
+    specificationTables.filter(
+      (table) => table.id !== tableId
+    )
+
+видалена таблиця автоматично зникне з Konva.
+
+Додатково викликати destroy() для Konva node не потрібно.
+
+====================================================================
+14. Важливі правила
+====================================================================
+
+1. У Store таблиці залишаються масивом.
+
+2. Пошук таблиці:
+
+       specificationTables.find(
+         table => table.id === tableId
+       )
+
+3. Оновлення таблиці:
+
+       specificationTables.map(...)
+
+4. Видалення таблиці:
+
+       specificationTables.filter(...)
+
+5. Не використовувати:
+
+       specificationTables[tableId]
+
+6. Не очищати title при вимкненні showTitle.
+
+7. Після видалення таблиці закрити модалку.
+
+8. Якщо рядки зберігаються окремо,
+   видалити і specificationRowsByTableId[tableId].
+
+9. Для старих таблиць використовувати:
+
+       table.showTitle !== false
+
+====================================================================
+15. Очікуваний результат
+====================================================================
+
+Після інтеграції:
+
+- у вкладці "Налаштування" з'явиться checkbox;
+- checkbox буде увімкнений за замовчуванням;
+- поле заголовка підтягуватиме поточний title;
+- при вимкненні checkbox заголовок не рендериться;
+- title при цьому не видаляється;
+- геометрія таблиці враховує titleHeight = 0;
+- кнопка "Видалити таблицю" видаляє таблицю за id;
+- таблиця зникає зі state specificationTables;
+- таблиця автоматично зникає з canvas;
+- модальне вікно закривається після видалення.
