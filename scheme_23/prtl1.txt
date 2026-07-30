@@ -1,0 +1,296 @@
+Проблема виникає через те, що після позначення одного повідомлення прочитаним у вас знову викликається `processAndSendNotifications()`. Функція бачить залишок непрочитаних повідомлень і повторно створює Windows-сповіщення:
+
+* залишилося одне — показує його текст;
+* залишилося більше одного — показує групове сповіщення.
+
+`isBulkReading` захищає лише сценарій «Прочитати всі», тому для окремої кнопки захисту немає.
+
+Масив ID тут справді не потрібний. Треба розрізняти **причину оновлення списку**:
+
+1. прийшло нове повідомлення;
+2. спрацювало нагадування через 5 хвилин;
+3. користувач сам позначив повідомлення прочитаним.
+
+Windows-сповіщення слід показувати лише у перших двох випадках.
+
+## Найкращий варіант
+
+Додайте параметр `showWindowsNotification` або `source` у функцію.
+
+```js
+async function processAndSendNotifications(
+    payloadArray,
+    { showWindowsNotification = true } = {}
+) {
+    if (!Array.isArray(payloadArray) || payloadArray.length === 0) {
+        return
+    }
+
+    const unreadItems = payloadArray.filter((item) => !item.READ_DATE)
+
+    // UI оновлюємо завжди
+    notificationsList = payloadArray
+    renderNotifications()
+    renumberNotifListItems()
+
+    if (unreadItems.length === 0) {
+        return
+    }
+
+    // Користувач сам працює зі списком сповіщень.
+    // Windows Notification у цьому випадку не показуємо.
+    if (!showWindowsNotification) {
+        return
+    }
+
+    const handleNotificationClick = async () => {
+        if (
+            window.electronAPI &&
+            typeof window.electronAPI.showWindow === 'function'
+        ) {
+            await window.electronAPI.showWindow()
+        }
+
+        if (typeof showNotification === 'function') {
+            showNotification()
+        }
+    }
+
+    if (unreadItems.length > 1) {
+        await AppNotifier.send({
+            title: 'Portal — Повідомлення (ПЗ)',
+            body: `У вас ${unreadItems.length} непрочитаних сповіщень`,
+            tag: 'notify-grouped-summary',
+            icon: '/images/bell-icon.png',
+            requireInteraction: false,
+            silent: false,
+            onClick: handleNotificationClick,
+        })
+
+        return
+    }
+
+    const item = unreadItems[0]
+
+    const plainTextBody = item.MESSAGE
+        .replace(/<\/?[^>]+(>|$)/g, '')
+        .trim()
+
+    const sourceText = item.SOURCE
+        .replace(/<\/?(b|i|u|span)>/gi, '')
+        .trim()
+
+    const notificationConfig = {
+        2: {
+            titlePrefix: 'Критичне',
+            requireInteraction: true,
+        },
+        1: {
+            titlePrefix: 'Важливе',
+            requireInteraction: true,
+        },
+        0: {
+            titlePrefix: 'Повідомлення',
+            requireInteraction: false,
+        },
+    }
+
+    const config =
+        notificationConfig[item.CRITICAL] ??
+        notificationConfig[0]
+
+    await AppNotifier.send({
+        title: `Portal — ${config.titlePrefix} (${sourceText})`,
+        body: plainTextBody,
+        tag: `notify-${item.ID}`,
+        icon: '/images/bell-icon.png',
+        requireInteraction: config.requireInteraction,
+        silent: false,
+        onClick: handleNotificationClick,
+    })
+}
+```
+
+## Коли прийшло нове повідомлення
+
+Викликайте функцію зі стандартним значенням:
+
+```js
+await processAndSendNotifications(payloadArray)
+```
+
+або явно:
+
+```js
+await processAndSendNotifications(payloadArray, {
+    showWindowsNotification: true,
+})
+```
+
+## Коли спрацювало нагадування через 5 хвилин
+
+Windows-сповіщення теж дозволене:
+
+```js
+async function checkUnreadNotifications() {
+    try {
+        const unreadItems = notificationsList.filter(
+            (item) => !item.READ_DATE
+        )
+
+        if (unreadItems.length === 0) {
+            return
+        }
+
+        await processAndSendNotifications(notificationsList, {
+            showWindowsNotification: true,
+        })
+    } finally {
+        resetUnreadTimer()
+    }
+}
+```
+
+Через 5 хвилин нагадування спрацює знову, оскільки ніякі ID не запам’ятовуються.
+
+## Коли натиснуто «Прочитано»
+
+Після успішної відповіді сервера не треба повторно запускати Windows-сповіщення. Треба лише змінити локальні дані й перемалювати список:
+
+```js
+if (e.target.classList.contains('ntf-btn-read')) {
+    const button = e.target
+    const id = button.getAttribute('data-id')
+    const username = button.getAttribute('data-username')
+
+    button.disabled = true
+    button.style.display = 'none'
+
+    const processingText = document.createElement('span')
+    processingText.className = 'ntf-processing-status'
+    processingText.textContent = 'Обробка...'
+    button.parentNode.appendChild(processingText)
+
+    socket.emit(
+        'notifications:markAsRead',
+        {
+            messageId: id,
+            userId: username,
+            readedAt: new Date().toISOString().split('.')[0],
+        },
+        async (response) => {
+            if (response?.success) {
+                const ntfItem = notificationsList.find(
+                    (item) => String(item.ID) === String(id)
+                )
+
+                if (ntfItem) {
+                    ntfItem.READ_DATE = new Date().toISOString()
+                }
+
+                // Лише оновлення інтерфейсу
+                await processAndSendNotifications(notificationsList, {
+                    showWindowsNotification: false,
+                })
+
+                resetUnreadTimer()
+                return
+            }
+
+            clientLogger.error(
+                'Помилка зміни статусу на сервері:',
+                response?.error ?? 'Невідома помилка'
+            )
+
+            alert(
+                'Помилка сервера: ' +
+                    (response?.error ?? 'Спробуйте пізніше')
+            )
+
+            button.disabled = false
+            button.style.display = 'block'
+            button.textContent = 'Прочитано'
+            processingText.remove()
+        }
+    )
+}
+```
+
+Зверніть увагу на порівняння ID:
+
+```js
+String(item.ID) === String(id)
+```
+
+`getAttribute()` завжди повертає рядок, а `item.ID` може бути числом. Через `==` ваш код працюватиме, але краще зробити типи явними.
+
+## Для «Прочитати всі»
+
+Тут також можна прибрати залежність від `isBulkReading` усередині функції відправлення сповіщень:
+
+```js
+Promise.all(promises)
+    .then(async (results) => {
+        clientLogger.info(
+            'Обробку всіх поодиноких запитів завершено',
+            results
+        )
+
+        await processAndSendNotifications(notificationsList, {
+            showWindowsNotification: false,
+        })
+
+        resetUnreadTimer()
+    })
+    .finally(() => {
+        isBulkReading = false
+    })
+```
+
+Не варто скидати прапорець через:
+
+```js
+setTimeout(() => {
+    isBulkReading = false
+}, 100)
+```
+
+Це потенційна гонка: сервер або рендер можуть працювати довше ніж 100 мс. Для скидання стану краще використовувати `.finally()`.
+
+## Ще краща архітектура
+
+Зараз `processAndSendNotifications()` виконує одразу дві різні задачі:
+
+* оновлення інтерфейсу;
+* показ системного Windows-сповіщення.
+
+Надійніше їх розділити:
+
+```js
+function updateNotificationsUI(payloadArray) {
+    notificationsList = payloadArray
+    renderNotifications()
+    renumberNotifListItems()
+}
+
+async function sendWindowsNotification(payloadArray) {
+    const unreadItems = payloadArray.filter((item) => !item.READ_DATE)
+
+    // Логіка AppNotifier.send(...)
+}
+```
+
+Тоді після натискання «Прочитано»:
+
+```js
+updateNotificationsUI(notificationsList)
+```
+
+А при новому повідомленні або п’ятихвилинному нагадуванні:
+
+```js
+updateNotificationsUI(payloadArray)
+await sendWindowsNotification(payloadArray)
+```
+
+Це повністю усуває баг: локальна дія користувача ніколи випадково не запускає Windows Notification, а періодичні нагадування продовжують працювати.

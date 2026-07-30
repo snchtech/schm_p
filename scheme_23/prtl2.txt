@@ -1,0 +1,122 @@
+Якщо реалізувати це через параметр `showWindowsNotification`, то **`isBulkReading` стає зайвим**.
+
+Подивимось, навіщо він у тебе зараз використовується.
+
+На початку `processAndSendNotifications()`:
+
+```js
+if (isBulkReading) return
+```
+
+Тобто він повністю забороняє виконання функції під час "Прочитати всі". Але якщо ти сам контролюєш, коли показувати Windows Notification, то немає потреби блокувати всю функцію.
+
+Наприклад:
+
+```js
+async function processAndSendNotifications(
+    payloadArray,
+    { showWindowsNotification = true } = {}
+) {
+    if (!Array.isArray(payloadArray) || payloadArray.length === 0) return
+
+    const unreadItems = payloadArray.filter(item => !item.READ_DATE)
+
+    renderNotifications()
+
+    if (!showWindowsNotification) {
+        return
+    }
+
+    // AppNotifier.send(...)
+}
+```
+
+Тоді:
+
+### Нове повідомлення
+
+```js
+processAndSendNotifications(payloadArray)
+// Windows Notification показується
+```
+
+### Нагадування через 5 хв
+
+```js
+processAndSendNotifications(notificationsList)
+// Windows Notification показується
+```
+
+### Натиснули "Прочитано"
+
+```js
+processAndSendNotifications(notificationsList, {
+    showWindowsNotification: false
+})
+```
+
+Windows Notification не показується.
+
+### Натиснули "Прочитати всі"
+
+```js
+processAndSendNotifications(notificationsList, {
+    showWindowsNotification: false
+})
+```
+
+Windows Notification також не показується.
+
+---
+
+### Я б навіть пішов ще далі
+
+Зараз `processAndSendNotifications()` робить дві абсолютно різні речі:
+
+* малює UI;
+* відправляє Windows Notification.
+
+Це і стало причиною бага.
+
+Я б розділив її на дві:
+
+```js
+updateNotifications(payloadArray)
+```
+
+і
+
+```js
+sendWindowsNotifications(payloadArray)
+```
+
+Тоді код стає дуже очевидним.
+
+Коли прийшло повідомлення:
+
+```js
+updateNotifications(payloadArray)
+await sendWindowsNotifications(payloadArray)
+```
+
+Коли натиснули "Прочитано":
+
+```js
+updateNotifications(notificationsList)
+```
+
+Коли натиснули "Прочитати всі":
+
+```js
+updateNotifications(notificationsList)
+```
+
+Коли пройшло 5 хвилин:
+
+```js
+await sendWindowsNotifications(notificationsList)
+```
+
+Тут вже взагалі **ніяких прапорців (`isBulkReading`, `isUserAction`, `showWindowsNotification`) не потрібно**. Архітектурно це набагато чистіше: кожна функція відповідає лише за одну задачу.
+
+**Я, дивлячись на твій код, саме так і зробив би.** Це спростить логіку й позбавить подібних побічних ефектів у майбутньому.

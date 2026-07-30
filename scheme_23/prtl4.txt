@@ -1,0 +1,258 @@
+Так, у твоєму випадку це якраз можна вирішити **всередині `socket.on('update')`**, бо там є два різні виклики:
+
+1. виклик із таймера через 5 хвилин — сповіщення треба показати;
+2. поточний виклик після отримання `update` — треба визначити, чи справді з’явилося нове непрочитане повідомлення.
+
+Для цього не потрібно знати, чи `update` прийшов саме від кнопки. Достатньо порівняти попередній та новий списки непрочитаних повідомлень.
+
+## Логіка
+
+* якщо кількість непрочитаних зменшилась після «Прочитано» — Windows Notification не показуємо;
+* якщо всі стали прочитаними — не показуємо;
+* якщо з’явився новий непрочитаний ID — показуємо;
+* коли спрацював п’ятихвилинний таймер — показуємо незалежно від того, чи ID уже був раніше.
+
+Це не той масив ID, про який ти говорив. Ми нічого не зберігаємо назавжди — лише порівнюємо попередній стан із новим у момент `update`.
+
+## `processAndSendNotifications`
+
+Додай параметр:
+
+```js
+async function processAndSendNotifications(
+    payloadArray,
+    { showWindowsNotification = true } = {}
+) {
+    if (!Array.isArray(payloadArray) || payloadArray.length === 0) {
+        return
+    }
+
+    const unreadItems = payloadArray.filter((item) => !item.READ_DATE)
+
+    if (unreadItems.length === 0) {
+        return
+    }
+
+    if (!showWindowsNotification) {
+        return
+    }
+
+    // Далі твоя поточна логіка AppNotifier.send(...)
+
+    if (unreadItems.length > 1) {
+        await AppNotifier.send({
+            title: 'Portal - Повідомлення (ПЗ)',
+            body: `У вас ${unreadItems.length} непрочитаних сповіщень в ПЗ`,
+            tag: 'notify-grouped-summary',
+            icon: '/images/bell-icon.png',
+            requireInteraction: false,
+            silent: false,
+            onClick: handleNotificationClick,
+        })
+
+        return
+    }
+
+    const item = unreadItems[0]
+
+    // Логіка одного повідомлення
+}
+```
+
+## Обробник `socket.on('update')`
+
+Припустимо, зараз у тебе приблизно така структура:
+
+```js
+socket.on('update', async (payloadArray) => {
+    resetUnreadTimer()
+
+    processAndSendNotifications(payloadArray)
+})
+```
+
+Зміни її так:
+
+```js
+socket.on('update', async (payloadArray) => {
+    if (!Array.isArray(payloadArray)) {
+        return
+    }
+
+    // Стан до отримання update
+    const previousUnreadIds = new Set(
+        notificationsList
+            .filter((item) => !item.READ_DATE)
+            .map((item) => String(item.ID))
+    )
+
+    // Новий стан
+    const nextUnreadItems = payloadArray.filter(
+        (item) => !item.READ_DATE
+    )
+
+    // Чи з'явилось хоча б одне нове непрочитане повідомлення
+    const hasNewUnreadNotification = nextUnreadItems.some(
+        (item) => !previousUnreadIds.has(String(item.ID))
+    )
+
+    // Оновлюємо глобальний список
+    notificationsList = payloadArray
+
+    renderNotifications()
+    renumberNotifListItems()
+
+    // Перезапускаємо п'ятихвилинне нагадування
+    resetUnreadTimer()
+
+    // Поточний update показує Windows Notification
+    // тільки коли з'явилося нове непрочитане повідомлення
+    await processAndSendNotifications(payloadArray, {
+        showWindowsNotification: hasNewUnreadNotification,
+    })
+})
+```
+
+## Таймер нагадування
+
+У таймері передавай `true`, тому що це саме нагадування:
+
+```js
+function resetUnreadTimer() {
+    if (unreadCheckTimer) {
+        clearTimeout(unreadCheckTimer)
+    }
+
+    unreadCheckTimer = setTimeout(async () => {
+        clientLogger.info(
+            'Запуск періодичної перевірки непрочитаних сповіщень...'
+        )
+
+        const unreadItems = notificationsList.filter(
+            (item) => !item.READ_DATE
+        )
+
+        if (unreadItems.length === 0) {
+            resetUnreadTimer()
+            return
+        }
+
+        await processAndSendNotifications(notificationsList, {
+            showWindowsNotification: true,
+        })
+
+        resetUnreadTimer()
+    }, 5 * 60 * 1000)
+}
+```
+
+Таким чином, аргументи будуть різні:
+
+```js
+// Таймер — завжди нагадуємо
+processAndSendNotifications(notificationsList, {
+    showWindowsNotification: true,
+})
+```
+
+```js
+// Поточний update — тільки якщо додалося нове повідомлення
+processAndSendNotifications(payloadArray, {
+    showWindowsNotification: hasNewUnreadNotification,
+})
+```
+
+## Що відбуватиметься після натискання «Прочитано»
+
+Було:
+
+```js
+previousUnreadIds = new Set(['10', '11', '12'])
+```
+
+Після натискання кнопки сервер повернув:
+
+```js
+nextUnreadItems = [
+    { ID: 11, READ_DATE: null },
+    { ID: 12, READ_DATE: null },
+]
+```
+
+Перевірка:
+
+```js
+const hasNewUnreadNotification = nextUnreadItems.some(
+    (item) => !previousUnreadIds.has(String(item.ID))
+)
+```
+
+Для `11` і `12` результат буде `false`, бо вони вже були непрочитаними до оновлення.
+
+Отже:
+
+```js
+showWindowsNotification: false
+```
+
+Windows Notification не з’явиться.
+
+Через 5 хвилин таймер виконає:
+
+```js
+showWindowsNotification: true
+```
+
+і нагадування про два непрочитані повідомлення нормально спрацює.
+
+## Коли прийде нове повідомлення
+
+Було:
+
+```js
+previousUnreadIds = new Set(['11', '12'])
+```
+
+Стало:
+
+```js
+nextUnreadItems = [
+    { ID: 11, READ_DATE: null },
+    { ID: 12, READ_DATE: null },
+    { ID: 15, READ_DATE: null },
+]
+```
+
+ID `15` у попередньому наборі немає, тому:
+
+```js
+hasNewUnreadNotification === true
+```
+
+Функція покаже групове Windows Notification уже з актуальною кількістю — три повідомлення.
+
+## Початкове завантаження
+
+Коли `notificationsList` спочатку порожній, усі непрочитані елементи вважатимуться новими. Якщо при першому завантаженні Windows Notification потрібно показувати — нічого більше робити не треба.
+
+Якщо при старті додатка його показувати не треба, додай прапорець:
+
+```js
+let notificationsInitialized = false
+```
+
+У `update`:
+
+```js
+const hasNewUnreadNotification =
+    notificationsInitialized &&
+    nextUnreadItems.some(
+        (item) => !previousUnreadIds.has(String(item.ID))
+    )
+
+notificationsInitialized = true
+```
+
+Тоді перше завантаження лише заповнить список, а наступні справжні нові повідомлення вже показуватимуть Windows Notification.
+
+У цій реалізації `isBulkReading` більше не потрібний: і одиночне «Прочитано», і «Прочитати всі» просто зменшують набір непрочитаних, тому автоматично не спричиняють системне сповіщення.

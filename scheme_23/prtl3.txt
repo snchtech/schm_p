@@ -1,0 +1,362 @@
+Так, у твоїй схемі `processAndSendNotifications()` не знає, чому прийшов `socket.on('update')`: через нове повідомлення, синхронізацію, натискання «Прочитано» чи «Прочитати всі».
+
+Тому аргумент у самій функції проблему не розв’язує. Причину потрібно визначити раніше — у `socket.on('update')`.
+
+Найкраще рішення — передавати через WebSocket тип оновлення. Наприклад, сервер надсилає:
+
+```js
+socket.emit('update', {
+    notifications,
+    reason: 'mark-as-read'
+})
+```
+
+А для нового повідомлення:
+
+```js
+socket.emit('update', {
+    notifications,
+    reason: 'new-notification'
+})
+```
+
+Тоді на клієнті:
+
+```js
+socket.on('update', async ({ notifications, reason }) => {
+    notificationsList = notifications
+
+    renderNotifications()
+    renumberNotifListItems()
+
+    const shouldShowWindowsNotification =
+        reason === 'new-notification' ||
+        reason === 'reminder'
+
+    if (shouldShowWindowsNotification) {
+        await processAndSendNotifications(notifications)
+    }
+})
+```
+
+Але якщо сервер зараз змінити складно, можна зробити локальний тимчасовий прапорець.
+
+## Локальне блокування наступного `update`
+
+Перед відправленням `markAsRead` встановлюємо, що найближчий `update` є результатом дії користувача:
+
+```js
+let suppressNextNotificationUpdate = false
+let suppressUpdateTimer = null
+```
+
+Функція блокування:
+
+```js
+function suppressNextWindowsNotification() {
+    suppressNextNotificationUpdate = true
+
+    clearTimeout(suppressUpdateTimer)
+
+    // Страховка, якщо сервер не надішле update
+    suppressUpdateTimer = setTimeout(() => {
+        suppressNextNotificationUpdate = false
+    }, 5000)
+}
+```
+
+У кнопці «Прочитано»:
+
+```js
+if (e.target.classList.contains('ntf-btn-read')) {
+    const button = e.target
+    const id = button.getAttribute('data-id')
+    const username = button.getAttribute('data-username')
+
+    suppressNextWindowsNotification()
+
+    socket.emit(
+        'notifications:markAsRead',
+        {
+            messageId: id,
+            userId: username,
+            readedAt: new Date().toISOString().split('.')[0],
+        },
+        (response) => {
+            if (!response?.success) {
+                suppressNextNotificationUpdate = false
+                clearTimeout(suppressUpdateTimer)
+
+                // Обробка помилки
+            }
+        }
+    )
+}
+```
+
+У `socket.on('update')`:
+
+```js
+socket.on('update', async (payloadArray) => {
+    notificationsList = payloadArray
+
+    // UI оновлюємо завжди
+    renderNotifications()
+    renumberNotifListItems()
+
+    if (suppressNextNotificationUpdate) {
+        suppressNextNotificationUpdate = false
+        clearTimeout(suppressUpdateTimer)
+
+        // Windows notification не викликаємо
+        return
+    }
+
+    await processAndSendNotifications(payloadArray)
+})
+```
+
+Аналогічно для «Прочитати всі»:
+
+```js
+if (e.target.classList.contains('ntf-btn-read-all')) {
+    suppressNextWindowsNotification()
+
+    // Далі поточна логіка markAsRead
+}
+```
+
+Але тут є важливий нюанс: якщо «Прочитати всі» породжує багато окремих подій `update`, одного boolean недостатньо.
+
+## Якщо сервер надсилає багато `update`
+
+Тоді потрібен не прапорець, а лічильник:
+
+```js
+let suppressedUpdateCount = 0
+let suppressUpdateTimer = null
+```
+
+```js
+function suppressWindowsUpdates(count = 1) {
+    suppressedUpdateCount += count
+
+    clearTimeout(suppressUpdateTimer)
+
+    suppressUpdateTimer = setTimeout(() => {
+        suppressedUpdateCount = 0
+    }, 5000)
+}
+```
+
+Для одного повідомлення:
+
+```js
+suppressWindowsUpdates(1)
+
+socket.emit('notifications:markAsRead', ...)
+```
+
+Для «Прочитати всі», якщо кожен запит породжує окремий `update`:
+
+```js
+const unreadItems = notificationsList.filter(
+    (item) => !item.READ_DATE
+)
+
+suppressWindowsUpdates(unreadItems.length)
+```
+
+У WebSocket-обробнику:
+
+```js
+socket.on('update', async (payloadArray) => {
+    notificationsList = payloadArray
+
+    renderNotifications()
+    renumberNotifListItems()
+
+    if (suppressedUpdateCount > 0) {
+        suppressedUpdateCount -= 1
+        return
+    }
+
+    await processAndSendNotifications(payloadArray)
+})
+```
+
+Проте лічильник також має ризик: під час обробки може прийти справжнє нове повідомлення, і воно випадково буде поглинуте як локальний `update`.
+
+## Найбезпечніший варіант без зміни сервера
+
+Використати тимчасовий `Set` ID повідомлень, які зараз позначаються прочитаними:
+
+```js
+const pendingReadIds = new Set()
+```
+
+Це не масив уже показаних повідомлень. Він не завадить п’ятихвилинному нагадуванню, оскільки ID видаляється одразу після відповідного оновлення.
+
+Перед `socket.emit`:
+
+```js
+pendingReadIds.add(String(id))
+```
+
+Для «Прочитати всі»:
+
+```js
+unreadItems.forEach((item) => {
+    pendingReadIds.add(String(item.ID))
+})
+```
+
+В `socket.on('update')` порівнюємо попередній і новий стани:
+
+```js
+socket.on('update', async (payloadArray) => {
+    const previousList = notificationsList
+
+    const locallyReadIds = []
+
+    for (const newItem of payloadArray) {
+        const id = String(newItem.ID)
+
+        if (!pendingReadIds.has(id)) {
+            continue
+        }
+
+        const previousItem = previousList.find(
+            (item) => String(item.ID) === id
+        )
+
+        const wasUnread = previousItem && !previousItem.READ_DATE
+        const becameRead = Boolean(newItem.READ_DATE)
+
+        if (wasUnread && becameRead) {
+            locallyReadIds.push(id)
+        }
+    }
+
+    notificationsList = payloadArray
+
+    renderNotifications()
+    renumberNotifListItems()
+
+    // Видаляємо лише підтверджені сервером ID
+    locallyReadIds.forEach((id) => {
+        pendingReadIds.delete(id)
+    })
+
+    const updateWasOnlyLocalReading =
+        locallyReadIds.length > 0 &&
+        payloadArray.length === previousList.length
+
+    if (updateWasOnlyLocalReading) {
+        return
+    }
+
+    await processAndSendNotifications(payloadArray)
+})
+```
+
+Можна зробити перевірку ще точнішою: визначити, чи були інші зміни, крім переходу `READ_DATE` із порожнього значення в заповнене.
+
+```js
+function isOnlyLocalReadUpdate(previousList, nextList) {
+    if (previousList.length !== nextList.length) {
+        return false
+    }
+
+    let hasConfirmedLocalRead = false
+
+    for (const nextItem of nextList) {
+        const id = String(nextItem.ID)
+
+        const previousItem = previousList.find(
+            (item) => String(item.ID) === id
+        )
+
+        if (!previousItem) {
+            return false
+        }
+
+        const readDateChanged =
+            previousItem.READ_DATE !== nextItem.READ_DATE
+
+        const becameRead =
+            !previousItem.READ_DATE &&
+            Boolean(nextItem.READ_DATE)
+
+        if (readDateChanged) {
+            if (!becameRead || !pendingReadIds.has(id)) {
+                return false
+            }
+
+            hasConfirmedLocalRead = true
+        }
+    }
+
+    return hasConfirmedLocalRead
+}
+```
+
+Обробник:
+
+```js
+socket.on('update', async (payloadArray) => {
+    const previousList = notificationsList
+
+    const onlyLocalReadUpdate = isOnlyLocalReadUpdate(
+        previousList,
+        payloadArray
+    )
+
+    notificationsList = payloadArray
+
+    renderNotifications()
+    renumberNotifListItems()
+
+    if (onlyLocalReadUpdate) {
+        payloadArray.forEach((item) => {
+            if (item.READ_DATE) {
+                pendingReadIds.delete(String(item.ID))
+            }
+        })
+
+        return
+    }
+
+    await processAndSendNotifications(payloadArray)
+})
+```
+
+П’ятихвилинне нагадування при цьому викликає відправлення напряму:
+
+```js
+function resetUnreadTimer() {
+    if (unreadCheckTimer) {
+        clearTimeout(unreadCheckTimer)
+    }
+
+    unreadCheckTimer = setTimeout(async () => {
+        const unreadItems = notificationsList.filter(
+            (item) => !item.READ_DATE
+        )
+
+        if (unreadItems.length > 0) {
+            await processAndSendNotifications(notificationsList)
+        }
+
+        resetUnreadTimer()
+    }, 5 * 60 * 1000)
+}
+```
+
+Отже, `isBulkReading` як глобальний прапорець не дуже надійний. У твоїй архітектурі оптимально:
+
+* серверний варіант: додати до `update` поле `reason` або `actionId`;
+* без зміни сервера: тимчасовий `pendingReadIds`, який містить лише запити, що зараз очікують підтвердження;
+* п’ятихвилинне нагадування запускати окремо, тому воно не залежить від `pendingReadIds`.
+
+Саме `reason` від сервера буде найчистішим рішенням, тому що клієнту не доведеться вгадувати походження `update`.
