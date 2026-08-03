@@ -1,0 +1,1595 @@
+ATTACHMENTS FEATURE — MULTI-FILE VIEWER PATCH
+=============================================
+
+Призначення
+-----------
+Цей пакет є доопрацюванням наданого рішення для Next.js + React + MUI + Konva.
+
+Реалізовано:
+1. Один блакитний badge для одного node або edge незалежно від кількості attachments.
+2. Відкриття одного модального вікна зі списком усіх файлів, прикріплених до об'єкта.
+3. Перемикання між файлами в межах модального вікна.
+4. Видалення тільки вибраного attachment через кнопку в модальному вікні.
+5. Видалення фізичного файлу через DELETE API перед видаленням metadata зі store.
+6. Масштабування зображень від 25% до 400%.
+7. Автоматичне перемикання на сусідній файл після видалення поточного.
+8. Автоматичне закриття viewer, коли видалено останній attachment об'єкта.
+
+Важлива зміна моделі viewer
+----------------------------
+Було:
+
+attachmentViewer: {
+  attachmentId: "..."
+}
+
+Стало:
+
+attachmentViewer: {
+  attachedTo: {
+    type: "node" | "edge",
+    id: "..."
+  },
+  activeAttachmentId: "..."
+}
+
+Тобто viewer відкривається для об'єкта, а не для одного файла.
+
+
+================================================================================
+1) FILE: src/lib/attachments/attachmentGeometry.js
+   REPLACE FILE
+================================================================================
+
+function getNodePosition(node) {
+  const x = node?.position?.x ?? node?.x ?? 0;
+  const y = node?.position?.y ?? node?.y ?? 0;
+  const width = node?.size?.width ?? node?.width ?? 120;
+  const height = node?.size?.height ?? node?.height ?? 60;
+
+  return { x, y, width, height };
+}
+
+function getEdgeCenter(edge) {
+  const pts = edge?.geometry?.points || [];
+
+  if (pts.length >= 4) {
+    const midIndex = Math.floor((pts.length / 2 - 1) / 2) * 2;
+    const x1 = pts[midIndex] ?? pts[0];
+    const y1 = pts[midIndex + 1] ?? pts[1];
+    const x2 = pts[midIndex + 2] ?? pts[pts.length - 2];
+    const y2 = pts[midIndex + 3] ?? pts[pts.length - 1];
+
+    return {
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+    };
+  }
+
+  const start = edge?.geometry?.start || edge?.start;
+  const end = edge?.geometry?.end || edge?.end;
+
+  if (start && end) {
+    return {
+      x: (start.x + end.x) / 2,
+      y: (start.y + end.y) / 2,
+    };
+  }
+
+  return { x: 0, y: 0 };
+}
+
+export function getAttachmentTargetKey(attachedTo) {
+  if (!attachedTo?.type || !attachedTo?.id) return "";
+  return `${attachedTo.type}:${attachedTo.id}`;
+}
+
+export function isSameAttachmentTarget(left, right) {
+  return (
+    left?.type === right?.type &&
+    String(left?.id) === String(right?.id)
+  );
+}
+
+export function groupAttachmentsByTarget(attachments = []) {
+  const groupsMap = new Map();
+
+  for (const attachment of attachments) {
+    const attachedTo = attachment?.attachedTo;
+    const key = getAttachmentTargetKey(attachedTo);
+
+    if (!key) continue;
+
+    if (!groupsMap.has(key)) {
+      groupsMap.set(key, {
+        key,
+        attachedTo: {
+          type: attachedTo.type,
+          id: attachedTo.id,
+        },
+        attachments: [],
+      });
+    }
+
+    groupsMap.get(key).attachments.push(attachment);
+  }
+
+  return Array.from(groupsMap.values());
+}
+
+export function resolveAttachmentBadgePosition({
+  attachedTo,
+  nodes = [],
+  edges = [],
+}) {
+  const targetType = attachedTo?.type;
+  const targetId = attachedTo?.id;
+
+  if (targetType === "node") {
+    const node = nodes.find((item) => String(item.id) === String(targetId));
+    if (!node) return null;
+
+    const rect = getNodePosition(node);
+
+    return {
+      x: rect.x + rect.width + 8,
+      y: rect.y + 8,
+    };
+  }
+
+  if (targetType === "edge") {
+    const edge = edges.find((item) => String(item.id) === String(targetId));
+    if (!edge) return null;
+
+    const center = getEdgeCenter(edge);
+
+    return {
+      x: center.x + 10,
+      y: center.y - 10,
+    };
+  }
+
+  return null;
+}
+
+
+================================================================================
+2) FILE: src/store/useCanvasStore.js
+   PATCH
+================================================================================
+
+У початковому state залишити:
+
+attachments: [],
+attachmentEditor: null,
+attachmentViewer: null,
+accessMode: "editor",
+
+Дії для attachments замінити/доповнити так:
+
+addAttachment: (attachment) =>
+  set((state) => ({
+    attachments: [...(state.attachments || []), attachment],
+  })),
+
+replaceAttachment: (id, nextAttachment) =>
+  set((state) => ({
+    attachments: (state.attachments || []).map((attachment) =>
+      attachment.id === id ? nextAttachment : attachment
+    ),
+  })),
+
+removeAttachment: (id) =>
+  set((state) => ({
+    attachments: (state.attachments || []).filter(
+      (attachment) => attachment.id !== id
+    ),
+  })),
+
+setAttachmentEditor: (attachmentEditor) => set({ attachmentEditor }),
+clearAttachmentEditor: () => set({ attachmentEditor: null }),
+
+setAttachmentViewer: (attachmentViewer) => set({ attachmentViewer }),
+clearAttachmentViewer: () => set({ attachmentViewer: null }),
+
+setActiveViewerAttachment: (activeAttachmentId) =>
+  set((state) => ({
+    attachmentViewer: state.attachmentViewer
+      ? {
+          ...state.attachmentViewer,
+          activeAttachmentId,
+        }
+      : null,
+  })),
+
+У replaceDocumentState залишити очищення модальних вікон:
+
+replaceDocumentState: (documentState) =>
+  set((state) => ({
+    nodes: documentState.nodes || [],
+    edges: documentState.edges || [],
+    annotations: documentState.annotations || [],
+    specificationTables: documentState.specificationTables || [],
+    notes: documentState.notes || [],
+    sheet: documentState.sheet || state.sheet,
+    attachments: documentState.attachments || [],
+
+    selection: null,
+    contextMenu: null,
+    attachmentEditor: null,
+    attachmentViewer: null,
+  })),
+
+
+================================================================================
+3) FILE: src/controllers/canvasController.js
+   PATCH / REPLACE ATTACHMENT METHODS
+================================================================================
+
+Додати import:
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { isSameAttachmentTarget } from "@/lib/attachments/attachmentGeometry";
+
+У canvasController замінити attachment-методи на наступні:
+
+openAttachmentEditor(attachedTo) {
+  const store = useCanvasStore.getState();
+
+  if (store.accessMode === "reader") {
+    return;
+  }
+
+  if (!attachedTo?.type || !attachedTo?.id) return;
+
+  store.setAttachmentEditor?.({
+    attachedTo: {
+      type: attachedTo.type,
+      id: attachedTo.id,
+    },
+  });
+},
+
+closeAttachmentEditor() {
+  useCanvasStore.getState().clearAttachmentEditor?.();
+},
+
+openAttachmentViewer(attachedTo, activeAttachmentId = null) {
+  const store = useCanvasStore.getState();
+
+  if (!attachedTo?.type || !attachedTo?.id) return;
+
+  const targetAttachments = (store.attachments || []).filter((attachment) =>
+    isSameAttachmentTarget(attachment?.attachedTo, attachedTo)
+  );
+
+  if (!targetAttachments.length) return;
+
+  const requestedAttachmentExists = targetAttachments.some(
+    (attachment) => attachment.id === activeAttachmentId
+  );
+
+  store.setAttachmentViewer?.({
+    attachedTo: {
+      type: attachedTo.type,
+      id: attachedTo.id,
+    },
+    activeAttachmentId: requestedAttachmentExists
+      ? activeAttachmentId
+      : targetAttachments[0].id,
+  });
+},
+
+setActiveViewerAttachment(attachmentId) {
+  const store = useCanvasStore.getState();
+  const viewer = store.attachmentViewer;
+
+  if (!viewer?.attachedTo || !attachmentId) return;
+
+  const belongsToViewerTarget = (store.attachments || []).some(
+    (attachment) =>
+      attachment.id === attachmentId &&
+      isSameAttachmentTarget(
+        attachment?.attachedTo,
+        viewer.attachedTo
+      )
+  );
+
+  if (!belongsToViewerTarget) return;
+
+  store.setActiveViewerAttachment?.(attachmentId);
+},
+
+closeAttachmentViewer() {
+  useCanvasStore.getState().clearAttachmentViewer?.();
+},
+
+async uploadAttachment({ attachedTo, file, comment }) {
+  const store = useCanvasStore.getState();
+
+  if (store.accessMode === "reader") {
+    return null;
+  }
+
+  if (!attachedTo?.type || !attachedTo?.id || !file) return null;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("attachedToType", attachedTo.type);
+  formData.append("attachedToId", attachedTo.id);
+  formData.append("comment", comment || "");
+
+  const response = await fetch("/api/attachments/upload", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Attachment upload failed");
+  }
+
+  const result = await response.json();
+
+  if (result?.attachment) {
+    store.addAttachment?.(result.attachment);
+    store.clearAttachmentEditor?.();
+    return result.attachment;
+  }
+
+  return null;
+},
+
+async deleteAttachment(attachmentId) {
+  const storeBeforeDelete = useCanvasStore.getState();
+
+  if (storeBeforeDelete.accessMode === "reader") {
+    return false;
+  }
+
+  const attachmentToDelete = (storeBeforeDelete.attachments || []).find(
+    (attachment) => attachment.id === attachmentId
+  );
+
+  if (!attachmentToDelete) {
+    return false;
+  }
+
+  const viewerBeforeDelete = storeBeforeDelete.attachmentViewer;
+
+  const response = await fetch(`/api/attachments/${attachmentId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Attachment delete failed");
+  }
+
+  // Видаляємо metadata зі store тільки після успішної відповіді сервера.
+  useCanvasStore.getState().removeAttachment?.(attachmentId);
+
+  const storeAfterDelete = useCanvasStore.getState();
+
+  if (
+    !viewerBeforeDelete?.attachedTo ||
+    !isSameAttachmentTarget(
+      attachmentToDelete.attachedTo,
+      viewerBeforeDelete.attachedTo
+    )
+  ) {
+    return true;
+  }
+
+  const remainingTargetAttachments = (storeAfterDelete.attachments || []).filter(
+    (attachment) =>
+      isSameAttachmentTarget(
+        attachment?.attachedTo,
+        viewerBeforeDelete.attachedTo
+      )
+  );
+
+  if (!remainingTargetAttachments.length) {
+    storeAfterDelete.clearAttachmentViewer?.();
+    return true;
+  }
+
+  // Якщо видалено неактивний файл, активний залишається без змін.
+  if (viewerBeforeDelete.activeAttachmentId !== attachmentId) {
+    return true;
+  }
+
+  const deletedIndex = (storeBeforeDelete.attachments || [])
+    .filter((attachment) =>
+      isSameAttachmentTarget(
+        attachment?.attachedTo,
+        viewerBeforeDelete.attachedTo
+      )
+    )
+    .findIndex((attachment) => attachment.id === attachmentId);
+
+  const nextIndex = Math.min(
+    Math.max(deletedIndex, 0),
+    remainingTargetAttachments.length - 1
+  );
+
+  storeAfterDelete.setActiveViewerAttachment?.(
+    remainingTargetAttachments[nextIndex].id
+  );
+
+  return true;
+},
+
+
+================================================================================
+4) FILE: src/components/attachments/AttachmentBadgesLayer.jsx
+   REPLACE FILE
+================================================================================
+
+"use client";
+
+import React from "react";
+import { Circle, Group, Text } from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  groupAttachmentsByTarget,
+  resolveAttachmentBadgePosition,
+} from "@/lib/attachments/attachmentGeometry";
+
+export default function AttachmentBadgesLayer() {
+  const attachments = useCanvasStore((state) => state.attachments || []);
+  const nodes = useCanvasStore((state) => state.nodes || []);
+  const edges = useCanvasStore((state) => state.edges || []);
+
+  if (!attachments.length) return null;
+
+  const attachmentGroups = groupAttachmentsByTarget(attachments);
+
+  return (
+    <>
+      {attachmentGroups.map((group) => {
+        const position = resolveAttachmentBadgePosition({
+          attachedTo: group.attachedTo,
+          nodes,
+          edges,
+        });
+
+        if (!position) return null;
+
+        const attachmentCount = group.attachments.length;
+        const countLabel =
+          attachmentCount > 99 ? "99+" : String(attachmentCount);
+
+        return (
+          <Group
+            key={group.key}
+            x={position.x}
+            y={position.y}
+            onMouseDown={(event) => {
+              event.cancelBubble = true;
+            }}
+            onTouchStart={(event) => {
+              event.cancelBubble = true;
+            }}
+            onClick={(event) => {
+              event.cancelBubble = true;
+
+              canvasController.openAttachmentViewer?.(
+                group.attachedTo,
+                group.attachments[0]?.id
+              );
+            }}
+            onTap={(event) => {
+              event.cancelBubble = true;
+
+              canvasController.openAttachmentViewer?.(
+                group.attachedTo,
+                group.attachments[0]?.id
+              );
+            }}
+          >
+            <Circle
+              radius={11}
+              fill="#2D9CDB"
+              stroke="white"
+              strokeWidth={2}
+              shadowColor="black"
+              shadowOpacity={0.18}
+              shadowBlur={3}
+            />
+
+            <Text
+              x={attachmentCount >= 10 ? -7.5 : -3.5}
+              y={-5}
+              width={attachmentCount >= 10 ? 15 : 7}
+              text={countLabel}
+              align="center"
+              fontSize={attachmentCount > 99 ? 7 : 10}
+              fontStyle="bold"
+              fill="white"
+              listening={false}
+            />
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+
+================================================================================
+5) FILE: src/components/attachments/AttachmentViewerModal.jsx
+   REPLACE FILE
+================================================================================
+
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  IconButton,
+  List,
+  ListItemButton,
+  ListItemText,
+  Paper,
+  Stack,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+
+import CloseIcon from "@mui/icons-material/Close";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import DownloadIcon from "@mui/icons-material/Download";
+import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import ZoomInIcon from "@mui/icons-material/ZoomIn";
+import ZoomOutIcon from "@mui/icons-material/ZoomOut";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { getAttachmentPreviewKind } from "@/lib/attachments/attachmentFileTypes";
+import { isSameAttachmentTarget } from "@/lib/attachments/attachmentGeometry";
+
+const MIN_IMAGE_ZOOM = 0.25;
+const MAX_IMAGE_ZOOM = 4;
+const IMAGE_ZOOM_STEP = 0.25;
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function formatFileSize(size = 0) {
+  const bytes = Number(size || 0);
+
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getTargetTitle(attachedTo) {
+  if (attachedTo?.type === "node") {
+    return `Файли елемента ${attachedTo.id}`;
+  }
+
+  if (attachedTo?.type === "edge") {
+    return `Файли з'єднання ${attachedTo.id}`;
+  }
+
+  return "Прикріплені файли";
+}
+
+export default function AttachmentViewerModal() {
+  const attachmentViewer = useCanvasStore(
+    (state) => state.attachmentViewer
+  );
+  const attachments = useCanvasStore(
+    (state) => state.attachments || []
+  );
+  const accessMode = useCanvasStore(
+    (state) => state.accessMode
+  );
+
+  const [imageZoom, setImageZoom] = useState(1);
+  const [deleteCandidateId, setDeleteCandidateId] = useState(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  const viewerAttachments = useMemo(() => {
+    if (!attachmentViewer?.attachedTo) return [];
+
+    return attachments.filter((attachment) =>
+      isSameAttachmentTarget(
+        attachment?.attachedTo,
+        attachmentViewer.attachedTo
+      )
+    );
+  }, [attachments, attachmentViewer?.attachedTo]);
+
+  const activeAttachment = useMemo(() => {
+    if (!viewerAttachments.length) return null;
+
+    return (
+      viewerAttachments.find(
+        (attachment) =>
+          attachment.id === attachmentViewer?.activeAttachmentId
+      ) || viewerAttachments[0]
+    );
+  }, [
+    viewerAttachments,
+    attachmentViewer?.activeAttachmentId,
+  ]);
+
+  const open =
+    Boolean(attachmentViewer?.attachedTo) &&
+    viewerAttachments.length > 0;
+
+  const readOnly = accessMode === "reader";
+
+  const previewKind = activeAttachment
+    ? getAttachmentPreviewKind(activeAttachment.file)
+    : null;
+
+  useEffect(() => {
+    setImageZoom(1);
+    setDeleteError("");
+    setDeleteCandidateId(null);
+  }, [activeAttachment?.id]);
+
+  // Захист від невалідного activeAttachmentId після load/update.
+  useEffect(() => {
+    if (!open || !activeAttachment) return;
+
+    if (
+      attachmentViewer?.activeAttachmentId !== activeAttachment.id
+    ) {
+      canvasController.setActiveViewerAttachment?.(
+        activeAttachment.id
+      );
+    }
+  }, [
+    open,
+    activeAttachment,
+    attachmentViewer?.activeAttachmentId,
+  ]);
+
+  // Якщо attachments для цілі зникли ззовні, viewer закривається.
+  useEffect(() => {
+    if (attachmentViewer?.attachedTo && !viewerAttachments.length) {
+      canvasController.closeAttachmentViewer?.();
+    }
+  }, [
+    attachmentViewer?.attachedTo,
+    viewerAttachments.length,
+  ]);
+
+  const handleClose = () => {
+    if (deleting) return;
+    canvasController.closeAttachmentViewer?.();
+  };
+
+  const handleSelectAttachment = (attachmentId) => {
+    if (deleting) return;
+    canvasController.setActiveViewerAttachment?.(attachmentId);
+  };
+
+  const handleZoomIn = () => {
+    setImageZoom((current) =>
+      clamp(
+        current + IMAGE_ZOOM_STEP,
+        MIN_IMAGE_ZOOM,
+        MAX_IMAGE_ZOOM
+      )
+    );
+  };
+
+  const handleZoomOut = () => {
+    setImageZoom((current) =>
+      clamp(
+        current - IMAGE_ZOOM_STEP,
+        MIN_IMAGE_ZOOM,
+        MAX_IMAGE_ZOOM
+      )
+    );
+  };
+
+  const handleResetZoom = () => {
+    setImageZoom(1);
+  };
+
+  const handleImageWheel = (event) => {
+    // Ctrl/Cmd + wheel масштабує зображення.
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+
+    const direction = event.deltaY < 0 ? 1 : -1;
+
+    setImageZoom((current) =>
+      clamp(
+        current + direction * IMAGE_ZOOM_STEP,
+        MIN_IMAGE_ZOOM,
+        MAX_IMAGE_ZOOM
+      )
+    );
+  };
+
+  const requestDelete = (attachmentId) => {
+    if (readOnly || deleting) return;
+
+    setDeleteError("");
+    setDeleteCandidateId(attachmentId);
+  };
+
+  const cancelDelete = () => {
+    if (deleting) return;
+    setDeleteCandidateId(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteCandidateId || readOnly || deleting) return;
+
+    try {
+      setDeleting(true);
+      setDeleteError("");
+
+      await canvasController.deleteAttachment?.(
+        deleteCandidateId
+      );
+
+      setDeleteCandidateId(null);
+    } catch (error) {
+      setDeleteError(
+        error?.message || "Не вдалося видалити файл"
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  if (!open || !activeAttachment) {
+    return null;
+  }
+
+  const previewUrl = activeAttachment.file.previewUrl;
+  const downloadUrl =
+    activeAttachment.file.downloadUrl || previewUrl;
+
+  return (
+    <>
+      <Dialog
+        open={open}
+        onClose={handleClose}
+        maxWidth="xl"
+        fullWidth
+        PaperProps={{
+          sx: {
+            height: "90vh",
+            maxHeight: "90vh",
+          },
+        }}
+      >
+        <DialogTitle
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 2,
+          }}
+        >
+          <Box>
+            <Typography variant="h6">
+              {getTargetTitle(attachmentViewer.attachedTo)}
+            </Typography>
+
+            <Typography
+              variant="body2"
+              color="text.secondary"
+            >
+              Прикріплено файлів: {viewerAttachments.length}
+            </Typography>
+          </Box>
+
+          <IconButton
+            onClick={handleClose}
+            disabled={deleting}
+            aria-label="Закрити"
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+
+        <DialogContent
+          dividers
+          sx={{
+            display: "flex",
+            minHeight: 0,
+            p: 0,
+          }}
+        >
+          <Box
+            sx={{
+              width: 320,
+              minWidth: 280,
+              maxWidth: 360,
+              borderRight: "1px solid",
+              borderColor: "divider",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <Typography
+              variant="subtitle2"
+              sx={{ px: 2, pt: 2, pb: 1 }}
+            >
+              Прикріплені файли
+            </Typography>
+
+            <List
+              disablePadding
+              sx={{
+                overflowY: "auto",
+                flex: 1,
+              }}
+            >
+              {viewerAttachments.map((attachment, index) => {
+                const selected =
+                  attachment.id === activeAttachment.id;
+
+                return (
+                  <ListItemButton
+                    key={attachment.id}
+                    selected={selected}
+                    onClick={() =>
+                      handleSelectAttachment(attachment.id)
+                    }
+                    disabled={deleting}
+                    sx={{
+                      alignItems: "flex-start",
+                      gap: 1,
+                      pr: 1,
+                    }}
+                  >
+                    <InsertDriveFileOutlinedIcon
+                      fontSize="small"
+                      sx={{ mt: 0.5 }}
+                    />
+
+                    <ListItemText
+                      primary={
+                        attachment.file.originalName ||
+                        `Файл ${index + 1}`
+                      }
+                      secondary={
+                        <>
+                          {formatFileSize(
+                            attachment.file.size
+                          )}
+                          {attachment.comment
+                            ? ` · ${attachment.comment}`
+                            : ""}
+                        </>
+                      }
+                      primaryTypographyProps={{
+                        noWrap: true,
+                        title:
+                          attachment.file.originalName,
+                      }}
+                      secondaryTypographyProps={{
+                        noWrap: true,
+                        title: attachment.comment || "",
+                      }}
+                    />
+
+                    {!readOnly && (
+                      <Tooltip title="Видалити цей файл">
+                        <span>
+                          <IconButton
+                            size="small"
+                            color="error"
+                            disabled={deleting}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              requestDelete(attachment.id);
+                            }}
+                            aria-label={`Видалити ${attachment.file.originalName}`}
+                          >
+                            <DeleteOutlineIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    )}
+                  </ListItemButton>
+                );
+              })}
+            </List>
+          </Box>
+
+          <Box
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              p: 2,
+              gap: 2,
+            }}
+          >
+            {deleteError && (
+              <Alert severity="error">
+                {deleteError}
+              </Alert>
+            )}
+
+            <Paper
+              variant="outlined"
+              sx={{ p: 1.5 }}
+            >
+              <Stack
+                direction={{
+                  xs: "column",
+                  md: "row",
+                }}
+                spacing={1}
+                justifyContent="space-between"
+                alignItems={{
+                  xs: "stretch",
+                  md: "center",
+                }}
+              >
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    variant="subtitle2"
+                    noWrap
+                    title={activeAttachment.file.originalName}
+                  >
+                    {activeAttachment.file.originalName}
+                  </Typography>
+
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                  >
+                    {activeAttachment.file.mimeType} ·{" "}
+                    {formatFileSize(
+                      activeAttachment.file.size
+                    )}
+                  </Typography>
+                </Box>
+
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  flexWrap="wrap"
+                >
+                  {previewKind === "image" && (
+                    <>
+                      <Tooltip title="Зменшити">
+                        <span>
+                          <IconButton
+                            onClick={handleZoomOut}
+                            disabled={
+                              imageZoom <= MIN_IMAGE_ZOOM
+                            }
+                            aria-label="Зменшити зображення"
+                          >
+                            <ZoomOutIcon />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+
+                      <Button
+                        onClick={handleResetZoom}
+                        startIcon={<RestartAltIcon />}
+                        sx={{ minWidth: 100 }}
+                      >
+                        {Math.round(imageZoom * 100)}%
+                      </Button>
+
+                      <Tooltip title="Збільшити">
+                        <span>
+                          <IconButton
+                            onClick={handleZoomIn}
+                            disabled={
+                              imageZoom >= MAX_IMAGE_ZOOM
+                            }
+                            aria-label="Збільшити зображення"
+                          >
+                            <ZoomInIcon />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </>
+                  )}
+
+                  <Button
+                    component="a"
+                    href={downloadUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    startIcon={<DownloadIcon />}
+                  >
+                    Відкрити / завантажити
+                  </Button>
+
+                  {!readOnly && (
+                    <Button
+                      color="error"
+                      variant="outlined"
+                      startIcon={<DeleteOutlineIcon />}
+                      disabled={deleting}
+                      onClick={() =>
+                        requestDelete(activeAttachment.id)
+                      }
+                    >
+                      Видалити файл
+                    </Button>
+                  )}
+                </Stack>
+              </Stack>
+            </Paper>
+
+            {activeAttachment.comment && (
+              <Paper
+                variant="outlined"
+                sx={{ p: 1.5 }}
+              >
+                <Typography variant="subtitle2">
+                  Коментар
+                </Typography>
+
+                <Typography
+                  variant="body2"
+                  sx={{ whiteSpace: "pre-wrap" }}
+                >
+                  {activeAttachment.comment}
+                </Typography>
+              </Paper>
+            )}
+
+            <Divider />
+
+            <Box
+              sx={{
+                flex: 1,
+                minHeight: 0,
+                overflow: "hidden",
+              }}
+            >
+              {previewKind === "pdf" && (
+                <Box
+                  component="iframe"
+                  key={activeAttachment.id}
+                  src={previewUrl}
+                  title={activeAttachment.file.originalName}
+                  sx={{
+                    width: "100%",
+                    height: "100%",
+                    minHeight: 450,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 1,
+                  }}
+                />
+              )}
+
+              {previewKind === "image" && (
+                <Box
+                  onWheel={handleImageWheel}
+                  sx={{
+                    width: "100%",
+                    height: "100%",
+                    minHeight: 450,
+                    overflow: "auto",
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 1,
+                    backgroundColor: "#fafafa",
+                  }}
+                >
+                  <Box
+                    sx={{
+                      minWidth: "100%",
+                      minHeight: "100%",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      justifyContent: "center",
+                      p: 2,
+                    }}
+                  >
+                    <Box
+                      component="img"
+                      key={activeAttachment.id}
+                      src={previewUrl}
+                      alt={activeAttachment.file.originalName}
+                      draggable={false}
+                      sx={{
+                        display: "block",
+                        width: `${imageZoom * 100}%`,
+                        maxWidth: "none",
+                        height: "auto",
+                        objectFit: "contain",
+                        userSelect: "none",
+                      }}
+                    />
+                  </Box>
+                </Box>
+              )}
+
+              {previewKind === "download-only" && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 4,
+                    minHeight: 300,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    textAlign: "center",
+                  }}
+                >
+                  <Box>
+                    <Typography
+                      variant="h6"
+                      sx={{ mb: 1 }}
+                    >
+                      Попередній перегляд недоступний
+                    </Typography>
+
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ mb: 2 }}
+                    >
+                      Цей тип файлу потрібно завантажити
+                      та відкрити у зовнішній програмі.
+                    </Typography>
+
+                    <Button
+                      component="a"
+                      href={downloadUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      variant="contained"
+                      startIcon={<DownloadIcon />}
+                    >
+                      Завантажити файл
+                    </Button>
+                  </Box>
+                </Paper>
+              )}
+            </Box>
+          </Box>
+        </DialogContent>
+
+        <DialogActions>
+          <Button
+            onClick={handleClose}
+            variant="contained"
+            disabled={deleting}
+          >
+            Закрити
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteCandidateId)}
+        onClose={cancelDelete}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>
+          Видалити прикріплений файл?
+        </DialogTitle>
+
+        <DialogContent dividers>
+          <Typography variant="body2">
+            Файл буде видалено зі схеми та з файлового
+            сховища. Цю дію неможливо скасувати.
+          </Typography>
+        </DialogContent>
+
+        <DialogActions>
+          <Button
+            onClick={cancelDelete}
+            disabled={deleting}
+          >
+            Скасувати
+          </Button>
+
+          <Button
+            onClick={confirmDelete}
+            color="error"
+            variant="contained"
+            disabled={deleting}
+          >
+            {deleting ? "Видалення..." : "Видалити"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
+
+================================================================================
+6) FILE: src/app/api/attachments/[id]/route.js
+   REPLACE OPTIONAL DELETE WITH THIS VERSION
+================================================================================
+
+import { NextResponse } from "next/server";
+import fs from "fs/promises";
+import path from "path";
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+export async function DELETE(_request, context) {
+  try {
+    const rawId = context?.params?.id || "";
+    const id = sanitizeId(rawId);
+
+    if (!id || id !== rawId) {
+      return new NextResponse("Invalid attachment id", {
+        status: 400,
+      });
+    }
+
+    const attachmentDir = path.join(
+      process.cwd(),
+      "uploads",
+      "attachments",
+      id
+    );
+
+    try {
+      await fs.access(attachmentDir);
+    } catch {
+      return new NextResponse("Attachment not found", {
+        status: 404,
+      });
+    }
+
+    await fs.rm(attachmentDir, {
+      recursive: true,
+      force: false,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      attachmentId: id,
+    });
+  } catch (error) {
+    console.error("Attachment delete error:", error);
+
+    return new NextResponse(
+      "Attachment delete failed",
+      { status: 500 }
+    );
+  }
+}
+
+
+================================================================================
+7) FILE: pages/api/attachments/[id].js
+   ONLY FOR PAGES ROUTER
+================================================================================
+
+Створити цей файл тільки якщо проєкт використовує pages/api.
+
+import fs from "fs/promises";
+import path from "path";
+
+function sanitizeId(value = "") {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "DELETE") {
+    res.setHeader("Allow", ["DELETE"]);
+    res.status(405).send("Method not allowed");
+    return;
+  }
+
+  try {
+    const rawId = String(req.query.id || "");
+    const id = sanitizeId(rawId);
+
+    if (!id || id !== rawId) {
+      res.status(400).send("Invalid attachment id");
+      return;
+    }
+
+    const attachmentDir = path.join(
+      process.cwd(),
+      "uploads",
+      "attachments",
+      id
+    );
+
+    try {
+      await fs.access(attachmentDir);
+    } catch {
+      res.status(404).send("Attachment not found");
+      return;
+    }
+
+    await fs.rm(attachmentDir, {
+      recursive: true,
+      force: false,
+    });
+
+    res.status(200).json({
+      ok: true,
+      attachmentId: id,
+    });
+  } catch (error) {
+    console.error("Attachment delete error:", error);
+    res.status(500).send("Attachment delete failed");
+  }
+}
+
+
+================================================================================
+8) FILE: src/components/attachments/AttachmentEditorModal.jsx
+   NO REQUIRED CHANGE
+================================================================================
+
+Поточний editor вже додає один файл за одну операцію. Це не заважає мати
+декілька attachments для одного node/edge, оскільки кожне завантаження додає
+новий metadata-об'єкт у масив attachments.
+
+За потреби можна змінити заголовок:
+
+Було:
+
+<DialogTitle>Прикріпити графічний файл</DialogTitle>
+
+Рекомендовано:
+
+<DialogTitle>Додати прикріплений файл</DialogTitle>
+
+Так само у контекстному меню:
+
+<ListItemText>Додати прикріплений файл</ListItemText>
+
+
+================================================================================
+9) FILE: src/components/canvas/CanvasContextMenu.jsx
+   REMOVE ATTACHMENT DELETE ITEM IF IT EXISTS
+================================================================================
+
+У контекстному меню потрібно залишити тільки дію додавання:
+
+<MenuItem
+  onClick={() => {
+    canvasController.openAttachmentEditor?.({
+      type: "node",
+      id: contextMenu.nodeId,
+    });
+    clearContextMenu?.();
+  }}
+>
+  <ListItemIcon>
+    <AttachFileIcon fontSize="small" />
+  </ListItemIcon>
+  <ListItemText>Додати прикріплений файл</ListItemText>
+</MenuItem>
+
+Для edge:
+
+<MenuItem
+  onClick={() => {
+    canvasController.openAttachmentEditor?.({
+      type: "edge",
+      id: contextMenu.edgeId,
+    });
+    clearContextMenu?.();
+  }}
+>
+  <ListItemIcon>
+    <AttachFileIcon fontSize="small" />
+  </ListItemIcon>
+  <ListItemText>Додати прикріплений файл</ListItemText>
+</MenuItem>
+
+Будь-який пункт на кшталт:
+
+- "Видалити прикріплений файл"
+- "Видалити attachment"
+- canvasController.removeAttachment(...)
+
+потрібно прибрати з context menu. Видалення тепер виконується лише для
+конкретного файла у AttachmentViewerModal.
+
+
+================================================================================
+10) FILE: src/components/canvas/EditorCanvas.jsx
+    NO STRUCTURAL CHANGE
+================================================================================
+
+У Stage залишається один шар badges:
+
+<Stage>
+  <PaperLayer />
+  <GridLayer />
+  <ConnectorsLayer />
+  <NodesLayer />
+  <AnnotationsLayer />
+  <SpecificationTablesLayer />
+  <AttachmentBadgesLayer />
+</Stage>
+
+Поза Stage:
+
+<AttachmentEditorModal />
+<AttachmentViewerModal />
+
+
+================================================================================
+11) OPTIONAL: ADD A FILE DIRECTLY FROM THE VIEWER
+================================================================================
+
+Якщо потрібно дозволити додавати новий файл без повторного відкриття
+контекстного меню, у AttachmentViewerModal можна додати кнопку:
+
+<Button
+  startIcon={<AttachFileIcon />}
+  disabled={readOnly || deleting}
+  onClick={() => {
+    const attachedTo = attachmentViewer.attachedTo;
+
+    canvasController.closeAttachmentViewer?.();
+    canvasController.openAttachmentEditor?.(attachedTo);
+  }}
+>
+  Додати файл
+</Button>
+
+Для цього додати import:
+
+import AttachFileIcon from "@mui/icons-material/AttachFile";
+
+Це опційне доповнення. Основні три вимоги працюють і без нього.
+
+
+================================================================================
+12) BEHAVIOR AFTER PATCH
+================================================================================
+
+Приклад store:
+
+attachments: [
+  {
+    id: "att-1",
+    attachedTo: { type: "node", id: "node-10" },
+    file: { originalName: "photo.png", ... }
+  },
+  {
+    id: "att-2",
+    attachedTo: { type: "node", id: "node-10" },
+    file: { originalName: "passport.pdf", ... }
+  },
+  {
+    id: "att-3",
+    attachedTo: { type: "edge", id: "edge-5" },
+    file: { originalName: "drawing.vsdx", ... }
+  }
+]
+
+Результат на canvas:
+
+- біля node-10 буде ОДИН badge з числом 2;
+- біля edge-5 буде ОДИН badge з числом 1;
+- клік по badge node-10 відкриє viewer зі списком photo.png та passport.pdf;
+- клік по елементу списку перемкне preview;
+- кнопка "Видалити файл" видалить тільки активний файл;
+- іконка кошика у списку дозволить видалити конкретний неактивний файл;
+- після видалення att-1 viewer покаже att-2;
+- після видалення останнього файла viewer закриється, а badge зникне;
+- для картинки доступні кнопки "-", reset %, "+" та Ctrl/Cmd + wheel;
+- PDF відкривається в iframe;
+- VSDX залишається download-only.
+
+
+================================================================================
+13) IMPORTANT INTEGRATION NOTES
+================================================================================
+
+1. Не викликайте старий метод:
+
+canvasController.openAttachmentViewer(attachment.id)
+
+Новий виклик:
+
+canvasController.openAttachmentViewer(
+  attachment.attachedTo,
+  attachment.id
+)
+
+або для групи:
+
+canvasController.openAttachmentViewer(group.attachedTo)
+
+2. Стару функцію groupAttachmentIndexes потрібно видалити. Вона створювала
+окрему позицію для кожного файла, що суперечить вимозі одного badge.
+
+3. Старий параметр indexForTarget у resolveAttachmentBadgePosition більше
+не потрібний.
+
+4. Не видаляйте metadata зі store до успішного DELETE API. Інакше при
+серверній помилці UI покаже, що файл видалено, хоча він залишиться у сховищі.
+
+5. У режимі reader:
+   - список і preview доступні;
+   - кнопки видалення приховані;
+   - upload залишається заблокованим.
+
+6. Поточна файлова реалізація не має транзакції між файловою системою та JSON
+схеми. Якщо JSON схеми зберігається окремою операцією, після видалення файла
+потрібно запустити ваш звичайний механізм позначення документа як changed/dirty.
+
+Наприклад, після store.removeAttachment:
+
+storeAfterDelete.markDocumentDirty?.();
+
+або іншу дію вашого проєкту.
+
+7. Якщо useCanvasStore має middleware persist, переконайтеся, що
+attachmentViewer та attachmentEditor не записуються до постійного стану.
+Це тимчасовий UI state.
+
+8. SVG з недовірених джерел варто віддавати з правильною Content Security
+Policy або конвертувати на сервері, оскільки SVG може містити активний вміст.
+
+9. DELETE API потрібно захистити тією самою авторизацією та перевіркою доступу
+до схеми, що й upload API. Наведений код демонструє файлову операцію, але не
+реалізує бізнес-авторизацію.
+
+10. Для Oracle BLOB frontend-контракт не змінюється. Метод DELETE повинен
+видаляти рядок attachment/BLOB у БД, після чого повертати:
+
+{
+  "ok": true,
+  "attachmentId": "..."
+}
+
+
+================================================================================
+14) QUICK TEST CHECKLIST
+================================================================================
+
+[ ] Додати перший файл до node.
+[ ] Перевірити появу одного badge з числом 1.
+[ ] Додати другий файл до того самого node.
+[ ] Перевірити, що badge залишився один, а число стало 2.
+[ ] Відкрити badge.
+[ ] Перевірити список із двох файлів.
+[ ] Перемкнутися між PDF та image.
+[ ] Збільшити image до 200%.
+[ ] Перевірити scroll при великому масштабі.
+[ ] Скинути zoom до 100%.
+[ ] Видалити неактивний файл через кошик у списку.
+[ ] Видалити активний файл через кнопку "Видалити файл".
+[ ] Перевірити автоматичний вибір сусіднього файла.
+[ ] Видалити останній файл.
+[ ] Перевірити закриття viewer та зникнення badge.
+[ ] Перевірити, що reader не бачить кнопок видалення.
+[ ] Перевірити помилку DELETE API: metadata не повинна зникати зі store.
+[ ] Зберегти та повторно відкрити JSON схеми.
+[ ] Перевірити, що групування attachments відновилось правильно.
+
+END OF MULTI-FILE ATTACHMENTS PATCH
