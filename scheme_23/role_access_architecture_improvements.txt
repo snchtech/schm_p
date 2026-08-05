@@ -1,0 +1,1477 @@
+АРХІТЕКТУРА РОЛЕВОЇ СИСТЕМИ ТА КЕРУВАННЯ ДОСТУПОМ
+для проєкту «Альбом схем»
+
+1. МЕТА
+
+Побудувати централізовану, масштабовану та придатну до подальшого підключення БД систему доступів, яка дозволяє:
+
+- підтримувати ролі reader, editor, administrator та нові ролі в майбутньому;
+- призначати користувачу декілька ролей одночасно;
+- обмежувати доступ не лише роллю, а й відділом, посадою та конкретним ресурсом;
+- визначати різний склад панелі інструментів для різних відділів;
+- повторно використовувати спільні графічні елементи без дублювання;
+- визначати доступ до альбомів, сторінок, схем і графічних об’єктів;
+- централізовано перевіряти права в UI, controller/store та API;
+- у майбутньому без зміни основної архітектури перейти від статичної конфігурації до даних з БД.
+
+2. КЛЮЧОВЕ АРХІТЕКТУРНЕ РІШЕННЯ
+
+Не варто будувати систему лише на перевірках виду:
+
+if (role === "editor") { ... }
+
+Такий підхід швидко перестає масштабуватися, оскільки:
+
+- користувач може мати декілька ролей;
+- одна роль може діяти лише в межах конкретного альбому або відділу;
+- однакові ролі можуть мати різні дозволи в різних контекстах;
+- посада і відділ можуть впливати на доступ;
+- administrator не завжди повинен мати доступ до абсолютно всього;
+- частина функціоналу може бути доступною reader, наприклад export PDF;
+- різним відділам потрібні різні набори інструментів.
+
+Рекомендована модель:
+
+RBAC + Resource Scope + Attributes
+
+де:
+
+- RBAC — ролі та дозволи;
+- Resource Scope — область, у межах якої діє роль;
+- Attributes — додаткові умови: відділ, посада, власник, тип ресурсу тощо.
+
+3. БАЗОВІ ПОНЯТТЯ
+
+3.1. Permission
+
+Permission — атомарний дозвіл на конкретну дію.
+
+Приклади:
+
+album.view
+album.create
+album.update
+album.delete
+album.manageMembers
+
+albumPage.view
+albumPage.create
+albumPage.update
+albumPage.delete
+albumPage.reorder
+
+scheme.view
+scheme.create
+scheme.update
+scheme.delete
+scheme.exportPdf
+scheme.saveJson
+
+drawing.node.create
+drawing.node.update
+drawing.node.delete
+drawing.edge.create
+drawing.edge.update
+drawing.edge.delete
+drawing.object.move
+drawing.annotation.update
+drawing.specification.update
+
+toolbox.view
+toolbox.useItem
+toolbox.manageCatalog
+
+user.manage
+role.manage
+department.manage
+
+3.2. Role
+
+Role — іменований набір дозволів.
+
+Початкові ролі:
+
+reader
+editor
+administrator
+
+Але роль не повинна бути основною умовою в компонентах. Компоненти повинні перевіряти permission.
+
+Правильно:
+
+can("drawing.node.create")
+
+Неправильно:
+
+role === "editor"
+
+3.3. Scope
+
+Scope — контекст, у межах якого діє роль або дозвіл.
+
+Рекомендовані типи scope:
+
+global
+department
+album
+albumPage
+scheme
+
+Приклад:
+
+користувач може бути:
+- editor у department A;
+- reader у department B;
+- administrator лише для одного album;
+- editor конкретної scheme.
+
+3.4. Attribute
+
+Attribute — додаткові характеристики користувача або ресурсу.
+
+Для користувача:
+
+user.id
+user.departmentIds
+user.positionIds
+user.status
+
+Для ресурсу:
+
+resource.departmentId
+resource.albumId
+resource.ownerId
+resource.type
+resource.visibility
+
+Attributes потрібні для правил виду:
+
+- користувач бачить альбоми свого відділу;
+- керівник відділу бачить усі альбоми відділу;
+- автор схеми може її редагувати;
+- користувач певної посади може погоджувати схему;
+- інші відділи можна переглядати, але вони початково згорнуті.
+
+4. РЕКОМЕНДОВАНА СТРУКТУРА МОДУЛІВ
+
+src/
+  auth/
+    permissions.ts
+    roles.ts
+    types.ts
+    policy.ts
+    accessContext.ts
+    guards.ts
+    selectors.ts
+    hooks.ts
+    errors.ts
+
+  toolbox/
+    catalog/
+      toolboxItems.ts
+      toolboxGroups.ts
+      departmentToolboxProfiles.ts
+    access/
+      toolboxPolicy.ts
+
+  stores/
+    useAuthStore.ts
+    useCanvasStore.ts
+
+  controllers/
+    canvasController.ts
+    albumController.ts
+
+  api/
+    auth/
+    albums/
+    schemes/
+
+5. ТИПИ
+
+// src/auth/types.ts
+
+export type RoleId =
+  | "reader"
+  | "editor"
+  | "administrator";
+
+export type Permission =
+  | "album.view"
+  | "album.create"
+  | "album.update"
+  | "album.delete"
+  | "album.manageMembers"
+  | "albumPage.view"
+  | "albumPage.create"
+  | "albumPage.update"
+  | "albumPage.delete"
+  | "albumPage.reorder"
+  | "scheme.view"
+  | "scheme.create"
+  | "scheme.update"
+  | "scheme.delete"
+  | "scheme.exportPdf"
+  | "scheme.saveJson"
+  | "drawing.node.create"
+  | "drawing.node.update"
+  | "drawing.node.delete"
+  | "drawing.edge.create"
+  | "drawing.edge.update"
+  | "drawing.edge.delete"
+  | "drawing.object.move"
+  | "drawing.annotation.update"
+  | "drawing.specification.update"
+  | "toolbox.view"
+  | "toolbox.useItem"
+  | "toolbox.manageCatalog"
+  | "user.manage"
+  | "role.manage"
+  | "department.manage";
+
+export type ScopeType =
+  | "global"
+  | "department"
+  | "album"
+  | "albumPage"
+  | "scheme";
+
+export interface AccessScope {
+  type: ScopeType;
+  id?: string;
+}
+
+export interface RoleAssignment {
+  roleId: RoleId;
+  scope: AccessScope;
+}
+
+export interface PositionAssignment {
+  positionId: string;
+  departmentId: string;
+}
+
+export interface AuthUser {
+  id: string;
+  name: string;
+  departmentIds: string[];
+  positions: PositionAssignment[];
+  roleAssignments: RoleAssignment[];
+}
+
+export interface AccessResource {
+  type: ScopeType;
+  id?: string;
+  departmentId?: string;
+  albumId?: string;
+  albumPageId?: string;
+  schemeId?: string;
+  ownerId?: string;
+}
+
+6. ЦЕНТРАЛІЗОВАНИЙ КАТАЛОГ ДОЗВОЛІВ
+
+// src/auth/permissions.ts
+
+import type { Permission, RoleId } from "./types";
+
+export const ROLE_PERMISSIONS: Record<RoleId, readonly Permission[]> = {
+  reader: [
+    "album.view",
+    "albumPage.view",
+    "scheme.view",
+    "scheme.exportPdf",
+    "toolbox.view",
+  ],
+
+  editor: [
+    "album.view",
+    "album.create",
+    "album.update",
+
+    "albumPage.view",
+    "albumPage.create",
+    "albumPage.update",
+    "albumPage.delete",
+    "albumPage.reorder",
+
+    "scheme.view",
+    "scheme.create",
+    "scheme.update",
+    "scheme.delete",
+    "scheme.exportPdf",
+    "scheme.saveJson",
+
+    "drawing.node.create",
+    "drawing.node.update",
+    "drawing.node.delete",
+
+    "drawing.edge.create",
+    "drawing.edge.update",
+    "drawing.edge.delete",
+
+    "drawing.object.move",
+    "drawing.annotation.update",
+    "drawing.specification.update",
+
+    "toolbox.view",
+    "toolbox.useItem",
+  ],
+
+  administrator: [
+    "album.view",
+    "album.create",
+    "album.update",
+    "album.delete",
+    "album.manageMembers",
+
+    "albumPage.view",
+    "albumPage.create",
+    "albumPage.update",
+    "albumPage.delete",
+    "albumPage.reorder",
+
+    "scheme.view",
+    "scheme.create",
+    "scheme.update",
+    "scheme.delete",
+    "scheme.exportPdf",
+    "scheme.saveJson",
+
+    "drawing.node.create",
+    "drawing.node.update",
+    "drawing.node.delete",
+
+    "drawing.edge.create",
+    "drawing.edge.update",
+    "drawing.edge.delete",
+
+    "drawing.object.move",
+    "drawing.annotation.update",
+    "drawing.specification.update",
+
+    "toolbox.view",
+    "toolbox.useItem",
+    "toolbox.manageCatalog",
+
+    "user.manage",
+    "role.manage",
+    "department.manage",
+  ],
+};
+
+ВАЖЛИВО:
+administrator не слід перевіряти окремою умовою в коді.
+Його повноваження мають бути описані в тому ж permission-каталозі.
+
+7. КОМПОЗИЦІЯ РОЛЕЙ
+
+Користувач може мати декілька roleAssignments.
+
+Приклад:
+
+const user = {
+  id: "u-1",
+  departmentIds: ["dep-electric"],
+  positions: [
+    {
+      positionId: "chief-engineer",
+      departmentId: "dep-electric",
+    },
+  ],
+  roleAssignments: [
+    {
+      roleId: "editor",
+      scope: {
+        type: "department",
+        id: "dep-electric",
+      },
+    },
+    {
+      roleId: "reader",
+      scope: {
+        type: "department",
+        id: "dep-water",
+      },
+    },
+  ],
+};
+
+Результат:
+
+- в електротехнічному відділі користувач редагує;
+- у водному відділі користувач лише переглядає;
+- ролі не конфліктують, оскільки діють у різних scope.
+
+8. ПОЛІТИКА ДОСТУПУ
+
+// src/auth/policy.ts
+
+import { ROLE_PERMISSIONS } from "./permissions";
+import type {
+  AccessResource,
+  AuthUser,
+  Permission,
+  RoleAssignment,
+} from "./types";
+
+function roleHasPermission(
+  roleId: RoleAssignment["roleId"],
+  permission: Permission,
+): boolean {
+  return ROLE_PERMISSIONS[roleId].includes(permission);
+}
+
+function assignmentMatchesResource(
+  assignment: RoleAssignment,
+  resource?: AccessResource,
+): boolean {
+  if (assignment.scope.type === "global") {
+    return true;
+  }
+
+  if (!resource) {
+    return false;
+  }
+
+  switch (assignment.scope.type) {
+    case "department":
+      return assignment.scope.id === resource.departmentId;
+
+    case "album":
+      return assignment.scope.id === resource.albumId
+        || (
+          resource.type === "album"
+          && assignment.scope.id === resource.id
+        );
+
+    case "albumPage":
+      return assignment.scope.id === resource.albumPageId
+        || (
+          resource.type === "albumPage"
+          && assignment.scope.id === resource.id
+        );
+
+    case "scheme":
+      return assignment.scope.id === resource.schemeId
+        || (
+          resource.type === "scheme"
+          && assignment.scope.id === resource.id
+        );
+
+    default:
+      return false;
+  }
+}
+
+export function can(
+  user: AuthUser | null,
+  permission: Permission,
+  resource?: AccessResource,
+): boolean {
+  if (!user) {
+    return false;
+  }
+
+  return user.roleAssignments.some((assignment) => {
+    return (
+      roleHasPermission(assignment.roleId, permission)
+      && assignmentMatchesResource(assignment, resource)
+    );
+  });
+}
+
+9. ДОСТУПИ ЗА ПОСАДАМИ
+
+Посаду не варто безпосередньо змішувати з роллю.
+
+Краще підтримувати окремі policy rules або position grants.
+
+Приклад:
+
+// src/auth/positionPermissions.ts
+
+export const POSITION_PERMISSIONS = {
+  "chief-engineer": [
+    "scheme.view",
+    "scheme.update",
+    "scheme.exportPdf",
+  ],
+
+  "department-head": [
+    "album.view",
+    "album.update",
+    "album.manageMembers",
+    "scheme.view",
+    "scheme.update",
+  ],
+} as const;
+
+Після цього can() може об’єднувати:
+
+- permissions з ролей;
+- permissions з посад;
+- персональні override;
+- заборони.
+
+Рекомендований порядок обчислення:
+
+1. explicit deny;
+2. global administrator permissions;
+3. role permissions;
+4. position permissions;
+5. personal allow override;
+6. contextual conditions.
+
+Explicit deny має бути сильнішим за allow.
+
+10. PERSONAL OVERRIDES
+
+У майбутній БД можна передбачити винятки:
+
+export interface PermissionOverride {
+  permission: Permission;
+  effect: "allow" | "deny";
+  scope: AccessScope;
+}
+
+Приклад:
+
+- editor відділу;
+- але заборонено scheme.delete;
+- дозволено album.manageMembers лише в одному альбомі.
+
+Не слід використовувати override як основний механізм.
+Вони потрібні лише для винятків.
+
+11. ПАНЕЛЬ ІНСТРУМЕНТІВ
+
+11.1. Не дублювати об’єкти між відділами
+
+Потрібно мати один глобальний каталог інструментів.
+
+Кожен інструмент описується один раз:
+
+// src/toolbox/catalog/toolboxItems.ts
+
+export type ToolboxItemId =
+  | "pump"
+  | "valve"
+  | "transformer"
+  | "sensor"
+  | "text"
+  | "connector";
+
+export interface ToolboxItemDefinition {
+  id: ToolboxItemId;
+  name: string;
+  categoryId: string;
+  requiredPermission: Permission;
+  supportedDepartments?: string[];
+  isActive: boolean;
+  factoryType: string;
+  defaultProps?: Record<string, unknown>;
+}
+
+export const TOOLBOX_ITEMS: ToolboxItemDefinition[] = [
+  {
+    id: "pump",
+    name: "Насос",
+    categoryId: "equipment",
+    requiredPermission: "toolbox.useItem",
+    supportedDepartments: [
+      "dep-water",
+      "dep-heat",
+    ],
+    isActive: true,
+    factoryType: "pump",
+  },
+  {
+    id: "transformer",
+    name: "Трансформатор",
+    categoryId: "equipment",
+    requiredPermission: "toolbox.useItem",
+    supportedDepartments: [
+      "dep-electric",
+    ],
+    isActive: true,
+    factoryType: "transformer",
+  },
+  {
+    id: "text",
+    name: "Текст",
+    categoryId: "annotations",
+    requiredPermission: "toolbox.useItem",
+    isActive: true,
+    factoryType: "text",
+  },
+];
+
+11.2. Профілі інструментів відділів
+
+Відділ не зберігає копії об’єктів.
+Він зберігає лише посилання на ID елементів із глобального каталогу.
+
+// src/toolbox/catalog/departmentToolboxProfiles.ts
+
+export interface DepartmentToolboxProfile {
+  departmentId: string;
+  itemIds: ToolboxItemId[];
+  hiddenItemIds?: ToolboxItemId[];
+  categoryOrder?: string[];
+}
+
+export const DEPARTMENT_TOOLBOX_PROFILES: DepartmentToolboxProfile[] = [
+  {
+    departmentId: "dep-electric",
+    itemIds: [
+      "transformer",
+      "sensor",
+      "text",
+      "connector",
+    ],
+  },
+  {
+    departmentId: "dep-water",
+    itemIds: [
+      "pump",
+      "valve",
+      "sensor",
+      "text",
+      "connector",
+    ],
+  },
+];
+
+Спільні елементи, наприклад text, sensor, connector, повторно не описуються.
+У профілях повторюються лише їхні ID.
+
+11.3. Групи або набори
+
+Для зручності можна створити reusable-набори:
+
+export const TOOLBOX_SETS = {
+  common: [
+    "text",
+    "connector",
+  ],
+
+  measuring: [
+    "sensor",
+  ],
+
+  electric: [
+    "transformer",
+  ],
+
+  water: [
+    "pump",
+    "valve",
+  ],
+};
+
+А профіль відділу формувати композицією:
+
+dep-electric = common + measuring + electric
+dep-water = common + measuring + water
+
+Це найзручніший спосіб не дублювати однакові набори.
+
+11.4. Фільтрація панелі
+
+export function getAvailableToolboxItems(params: {
+  user: AuthUser;
+  departmentId: string;
+  schemeId: string;
+}) {
+  const profile = DEPARTMENT_TOOLBOX_PROFILES.find(
+    (item) => item.departmentId === params.departmentId,
+  );
+
+  if (!profile) {
+    return [];
+  }
+
+  const resource: AccessResource = {
+    type: "scheme",
+    id: params.schemeId,
+    schemeId: params.schemeId,
+    departmentId: params.departmentId,
+  };
+
+  return TOOLBOX_ITEMS.filter((item) => {
+    return (
+      profile.itemIds.includes(item.id)
+      && item.isActive
+      && can(
+        params.user,
+        item.requiredPermission,
+        resource,
+      )
+    );
+  });
+}
+
+Результат визначається двома незалежними умовами:
+
+1. елемент дозволений для відділу;
+2. користувач має permission на використання елемента.
+
+Це важливо, тому що:
+
+- відділ визначає доступний каталог;
+- роль визначає, що користувач може з ним робити.
+
+Reader може бачити список інструментів або легенду, але не мати toolbox.useItem.
+Editor може бачити й використовувати інструменти.
+
+12. РОЗДІЛЕННЯ AUTH STORE І CANVAS STORE
+
+Не варто зберігати повну рольову модель у useCanvasStore.
+
+Рекомендовано:
+
+useAuthStore:
+- currentUser;
+- roleAssignments;
+- department context;
+- access checks;
+- permissions snapshot.
+
+useCanvasStore:
+- nodes;
+- edges;
+- selection;
+- viewport;
+- activeTool;
+- document state;
+- editor state.
+
+Приклад:
+
+// src/stores/useAuthStore.ts
+
+interface AuthState {
+  currentUser: AuthUser | null;
+  activeDepartmentId: string | null;
+  setCurrentUser: (user: AuthUser | null) => void;
+  setActiveDepartmentId: (id: string | null) => void;
+}
+
+Canvas не повинен знати, як обчислюються ролі.
+Він повинен отримувати результат can(...).
+
+13. ЗАХИСТ НА ТРЬОХ РІВНЯХ
+
+13.1. UI
+
+UI приховує або блокує недоступні дії.
+
+const allowed = can(
+  currentUser,
+  "drawing.node.create",
+  currentSchemeResource,
+);
+
+<Button disabled={!allowed}>
+  Додати елемент
+</Button>
+
+Це лише UX.
+UI не є реальною межею безпеки.
+
+13.2. Controller / Store
+
+Controller має перевіряти permission перед мутацією.
+
+function addNode(node: Node) {
+  const user = useAuthStore.getState().currentUser;
+  const canvas = useCanvasStore.getState();
+
+  if (!can(
+    user,
+    "drawing.node.create",
+    canvas.currentSchemeResource,
+  )) {
+    throw new AccessDeniedError(
+      "drawing.node.create",
+    );
+  }
+
+  canvas.addNodeInternal(node);
+}
+
+Store також може мати захисний wrapper для document mutations.
+
+13.3. API / Server
+
+Справжня перевірка доступу повинна відбуватись на сервері.
+
+API не має довіряти:
+
+- ролям з Zustand;
+- disabled кнопці;
+- даним, надісланим клієнтом;
+- departmentId, який передав клієнт без перевірки.
+
+На API потрібно:
+
+1. визначити користувача із сесії або токена;
+2. завантажити його role assignments;
+3. завантажити ресурс;
+4. побудувати AccessResource;
+5. виконати can();
+6. лише тоді виконувати операцію.
+
+14. GLOBAL READ-ONLY ДЛЯ CANVAS
+
+Підхід із глобальним read-only корисний, але він не повинен повністю замінювати permissions.
+
+Причина:
+
+reader може мати право:
+- переглядати;
+- масштабувати;
+- переміщати viewport;
+- вибирати об’єкти;
+- відкривати картку;
+- експортувати PDF.
+
+Але не може:
+- створювати;
+- змінювати;
+- видаляти;
+- пересувати об’єкти;
+- зберігати JSON.
+
+Тому варто розділити:
+
+document state — захищений permissions;
+editor state — доступний для reader.
+
+Приклад wrapper:
+
+function createGuardedDocumentSet(
+  set: StoreApi<CanvasState>["setState"],
+  get: StoreApi<CanvasState>["getState"],
+) {
+  return (
+    permission: Permission,
+    producer: (
+      state: CanvasState,
+    ) => Partial<CanvasState>,
+  ) => {
+    const user = useAuthStore.getState().currentUser;
+    const resource = get().currentSchemeResource;
+
+    if (!can(user, permission, resource)) {
+      throw new AccessDeniedError(permission);
+    }
+
+    set(producer);
+  };
+}
+
+У store:
+
+addNode: (node) =>
+  setDocument(
+    "drawing.node.create",
+    (state) => ({
+      nodes: [...state.nodes, node],
+    }),
+  ),
+
+moveNode: (nodeId, position) =>
+  setDocument(
+    "drawing.object.move",
+    (state) => ({
+      nodes: state.nodes.map((node) =>
+        node.id === nodeId
+          ? { ...node, position }
+          : node
+      ),
+    }),
+  ),
+
+setSelection: (selection) =>
+  set({ selection }),
+
+setViewport: (viewport) =>
+  set({ viewport }),
+
+15. KONVA
+
+Не слід вимикати весь Stage через одну глобальну ознаку, тому що reader повинен мати pan і zoom.
+
+Краще перевіряти окремі можливості:
+
+const canMoveObject = can(
+  currentUser,
+  "drawing.object.move",
+  currentSchemeResource,
+);
+
+<Group
+  draggable={canMoveObject}
+  listening={true}
+/>
+
+Для створення node:
+
+const canCreateNode = can(
+  currentUser,
+  "drawing.node.create",
+  currentSchemeResource,
+);
+
+Для контекстного меню:
+
+const canDeleteNode = can(
+  currentUser,
+  "drawing.node.delete",
+  currentSchemeResource,
+);
+
+16. ДОСТУП ДО АЛЬБОМІВ СХЕМ
+
+Потрібно розділити:
+
+1. чи бачить користувач альбом;
+2. як альбоми групуються та відкриваються в UI;
+3. чи може користувач редагувати альбом.
+
+Приклад моделі:
+
+interface Album {
+  id: string;
+  name: string;
+  departmentId: string;
+  visibility: "department" | "shared" | "private";
+  ownerId: string;
+}
+
+Алгоритм:
+
+1. отримати всі альбоми, доступні користувачу через album.view;
+2. згрупувати їх за departmentId;
+3. відділ користувача показати першим;
+4. його групу розгорнути;
+5. інші доступні відділи показати згорнутими;
+6. недоступні альбоми взагалі не повертати з API.
+
+UI-стан розгортання не є permission.
+
+Приклад:
+
+const defaultExpandedDepartmentIds =
+  currentUser.departmentIds;
+
+Для кожної групи:
+
+{
+  departmentId,
+  departmentName,
+  isExpandedByDefault:
+    currentUser.departmentIds.includes(
+      departmentId,
+    ),
+  albums,
+}
+
+Якщо administrator має глобальний album.view, він бачить усі групи.
+За замовчуванням можна розгортати:
+- його власний відділ;
+- або всі відділи, якщо це вимога продукту.
+
+17. ВІДДІЛ І ПОСАДА — НЕ РОЛЬ
+
+Не рекомендується створювати ролі:
+
+electricDepartmentEditor
+waterDepartmentReader
+chiefEngineerEditor
+departmentHeadReader
+
+Це призведе до вибухового зростання кількості ролей.
+
+Правильно:
+
+role = editor
+scope = department:dep-electric
+position = chief-engineer
+
+Тоді всі характеристики комбінуються без створення десятків спеціальних ролей.
+
+18. РЕКОМЕНДОВАНА МОДЕЛЬ БД
+
+users
+- id
+- name
+- email
+- status
+
+departments
+- id
+- name
+- code
+
+positions
+- id
+- name
+- code
+
+user_departments
+- user_id
+- department_id
+
+user_positions
+- user_id
+- position_id
+- department_id
+
+roles
+- id
+- code
+- name
+
+permissions
+- id
+- code
+- name
+
+role_permissions
+- role_id
+- permission_id
+
+user_role_assignments
+- id
+- user_id
+- role_id
+- scope_type
+- scope_id
+- starts_at
+- expires_at
+
+permission_overrides
+- id
+- user_id
+- permission_id
+- effect
+- scope_type
+- scope_id
+
+albums
+- id
+- department_id
+- owner_id
+- name
+- visibility
+
+album_pages
+- id
+- album_id
+- name
+- order_index
+
+schemes
+- id
+- album_page_id
+- owner_id
+- name
+
+toolbox_items
+- id
+- code
+- name
+- category_id
+- factory_type
+- is_active
+
+toolbox_sets
+- id
+- code
+- name
+
+toolbox_set_items
+- toolbox_set_id
+- toolbox_item_id
+
+department_toolbox_sets
+- department_id
+- toolbox_set_id
+
+department_toolbox_items
+- department_id
+- toolbox_item_id
+- effect
+
+Поля scope_type + scope_id дозволяють не створювати окремі таблиці ролей для album, scheme та department.
+
+19. ПОЧАТКОВА РЕАЛІЗАЦІЯ БЕЗ БД
+
+На першому етапі дані можна зберігати у статичних конфігураціях:
+
+mockUsers.ts
+roles.ts
+permissions.ts
+departmentToolboxProfiles.ts
+toolboxItems.ts
+
+Важливо, щоб UI і controller працювали через інтерфейси:
+
+getCurrentUser()
+can(user, permission, resource)
+getAvailableToolboxItems(...)
+getAccessibleAlbums(...)
+
+Тоді при підключенні БД зміниться лише джерело даних, а не компоненти.
+
+20. ACCESS CONTEXT
+
+Для зручності варто створити AccessContext для поточного ресурсу.
+
+interface CurrentAccessContext {
+  departmentId?: string;
+  albumId?: string;
+  albumPageId?: string;
+  schemeId?: string;
+}
+
+Поточна сторінка схеми формує resource один раз:
+
+const resource = {
+  type: "scheme",
+  id: scheme.id,
+  schemeId: scheme.id,
+  albumPageId: scheme.albumPageId,
+  albumId: scheme.albumId,
+  departmentId: scheme.departmentId,
+  ownerId: scheme.ownerId,
+};
+
+Після цього компоненти використовують один context, а не вручну збирають resource.
+
+21. REACT HOOK
+
+// src/auth/hooks.ts
+
+export function useCan(
+  permission: Permission,
+  resource?: AccessResource,
+): boolean {
+  const user = useAuthStore(
+    (state) => state.currentUser,
+  );
+
+  return useMemo(
+    () => can(user, permission, resource),
+    [user, permission, resource],
+  );
+}
+
+Використання:
+
+const canEditScheme = useCan(
+  "scheme.update",
+  currentSchemeResource,
+);
+
+22. КОМПОНЕНТ GUARD
+
+interface CanProps {
+  permission: Permission;
+  resource?: AccessResource;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+}
+
+export function Can({
+  permission,
+  resource,
+  fallback = null,
+  children,
+}: CanProps) {
+  const allowed = useCan(
+    permission,
+    resource,
+  );
+
+  return allowed ? children : fallback;
+}
+
+Використання:
+
+<Can
+  permission="scheme.update"
+  resource={currentSchemeResource}
+>
+  <EditSchemeButton />
+</Can>
+
+Цей компонент корисний для UI, але не замінює controller/API guard.
+
+23. ОБРОБКА ВІДМОВИ
+
+// src/auth/errors.ts
+
+export class AccessDeniedError extends Error {
+  constructor(
+    public readonly permission: Permission,
+  ) {
+    super(
+      `Access denied: ${permission}`,
+    );
+
+    this.name = "AccessDeniedError";
+  }
+}
+
+Не варто мовчки робити return у всіх controller methods.
+Краще:
+
+- кинути typed error;
+- показати toast;
+- записати audit log;
+- не виконувати мутацію.
+
+24. AUDIT LOG
+
+Для критичних дій у майбутньому варто передбачити аудит:
+
+audit_logs
+- id
+- user_id
+- permission
+- action
+- resource_type
+- resource_id
+- result
+- created_at
+- metadata
+
+Особливо для:
+
+- видалення альбому;
+- видалення схеми;
+- зміни ролей;
+- зміни складу панелі інструментів;
+- експорту;
+- адміністративних дій.
+
+25. КЕШУВАННЯ
+
+На клієнті можна кешувати permissions snapshot для UX.
+
+Але сервер має кожного разу перевіряти актуальний доступ для mutating requests.
+
+Після зміни ролей:
+
+- інвалідовувати auth session;
+- оновлювати permissions snapshot;
+- перевантажувати доступні альбоми;
+- перевантажувати toolbox profile.
+
+26. ПРАВИЛА ПРІОРИТЕТУ
+
+Рекомендовано зафіксувати такі правила:
+
+1. відсутність дозволу = deny;
+2. explicit deny сильніший за allow;
+3. role assignment діє лише в межах scope;
+4. дочірній ресурс успадковує доступ від батьківського scope;
+5. більш вузький deny може перекрити ширший allow;
+6. administrator не обходить explicit deny автоматично, якщо це не визначено окремо;
+7. UI ніколи не є джерелом істини;
+8. дані про доступ не беруться з параметрів запиту без серверної перевірки.
+
+27. ПРИКЛАД УСПАДКУВАННЯ SCOPE
+
+Роль editor на album:
+
+- дозволяє редагувати album;
+- дозволяє редагувати albumPage цього album;
+- дозволяє редагувати scheme в цих albumPage.
+
+Роль reader на scheme:
+
+- дає перегляд лише цієї scheme;
+- не дає доступ до сусідніх схем;
+- не дає редагування album.
+
+Для цього resource має містити повний ланцюг:
+
+departmentId
+albumId
+albumPageId
+schemeId
+
+28. НЕ РЕКОМЕНДОВАНІ РІШЕННЯ
+
+Не робити:
+
+- перевірки role === "reader" у десятках компонентів;
+- окремий список графічних об’єктів для кожного відділу;
+- копії однакових інструментів у різних відділах;
+- зберігання ролі лише в canvas store;
+- довіру до client-side role;
+- одну глобальну роль без scope;
+- створення ролі для кожної комбінації відділу і посади;
+- лише hide/disable без controller/API guard;
+- автоматичний повний доступ administrator без каталогу permissions;
+- змішування UI state, document state та access state.
+
+29. ЕТАПИ ВПРОВАДЖЕННЯ
+
+ЕТАП 1. Типи та каталог permissions
+
+Створити:
+
+src/auth/types.ts
+src/auth/permissions.ts
+src/auth/policy.ts
+src/auth/errors.ts
+
+ЕТАП 2. Auth store
+
+Створити useAuthStore з:
+
+currentUser
+activeDepartmentId
+mock role assignments
+
+ЕТАП 3. Resource context
+
+На сторінках album, albumPage, scheme формувати AccessResource.
+
+ЕТАП 4. UI guards
+
+Замінити role checks на:
+
+useCan(...)
+<Can ... />
+
+ЕТАП 5. Controller guards
+
+Усі mutating methods controller перевіряють конкретний permission.
+
+ЕТАП 6. Store protection
+
+Розділити:
+
+document mutations
+editor/UI mutations
+
+Захистити document mutations через permission-aware wrapper.
+
+ЕТАП 7. Toolbox catalog
+
+Створити:
+
+TOOLBOX_ITEMS
+TOOLBOX_SETS
+DEPARTMENT_TOOLBOX_PROFILES
+
+ЕТАП 8. Album visibility
+
+Реалізувати:
+
+getAccessibleAlbums()
+groupAlbumsByDepartment()
+defaultExpandedDepartmentIds
+
+ЕТАП 9. API middleware
+
+Після появи backend додати серверний authorize().
+
+ЕТАП 10. БД
+
+Замінити mock-конфігурації на repository/service layer без зміни API для UI.
+
+30. МІНІМАЛЬНИЙ РЕКОМЕНДОВАНИЙ API
+
+can(
+  user,
+  permission,
+  resource,
+): boolean
+
+assertCan(
+  user,
+  permission,
+  resource,
+): void
+
+getAccessibleAlbums(
+  user,
+  albums,
+): Album[]
+
+getAvailableToolboxItems({
+  user,
+  departmentId,
+  schemeId,
+}): ToolboxItemDefinition[]
+
+getEffectivePermissions(
+  user,
+  resource,
+): Permission[]
+
+31. ПІДСУМКОВА АРХІТЕКТУРА
+
+Користувач
+  ├── відділи
+  ├── посади
+  ├── role assignments
+  │     ├── role
+  │     └── scope
+  └── permission overrides
+
+Role
+  └── permissions
+
+Resource
+  ├── department
+  ├── album
+  ├── albumPage
+  └── scheme
+
+Toolbox
+  ├── global item catalog
+  ├── reusable sets
+  └── department profiles
+
+Access flow:
+
+UI
+  ↓ can(permission, resource)
+Controller
+  ↓ assertCan(permission, resource)
+Store mutation
+  ↓ guarded document state
+API
+  ↓ server authorize
+Database
+
+32. ГОЛОВНА РЕКОМЕНДАЦІЯ
+
+Основною одиницею перевірки має бути не роль, а permission.
+
+Роль повинна бути лише способом згрупувати permissions.
+
+Відділ, альбом, сторінка та схема повинні визначати scope.
+
+Посада повинна додавати окремі permissions або contextual rules.
+
+Панель інструментів повинна будуватися з одного глобального каталогу через набори та профілі відділів.
+
+Така модель дозволить:
+
+- додавати нові ролі без переписування компонентів;
+- комбінувати декілька ролей;
+- видавати ролі на рівні БД;
+- підтримувати різні права в різних відділах;
+- не дублювати графічні елементи;
+- централізовано контролювати canvas;
+- підключити API та БД без перебудови frontend-архітектури.

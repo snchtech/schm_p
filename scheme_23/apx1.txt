@@ -1,0 +1,525 @@
+Реалізацію краще побудувати через **session state сторінки**, а фільтрацію виконувати безпосередньо в SQL-запиті Interactive Report.
+
+## 1. Передавання `MODE` з першої сторінки
+
+На сторінці 10 створіть прихований елемент:
+
+```text
+P10_MODE
+```
+
+Для кнопки на першій сторінці:
+
+* **Action**: Redirect to Page in this Application
+* **Page**: 10
+* **Set Items**:
+
+```text
+P10_MODE
+```
+
+* **With These Values**:
+
+```text
+&P1_MODE.
+```
+
+Або передайте конкретне значення:
+
+```text
+PLAN
+```
+
+У SQL Interactive Report використовуйте:
+
+```sql
+and (:P10_MODE is null or t.mode = :P10_MODE)
+```
+
+Якщо `MODE` впливає не просто на фільтр, а на різні умови, можна написати:
+
+```sql
+and (
+       :P10_MODE is null
+       or (:P10_MODE = 'PLAN' and t.status = 'PLANNED')
+       or (:P10_MODE = 'FACT' and t.status = 'COMPLETED')
+    )
+```
+
+Значення, передане через URL, не варто використовувати як єдиний механізм контролю доступу: користувач теоретично може змінити його вручну.
+
+---
+
+## 2. Елементи вибору дат
+
+На сторінці 10 створіть:
+
+```text
+P10_CUST_DATE_START
+P10_CUST_DATE_END
+```
+
+Тип обох елементів:
+
+```text
+Date Picker
+```
+
+Наприклад, формат:
+
+```text
+DD.MM.YYYY
+```
+
+Також створіть кнопку:
+
+```text
+DOWNLOAD
+```
+
+Обидві дати краще залишити необов’язковими.
+
+---
+
+## 3. Фільтрація Interactive Report
+
+Якщо `PLANNING_DATE_START` і `PLANNING_DATE_END` мають тип Oracle `DATE`, використовуйте такий запит:
+
+```sql
+select
+    t.id,
+    t.name,
+    t.mode,
+    t.planning_date_start,
+    t.planning_date_end
+from your_table t
+where 1 = 1
+  and (:P10_MODE is null or t.mode = :P10_MODE)
+
+  and (
+        :P10_CUST_DATE_START is null
+        or t.planning_date_start >=
+           to_date(:P10_CUST_DATE_START, 'DD.MM.YYYY')
+      )
+
+  and (
+        :P10_CUST_DATE_END is null
+        or t.planning_date_end <
+           to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1
+      )
+```
+
+Важливий момент — для кінцевої дати використано:
+
+```sql
+< to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1
+```
+
+Наприклад, користувач вибрав:
+
+```text
+05.08.2026
+```
+
+Умова охопить увесь день:
+
+```text
+05.08.2026 00:00:00
+...
+05.08.2026 23:59:59
+```
+
+Не рекомендую писати:
+
+```sql
+t.planning_date_end <= to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY')
+```
+
+Така умова включить лише записи до `00:00:00` обраної дати.
+
+---
+
+## 4. Коли дата початку і завершення належать одному запису
+
+Потрібно визначити, який саме тип фільтрації вам потрібен.
+
+### Варіант А. Обидві дати перевіряються окремо
+
+```sql
+and (
+      :P10_CUST_DATE_START is null
+      or t.planning_date_start >=
+         to_date(:P10_CUST_DATE_START, 'DD.MM.YYYY')
+    )
+and (
+      :P10_CUST_DATE_END is null
+      or t.planning_date_end <
+         to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1
+    )
+```
+
+Цей варіант вибирає записи, які повністю перебувають усередині заданого періоду.
+
+### Варіант Б. Потрібні всі записи, які хоча б частково перетинають період
+
+Для звітів за часовими проміжками це часто правильніша логіка:
+
+```sql
+and (
+      :P10_CUST_DATE_END is null
+      or t.planning_date_start <
+         to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1
+    )
+and (
+      :P10_CUST_DATE_START is null
+      or t.planning_date_end >=
+         to_date(:P10_CUST_DATE_START, 'DD.MM.YYYY')
+    )
+```
+
+Наприклад, запис триває з 1 до 10 серпня, а користувач вибирає період з 5 до 7 серпня. Варіант Б включить цей запис, оскільки періоди перетинаються.
+
+---
+
+## 5. Якщо користувач не вказав дати
+
+Конструкція:
+
+```sql
+:P10_CUST_DATE_START is null
+or ...
+```
+
+означає, що коли дата не задана, відповідна умова не обмежує результат.
+
+Тому:
+
+* обидві дати порожні — завантажуються всі записи;
+* задана тільки дата від — записи від цієї дати;
+* задана тільки дата до — записи до кінця цієї дати;
+* задані обидві — записи за період.
+
+Окрему перевірку для «всіх записів за весь час» робити не потрібно.
+
+---
+
+## 6. Що робити, якщо дата в таблиці зберігається як `CHAR`
+
+Спочатку перевірте реальний тип колонки:
+
+```sql
+select
+    column_name,
+    data_type,
+    data_length
+from user_tab_columns
+where table_name = upper('YOUR_TABLE')
+  and column_name in (
+      'PLANNING_DATE_START',
+      'PLANNING_DATE_END'
+  );
+```
+
+Якщо дата зберігається як `VARCHAR2` або `CHAR`, її потрібно перетворювати.
+
+Наприклад, значення має вигляд:
+
+```text
+2026-08-05 14:30:00
+```
+
+Тоді:
+
+```sql
+to_date(
+    t.planning_date_start,
+    'YYYY-MM-DD HH24:MI:SS'
+)
+```
+
+Повний приклад:
+
+```sql
+select
+    t.id,
+    t.name,
+    t.mode,
+    to_date(
+        t.planning_date_start,
+        'YYYY-MM-DD HH24:MI:SS'
+    ) as planning_date_start,
+    to_date(
+        t.planning_date_end,
+        'YYYY-MM-DD HH24:MI:SS'
+    ) as planning_date_end
+from your_table t
+where 1 = 1
+  and (:P10_MODE is null or t.mode = :P10_MODE)
+  and (
+        :P10_CUST_DATE_START is null
+        or to_date(
+               t.planning_date_start,
+               'YYYY-MM-DD HH24:MI:SS'
+           ) >= to_date(
+               :P10_CUST_DATE_START,
+               'DD.MM.YYYY'
+           )
+      )
+  and (
+        :P10_CUST_DATE_END is null
+        or to_date(
+               t.planning_date_end,
+               'YYYY-MM-DD HH24:MI:SS'
+           ) < to_date(
+               :P10_CUST_DATE_END,
+               'DD.MM.YYYY'
+           ) + 1
+      )
+```
+
+Але постійне виконання `TO_DATE()` для колонки має недоліки:
+
+* Oracle може не використовувати звичайний індекс;
+* запит працюватиме повільніше;
+* один запис із неправильним форматом спричинить `ORA-01861`, `ORA-01843` або подібну помилку;
+* сортування текстових дат може давати неправильний результат.
+
+Тому правильніше зберігати такі значення як:
+
+```text
+DATE
+```
+
+або, коли важливі частки секунди чи часовий пояс:
+
+```text
+TIMESTAMP
+TIMESTAMP WITH TIME ZONE
+```
+
+---
+
+## 7. Який тип і формат колонки обрати в Interactive Report
+
+У SQL повертайте колонку як `DATE` або `TIMESTAMP`, а формат задавайте вже в атрибутах колонки Interactive Report.
+
+Наприклад:
+
+```text
+DD.MM.YYYY HH24:MI
+```
+
+або:
+
+```text
+DD.MM.YYYY
+```
+
+Не потрібно перетворювати дату на текст через `TO_CHAR()` у головному запиті:
+
+```sql
+-- небажано
+to_char(t.planning_date_start, 'DD.MM.YYYY')
+```
+
+Після `TO_CHAR()` Interactive Report сприйматиме значення як текст. Це може погіршити:
+
+* сортування;
+* фільтрацію;
+* групування;
+* експорт;
+* обчислення.
+
+Краще:
+
+```sql
+select t.planning_date_start
+```
+
+а формат установити в:
+
+```text
+Column → Appearance → Format Mask
+```
+
+---
+
+## 8. Оновлення звіту після вибору дат
+
+У властивостях Interactive Report додайте до:
+
+```text
+Page Items to Submit
+```
+
+такі елементи:
+
+```text
+P10_MODE,P10_CUST_DATE_START,P10_CUST_DATE_END
+```
+
+Це особливо важливо, якщо ви оновлюватимете регіон через Dynamic Action без повного submit сторінки.
+
+Для кнопки можна створити Dynamic Action:
+
+* Event: Click
+* Selection Type: Button
+* Button: `DOWNLOAD`
+* True Action: Refresh
+* Affected Elements: ваш Interactive Report
+
+Але для самого завантаження файлу одного `Refresh` недостатньо — він лише перебудує звіт.
+
+---
+
+## 9. Завантаження через стандартний механізм Interactive Report
+
+Практична схема:
+
+### Кнопка `DOWNLOAD`
+
+Налаштуйте:
+
+```text
+Action: Submit Page
+Request / Button Name: DOWNLOAD
+```
+
+Після submit значення:
+
+```text
+P10_MODE
+P10_CUST_DATE_START
+P10_CUST_DATE_END
+```
+
+потраплять у session state.
+
+Потім створіть Branch:
+
+* **Point**: After Processing
+* **Server-side Condition**: Request = Expression 1
+* **Expression 1**:
+
+```text
+DOWNLOAD
+```
+
+* Target URL:
+
+```text
+f?p=&APP_ID.:10:&SESSION.:CSV:&DEBUG.
+```
+
+Для XLSX, якщо ваша версія APEX і налаштування звіту підтримують цей формат:
+
+```text
+f?p=&APP_ID.:10:&SESSION.:XLSX:&DEBUG.
+```
+
+У властивостях Interactive Report повинно бути дозволено відповідний формат завантаження.
+
+У деяких версіях APEX або за наявності кількох Interactive Report на сторінці запит експорту може містити ідентифікатор конкретного регіону. Найбезпечніше подивитися URL, який генерує стандартний пункт:
+
+```text
+Actions → Download → CSV
+```
+
+і використати такий самий формат request для власної кнопки.
+
+---
+
+## 10. Прихований Interactive Report
+
+Не ставте для нього server-side condition, яка заборонить рендеринг, наприклад:
+
+```text
+Never
+```
+
+Якщо регіон не створений на сервері, експортувати його не вийде.
+
+Краще:
+
+1. Додайте регіону Static ID:
+
+```text
+download_report
+```
+
+2. Приховайте його через CSS:
+
+```css
+#download_report {
+    display: none;
+}
+```
+
+Або додайте CSS-клас:
+
+```text
+u-hidden
+```
+
+Тобто звіт має бути створений APEX, але не показаний користувачу.
+
+---
+
+## 11. Перевірка правильності періоду
+
+Доцільно додати validation:
+
+```plsql
+:P10_CUST_DATE_START is null
+or :P10_CUST_DATE_END is null
+or to_date(:P10_CUST_DATE_START, 'DD.MM.YYYY')
+   <=
+   to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY')
+```
+
+Повідомлення:
+
+```text
+Дата початку не може бути пізнішою за дату завершення.
+```
+
+---
+
+## Рекомендований SQL
+
+Якщо колонки таблиці мають тип `DATE`, підсумковий варіант може виглядати так:
+
+```sql
+select
+    t.id,
+    t.name,
+    t.mode,
+    t.planning_date_start,
+    t.planning_date_end,
+    t.status
+from your_table t
+where 1 = 1
+  and (
+        :P10_MODE is null
+        or t.mode = :P10_MODE
+      )
+  and (
+        :P10_CUST_DATE_END is null
+        or t.planning_date_start <
+           to_date(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1
+      )
+  and (
+        :P10_CUST_DATE_START is null
+        or t.planning_date_end >=
+           to_date(:P10_CUST_DATE_START, 'DD.MM.YYYY')
+      )
+order by t.planning_date_start
+```
+
+Цей запит:
+
+* враховує `MODE`;
+* підтримує порожні дати;
+* охоплює весь кінцевий день;
+* вибирає записи, часовий проміжок яких перетинається з періодом користувача;
+* повертає справжні `DATE`, а не текстові значення.

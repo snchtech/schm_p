@@ -1,0 +1,944 @@
+// ============================================================================
+// ELEMENT INFO CARD PACKAGE — UPDATED VERSION
+// ============================================================================
+// PURPOSE:
+// Реалізує перегляд та редагування інформаційної картки для node/edge.
+//
+// ROLE BEHAVIOR:
+// - editor:
+//   - переглядає картку по double click або через context menu;
+//   - може окремо відкрити режим редагування через context menu;
+//   - може змінити назву та вибрати обладнання з довідника;
+// - reader:
+//   - переглядає картку по double click або через context menu;
+//   - не бачить команди редагування;
+//   - не може зберегти зміни навіть при прямому виклику controller method.
+//
+// DATA:
+// - title — назва об'єкта;
+// - equipmentId — ідентифікатор обладнання;
+// - equipmentSnapshot — демонстраційний snapshot вибраного значення;
+// - надалі equipment list можна замінити API/DB-запитом без зміни форми.
+//
+// STACK ASSUMPTIONS:
+// - Next.js / React;
+// - Zustand;
+// - MUI;
+// - Konva;
+// - централізований canvasController.
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/access/accessControl.js
+// ============================================================================
+
+export const USER_ROLES = Object.freeze({
+  EDITOR: "editor",
+  READER: "reader",
+});
+
+export const PERMISSIONS = Object.freeze({
+  ELEMENT_INFO_VIEW: "elementInfo.view",
+  ELEMENT_INFO_EDIT: "elementInfo.edit",
+});
+
+const ROLE_PERMISSIONS = Object.freeze({
+  [USER_ROLES.EDITOR]: [
+    PERMISSIONS.ELEMENT_INFO_VIEW,
+    PERMISSIONS.ELEMENT_INFO_EDIT,
+  ],
+  [USER_ROLES.READER]: [PERMISSIONS.ELEMENT_INFO_VIEW],
+});
+
+export function hasPermission(role, permission) {
+  return ROLE_PERMISSIONS[role]?.includes(permission) ?? false;
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/elementInfo/elementInfoModel.js
+// ============================================================================
+
+export function createDefaultElementInfo(existing = {}) {
+  return {
+    title: existing.title || "",
+
+    // ID запису обладнання у майбутній БД.
+    equipmentId: existing.equipmentId || null,
+
+    // Не є джерелом істини. Це лише локальний snapshot для demo/offline UI.
+    // Після підключення БД актуальне значення треба отримувати за equipmentId.
+    equipmentSnapshot: existing.equipmentSnapshot || null,
+
+    // Reserved for future system links.
+    systemId: existing.systemId || null,
+    externalId: existing.externalId || null,
+
+    // Reserved for future dynamic parameters.
+    parameters: existing.parameters || {},
+
+    updatedAt: existing.updatedAt || null,
+  };
+}
+
+export function patchElementInfo(existing = {}, patch = {}) {
+  return {
+    ...createDefaultElementInfo(existing),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/equipment/equipmentRepository.js
+// ============================================================================
+// Тимчасовий локальний довідник.
+// У майбутньому реалізацію listEquipment можна замінити fetch/API/DB-запитом,
+// а компоненти форми не доведеться переписувати.
+// ============================================================================
+
+const DEMO_EQUIPMENT = Object.freeze([
+  {
+    id: "eq-pump-001",
+    code: "P-001",
+    name: "Насос циркуляційний №1",
+    type: "pump",
+  },
+  {
+    id: "eq-valve-014",
+    code: "V-014",
+    name: "Засувка запірна №14",
+    type: "valve",
+  },
+  {
+    id: "eq-tank-003",
+    code: "T-003",
+    name: "Резервуар технологічний №3",
+    type: "tank",
+  },
+  {
+    id: "eq-sensor-021",
+    code: "S-021",
+    name: "Датчик тиску №21",
+    type: "sensor",
+  },
+]);
+
+export const equipmentRepository = {
+  async listEquipment({ search = "" } = {}) {
+    const normalizedSearch = search.trim().toLowerCase();
+
+    if (!normalizedSearch) {
+      return [...DEMO_EQUIPMENT];
+    }
+
+    return DEMO_EQUIPMENT.filter((item) => {
+      const value = `${item.code} ${item.name} ${item.type}`.toLowerCase();
+      return value.includes(normalizedSearch);
+    });
+  },
+
+  async getEquipmentById(id) {
+    return DEMO_EQUIPMENT.find((item) => item.id === id) || null;
+  },
+};
+
+
+
+// ============================================================================
+// FILE: src/store/useCanvasStore.js
+// PATCH: додати в існуючий create((set, get) => ({ ... }))
+// ============================================================================
+
+/*
+  ДОДАТИ STATE:
+
+  userRole: "editor",
+
+  // Краще нейтральна назва, бо цей state використовується і для view, і edit.
+  elementInfoDialog: null,
+
+  ДОДАТИ ACTIONS:
+
+  setUserRole: (userRole) => set({ userRole }),
+
+  setElementInfoDialog: (elementInfoDialog) =>
+    set({ elementInfoDialog }),
+
+  clearElementInfoDialog: () =>
+    set({ elementInfoDialog: null }),
+
+  updateNodeInfo: (nodeId, nextInfo) =>
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        node.id === nodeId
+          ? { ...node, info: nextInfo }
+          : node
+      ),
+    })),
+
+  updateEdgeInfo: (edgeId, nextInfo) =>
+    set((state) => ({
+      edges: state.edges.map((edge) =>
+        edge.id === edgeId
+          ? { ...edge, info: nextInfo }
+          : edge
+      ),
+    })),
+*/
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: imports
+// ============================================================================
+
+/*
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  createDefaultElementInfo,
+  patchElementInfo,
+} from "@/lib/elementInfo/elementInfoModel";
+import {
+  hasPermission,
+  PERMISSIONS,
+} from "@/lib/access/accessControl";
+*/
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: helper methods + public methods inside canvasController
+// ============================================================================
+
+/*
+function getElementByTarget(store, target) {
+  if (!target?.type || !target?.id) return null;
+
+  if (target.type === "node") {
+    return store.nodes.find((node) => node.id === target.id) || null;
+  }
+
+  if (target.type === "edge") {
+    return store.edges.find((edge) => edge.id === target.id) || null;
+  }
+
+  return null;
+}
+
+function getTargetFromContextMenu(contextMenu) {
+  if (!contextMenu) return null;
+
+  if (contextMenu.type === "node" && contextMenu.nodeId) {
+    return { type: "node", id: contextMenu.nodeId };
+  }
+
+  if (
+    (contextMenu.type === "edge" || contextMenu.type === "connector") &&
+    contextMenu.edgeId
+  ) {
+    return { type: "edge", id: contextMenu.edgeId };
+  }
+
+  return null;
+}
+
+export const canvasController = {
+  // ...existing methods
+
+  openElementInfoCard(target, requestedMode = "view") {
+    const store = useCanvasStore.getState();
+    const entity = getElementByTarget(store, target);
+
+    if (!entity) return false;
+
+    if (!hasPermission(store.userRole, PERMISSIONS.ELEMENT_INFO_VIEW)) {
+      return false;
+    }
+
+    // Захист не тільки UI, а й controller layer.
+    const canEdit = hasPermission(
+      store.userRole,
+      PERMISSIONS.ELEMENT_INFO_EDIT
+    );
+
+    const mode = requestedMode === "edit" && canEdit ? "edit" : "view";
+
+    store.setElementInfoDialog?.({
+      target: {
+        type: target.type,
+        id: target.id,
+      },
+      mode,
+    });
+
+    store.clearContextMenu?.();
+    return true;
+  },
+
+  openElementInfoView(target) {
+    return this.openElementInfoCard(target, "view");
+  },
+
+  openElementInfoEdit(target) {
+    return this.openElementInfoCard(target, "edit");
+  },
+
+  openElementInfoViewFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const target = getTargetFromContextMenu(store.contextMenu);
+
+    if (!target) return false;
+    return this.openElementInfoView(target);
+  },
+
+  openElementInfoEditFromContextMenu() {
+    const store = useCanvasStore.getState();
+    const target = getTargetFromContextMenu(store.contextMenu);
+
+    if (!target) return false;
+    return this.openElementInfoEdit(target);
+  },
+
+  switchElementInfoToEdit() {
+    const store = useCanvasStore.getState();
+    const dialog = store.elementInfoDialog;
+
+    if (!dialog?.target) return false;
+
+    if (!hasPermission(store.userRole, PERMISSIONS.ELEMENT_INFO_EDIT)) {
+      return false;
+    }
+
+    store.setElementInfoDialog?.({
+      ...dialog,
+      mode: "edit",
+    });
+
+    return true;
+  },
+
+  closeElementInfoCard() {
+    useCanvasStore.getState().clearElementInfoDialog?.();
+  },
+
+  saveElementInfoCard({ title, equipment }) {
+    const store = useCanvasStore.getState();
+    const dialog = store.elementInfoDialog;
+
+    if (!dialog?.target || dialog.mode !== "edit") return false;
+
+    // Обов'язковий повторний permission check.
+    if (!hasPermission(store.userRole, PERMISSIONS.ELEMENT_INFO_EDIT)) {
+      store.clearElementInfoDialog?.();
+      return false;
+    }
+
+    const entity = getElementByTarget(store, dialog.target);
+    if (!entity) return false;
+
+    const normalizedTitle = title.trim();
+
+    const nextInfo = patchElementInfo(
+      createDefaultElementInfo(entity.info),
+      {
+        title: normalizedTitle,
+        equipmentId: equipment?.id || null,
+        equipmentSnapshot: equipment
+          ? {
+              id: equipment.id,
+              code: equipment.code,
+              name: equipment.name,
+              type: equipment.type,
+            }
+          : null,
+      }
+    );
+
+    if (dialog.target.type === "node") {
+      store.updateNodeInfo?.(dialog.target.id, nextInfo);
+    } else if (dialog.target.type === "edge") {
+      store.updateEdgeInfo?.(dialog.target.id, nextInfo);
+    }
+
+    store.clearElementInfoDialog?.();
+    return true;
+  },
+};
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/ElementInfoCardModal.jsx
+// FULL FILE
+// ============================================================================
+
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  Autocomplete,
+  Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import { createDefaultElementInfo } from "@/lib/elementInfo/elementInfoModel";
+import { equipmentRepository } from "@/lib/equipment/equipmentRepository";
+import {
+  hasPermission,
+  PERMISSIONS,
+} from "@/lib/access/accessControl";
+
+export default function ElementInfoCardModal() {
+  const dialog = useCanvasStore((state) => state.elementInfoDialog);
+  const nodes = useCanvasStore((state) => state.nodes);
+  const edges = useCanvasStore((state) => state.edges);
+  const userRole = useCanvasStore((state) => state.userRole);
+
+  const [title, setTitle] = useState("");
+  const [equipmentOptions, setEquipmentOptions] = useState([]);
+  const [selectedEquipment, setSelectedEquipment] = useState(null);
+  const [isEquipmentLoading, setIsEquipmentLoading] = useState(false);
+  const [equipmentError, setEquipmentError] = useState("");
+
+  const open = Boolean(dialog?.target);
+  const isEditMode = dialog?.mode === "edit";
+  const canEdit = hasPermission(userRole, PERMISSIONS.ELEMENT_INFO_EDIT);
+
+  const entity = useMemo(() => {
+    if (!dialog?.target) return null;
+
+    if (dialog.target.type === "node") {
+      return nodes.find((node) => node.id === dialog.target.id) || null;
+    }
+
+    if (dialog.target.type === "edge") {
+      return edges.find((edge) => edge.id === dialog.target.id) || null;
+    }
+
+    return null;
+  }, [dialog, nodes, edges]);
+
+  const info = useMemo(
+    () => createDefaultElementInfo(entity?.info || {}),
+    [entity]
+  );
+
+  useEffect(() => {
+    if (!open) return;
+
+    let active = true;
+
+    async function loadEquipment() {
+      setIsEquipmentLoading(true);
+      setEquipmentError("");
+
+      try {
+        const options = await equipmentRepository.listEquipment();
+        if (!active) return;
+
+        setEquipmentOptions(options);
+
+        const selected =
+          options.find((item) => item.id === info.equipmentId) ||
+          info.equipmentSnapshot ||
+          null;
+
+        setSelectedEquipment(selected);
+      } catch (error) {
+        if (!active) return;
+        console.error("Failed to load equipment dictionary", error);
+        setEquipmentError("Не вдалося завантажити довідник обладнання.");
+      } finally {
+        if (active) setIsEquipmentLoading(false);
+      }
+    }
+
+    setTitle(info.title || "");
+    loadEquipment();
+
+    return () => {
+      active = false;
+    };
+  }, [open, dialog?.target?.type, dialog?.target?.id, info.title, info.equipmentId]);
+
+  function handleClose() {
+    canvasController.closeElementInfoCard?.();
+  }
+
+  function handleSave() {
+    canvasController.saveElementInfoCard?.({
+      title,
+      equipment: selectedEquipment,
+    });
+  }
+
+  function handleStartEdit() {
+    canvasController.switchElementInfoToEdit?.();
+  }
+
+  if (!open) return null;
+
+  return (
+    <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
+      <DialogTitle>
+        {isEditMode ? "Редагування картки об’єкта" : "Картка об’єкта"}
+      </DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2.5}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Chip
+              size="small"
+              label={dialog?.target?.type === "node" ? "Node" : "Edge"}
+            />
+
+            <Typography variant="caption" color="text.secondary">
+              ID: {dialog?.target?.id}
+            </Typography>
+
+            <Chip
+              size="small"
+              variant="outlined"
+              label={isEditMode ? "Редагування" : "Перегляд"}
+            />
+          </Stack>
+
+          <Divider />
+
+          <TextField
+            label="Назва об’єкта"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            fullWidth
+            disabled={!isEditMode}
+            placeholder="Введіть назву об’єкта або з’єднання"
+            inputProps={{ maxLength: 255 }}
+          />
+
+          <Autocomplete
+            options={equipmentOptions}
+            value={selectedEquipment}
+            onChange={(_event, value) => setSelectedEquipment(value)}
+            disabled={!isEditMode || isEquipmentLoading}
+            loading={isEquipmentLoading}
+            isOptionEqualToValue={(option, value) => option.id === value.id}
+            getOptionLabel={(option) =>
+              option ? `${option.code} — ${option.name}` : ""
+            }
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Обладнання"
+                placeholder="Оберіть обладнання з довідника"
+                InputProps={{
+                  ...params.InputProps,
+                  endAdornment: (
+                    <>
+                      {isEquipmentLoading ? (
+                        <CircularProgress size={20} />
+                      ) : null}
+                      {params.InputProps.endAdornment}
+                    </>
+                  ),
+                }}
+              />
+            )}
+            noOptionsText="Обладнання не знайдено"
+          />
+
+          {equipmentError && (
+            <Alert severity="error">{equipmentError}</Alert>
+          )}
+
+          {!isEditMode && !selectedEquipment && (
+            <Typography color="text.secondary">
+              Обладнання не прив’язано.
+            </Typography>
+          )}
+
+          <Alert severity="info">
+            Зараз використовується локальний демонстраційний довідник. Після
+            підключення БД у картці зберігатиметься equipmentId, а список буде
+            завантажуватися через repository/API.
+          </Alert>
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose}>
+          {isEditMode ? "Скасувати" : "Закрити"}
+        </Button>
+
+        {!isEditMode && canEdit && (
+          <Button
+            variant="outlined"
+            startIcon={<EditOutlinedIcon />}
+            onClick={handleStartEdit}
+          >
+            Редагувати
+          </Button>
+        )}
+
+        {isEditMode && canEdit && (
+          <Button
+            variant="contained"
+            onClick={handleSave}
+            disabled={!title.trim()}
+          >
+            Зберегти
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: imports
+// ============================================================================
+
+/*
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  hasPermission,
+  PERMISSIONS,
+} from "@/lib/access/accessControl";
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: component-level permission
+// ============================================================================
+
+/*
+const userRole = useCanvasStore((state) => state.userRole);
+const canEditElementInfo = hasPermission(
+  userRole,
+  PERMISSIONS.ELEMENT_INFO_EDIT
+);
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: спільний блок для node / edge / connector
+// Вставити всередину <Menu>.
+// ============================================================================
+
+/*
+{["node", "edge", "connector"].includes(contextMenu?.type) && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController.openElementInfoViewFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <InfoOutlinedIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Переглянути картку</ListItemText>
+    </MenuItem>
+
+    {canEditElementInfo && (
+      <MenuItem
+        onClick={() => {
+          canvasController.openElementInfoEditFromContextMenu?.();
+        }}
+      >
+        <ListItemIcon>
+          <EditOutlinedIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Редагувати картку</ListItemText>
+      </MenuItem>
+    )}
+
+    <Divider />
+  </>
+)}
+*/
+
+
+
+// ============================================================================
+// FILE: Node rendering / NodesLayer.jsx
+// PATCH: double click + context menu
+// ============================================================================
+
+/*
+<Group
+  onDblClick={(event) => {
+    event.cancelBubble = true;
+
+    canvasController.openElementInfoView?.({
+      type: "node",
+      id: node.id,
+    });
+  }}
+  onDblTap={(event) => {
+    // Для touch device.
+    event.cancelBubble = true;
+
+    canvasController.openElementInfoView?.({
+      type: "node",
+      id: node.id,
+    });
+  }}
+  onContextMenu={(event) => {
+    event.evt.preventDefault();
+    event.cancelBubble = true;
+
+    // Для MUI Menu потрібні viewport/client coordinates, а не stage coordinates.
+    const clientX = event.evt.clientX;
+    const clientY = event.evt.clientY;
+
+    useCanvasStore.getState().setContextMenu?.({
+      type: "node",
+      nodeId: node.id,
+      x: clientX,
+      y: clientY,
+    });
+  }}
+>
+  ...existing node rendering
+</Group>
+*/
+
+
+
+// ============================================================================
+// FILE: Edge / Connector rendering
+// PATCH: double click + context menu
+// ============================================================================
+
+/*
+<Line
+  {...existingProps}
+  onDblClick={(event) => {
+    event.cancelBubble = true;
+
+    canvasController.openElementInfoView?.({
+      type: "edge",
+      id: edge.id,
+    });
+  }}
+  onDblTap={(event) => {
+    event.cancelBubble = true;
+
+    canvasController.openElementInfoView?.({
+      type: "edge",
+      id: edge.id,
+    });
+  }}
+  onContextMenu={(event) => {
+    event.evt.preventDefault();
+    event.cancelBubble = true;
+
+    useCanvasStore.getState().setContextMenu?.({
+      type: edge.kind === "connector" ? "connector" : "edge",
+      edgeId: edge.id,
+      x: event.evt.clientX,
+      y: event.evt.clientY,
+    });
+  }}
+/>
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: render modal once outside Konva Stage
+// ============================================================================
+
+/*
+import CanvasContextMenu from "@/components/canvas/CanvasContextMenu";
+import ElementInfoCardModal from "@/components/canvas/ElementInfoCardModal";
+
+export default function EditorCanvas() {
+  return (
+    <>
+      <Stage>
+        ...
+      </Stage>
+
+      <CanvasContextMenu />
+      <ElementInfoCardModal />
+    </>
+  );
+}
+*/
+
+
+
+// ============================================================================
+// FILE: src/components/toolbar/RoleSwitcherExample.jsx
+// OPTIONAL DEMO ONLY
+// ============================================================================
+
+/*
+"use client";
+
+import React from "react";
+import { Button, Stack } from "@mui/material";
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { USER_ROLES } from "@/lib/access/accessControl";
+
+export function RoleSwitcherExample() {
+  const userRole = useCanvasStore((state) => state.userRole);
+  const setUserRole = useCanvasStore((state) => state.setUserRole);
+
+  return (
+    <Stack direction="row" spacing={1}>
+      <Button
+        size="small"
+        variant={
+          userRole === USER_ROLES.EDITOR ? "contained" : "outlined"
+        }
+        onClick={() => setUserRole(USER_ROLES.EDITOR)}
+      >
+        Editor
+      </Button>
+
+      <Button
+        size="small"
+        variant={
+          userRole === USER_ROLES.READER ? "contained" : "outlined"
+        }
+        onClick={() => setUserRole(USER_ROLES.READER)}
+      >
+        Reader
+      </Button>
+    </Stack>
+  );
+}
+*/
+
+
+
+// ============================================================================
+// NORMALIZATION / MIGRATION
+// ============================================================================
+
+/*
+import { createDefaultElementInfo } from "@/lib/elementInfo/elementInfoModel";
+
+export function normalizeNode(node) {
+  return {
+    ...node,
+    info: createDefaultElementInfo(node.info || {}),
+  };
+}
+
+export function normalizeEdge(edge) {
+  return {
+    ...edge,
+    info: createDefaultElementInfo(edge.info || {}),
+  };
+}
+*/
+
+
+
+// ============================================================================
+// SERIALIZED DATA EXAMPLE
+// ============================================================================
+
+/*
+{
+  "id": "node_1",
+  "info": {
+    "title": "Насос подачі",
+    "equipmentId": "eq-pump-001",
+    "equipmentSnapshot": {
+      "id": "eq-pump-001",
+      "code": "P-001",
+      "name": "Насос циркуляційний №1",
+      "type": "pump"
+    },
+    "systemId": null,
+    "externalId": null,
+    "parameters": {},
+    "updatedAt": "2026-08-05T19:00:00.000Z"
+  }
+}
+*/
+
+
+
+// ============================================================================
+// FUTURE DB/API REPLACEMENT
+// ============================================================================
+// Залишити той самий контракт equipmentRepository:
+//
+// async listEquipment({ search, signal }) => Equipment[]
+// async getEquipmentById(id, { signal }) => Equipment | null
+//
+// Приклад майбутньої реалізації:
+//
+// export const equipmentRepository = {
+//   async listEquipment({ search = "", signal } = {}) {
+//     const params = new URLSearchParams();
+//     if (search) params.set("search", search);
+//
+//     const response = await fetch(`/api/equipment?${params}`, { signal });
+//     if (!response.ok) throw new Error("Equipment request failed");
+//     return response.json();
+//   },
+//
+//   async getEquipmentById(id, { signal } = {}) {
+//     const response = await fetch(`/api/equipment/${id}`, { signal });
+//     if (response.status === 404) return null;
+//     if (!response.ok) throw new Error("Equipment request failed");
+//     return response.json();
+//   },
+// };
+//
+// ВАЖЛИВО:
+// UI-перевірка ролі не є серверною авторизацією. Після підключення backend
+// сервер повинен незалежно перевіряти право elementInfo.edit перед UPDATE.
+// ============================================================================
+
+
+
+// ============================================================================
+// RESULT
+// ============================================================================
+// 1. editor та reader відкривають картку подвійним кліком у режимі view.
+// 2. Обидві ролі бачать "Переглянути картку" в context menu.
+// 3. Тільки editor бачить "Редагувати картку".
+// 4. editor може перейти з view у edit кнопкою "Редагувати".
+// 5. reader не отримує edit mode навіть при прямому controller call.
+// 6. Форма містить назву та MUI Autocomplete як list of values.
+// 7. У state зберігається стабільний equipmentId.
+// 8. Локальний довідник надалі замінюється repository/API без переписування UI.
+// ============================================================================

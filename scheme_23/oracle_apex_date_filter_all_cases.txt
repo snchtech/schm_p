@@ -1,0 +1,71 @@
+Oracle APEX Interactive Report
+Фільтрація за датами P10_CUST_DATE_START та P10_CUST_DATE_END
+
+Умови:
+1. Обидва поля порожні — повертаються всі рядки.
+2. Заповнена тільки дата початку — повертаються всі записи від цієї дати і новіші.
+3. Заповнена тільки дата завершення — повертаються всі записи до цієї дати включно.
+4. Заповнені обидві дати — повертаються всі записи в проміжку включно.
+
+Приклад для однієї колонки дати PLANNING_DATE_START:
+
+SELECT
+    t.ID,
+    t.NAME,
+    t.PLANNING_DATE_START,
+    t.PLANNING_DATE_END
+FROM YOUR_TABLE t
+WHERE
+    (
+        :P10_CUST_DATE_START IS NULL
+        OR t.PLANNING_DATE_START >= TO_DATE(
+            :P10_CUST_DATE_START,
+            'DD.MM.YYYY'
+        )
+    )
+AND
+    (
+        :P10_CUST_DATE_END IS NULL
+        OR t.PLANNING_DATE_START < TO_DATE(
+            :P10_CUST_DATE_END,
+            'DD.MM.YYYY'
+        ) + 1
+    )
+ORDER BY t.PLANNING_DATE_START;
+
+
+Скорочений варіант WHERE:
+
+WHERE
+    (:P10_CUST_DATE_START IS NULL
+     OR t.PLANNING_DATE_START >= TO_DATE(:P10_CUST_DATE_START, 'DD.MM.YYYY'))
+AND
+    (:P10_CUST_DATE_END IS NULL
+     OR t.PLANNING_DATE_START < TO_DATE(:P10_CUST_DATE_END, 'DD.MM.YYYY') + 1)
+
+
+Якщо колонка PLANNING_DATE_START має тип TIMESTAMP:
+
+SELECT
+    t.ID,
+    t.NAME,
+    t.PLANNING_DATE_START,
+    t.PLANNING_DATE_END
+FROM YOUR_TABLE t
+WHERE
+    (
+        :P10_CUST_DATE_START IS NULL
+        OR t.PLANNING_DATE_START >= TO_TIMESTAMP(
+            :P10_CUST_DATE_START,
+            'DD.MM.YYYY'
+        )
+    )
+AND
+    (
+        :P10_CUST_DATE_END IS NULL
+        OR t.PLANNING_DATE_START < TO_TIMESTAMP(
+            :P10_CUST_DATE_END,
+            'DD.MM.YYYY'
+        ) + INTERVAL '1' DAY
+    )
+ORDER BY t.PLANNING_DATE_START;
