@@ -1,0 +1,578 @@
+Надалі код наводитиму на звичайному JavaScript `.js`.
+
+У вашому прикладі важливо розділити дві різні речі:
+
+```text
+Роль користувача — що йому дозволено.
+
+Режим роботи — що він зараз хоче робити:
+переглядати чи редагувати.
+```
+
+Це не одне й те саме.
+
+## Якщо користувач має одночасно `editor` і `reader`
+
+Зазвичай permissions усіх ролей об’єднуються.
+
+Наприклад:
+
+```js
+const ROLE_PERMISSIONS = {
+  reader: [
+    "scheme.view",
+    "scheme.exportPdf",
+  ],
+
+  editor: [
+    "scheme.view",
+    "scheme.update",
+    "drawing.node.create",
+    "drawing.node.update",
+    "drawing.node.delete",
+  ],
+};
+```
+
+Користувач має:
+
+```js
+const user = {
+  roles: ["reader", "editor"],
+};
+```
+
+Його ефективні дозволи будуть такими:
+
+```text
+scheme.view
+scheme.exportPdf
+scheme.update
+drawing.node.create
+drawing.node.update
+drawing.node.delete
+```
+
+Тобто система бере об’єднання дозволів обох ролей.
+
+У JavaScript це можна отримати так:
+
+```js
+export function getUserPermissions(user) {
+  const permissions = user.roles.flatMap((role) => {
+    return ROLE_PERMISSIONS[role] || [];
+  });
+
+  return [...new Set(permissions)];
+}
+```
+
+Використання:
+
+```js
+const permissions = getUserPermissions(user);
+
+console.log(permissions);
+```
+
+`Set` прибирає дублікати. Наприклад, `scheme.view` є і в `reader`, і в `editor`, але в результаті буде лише один раз.
+
+## Що показувати такому користувачу
+
+Якщо `editor` має право і переглядати, і редагувати, то користувачу потрібно показувати можливості редактора.
+
+Тобто:
+
+```text
+- схему він бачить;
+- кнопки редагування доступні;
+- об’єкти можна переміщувати;
+- можна створювати та видаляти елементи;
+- можна відкрити картку об’єкта;
+- можна зберігати зміни.
+```
+
+Не потрібно змушувати його вибирати роль:
+
+```text
+Зараз я reader
+або
+Зараз я editor
+```
+
+Ролі — це не режими програми.
+
+Роль відповідає на питання:
+
+> Що користувачу максимально дозволено?
+
+Якщо йому дозволено редагувати, він автоматично може і переглядати.
+
+Тому ситуація:
+
+```text
+editor + reader в одному відділі
+```
+
+фактично зазвичай дорівнює:
+
+```text
+editor
+```
+
+Оскільки `editor` уже має `scheme.view`.
+
+## Чи взагалі потрібна роль `reader`, якщо є `editor`
+
+Так, потрібна.
+
+Тому що інший користувач може мати лише:
+
+```js
+roles: ["reader"]
+```
+
+Тоді він побачить схему, але не зможе її змінити.
+
+Але одному користувачу не обов’язково призначати одночасно `editor` і `reader` для одного й того самого ресурсу.
+
+Наприклад, це надлишкова конфігурація:
+
+```js
+{
+  role: "reader",
+  departmentId: "department-1",
+},
+{
+  role: "editor",
+  departmentId: "department-1",
+}
+```
+
+Тому що `editor` уже включає перегляд.
+
+Достатньо:
+
+```js
+{
+  role: "editor",
+  departmentId: "department-1",
+}
+```
+
+## Коли дві ролі мають сенс
+
+Дві ролі мають сенс, якщо вони діють у різних областях.
+
+Наприклад:
+
+```js
+const user = {
+  roleAssignments: [
+    {
+      role: "editor",
+      scope: {
+        type: "department",
+        id: "department-electric",
+      },
+    },
+    {
+      role: "reader",
+      scope: {
+        type: "department",
+        id: "department-water",
+      },
+    },
+  ],
+};
+```
+
+Тоді користувач:
+
+```text
+В електротехнічному відділі:
+- переглядає;
+- редагує;
+- створює об’єкти;
+- видаляє об’єкти.
+
+У відділі водопостачання:
+- тільки переглядає;
+- не може редагувати.
+```
+
+Ось тут одночасне існування `editor` і `reader` повністю виправдане.
+
+## А якщо користувач іноді хоче лише переглядати
+
+Тоді потрібно створити не окрему роль, а режим інтерфейсу:
+
+```text
+view
+edit
+```
+
+Наприклад, користувач має роль `editor`, але може перемкнути схему в режим перегляду.
+
+```js
+const useAuthStore = create((set) => ({
+  currentUser: null,
+
+  workspaceMode: "view",
+
+  setWorkspaceMode: (workspaceMode) => {
+    set({ workspaceMode });
+  },
+}));
+```
+
+Можливі значення:
+
+```js
+workspaceMode: "view"
+```
+
+або:
+
+```js
+workspaceMode: "edit"
+```
+
+Але перейти в режим `edit` можна лише тоді, коли користувач має відповідний permission.
+
+Логіка має бути такою:
+
+```text
+Роль editor:
+користувачу дозволено редагування.
+
+workspaceMode = view:
+користувач зараз свідомо працює без редагування.
+
+workspaceMode = edit:
+користувач зараз редагує.
+```
+
+## Приклад структури `useAuthStore`
+
+```js
+import { create } from "zustand";
+
+export const useAuthStore = create((set, get) => ({
+  currentUser: null,
+
+  workspaceMode: "view",
+
+  setCurrentUser: (currentUser) => {
+    set({ currentUser });
+  },
+
+  setWorkspaceMode: (workspaceMode) => {
+    set({ workspaceMode });
+  },
+
+  isViewMode: () => {
+    return get().workspaceMode === "view";
+  },
+
+  isEditMode: () => {
+    return get().workspaceMode === "edit";
+  },
+}));
+```
+
+Але `workspaceMode` не повинен самостійно давати право на редагування.
+
+Тобто не можна робити так:
+
+```js
+if (workspaceMode === "edit") {
+  // дозволити редагування
+}
+```
+
+Бо користувач із роллю `reader` теоретично також міг би встановити `workspaceMode = "edit"`.
+
+Правильна перевірка:
+
+```js
+const allowed =
+  can(user, "scheme.update", resource)
+  && workspaceMode === "edit";
+```
+
+## Повна логіка редагування
+
+Для того щоб користувач міг змінити схему, мають виконуватись дві умови:
+
+```text
+1. Користувач має permission.
+2. Інтерфейс перебуває в режимі edit.
+```
+
+Функція:
+
+```js
+export function canEditNow({
+  user,
+  resource,
+  workspaceMode,
+}) {
+  return (
+    can(user, "scheme.update", resource)
+    && workspaceMode === "edit"
+  );
+}
+```
+
+У компоненті:
+
+```js
+const currentUser = useAuthStore(
+  (state) => state.currentUser
+);
+
+const workspaceMode = useAuthStore(
+  (state) => state.workspaceMode
+);
+
+const canEditScheme =
+  can(currentUser, "scheme.update", schemeResource)
+  && workspaceMode === "edit";
+```
+
+Для Konva:
+
+```jsx
+<Group
+  draggable={canEditScheme}
+  listening={true}
+/>
+```
+
+Для кнопки:
+
+```jsx
+<button
+  disabled={!canEditScheme}
+  onClick={handleAddNode}
+>
+  Додати об’єкт
+</button>
+```
+
+## Як показувати перемикач режиму
+
+Якщо користувач має лише `reader`, перемикач режиму редагування взагалі не показуємо.
+
+Якщо користувач має `editor`, показуємо:
+
+```jsx
+const canEnterEditMode = can(
+  currentUser,
+  "scheme.update",
+  schemeResource
+);
+
+return (
+  <>
+    {canEnterEditMode && (
+      <div>
+        <button
+          onClick={() => {
+            setWorkspaceMode("view");
+          }}
+        >
+          Перегляд
+        </button>
+
+        <button
+          onClick={() => {
+            setWorkspaceMode("edit");
+          }}
+        >
+          Редагування
+        </button>
+      </div>
+    )}
+  </>
+);
+```
+
+Для `reader` можна просто показати напис:
+
+```jsx
+{!canEnterEditMode && (
+  <span>Режим перегляду</span>
+)}
+```
+
+## Який режим відкривати за замовчуванням
+
+Я рекомендую навіть для `editor` відкривати схему спочатку в режимі `view`.
+
+Причини:
+
+```text
+- користувач випадково не пересуне об’єкт;
+- не змінить текст випадковим подвійним кліком;
+- не видалить елемент через клавіатуру;
+- перегляд буде безпечним;
+- редагування починається свідомо.
+```
+
+Тобто:
+
+```js
+workspaceMode: "view"
+```
+
+Після натискання кнопки «Редагувати»:
+
+```js
+setWorkspaceMode("edit");
+```
+
+Це особливо корисно для Konva, де легко випадково пересунути елемент.
+
+## Чи потрібно записувати режим `view/edit` у БД
+
+Зазвичай ні.
+
+Ролі та permissions потрібно зберігати в БД:
+
+```text
+Користувач Сергій:
+editor у department-electric
+reader у department-water
+```
+
+А режим роботи:
+
+```text
+view або edit
+```
+
+це тимчасовий стан інтерфейсу.
+
+Його можна тримати в Zustand.
+
+Максимум можна зберігати режим у `localStorage`, якщо потрібно пам’ятати останній вибір:
+
+```js
+localStorage.setItem(
+  "workspaceMode",
+  workspaceMode
+);
+```
+
+Але це не інформація про доступ.
+
+## Важливий момент щодо `useAuthStore`
+
+Я б не зберігав `workspaceMode` в `useAuthStore`, хоча технічно це можливо.
+
+Логічніше розділити:
+
+```text
+useAuthStore:
+- currentUser;
+- ролі;
+- відділи;
+- permissions;
+- авторизація.
+
+useWorkspaceStore або useCanvasStore:
+- view/edit режим;
+- active tool;
+- selection;
+- viewport.
+```
+
+Тому що `view/edit` — це режим роботи зі схемою, а не властивість авторизації.
+
+Наприклад:
+
+```js
+export const useCanvasStore = create((set) => ({
+  workspaceMode: "view",
+
+  setWorkspaceMode: (workspaceMode) => {
+    set({ workspaceMode });
+  },
+}));
+```
+
+А `useAuthStore`:
+
+```js
+export const useAuthStore = create((set) => ({
+  currentUser: null,
+
+  setCurrentUser: (currentUser) => {
+    set({ currentUser });
+  },
+}));
+```
+
+Тоді перевірка використовує обидва store:
+
+```js
+const currentUser = useAuthStore(
+  (state) => state.currentUser
+);
+
+const workspaceMode = useCanvasStore(
+  (state) => state.workspaceMode
+);
+
+const canEditNow =
+  can(
+    currentUser,
+    "drawing.node.update",
+    schemeResource
+  )
+  && workspaceMode === "edit";
+```
+
+## Підсумкова модель
+
+```text
+Роль reader
+    ↓
+можна переглядати
+
+Роль editor
+    ↓
+можна переглядати і редагувати
+
+Ролі editor + reader в одному scope
+    ↓
+відображаємо можливості editor,
+бо permissions об’єднуються
+
+Editor у відділі A + reader у відділі B
+    ↓
+у відділі A редагування
+у відділі B лише перегляд
+
+Режим view
+    ↓
+тимчасово вимикає редагування,
+навіть якщо користувач editor
+
+Режим edit
+    ↓
+працює лише тоді,
+коли користувач має permission
+```
+
+Найкраща для вашого випадку формула:
+
+```js
+const canEditNow =
+  hasPermission
+  && workspaceMode === "edit";
+```
+
+Тобто роль визначає верхню межу можливостей, а режим визначає, чи користувач зараз цими можливостями користується.

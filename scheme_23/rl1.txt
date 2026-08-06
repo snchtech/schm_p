@@ -1,0 +1,1480 @@
+Таку систему можна впровадити без відмови від Feature-Sliced Design і без перебудови всього проєкту. Ідея полягає не в тому, щоб створити нову глобальну структуру каталогів, а в тому, щоб додати в межах FSD окремий модуль авторизації, який відповідатиме лише на одне питання:
+
+> Чи може поточний користувач виконати конкретну дію над конкретним об’єктом?
+
+У попередніх файлах уже правильно закладена ідея permission layer: компоненти не повинні самостійно вирішувати, що може `editor`, а що може `reader` . Також правильно розділено зміни документа і звичайний UI-стан canvas .
+
+## 1. Як це працює простими словами
+
+У системі є чотири основні поняття:
+
+```text
+Користувач
+    ↓
+має ролі
+    ↓
+ролі містять дозволи
+    ↓
+дозволи перевіряються для конкретного об’єкта
+```
+
+Наприклад:
+
+```text
+Користувач Сергій
+
+У відділі електропостачання:
+- editor
+
+У відділі водопостачання:
+- reader
+```
+
+Роль `editor` сама по собі не означає, що користувач може редагувати абсолютно все.
+
+Вона означає:
+
+```text
+editor + відділ електропостачання
+```
+
+Тобто користувач редагує схеми електротехнічного відділу, але схеми водопостачання лише переглядає.
+
+Перевірка виглядає логічно так:
+
+```ts
+can(
+  currentUser,
+  "scheme.update",
+  currentScheme
+);
+```
+
+Функція `can` дивиться:
+
+1. Які ролі має користувач.
+2. Які дозволи містять ці ролі.
+3. Де саме діє роль.
+4. До якого відділу, альбому або схеми належить поточний об’єкт.
+5. Повертає `true` або `false`.
+
+Компоненту не потрібно знати всю цю логіку.
+
+## 2. Чому краще перевіряти permission, а не роль
+
+На перший погляд простіше написати:
+
+```ts
+if (user.role === "editor") {
+  // дозволити редагування
+}
+```
+
+Але пізніше можуть з’явитися такі вимоги:
+
+```text
+reader може експортувати PDF;
+editor може редагувати, але не видаляти альбом;
+старший editor може погоджувати схему;
+керівник відділу може бачити всі схеми відділу;
+administrator може керувати ролями;
+editor одного відділу є reader іншого відділу.
+```
+
+Тоді перевірки ролей почнуть виглядати так:
+
+```ts
+if (
+  role === "editor"
+  || role === "administrator"
+  || role === "departmentHead"
+  || role === "seniorEditor"
+) {
+  // ...
+}
+```
+
+І вони будуть розкидані по всьому проєкту.
+
+З permission підхід інший:
+
+```ts
+can("scheme.update");
+can("scheme.delete");
+can("scheme.exportPdf");
+can("album.manageMembers");
+can("drawing.node.create");
+```
+
+Роль лише визначає набір permission:
+
+```ts
+reader = [
+  "album.view",
+  "scheme.view",
+  "scheme.exportPdf",
+];
+
+editor = [
+  "album.view",
+  "scheme.view",
+  "scheme.update",
+  "scheme.exportPdf",
+  "drawing.node.create",
+  "drawing.node.update",
+  "drawing.node.delete",
+];
+```
+
+Якщо пізніше `reader` потрібно дозволити ще одну дію, ви просто додаєте permission до його набору. Компоненти змінювати не потрібно.
+
+---
+
+# 3. Як це вписати у Feature-Sliced Design
+
+Не потрібно створювати окрему структуру `src/auth`, якщо вона суперечить вашому FSD.
+
+Можна розмістити систему доступів так:
+
+```text
+src/
+├── app/
+├── pages/
+├── widgets/
+├── features/
+│   └── auth/
+│       ├── model/
+│       │   ├── useAuthStore.ts
+│       │   ├── permissions.ts
+│       │   ├── roles.ts
+│       │   ├── can.ts
+│       │   ├── types.ts
+│       │   └── selectors.ts
+│       │
+│       ├── ui/
+│       │   └── Can.tsx
+│       │
+│       └── index.ts
+│
+├── entities/
+│   ├── album/
+│   ├── scheme/
+│   ├── department/
+│   ├── user/
+│   └── toolbox-item/
+│
+└── shared/
+```
+
+Але є важливий момент.
+
+У класичному FSD сутність користувача краще розташувати в:
+
+```text
+entities/user
+```
+
+А сам механізм перевірки доступу може бути:
+
+```text
+features/auth
+```
+
+Наприклад:
+
+```text
+src/
+├── entities/
+│   └── user/
+│       └── model/
+│           └── types.ts
+│
+├── features/
+│   └── auth/
+│       ├── model/
+│       │   ├── useAuthStore.ts
+│       │   ├── permissions.ts
+│       │   ├── roles.ts
+│       │   ├── policy.ts
+│       │   └── hooks.ts
+│       ├── ui/
+│       │   └── Can.tsx
+│       └── index.ts
+```
+
+Це не змінює вашу архітектуру. Ви просто додаєте нову feature.
+
+## 4. Що саме зберігати в `useAuthStore`
+
+`useAuthStore` не повинен зберігати canvas, вузли, ребра, альбоми чи інші дані проєкту.
+
+Його зона відповідальності:
+
+```text
+- хто зараз увійшов;
+- до яких відділів він належить;
+- які ролі має;
+- у яких областях діють ці ролі;
+- який зараз активний відділ;
+- чи завантажено дані доступу.
+```
+
+Приклад:
+
+```ts
+// features/auth/model/types.ts
+
+export type RoleId =
+  | "reader"
+  | "editor"
+  | "administrator";
+
+export type ScopeType =
+  | "global"
+  | "department"
+  | "album"
+  | "scheme";
+
+export interface RoleAssignment {
+  roleId: RoleId;
+
+  scope: {
+    type: ScopeType;
+    id?: string;
+  };
+}
+
+export interface AuthUser {
+  id: string;
+  name: string;
+
+  departmentIds: string[];
+
+  roleAssignments: RoleAssignment[];
+}
+```
+
+Приклад користувача:
+
+```ts
+const mockUser: AuthUser = {
+  id: "user-1",
+  name: "Сергій",
+
+  departmentIds: [
+    "department-electric",
+  ],
+
+  roleAssignments: [
+    {
+      roleId: "editor",
+      scope: {
+        type: "department",
+        id: "department-electric",
+      },
+    },
+    {
+      roleId: "reader",
+      scope: {
+        type: "department",
+        id: "department-water",
+      },
+    },
+  ],
+};
+```
+
+Store:
+
+```ts
+// features/auth/model/useAuthStore.ts
+
+import { create } from "zustand";
+import type { AuthUser } from "./types";
+
+interface AuthState {
+  currentUser: AuthUser | null;
+  activeDepartmentId: string | null;
+  isInitialized: boolean;
+
+  setCurrentUser: (
+    user: AuthUser | null
+  ) => void;
+
+  setActiveDepartmentId: (
+    departmentId: string | null
+  ) => void;
+
+  initializeAuth: () => void;
+}
+
+export const useAuthStore =
+  create<AuthState>((set) => ({
+    currentUser: null,
+    activeDepartmentId: null,
+    isInitialized: false,
+
+    setCurrentUser: (currentUser) => {
+      set({ currentUser });
+    },
+
+    setActiveDepartmentId: (
+      activeDepartmentId
+    ) => {
+      set({ activeDepartmentId });
+    },
+
+    initializeAuth: () => {
+      set({
+        currentUser: mockUser,
+        activeDepartmentId:
+          mockUser.departmentIds[0] ?? null,
+        isInitialized: true,
+      });
+    },
+  }));
+```
+
+Поки БД немає, `initializeAuth()` бере `mockUser`.
+
+Пізніше він робитиме запит:
+
+```ts
+const response = await fetch(
+  "/api/auth/current-user"
+);
+```
+
+А решта проєкту не зміниться.
+
+---
+
+# 5. Де зберігати список permissions
+
+Окремо від store.
+
+```ts
+// features/auth/model/permissions.ts
+
+export type Permission =
+  | "album.view"
+  | "album.create"
+  | "album.update"
+  | "album.delete"
+  | "scheme.view"
+  | "scheme.update"
+  | "scheme.delete"
+  | "scheme.exportPdf"
+  | "drawing.node.create"
+  | "drawing.node.update"
+  | "drawing.node.delete"
+  | "drawing.edge.create"
+  | "drawing.edge.update"
+  | "drawing.edge.delete"
+  | "drawing.object.move"
+  | "toolbox.view"
+  | "toolbox.useItem"
+  | "role.manage";
+```
+
+Тут міститься лише перелік можливих дій.
+
+Це фактично словник усього функціоналу, який можна дозволити або заборонити.
+
+## 6. Як ролі зв’язуються з permissions
+
+```ts
+// features/auth/model/roles.ts
+
+import type { Permission } from "./permissions";
+import type { RoleId } from "./types";
+
+export const ROLE_PERMISSIONS:
+  Record<RoleId, readonly Permission[]> = {
+    reader: [
+      "album.view",
+      "scheme.view",
+      "scheme.exportPdf",
+      "toolbox.view",
+    ],
+
+    editor: [
+      "album.view",
+      "album.create",
+      "album.update",
+
+      "scheme.view",
+      "scheme.update",
+      "scheme.delete",
+      "scheme.exportPdf",
+
+      "drawing.node.create",
+      "drawing.node.update",
+      "drawing.node.delete",
+
+      "drawing.edge.create",
+      "drawing.edge.update",
+      "drawing.edge.delete",
+
+      "drawing.object.move",
+
+      "toolbox.view",
+      "toolbox.useItem",
+    ],
+
+    administrator: [
+      "album.view",
+      "album.create",
+      "album.update",
+      "album.delete",
+
+      "scheme.view",
+      "scheme.update",
+      "scheme.delete",
+      "scheme.exportPdf",
+
+      "drawing.node.create",
+      "drawing.node.update",
+      "drawing.node.delete",
+
+      "drawing.edge.create",
+      "drawing.edge.update",
+      "drawing.edge.delete",
+
+      "drawing.object.move",
+
+      "toolbox.view",
+      "toolbox.useItem",
+
+      "role.manage",
+    ],
+  };
+```
+
+Це початкова статична конфігурація.
+
+Пізніше таблиці БД:
+
+```text
+roles
+permissions
+role_permissions
+```
+
+замінять цей об’єкт. Але зовнішня функція `can()` залишиться такою самою.
+
+---
+
+# 7. Що означає scope
+
+Scope відповідає на питання:
+
+> Де діє ця роль?
+
+Приклад глобального адміністратора:
+
+```ts
+{
+  roleId: "administrator",
+  scope: {
+    type: "global",
+  },
+}
+```
+
+Ця роль діє всюди.
+
+Приклад editor відділу:
+
+```ts
+{
+  roleId: "editor",
+  scope: {
+    type: "department",
+    id: "department-electric",
+  },
+}
+```
+
+Ця роль діє лише для ресурсів, які належать відділу `department-electric`.
+
+Приклад editor конкретної схеми:
+
+```ts
+{
+  roleId: "editor",
+  scope: {
+    type: "scheme",
+    id: "scheme-100",
+  },
+}
+```
+
+Він може редагувати лише `scheme-100`.
+
+Scope дозволяє не створювати ролі:
+
+```text
+electricEditor
+waterEditor
+albumEditor
+schemeEditor
+```
+
+Замість цього роль одна:
+
+```text
+editor
+```
+
+Змінюється лише місце її дії.
+
+---
+
+# 8. Які дані потрібні від поточного об’єкта
+
+Щоб перевірити доступ, система повинна знати, до чого належить ресурс.
+
+Наприклад схема:
+
+```ts
+interface SchemeAccessResource {
+  type: "scheme";
+
+  id: string;
+  departmentId: string;
+  albumId: string;
+  albumPageId: string;
+}
+```
+
+Конкретний об’єкт:
+
+```ts
+const schemeResource = {
+  type: "scheme" as const,
+  id: "scheme-100",
+  departmentId: "department-electric",
+  albumId: "album-20",
+  albumPageId: "page-5",
+};
+```
+
+Це не означає, що потрібно перебудовувати модель схеми.
+
+Можна просто створити допоміжний об’єкт перед перевіркою:
+
+```ts
+const resource = {
+  type: "scheme" as const,
+  id: scheme.id,
+  departmentId: scheme.departmentId,
+  albumId: scheme.albumId,
+};
+```
+
+---
+
+# 9. Як працює функція `can`
+
+Спрощений варіант:
+
+```ts
+// features/auth/model/can.ts
+
+import { ROLE_PERMISSIONS } from "./roles";
+import type { Permission } from "./permissions";
+import type {
+  AuthUser,
+  RoleAssignment,
+} from "./types";
+
+interface AccessResource {
+  type:
+    | "department"
+    | "album"
+    | "scheme";
+
+  id: string;
+  departmentId?: string;
+  albumId?: string;
+}
+
+function scopeMatches(
+  assignment: RoleAssignment,
+  resource: AccessResource,
+): boolean {
+  switch (assignment.scope.type) {
+    case "global":
+      return true;
+
+    case "department":
+      return (
+        assignment.scope.id
+        === resource.departmentId
+      );
+
+    case "album":
+      return (
+        assignment.scope.id
+        === resource.albumId
+        || (
+          resource.type === "album"
+          && assignment.scope.id
+            === resource.id
+        )
+      );
+
+    case "scheme":
+      return (
+        resource.type === "scheme"
+        && assignment.scope.id
+          === resource.id
+      );
+
+    default:
+      return false;
+  }
+}
+
+export function can(
+  user: AuthUser | null,
+  permission: Permission,
+  resource: AccessResource,
+): boolean {
+  if (!user) {
+    return false;
+  }
+
+  return user.roleAssignments.some(
+    (assignment) => {
+      const rolePermissions =
+        ROLE_PERMISSIONS[
+          assignment.roleId
+        ];
+
+      const roleAllowsAction =
+        rolePermissions.includes(
+          permission
+        );
+
+      const roleAppliesHere =
+        scopeMatches(
+          assignment,
+          resource
+        );
+
+      return (
+        roleAllowsAction
+        && roleAppliesHere
+      );
+    }
+  );
+}
+```
+
+Простими словами:
+
+```text
+Для кожної ролі користувача:
+
+1. Чи має роль потрібний permission?
+2. Чи діє ця роль для поточного ресурсу?
+3. Якщо обидві умови виконані — доступ є.
+```
+
+---
+
+# 10. Приклад повної перевірки
+
+Користувач:
+
+```ts
+{
+  roleId: "editor",
+  scope: {
+    type: "department",
+    id: "department-electric",
+  },
+}
+```
+
+Схема:
+
+```ts
+{
+  type: "scheme",
+  id: "scheme-1",
+  departmentId: "department-electric",
+}
+```
+
+Перевірка:
+
+```ts
+can(
+  user,
+  "drawing.node.create",
+  schemeResource
+);
+```
+
+Що відбувається:
+
+```text
+1. У editor є drawing.node.create?
+   Так.
+
+2. Editor діє для department-electric?
+   Так.
+
+3. Схема належить department-electric?
+   Так.
+
+Результат: true.
+```
+
+Інша схема:
+
+```ts
+{
+  type: "scheme",
+  id: "scheme-2",
+  departmentId: "department-water",
+}
+```
+
+Тоді:
+
+```text
+1. У editor є drawing.node.create?
+   Так.
+
+2. Роль editor діє для department-electric?
+   Так.
+
+3. Схема належить department-electric?
+   Ні.
+
+Результат: false.
+```
+
+---
+
+# 11. Як використовувати це в React-компоненті
+
+Створюємо hook:
+
+```ts
+// features/auth/model/useCan.ts
+
+import { useMemo } from "react";
+import { useAuthStore } from "./useAuthStore";
+import { can } from "./can";
+import type { Permission } from "./permissions";
+
+export function useCan(
+  permission: Permission,
+  resource: AccessResource,
+): boolean {
+  const currentUser = useAuthStore(
+    (state) => state.currentUser
+  );
+
+  return useMemo(() => {
+    return can(
+      currentUser,
+      permission,
+      resource
+    );
+  }, [
+    currentUser,
+    permission,
+    resource,
+  ]);
+}
+```
+
+У панелі інструментів:
+
+```tsx
+const canCreateNode = useCan(
+  "drawing.node.create",
+  currentSchemeResource
+);
+
+<Button disabled={!canCreateNode}>
+  Додати об’єкт
+</Button>
+```
+
+У контекстному меню:
+
+```tsx
+const canDeleteNode = useCan(
+  "drawing.node.delete",
+  currentSchemeResource
+);
+
+{canDeleteNode && (
+  <MenuItem onClick={handleDelete}>
+    Видалити
+  </MenuItem>
+)}
+```
+
+У картці об’єкта:
+
+```tsx
+const canEditNode = useCan(
+  "drawing.node.update",
+  currentSchemeResource
+);
+
+<TextField
+  value={name}
+  disabled={!canEditNode}
+/>
+```
+
+---
+
+# 12. Як не дублювати перевірки в кожному компоненті
+
+Можна створити компонент `Can`.
+
+```tsx
+// features/auth/ui/Can.tsx
+
+interface CanProps {
+  permission: Permission;
+  resource: AccessResource;
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}
+
+export function Can({
+  permission,
+  resource,
+  children,
+  fallback = null,
+}: CanProps) {
+  const allowed = useCan(
+    permission,
+    resource
+  );
+
+  if (!allowed) {
+    return fallback;
+  }
+
+  return children;
+}
+```
+
+Використання:
+
+```tsx
+<Can
+  permission="drawing.node.create"
+  resource={currentSchemeResource}
+>
+  <Button>
+    Додати об’єкт
+  </Button>
+</Can>
+```
+
+Або показати disabled-версію:
+
+```tsx
+<Can
+  permission="drawing.node.create"
+  resource={currentSchemeResource}
+  fallback={
+    <Button disabled>
+      Додати об’єкт
+    </Button>
+  }
+>
+  <Button>
+    Додати об’єкт
+  </Button>
+</Can>
+```
+
+---
+
+# 13. Навіщо перевіряти доступ у controller, якщо кнопка disabled
+
+Бо disabled-кнопка — це лише інтерфейс.
+
+Функцію теоретично можуть викликати:
+
+```text
+- інші компоненти;
+- гарячі клавіші;
+- контекстне меню;
+- WebSocket callback;
+- імпорт JSON;
+- console;
+- помилково залишений handler.
+```
+
+Тому в `canvasController` теж потрібна перевірка.
+
+```ts
+export const canvasController = {
+  addNode(node: Node) {
+    const user =
+      useAuthStore.getState()
+        .currentUser;
+
+    const canvas =
+      useCanvasStore.getState();
+
+    const resource =
+      canvas.currentSchemeResource;
+
+    if (!can(
+      user,
+      "drawing.node.create",
+      resource,
+    )) {
+      return;
+    }
+
+    canvas.addNode(node);
+  },
+};
+```
+
+Але тут є важливий нюанс.
+
+Не обов’язково відразу переписувати всі методи controller. Можна робити поступово:
+
+```text
+1. create;
+2. update;
+3. delete;
+4. move;
+5. save;
+6. import.
+```
+
+Почніть із найкритичніших мутацій.
+
+---
+
+# 14. Як це поєднати з `useCanvasStore`
+
+В `useCanvasStore` не потрібно переносити ролі.
+
+Правильно:
+
+```text
+useAuthStore
+- користувач;
+- ролі;
+- scope;
+- активний відділ.
+
+useCanvasStore
+- nodes;
+- edges;
+- selectedIds;
+- viewport;
+- activeTool;
+- поточна схема.
+```
+
+`canvasController` може читати обидва store:
+
+```ts
+const user =
+  useAuthStore.getState().currentUser;
+
+const canvas =
+  useCanvasStore.getState();
+```
+
+Тобто `useAuthStore` є окремим простором доступів, але не вимагає змінювати структуру `useCanvasStore`.
+
+---
+
+# 15. Що дозволено reader у canvas
+
+Не варто робити так:
+
+```ts
+if (reader) {
+  повністю вимкнути Stage
+}
+```
+
+Reader має мати можливість:
+
+```text
+- бачити схему;
+- переміщувати viewport;
+- робити zoom;
+- вибирати об’єкт;
+- відкривати картку;
+- переглядати вкладення;
+- експортувати PDF, якщо це дозволено.
+```
+
+Він не має змінювати документ:
+
+```text
+- створювати node;
+- рухати node;
+- видаляти edge;
+- редагувати текст;
+- змінювати таблиці;
+- зберігати зміни.
+```
+
+Тому перевіряється конкретна дія.
+
+```tsx
+const canMoveObject = useCan(
+  "drawing.object.move",
+  currentSchemeResource
+);
+
+<Group
+  draggable={canMoveObject}
+  listening
+/>
+```
+
+А Stage залишається активним для pan і zoom.
+
+---
+
+# 16. Як формувати різну панель інструментів
+
+Тут потрібно розділити два питання.
+
+## Перше питання
+
+Які інструменти передбачені для цього відділу?
+
+## Друге питання
+
+Чи може поточний користувач ними користуватися?
+
+Наприклад є загальний список:
+
+```ts
+const TOOLBOX_ITEMS = [
+  {
+    id: "pump",
+    name: "Насос",
+  },
+  {
+    id: "valve",
+    name: "Засувка",
+  },
+  {
+    id: "transformer",
+    name: "Трансформатор",
+  },
+  {
+    id: "text",
+    name: "Текст",
+  },
+  {
+    id: "connector",
+    name: "Лінія зв’язку",
+  },
+];
+```
+
+Опис відділів містить лише ID:
+
+```ts
+const DEPARTMENT_TOOLBOX = {
+  "department-electric": [
+    "transformer",
+    "text",
+    "connector",
+  ],
+
+  "department-water": [
+    "pump",
+    "valve",
+    "text",
+    "connector",
+  ],
+};
+```
+
+Об’єкти `text` і `connector` не дублюються.
+
+Вони описані один раз, але використовуються в декількох наборах.
+
+Отримання елементів:
+
+```ts
+function getDepartmentToolboxItems(
+  departmentId: string
+) {
+  const allowedIds =
+    DEPARTMENT_TOOLBOX[
+      departmentId
+    ] ?? [];
+
+  return TOOLBOX_ITEMS.filter(
+    (item) =>
+      allowedIds.includes(item.id)
+  );
+}
+```
+
+Потім враховуємо роль:
+
+```tsx
+const canUseTools = useCan(
+  "toolbox.useItem",
+  currentSchemeResource
+);
+
+const items =
+  getDepartmentToolboxItems(
+    scheme.departmentId
+  );
+
+return (
+  <Toolbar>
+    {items.map((item) => (
+      <ToolButton
+        key={item.id}
+        item={item}
+        disabled={!canUseTools}
+      />
+    ))}
+  </Toolbar>
+);
+```
+
+Отже:
+
+```text
+Відділ визначає склад панелі.
+Permission визначає можливість використання.
+```
+
+---
+
+# 17. Як відкривати альбоми свого відділу розгорнутими
+
+Це не permission. Це UI-поведінка.
+
+Спочатку система визначає, які альбоми користувач взагалі може бачити:
+
+```ts
+const accessibleAlbums =
+  albums.filter((album) =>
+    can(
+      currentUser,
+      "album.view",
+      {
+        type: "album",
+        id: album.id,
+        albumId: album.id,
+        departmentId:
+          album.departmentId,
+      }
+    )
+  );
+```
+
+Потім групує їх:
+
+```ts
+const groupedAlbums =
+  groupBy(
+    accessibleAlbums,
+    (album) => album.departmentId
+  );
+```
+
+А розгорнутими робить відділи користувача:
+
+```ts
+const defaultExpanded =
+  currentUser.departmentIds;
+```
+
+Наприклад:
+
+```tsx
+<DepartmentAlbumsGroup
+  defaultExpanded={
+    currentUser.departmentIds.includes(
+      department.id
+    )
+  }
+/>
+```
+
+Різниця:
+
+```text
+Permission:
+чи має користувач право бачити альбом.
+
+UI state:
+чи група альбомів відкрита або згорнута.
+```
+
+Не потрібно змішувати ці два поняття.
+
+---
+
+# 18. Як враховувати посади
+
+На початку не рекомендую одразу будувати складну систему посад.
+
+Спочатку достатньо:
+
+```text
+reader
+editor
+administrator
+scope за відділом
+```
+
+Коли з’явиться реальна вимога, наприклад:
+
+```text
+лише керівник відділу може погодити схему
+```
+
+додається permission:
+
+```ts
+"scheme.approve"
+```
+
+І правило:
+
+```ts
+const POSITION_PERMISSIONS = {
+  "department-head": [
+    "scheme.approve",
+  ],
+};
+```
+
+Тоді `can()` може об’єднувати:
+
+```text
+permissions ролей
++
+permissions посад
+```
+
+Але для першої реалізації це можна не додавати. Головне — не зашивати посаду прямо в компоненти.
+
+---
+
+# 19. Мінімальний варіант, із якого варто почати
+
+Вам не потрібно відразу реалізовувати всю складну модель.
+
+Для початку достатньо шести файлів:
+
+```text
+features/auth/
+├── model/
+│   ├── types.ts
+│   ├── permissions.ts
+│   ├── roles.ts
+│   ├── can.ts
+│   ├── useAuthStore.ts
+│   └── useCan.ts
+└── index.ts
+```
+
+## `index.ts`
+
+```ts
+export {
+  useAuthStore
+} from "./model/useAuthStore";
+
+export {
+  useCan
+} from "./model/useCan";
+
+export {
+  can
+} from "./model/can";
+
+export type {
+  Permission
+} from "./model/permissions";
+
+export type {
+  AuthUser,
+  RoleAssignment,
+  RoleId,
+} from "./model/types";
+```
+
+Тоді інші slices імпортують тільки public API:
+
+```ts
+import {
+  useCan,
+} from "@/features/auth";
+```
+
+Це відповідає принципам FSD.
+
+---
+
+# 20. Як би я впроваджував це у вашому проєкті
+
+## Крок 1
+
+Додати `features/auth`.
+
+Нічого в існуючих store поки не змінювати.
+
+## Крок 2
+
+Створити mock-користувача:
+
+```ts
+{
+  roleAssignments: [
+    {
+      roleId: "editor",
+      scope: {
+        type: "department",
+        id: "department-1",
+      },
+    },
+  ],
+}
+```
+
+## Крок 3
+
+Додати `useAuthStore`.
+
+При старті застосунку записати туди mock-користувача.
+
+## Крок 4
+
+Створити permission для основних дій:
+
+```text
+scheme.view
+scheme.update
+drawing.node.create
+drawing.node.update
+drawing.node.delete
+drawing.object.move
+toolbox.useItem
+```
+
+## Крок 5
+
+Підключити перевірку до одного компонента, наприклад кнопки додавання node.
+
+```tsx
+const allowed = useCan(
+  "drawing.node.create",
+  resource
+);
+```
+
+## Крок 6
+
+Додати таку саму перевірку в `canvasController.addNode`.
+
+## Крок 7
+
+Поступово перенести інші mutating actions.
+
+## Крок 8
+
+Додати каталог панелі інструментів і профілі відділів.
+
+## Крок 9
+
+Під час підключення БД замінити mock-користувача даними API.
+
+---
+
+# 21. Найважливіша схема роботи
+
+```text
+Компонент натискає «Додати node»
+            ↓
+UI перевіряє drawing.node.create
+            ↓
+Кнопка доступна
+            ↓
+Викликається canvasController.addNode
+            ↓
+Controller повторно перевіряє drawing.node.create
+            ↓
+useCanvasStore змінює nodes
+            ↓
+У майбутньому API також перевіряє drawing.node.create
+```
+
+UI-перевірка потрібна для зручності.
+
+Controller-перевірка потрібна, щоб випадково не обійти обмеження всередині frontend.
+
+API-перевірка потрібна для реальної безпеки.
+
+---
+
+# 22. Що фактично зміниться у вашому проєкті
+
+Не потрібно:
+
+```text
+- переносити canvas store;
+- переносити controller;
+- змінювати entities;
+- відмовлятися від FSD;
+- переписувати всі компоненти;
+- відразу підключати БД;
+- відразу реалізовувати посади й винятки.
+```
+
+Потрібно:
+
+```text
+- додати features/auth;
+- створити useAuthStore;
+- створити can та useCan;
+- передавати в перевірку поточний ресурс;
+- поступово захищати mutating actions;
+- зберігати набори інструментів через ID.
+```
+
+Тобто `useAuthStore` стає централізованим місцем, де зберігається інформація про поточного користувача, але рішення про доступ приймає окрема функція `can()`.
+
+Це важливе розділення:
+
+```text
+useAuthStore — зберігає факти про користувача.
+
+can() — обчислює, чи дозволена дія.
+
+useCan() — зручний React-інтерфейс до can().
+
+canvasController — не дозволяє виконати заборонену мутацію.
+
+useCanvasStore — зберігає стан схеми.
+```

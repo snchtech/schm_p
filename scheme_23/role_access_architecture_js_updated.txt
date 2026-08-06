@@ -1,0 +1,2806 @@
+ОНОВЛЕНИЙ ПАКЕТ ДОПРАЦЮВАНЬ
+АРХІТЕКТУРА РОЛЕВОЇ СИСТЕМИ ТА КЕРУВАННЯ ДОСТУПОМ
+для проєкту «Альбом схем»
+JavaScript + Feature-Sliced Design + Zustand
+
+======================================================================
+1. МЕТА
+======================================================================
+
+Побудувати централізовану систему доступів без зміни поточної
+Feature-Sliced Design архітектури проєкту.
+
+Система повинна:
+
+- працювати на JavaScript, без TypeScript;
+- підтримувати ролі reader, editor, administrator;
+- дозволяти користувачу мати декілька ролей;
+- об’єднувати permissions усіх ролей користувача;
+- підтримувати scope: global, department, album, albumPage, scheme;
+- дозволяти editor перемикатися між режимом перегляду та редагування;
+- показувати в шапці поточний статус:
+  «Режим перегляду»,
+  «Режим редагування»,
+  «Режим адміністрування»;
+- для користувача лише з роллю reader не показувати перемикач,
+  а показувати тільки статус «Режим перегляду»;
+- для editor показувати перемикач view/edit;
+- для administrator показувати статус «Режим адміністрування»;
+- централізовано перевіряти права в UI, controller/store та API;
+- у майбутньому підключити БД без перебудови frontend.
+
+======================================================================
+2. ГОЛОВНА ІДЕЯ
+======================================================================
+
+Потрібно розділити:
+
+1. РОЛЬ — що користувачу взагалі дозволено.
+2. PERMISSION — конкретна дозволена дія.
+3. SCOPE — де саме діє роль.
+4. WORKSPACE MODE — у якому режимі користувач зараз працює.
+
+Приклад:
+
+Користувач має роль editor у своєму відділі.
+
+Це означає, що він МАЄ ПРАВО редагувати.
+
+Але схема може бути відкрита в режимі view.
+
+Тоді:
+
+- право на редагування є;
+- але зараз редагування тимчасово вимкнено;
+- користувач може натиснути «Редагувати» в шапці;
+- після цього активується edit mode.
+
+Формула:
+
+canEditNow =
+  користувач має permission
+  &&
+  workspaceMode === "edit"
+
+======================================================================
+3. ЯК ПРАЦЮЮТЬ ДЕКІЛЬКА РОЛЕЙ
+======================================================================
+
+Якщо користувач має декілька ролей, permissions цих ролей об’єднуються.
+
+Наприклад:
+
+roles: ["reader", "editor"]
+
+reader дає:
+
+- scheme.view;
+- scheme.exportPdf.
+
+editor дає:
+
+- scheme.view;
+- scheme.update;
+- drawing.node.create;
+- drawing.node.update;
+- drawing.node.delete.
+
+Результат:
+
+- scheme.view;
+- scheme.exportPdf;
+- scheme.update;
+- drawing.node.create;
+- drawing.node.update;
+- drawing.node.delete.
+
+Тобто в одному scope editor фактично перекриває reader,
+оскільки editor уже має права на перегляд.
+
+Але дві ролі мають сенс, якщо вони діють у різних scope.
+
+Приклад:
+
+- editor у department-electric;
+- reader у department-water.
+
+Тоді:
+
+- у department-electric користувач може редагувати;
+- у department-water користувач може лише переглядати.
+
+======================================================================
+4. РЕКОМЕНДОВАНЕ РОЗМІЩЕННЯ У FSD
+======================================================================
+
+Не потрібно змінювати поточну структуру проєкту.
+
+Додати окрему feature:
+
+src/
+  features/
+    auth/
+      model/
+        permissions.js
+        rolePermissions.js
+        mockUsers.js
+        accessPolicy.js
+        useAuthStore.js
+        useCan.js
+        accessSelectors.js
+        accessErrors.js
+
+      ui/
+        Can.jsx
+        AccessModeControl.jsx
+        AccessModeStatus.jsx
+
+      index.js
+
+Існуючі slices залишаються без перенесення:
+
+src/
+  entities/
+    user/
+    album/
+    scheme/
+    department/
+    toolbox-item/
+
+  features/
+    auth/
+
+  widgets/
+    header/
+    canvas/
+    toolbox/
+
+  pages/
+
+  shared/
+
+Важливо:
+
+- auth feature відповідає за користувача та доступи;
+- canvas store відповідає за canvas;
+- header widget лише використовує public API auth feature;
+- інші slices не імпортують внутрішні файли feature напряму;
+- імпорт робиться через features/auth/index.js.
+
+======================================================================
+5. PERMISSIONS
+======================================================================
+
+Файл:
+
+src/features/auth/model/permissions.js
+
+Код:
+
+export const PERMISSIONS = {
+  ALBUM_VIEW: "album.view",
+  ALBUM_CREATE: "album.create",
+  ALBUM_UPDATE: "album.update",
+  ALBUM_DELETE: "album.delete",
+  ALBUM_MANAGE_MEMBERS: "album.manageMembers",
+
+  ALBUM_PAGE_VIEW: "albumPage.view",
+  ALBUM_PAGE_CREATE: "albumPage.create",
+  ALBUM_PAGE_UPDATE: "albumPage.update",
+  ALBUM_PAGE_DELETE: "albumPage.delete",
+  ALBUM_PAGE_REORDER: "albumPage.reorder",
+
+  SCHEME_VIEW: "scheme.view",
+  SCHEME_CREATE: "scheme.create",
+  SCHEME_UPDATE: "scheme.update",
+  SCHEME_DELETE: "scheme.delete",
+  SCHEME_EXPORT_PDF: "scheme.exportPdf",
+  SCHEME_SAVE_JSON: "scheme.saveJson",
+
+  DRAWING_NODE_CREATE: "drawing.node.create",
+  DRAWING_NODE_UPDATE: "drawing.node.update",
+  DRAWING_NODE_DELETE: "drawing.node.delete",
+
+  DRAWING_EDGE_CREATE: "drawing.edge.create",
+  DRAWING_EDGE_UPDATE: "drawing.edge.update",
+  DRAWING_EDGE_DELETE: "drawing.edge.delete",
+
+  DRAWING_OBJECT_MOVE: "drawing.object.move",
+  DRAWING_ANNOTATION_UPDATE: "drawing.annotation.update",
+  DRAWING_SPECIFICATION_UPDATE:
+    "drawing.specification.update",
+
+  TOOLBOX_VIEW: "toolbox.view",
+  TOOLBOX_USE_ITEM: "toolbox.useItem",
+  TOOLBOX_MANAGE_CATALOG:
+    "toolbox.manageCatalog",
+
+  USER_MANAGE: "user.manage",
+  ROLE_MANAGE: "role.manage",
+  DEPARTMENT_MANAGE: "department.manage",
+};
+
+Навіщо об’єкт PERMISSIONS:
+
+- менше помилок у рядках;
+- зручний автокомпліт у редакторі;
+- один централізований перелік;
+- легше перейменовувати permissions.
+
+======================================================================
+6. РОЛІ ТА ЇХ PERMISSIONS
+======================================================================
+
+Файл:
+
+src/features/auth/model/rolePermissions.js
+
+Код:
+
+import { PERMISSIONS } from "./permissions";
+
+export const ROLE_PERMISSIONS = {
+  reader: [
+    PERMISSIONS.ALBUM_VIEW,
+    PERMISSIONS.ALBUM_PAGE_VIEW,
+    PERMISSIONS.SCHEME_VIEW,
+    PERMISSIONS.SCHEME_EXPORT_PDF,
+    PERMISSIONS.TOOLBOX_VIEW,
+  ],
+
+  editor: [
+    PERMISSIONS.ALBUM_VIEW,
+    PERMISSIONS.ALBUM_CREATE,
+    PERMISSIONS.ALBUM_UPDATE,
+
+    PERMISSIONS.ALBUM_PAGE_VIEW,
+    PERMISSIONS.ALBUM_PAGE_CREATE,
+    PERMISSIONS.ALBUM_PAGE_UPDATE,
+    PERMISSIONS.ALBUM_PAGE_DELETE,
+    PERMISSIONS.ALBUM_PAGE_REORDER,
+
+    PERMISSIONS.SCHEME_VIEW,
+    PERMISSIONS.SCHEME_CREATE,
+    PERMISSIONS.SCHEME_UPDATE,
+    PERMISSIONS.SCHEME_DELETE,
+    PERMISSIONS.SCHEME_EXPORT_PDF,
+    PERMISSIONS.SCHEME_SAVE_JSON,
+
+    PERMISSIONS.DRAWING_NODE_CREATE,
+    PERMISSIONS.DRAWING_NODE_UPDATE,
+    PERMISSIONS.DRAWING_NODE_DELETE,
+
+    PERMISSIONS.DRAWING_EDGE_CREATE,
+    PERMISSIONS.DRAWING_EDGE_UPDATE,
+    PERMISSIONS.DRAWING_EDGE_DELETE,
+
+    PERMISSIONS.DRAWING_OBJECT_MOVE,
+    PERMISSIONS.DRAWING_ANNOTATION_UPDATE,
+    PERMISSIONS.DRAWING_SPECIFICATION_UPDATE,
+
+    PERMISSIONS.TOOLBOX_VIEW,
+    PERMISSIONS.TOOLBOX_USE_ITEM,
+  ],
+
+  administrator: [
+    PERMISSIONS.ALBUM_VIEW,
+    PERMISSIONS.ALBUM_CREATE,
+    PERMISSIONS.ALBUM_UPDATE,
+    PERMISSIONS.ALBUM_DELETE,
+    PERMISSIONS.ALBUM_MANAGE_MEMBERS,
+
+    PERMISSIONS.ALBUM_PAGE_VIEW,
+    PERMISSIONS.ALBUM_PAGE_CREATE,
+    PERMISSIONS.ALBUM_PAGE_UPDATE,
+    PERMISSIONS.ALBUM_PAGE_DELETE,
+    PERMISSIONS.ALBUM_PAGE_REORDER,
+
+    PERMISSIONS.SCHEME_VIEW,
+    PERMISSIONS.SCHEME_CREATE,
+    PERMISSIONS.SCHEME_UPDATE,
+    PERMISSIONS.SCHEME_DELETE,
+    PERMISSIONS.SCHEME_EXPORT_PDF,
+    PERMISSIONS.SCHEME_SAVE_JSON,
+
+    PERMISSIONS.DRAWING_NODE_CREATE,
+    PERMISSIONS.DRAWING_NODE_UPDATE,
+    PERMISSIONS.DRAWING_NODE_DELETE,
+
+    PERMISSIONS.DRAWING_EDGE_CREATE,
+    PERMISSIONS.DRAWING_EDGE_UPDATE,
+    PERMISSIONS.DRAWING_EDGE_DELETE,
+
+    PERMISSIONS.DRAWING_OBJECT_MOVE,
+    PERMISSIONS.DRAWING_ANNOTATION_UPDATE,
+    PERMISSIONS.DRAWING_SPECIFICATION_UPDATE,
+
+    PERMISSIONS.TOOLBOX_VIEW,
+    PERMISSIONS.TOOLBOX_USE_ITEM,
+    PERMISSIONS.TOOLBOX_MANAGE_CATALOG,
+
+    PERMISSIONS.USER_MANAGE,
+    PERMISSIONS.ROLE_MANAGE,
+    PERMISSIONS.DEPARTMENT_MANAGE,
+  ],
+};
+
+ВАЖЛИВО:
+
+У компонентах не треба перевіряти:
+
+if (role === "editor")
+
+Треба перевіряти:
+
+can(user, PERMISSIONS.SCHEME_UPDATE, resource)
+
+======================================================================
+7. MOCK-КОРИСТУВАЧІ БЕЗ БД
+======================================================================
+
+Файл:
+
+src/features/auth/model/mockUsers.js
+
+Код:
+
+export const MOCK_USERS = {
+  reader: {
+    id: "user-reader",
+    name: "Користувач Reader",
+    departmentIds: ["dep-electric"],
+    positions: [],
+    roleAssignments: [
+      {
+        roleId: "reader",
+        scope: {
+          type: "department",
+          id: "dep-electric",
+        },
+      },
+    ],
+  },
+
+  editor: {
+    id: "user-editor",
+    name: "Користувач Editor",
+    departmentIds: ["dep-electric"],
+    positions: [],
+    roleAssignments: [
+      {
+        roleId: "editor",
+        scope: {
+          type: "department",
+          id: "dep-electric",
+        },
+      },
+    ],
+  },
+
+  mixed: {
+    id: "user-mixed",
+    name: "Користувач із двома ролями",
+    departmentIds: [
+      "dep-electric",
+      "dep-water",
+    ],
+    positions: [],
+    roleAssignments: [
+      {
+        roleId: "editor",
+        scope: {
+          type: "department",
+          id: "dep-electric",
+        },
+      },
+      {
+        roleId: "reader",
+        scope: {
+          type: "department",
+          id: "dep-water",
+        },
+      },
+    ],
+  },
+
+  administrator: {
+    id: "user-admin",
+    name: "Адміністратор",
+    departmentIds: ["dep-electric"],
+    positions: [],
+    roleAssignments: [
+      {
+        roleId: "administrator",
+        scope: {
+          type: "global",
+        },
+      },
+    ],
+  },
+};
+
+======================================================================
+8. ПЕРЕВІРКА SCOPE
+======================================================================
+
+Файл:
+
+src/features/auth/model/accessPolicy.js
+
+Код:
+
+import { ROLE_PERMISSIONS } from "./rolePermissions";
+
+function roleHasPermission(roleId, permission) {
+  const rolePermissions =
+    ROLE_PERMISSIONS[roleId] || [];
+
+  return rolePermissions.includes(permission);
+}
+
+function assignmentMatchesResource(
+  assignment,
+  resource
+) {
+  if (!assignment || !assignment.scope) {
+    return false;
+  }
+
+  if (assignment.scope.type === "global") {
+    return true;
+  }
+
+  if (!resource) {
+    return false;
+  }
+
+  switch (assignment.scope.type) {
+    case "department":
+      return (
+        assignment.scope.id
+        === resource.departmentId
+      );
+
+    case "album":
+      return (
+        assignment.scope.id
+          === resource.albumId
+        || (
+          resource.type === "album"
+          && assignment.scope.id
+            === resource.id
+        )
+      );
+
+    case "albumPage":
+      return (
+        assignment.scope.id
+          === resource.albumPageId
+        || (
+          resource.type === "albumPage"
+          && assignment.scope.id
+            === resource.id
+        )
+      );
+
+    case "scheme":
+      return (
+        assignment.scope.id
+          === resource.schemeId
+        || (
+          resource.type === "scheme"
+          && assignment.scope.id
+            === resource.id
+        )
+      );
+
+    default:
+      return false;
+  }
+}
+
+export function can(
+  user,
+  permission,
+  resource
+) {
+  if (
+    !user
+    || !Array.isArray(user.roleAssignments)
+  ) {
+    return false;
+  }
+
+  return user.roleAssignments.some(
+    (assignment) => {
+      const allowedByRole =
+        roleHasPermission(
+          assignment.roleId,
+          permission
+        );
+
+      const allowedInScope =
+        assignmentMatchesResource(
+          assignment,
+          resource
+        );
+
+      return (
+        allowedByRole
+        && allowedInScope
+      );
+    }
+  );
+}
+
+export function getEffectivePermissions(
+  user,
+  resource
+) {
+  if (
+    !user
+    || !Array.isArray(user.roleAssignments)
+  ) {
+    return [];
+  }
+
+  const permissions =
+    user.roleAssignments.flatMap(
+      (assignment) => {
+        const matches =
+          assignmentMatchesResource(
+            assignment,
+            resource
+          );
+
+        if (!matches) {
+          return [];
+        }
+
+        return (
+          ROLE_PERMISSIONS[
+            assignment.roleId
+          ] || []
+        );
+      }
+    );
+
+  return [...new Set(permissions)];
+}
+
+export function hasRole(
+  user,
+  roleId,
+  resource
+) {
+  if (
+    !user
+    || !Array.isArray(user.roleAssignments)
+  ) {
+    return false;
+  }
+
+  return user.roleAssignments.some(
+    (assignment) => {
+      return (
+        assignment.roleId === roleId
+        && assignmentMatchesResource(
+          assignment,
+          resource
+        )
+      );
+    }
+  );
+}
+
+======================================================================
+9. ЧОМУ РЕЖИМ РОБОТИ НЕ Є РОЛЛЮ
+======================================================================
+
+Роль editor означає:
+
+«Користувачу дозволено редагування».
+
+Режим view означає:
+
+«Користувач зараз добровільно працює без редагування».
+
+Режим edit означає:
+
+«Користувач зараз використовує своє право на редагування».
+
+Роль reader:
+
+- не може перейти в edit;
+- завжди працює в view;
+- бачить статус «Режим перегляду».
+
+Роль editor:
+
+- може перемикатися view/edit;
+- за замовчуванням відкриває схему у view;
+- у view не може змінювати документ;
+- у edit може змінювати документ.
+
+Роль administrator:
+
+- бачить статус «Режим адміністрування»;
+- адміністративний статус має пріоритет;
+- за потреби administrator може мати окремий режим canvas,
+  але в шапці відображається саме «Режим адміністрування».
+
+======================================================================
+10. useAuthStore
+======================================================================
+
+Файл:
+
+src/features/auth/model/useAuthStore.js
+
+Код:
+
+import { create } from "zustand";
+import { MOCK_USERS } from "./mockUsers";
+
+export const ACCESS_MODES = {
+  VIEW: "view",
+  EDIT: "edit",
+  ADMIN: "admin",
+};
+
+export const useAuthStore = create(
+  (set, get) => ({
+    currentUser: null,
+    activeDepartmentId: null,
+    workspaceMode: ACCESS_MODES.VIEW,
+    isInitialized: false,
+
+    setCurrentUser: (currentUser) => {
+      const hasAdministratorRole =
+        currentUser?.roleAssignments?.some(
+          (assignment) =>
+            assignment.roleId
+              === "administrator"
+        );
+
+      set({
+        currentUser,
+        activeDepartmentId:
+          currentUser?.departmentIds?.[0]
+          || null,
+
+        workspaceMode:
+          hasAdministratorRole
+            ? ACCESS_MODES.ADMIN
+            : ACCESS_MODES.VIEW,
+
+        isInitialized: true,
+      });
+    },
+
+    setActiveDepartmentId: (
+      activeDepartmentId
+    ) => {
+      set({ activeDepartmentId });
+    },
+
+    setWorkspaceMode: (
+      workspaceMode
+    ) => {
+      set({ workspaceMode });
+    },
+
+    resetWorkspaceMode: () => {
+      const currentUser =
+        get().currentUser;
+
+      const hasAdministratorRole =
+        currentUser?.roleAssignments?.some(
+          (assignment) =>
+            assignment.roleId
+              === "administrator"
+        );
+
+      set({
+        workspaceMode:
+          hasAdministratorRole
+            ? ACCESS_MODES.ADMIN
+            : ACCESS_MODES.VIEW,
+      });
+    },
+
+    initializeAuth: () => {
+      // Тимчасово без БД.
+      // Для тесту можна змінити:
+      // MOCK_USERS.reader
+      // MOCK_USERS.editor
+      // MOCK_USERS.mixed
+      // MOCK_USERS.administrator
+
+      get().setCurrentUser(
+        MOCK_USERS.editor
+      );
+    },
+
+    logout: () => {
+      set({
+        currentUser: null,
+        activeDepartmentId: null,
+        workspaceMode:
+          ACCESS_MODES.VIEW,
+        isInitialized: false,
+      });
+    },
+  })
+);
+
+Примітка:
+
+У строгому поділі відповідальності workspaceMode можна зберігати
+в useCanvasStore або useWorkspaceStore.
+
+Але для початкової реалізації допустимо тримати його в useAuthStore,
+тому що:
+
+- він безпосередньо пов’язаний із поточним режимом доступу;
+- всі компоненти шапки отримують дані з одного store;
+- простіше впровадити без перебудови поточного проєкту.
+
+У майбутньому mode можна винести без зміни can().
+
+======================================================================
+11. СЕЛЕКТОРИ ДЛЯ РЕЖИМІВ
+======================================================================
+
+Файл:
+
+src/features/auth/model/accessSelectors.js
+
+Код:
+
+import { ACCESS_MODES } from "./useAuthStore";
+import {
+  can,
+  hasRole,
+} from "./accessPolicy";
+import { PERMISSIONS } from "./permissions";
+
+export function canEnterEditMode(
+  user,
+  resource
+) {
+  return can(
+    user,
+    PERMISSIONS.SCHEME_UPDATE,
+    resource
+  );
+}
+
+export function isAdministrator(
+  user,
+  resource
+) {
+  return hasRole(
+    user,
+    "administrator",
+    resource
+  );
+}
+
+export function canEditNow(
+  user,
+  resource,
+  workspaceMode
+) {
+  return (
+    workspaceMode === ACCESS_MODES.EDIT
+    && can(
+      user,
+      PERMISSIONS.SCHEME_UPDATE,
+      resource
+    )
+  );
+}
+
+export function getAccessModeStatus({
+  user,
+  resource,
+  workspaceMode,
+}) {
+  if (
+    isAdministrator(
+      user,
+      resource
+    )
+  ) {
+    return {
+      key: "admin",
+      label:
+        "Режим адміністрування",
+    };
+  }
+
+  const allowedToEdit =
+    canEnterEditMode(
+      user,
+      resource
+    );
+
+  if (
+    allowedToEdit
+    && workspaceMode
+      === ACCESS_MODES.EDIT
+  ) {
+    return {
+      key: "edit",
+      label:
+        "Режим редагування",
+    };
+  }
+
+  return {
+    key: "view",
+    label:
+      "Режим перегляду",
+  };
+}
+
+======================================================================
+12. БЕЗПЕЧНА ЗМІНА РЕЖИМУ
+======================================================================
+
+Не можна просто дозволити будь-кому зробити:
+
+setWorkspaceMode("edit")
+
+Потрібна централізована перевірка.
+
+Додати в useAuthStore:
+
+import { can } from "./accessPolicy";
+import { PERMISSIONS } from "./permissions";
+
+requestWorkspaceMode: (
+  nextMode,
+  resource
+) => {
+  const {
+    currentUser,
+  } = get();
+
+  const hasAdministratorRole =
+    currentUser?.roleAssignments?.some(
+      (assignment) =>
+        assignment.roleId
+          === "administrator"
+    );
+
+  if (hasAdministratorRole) {
+    set({
+      workspaceMode:
+        ACCESS_MODES.ADMIN,
+    });
+
+    return true;
+  }
+
+  if (
+    nextMode
+      === ACCESS_MODES.VIEW
+  ) {
+    set({
+      workspaceMode:
+        ACCESS_MODES.VIEW,
+    });
+
+    return true;
+  }
+
+  if (
+    nextMode
+      === ACCESS_MODES.EDIT
+  ) {
+    const allowed = can(
+      currentUser,
+      PERMISSIONS.SCHEME_UPDATE,
+      resource
+    );
+
+    if (!allowed) {
+      return false;
+    }
+
+    set({
+      workspaceMode:
+        ACCESS_MODES.EDIT,
+    });
+
+    return true;
+  }
+
+  return false;
+},
+
+Повний рекомендований store:
+
+import { create } from "zustand";
+import { MOCK_USERS } from "./mockUsers";
+import { can } from "./accessPolicy";
+import { PERMISSIONS } from "./permissions";
+
+export const ACCESS_MODES = {
+  VIEW: "view",
+  EDIT: "edit",
+  ADMIN: "admin",
+};
+
+export const useAuthStore = create(
+  (set, get) => ({
+    currentUser: null,
+    activeDepartmentId: null,
+    workspaceMode: ACCESS_MODES.VIEW,
+    isInitialized: false,
+
+    setCurrentUser: (currentUser) => {
+      const hasAdministratorRole =
+        currentUser?.roleAssignments?.some(
+          (assignment) =>
+            assignment.roleId
+              === "administrator"
+        );
+
+      set({
+        currentUser,
+        activeDepartmentId:
+          currentUser?.departmentIds?.[0]
+          || null,
+
+        workspaceMode:
+          hasAdministratorRole
+            ? ACCESS_MODES.ADMIN
+            : ACCESS_MODES.VIEW,
+
+        isInitialized: true,
+      });
+    },
+
+    setActiveDepartmentId: (
+      activeDepartmentId
+    ) => {
+      set({ activeDepartmentId });
+    },
+
+    requestWorkspaceMode: (
+      nextMode,
+      resource
+    ) => {
+      const {
+        currentUser,
+      } = get();
+
+      const hasAdministratorRole =
+        currentUser?.roleAssignments?.some(
+          (assignment) =>
+            assignment.roleId
+              === "administrator"
+        );
+
+      if (hasAdministratorRole) {
+        set({
+          workspaceMode:
+            ACCESS_MODES.ADMIN,
+        });
+
+        return true;
+      }
+
+      if (
+        nextMode
+          === ACCESS_MODES.VIEW
+      ) {
+        set({
+          workspaceMode:
+            ACCESS_MODES.VIEW,
+        });
+
+        return true;
+      }
+
+      if (
+        nextMode
+          === ACCESS_MODES.EDIT
+      ) {
+        const allowed = can(
+          currentUser,
+          PERMISSIONS.SCHEME_UPDATE,
+          resource
+        );
+
+        if (!allowed) {
+          return false;
+        }
+
+        set({
+          workspaceMode:
+            ACCESS_MODES.EDIT,
+        });
+
+        return true;
+      }
+
+      return false;
+    },
+
+    resetWorkspaceMode: () => {
+      const currentUser =
+        get().currentUser;
+
+      const hasAdministratorRole =
+        currentUser?.roleAssignments?.some(
+          (assignment) =>
+            assignment.roleId
+              === "administrator"
+        );
+
+      set({
+        workspaceMode:
+          hasAdministratorRole
+            ? ACCESS_MODES.ADMIN
+            : ACCESS_MODES.VIEW,
+      });
+    },
+
+    initializeAuth: () => {
+      get().setCurrentUser(
+        MOCK_USERS.editor
+      );
+    },
+
+    logout: () => {
+      set({
+        currentUser: null,
+        activeDepartmentId: null,
+        workspaceMode:
+          ACCESS_MODES.VIEW,
+        isInitialized: false,
+      });
+    },
+  })
+);
+
+======================================================================
+13. HOOK useCan
+======================================================================
+
+Файл:
+
+src/features/auth/model/useCan.js
+
+Код:
+
+import { useMemo } from "react";
+import { useAuthStore } from "./useAuthStore";
+import { can } from "./accessPolicy";
+
+export function useCan(
+  permission,
+  resource
+) {
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  return useMemo(() => {
+    return can(
+      currentUser,
+      permission,
+      resource
+    );
+  }, [
+    currentUser,
+    permission,
+    resource,
+  ]);
+}
+
+Увага:
+
+Якщо resource створюється прямо в JSX на кожному render,
+useMemo буде перераховуватися.
+
+Краще формувати resource через useMemo у сторінці схеми:
+
+const schemeResource =
+  useMemo(() => ({
+    type: "scheme",
+    id: scheme.id,
+    schemeId: scheme.id,
+    albumPageId:
+      scheme.albumPageId,
+    albumId:
+      scheme.albumId,
+    departmentId:
+      scheme.departmentId,
+    ownerId:
+      scheme.ownerId,
+  }), [
+    scheme.id,
+    scheme.albumPageId,
+    scheme.albumId,
+    scheme.departmentId,
+    scheme.ownerId,
+  ]);
+
+======================================================================
+14. COMPONENT <Can>
+======================================================================
+
+Файл:
+
+src/features/auth/ui/Can.jsx
+
+Код:
+
+import { useCan } from "../model/useCan";
+
+export function Can({
+  permission,
+  resource,
+  fallback = null,
+  children,
+}) {
+  const allowed = useCan(
+    permission,
+    resource
+  );
+
+  return allowed
+    ? children
+    : fallback;
+}
+
+Використання:
+
+<Can
+  permission={
+    PERMISSIONS.DRAWING_NODE_CREATE
+  }
+  resource={schemeResource}
+>
+  <button>
+    Додати об’єкт
+  </button>
+</Can>
+
+======================================================================
+15. СТАТУС РЕЖИМУ У ШАПЦІ
+======================================================================
+
+Файл:
+
+src/features/auth/ui/AccessModeStatus.jsx
+
+Код:
+
+import { useMemo } from "react";
+import { useAuthStore } from "../model/useAuthStore";
+import {
+  getAccessModeStatus,
+} from "../model/accessSelectors";
+
+export function AccessModeStatus({
+  resource,
+}) {
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  const workspaceMode =
+    useAuthStore(
+      (state) =>
+        state.workspaceMode
+    );
+
+  const status = useMemo(() => {
+    return getAccessModeStatus({
+      user: currentUser,
+      resource,
+      workspaceMode,
+    });
+  }, [
+    currentUser,
+    resource,
+    workspaceMode,
+  ]);
+
+  return (
+    <span
+      data-access-mode={status.key}
+      className={
+        `access-mode-status ` +
+        `access-mode-status--${status.key}`
+      }
+    >
+      {status.label}
+    </span>
+  );
+}
+
+Можливий CSS:
+
+.access-mode-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.access-mode-status--view {
+  background: #eef2f6;
+  color: #394957;
+}
+
+.access-mode-status--edit {
+  background: #fff3cd;
+  color: #7a5b00;
+}
+
+.access-mode-status--admin {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+Примітка:
+
+Кольори можна замінити під дизайн-систему проєкту.
+
+======================================================================
+16. ПЕРЕМИКАЧ VIEW / EDIT У ШАПЦІ
+======================================================================
+
+Файл:
+
+src/features/auth/ui/AccessModeControl.jsx
+
+Код:
+
+import { useMemo } from "react";
+import {
+  ACCESS_MODES,
+  useAuthStore,
+} from "../model/useAuthStore";
+import {
+  canEnterEditMode,
+  getAccessModeStatus,
+  isAdministrator,
+} from "../model/accessSelectors";
+
+export function AccessModeControl({
+  resource,
+}) {
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  const workspaceMode =
+    useAuthStore(
+      (state) =>
+        state.workspaceMode
+    );
+
+  const requestWorkspaceMode =
+    useAuthStore(
+      (state) =>
+        state.requestWorkspaceMode
+    );
+
+  const allowedToEdit =
+    useMemo(() => {
+      return canEnterEditMode(
+        currentUser,
+        resource
+      );
+    }, [
+      currentUser,
+      resource,
+    ]);
+
+  const administrator =
+    useMemo(() => {
+      return isAdministrator(
+        currentUser,
+        resource
+      );
+    }, [
+      currentUser,
+      resource,
+    ]);
+
+  const status =
+    useMemo(() => {
+      return getAccessModeStatus({
+        user: currentUser,
+        resource,
+        workspaceMode,
+      });
+    }, [
+      currentUser,
+      resource,
+      workspaceMode,
+    ]);
+
+  // Administrator:
+  // показуємо тільки статус.
+  if (administrator) {
+    return (
+      <div
+        className="access-mode-control"
+      >
+        <span
+          className={
+            `access-mode-status ` +
+            `access-mode-status--admin`
+          }
+        >
+          {status.label}
+        </span>
+      </div>
+    );
+  }
+
+  // Reader:
+  // не показуємо перемикач.
+  if (!allowedToEdit) {
+    return (
+      <div
+        className="access-mode-control"
+      >
+        <span
+          className={
+            `access-mode-status ` +
+            `access-mode-status--view`
+          }
+        >
+          Режим перегляду
+        </span>
+      </div>
+    );
+  }
+
+  // Editor:
+  // показуємо view/edit перемикач.
+  return (
+    <div
+      className="access-mode-control"
+      role="group"
+      aria-label={
+        "Режим роботи зі схемою"
+      }
+    >
+      <button
+        type="button"
+        className={
+          workspaceMode
+            === ACCESS_MODES.VIEW
+            ? "access-mode-button active"
+            : "access-mode-button"
+        }
+        aria-pressed={
+          workspaceMode
+            === ACCESS_MODES.VIEW
+        }
+        onClick={() => {
+          requestWorkspaceMode(
+            ACCESS_MODES.VIEW,
+            resource
+          );
+        }}
+      >
+        Перегляд
+      </button>
+
+      <button
+        type="button"
+        className={
+          workspaceMode
+            === ACCESS_MODES.EDIT
+            ? "access-mode-button active"
+            : "access-mode-button"
+        }
+        aria-pressed={
+          workspaceMode
+            === ACCESS_MODES.EDIT
+        }
+        onClick={() => {
+          requestWorkspaceMode(
+            ACCESS_MODES.EDIT,
+            resource
+          );
+        }}
+      >
+        Редагування
+      </button>
+
+      <span
+        className={
+          `access-mode-status ` +
+          `access-mode-status--${status.key}`
+        }
+      >
+        {status.label}
+      </span>
+    </div>
+  );
+}
+
+CSS:
+
+.access-mode-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.access-mode-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+}
+
+.access-mode-button:hover {
+  background: #f8fafc;
+}
+
+.access-mode-button.active {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+}
+
+======================================================================
+17. ВАРІАНТ ІЗ CHECKBOX / SWITCH
+======================================================================
+
+Якщо в шапці краще виглядатиме один switch:
+
+Файл:
+
+src/features/auth/ui/EditModeSwitch.jsx
+
+Код:
+
+import { useMemo } from "react";
+import {
+  ACCESS_MODES,
+  useAuthStore,
+} from "../model/useAuthStore";
+import {
+  canEnterEditMode,
+  isAdministrator,
+} from "../model/accessSelectors";
+
+export function EditModeSwitch({
+  resource,
+}) {
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  const workspaceMode =
+    useAuthStore(
+      (state) =>
+        state.workspaceMode
+    );
+
+  const requestWorkspaceMode =
+    useAuthStore(
+      (state) =>
+        state.requestWorkspaceMode
+    );
+
+  const allowedToEdit =
+    useMemo(() => {
+      return canEnterEditMode(
+        currentUser,
+        resource
+      );
+    }, [
+      currentUser,
+      resource,
+    ]);
+
+  const administrator =
+    useMemo(() => {
+      return isAdministrator(
+        currentUser,
+        resource
+      );
+    }, [
+      currentUser,
+      resource,
+    ]);
+
+  if (
+    administrator
+    || !allowedToEdit
+  ) {
+    return null;
+  }
+
+  const isEdit =
+    workspaceMode
+      === ACCESS_MODES.EDIT;
+
+  return (
+    <label
+      className="edit-mode-switch"
+    >
+      <input
+        type="checkbox"
+        checked={isEdit}
+        onChange={(event) => {
+          requestWorkspaceMode(
+            event.target.checked
+              ? ACCESS_MODES.EDIT
+              : ACCESS_MODES.VIEW,
+            resource
+          );
+        }}
+      />
+
+      <span>
+        {isEdit
+          ? "Редагування"
+          : "Перегляд"}
+      </span>
+    </label>
+  );
+}
+
+======================================================================
+18. РОЗМІЩЕННЯ В HEADER WIDGET
+======================================================================
+
+Приклад FSD:
+
+src/widgets/header/ui/AppHeader.jsx
+
+Код:
+
+import {
+  AccessModeControl,
+} from "@/features/auth";
+
+export function AppHeader({
+  currentScheme,
+}) {
+  const schemeResource =
+    currentScheme
+      ? {
+          type: "scheme",
+          id: currentScheme.id,
+          schemeId:
+            currentScheme.id,
+          albumPageId:
+            currentScheme.albumPageId,
+          albumId:
+            currentScheme.albumId,
+          departmentId:
+            currentScheme.departmentId,
+          ownerId:
+            currentScheme.ownerId,
+        }
+      : null;
+
+  return (
+    <header className="app-header">
+      <div className="app-header__left">
+        <h1>
+          Альбом схем
+        </h1>
+      </div>
+
+      <div className="app-header__center">
+        {schemeResource && (
+          <AccessModeControl
+            resource={
+              schemeResource
+            }
+          />
+        )}
+      </div>
+
+      <div className="app-header__right">
+        {/* Меню користувача */}
+      </div>
+    </header>
+  );
+}
+
+Якщо header не отримує currentScheme через props,
+resource можна брати з useCanvasStore:
+
+const currentScheme =
+  useCanvasStore(
+    (state) =>
+      state.currentScheme
+  );
+
+Але краще не тягнути весь canvas store.
+Брати тільки необхідне поле.
+
+======================================================================
+19. PUBLIC API FEATURE
+======================================================================
+
+Файл:
+
+src/features/auth/index.js
+
+Код:
+
+export {
+  PERMISSIONS,
+} from "./model/permissions";
+
+export {
+  ROLE_PERMISSIONS,
+} from "./model/rolePermissions";
+
+export {
+  can,
+  hasRole,
+  getEffectivePermissions,
+} from "./model/accessPolicy";
+
+export {
+  ACCESS_MODES,
+  useAuthStore,
+} from "./model/useAuthStore";
+
+export {
+  useCan,
+} from "./model/useCan";
+
+export {
+  canEnterEditMode,
+  canEditNow,
+  getAccessModeStatus,
+  isAdministrator,
+} from "./model/accessSelectors";
+
+export {
+  Can,
+} from "./ui/Can";
+
+export {
+  AccessModeStatus,
+} from "./ui/AccessModeStatus";
+
+export {
+  AccessModeControl,
+} from "./ui/AccessModeControl";
+
+Інші slices імпортують лише так:
+
+import {
+  PERMISSIONS,
+  useCan,
+  AccessModeControl,
+} from "@/features/auth";
+
+Не імпортувати:
+
+import {
+  ...
+} from "@/features/auth/model/...";
+
+======================================================================
+20. ІНІЦІАЛІЗАЦІЯ AUTH ПРИ СТАРТІ
+======================================================================
+
+Наприклад у app provider або root layout:
+
+import { useEffect } from "react";
+import {
+  useAuthStore,
+} from "@/features/auth";
+
+export function AuthInitializer({
+  children,
+}) {
+  const initializeAuth =
+    useAuthStore(
+      (state) =>
+        state.initializeAuth
+    );
+
+  const isInitialized =
+    useAuthStore(
+      (state) =>
+        state.isInitialized
+    );
+
+  useEffect(() => {
+    if (!isInitialized) {
+      initializeAuth();
+    }
+  }, [
+    initializeAuth,
+    isInitialized,
+  ]);
+
+  if (!isInitialized) {
+    return (
+      <div>
+        Завантаження доступів...
+      </div>
+    );
+  }
+
+  return children;
+}
+
+Пізніше initializeAuth робитиме API-запит:
+
+async initializeAuth() {
+  const response = await fetch(
+    "/api/auth/me"
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      "Не вдалося завантажити користувача"
+    );
+  }
+
+  const currentUser =
+    await response.json();
+
+  get().setCurrentUser(
+    currentUser
+  );
+}
+
+======================================================================
+21. ЯК ВИЗНАЧИТИ, ЧИ МОЖНА РЕДАГУВАТИ ЗАРАЗ
+======================================================================
+
+У React-компоненті:
+
+import {
+  PERMISSIONS,
+  useAuthStore,
+  useCan,
+  ACCESS_MODES,
+} from "@/features/auth";
+
+const hasEditPermission =
+  useCan(
+    PERMISSIONS.SCHEME_UPDATE,
+    schemeResource
+  );
+
+const workspaceMode =
+  useAuthStore(
+    (state) =>
+      state.workspaceMode
+  );
+
+const canEditNow =
+  hasEditPermission
+  && workspaceMode
+    === ACCESS_MODES.EDIT;
+
+Важливо:
+
+hasEditPermission — постійне право користувача.
+
+workspaceMode — поточний UI-режим.
+
+======================================================================
+22. KONVA
+======================================================================
+
+Для object:
+
+const canMoveObject =
+  useCan(
+    PERMISSIONS.DRAWING_OBJECT_MOVE,
+    schemeResource
+  );
+
+const workspaceMode =
+  useAuthStore(
+    (state) =>
+      state.workspaceMode
+  );
+
+const draggable =
+  canMoveObject
+  && workspaceMode
+    === ACCESS_MODES.EDIT;
+
+<Group
+  draggable={draggable}
+  listening={true}
+/>
+
+Не вимикати весь Stage для reader.
+
+Reader повинен мати:
+
+- pan;
+- zoom;
+- selection;
+- подвійний клік для перегляду;
+- контекстне меню перегляду;
+- відкриття інформаційної картки;
+- перегляд вкладень.
+
+Заборонені лише document mutations.
+
+======================================================================
+23. TOOLBAR
+======================================================================
+
+Приклад:
+
+const canUseToolbox =
+  useCan(
+    PERMISSIONS.TOOLBOX_USE_ITEM,
+    schemeResource
+  );
+
+const workspaceMode =
+  useAuthStore(
+    (state) =>
+      state.workspaceMode
+  );
+
+const toolboxEnabled =
+  canUseToolbox
+  && workspaceMode
+    === ACCESS_MODES.EDIT;
+
+return (
+  <Toolbox
+    disabled={!toolboxEnabled}
+  />
+);
+
+Можливі UX-варіанти:
+
+1. У view режимі повністю приховати editing toolbar.
+2. Показати toolbar disabled.
+3. Показати лише інструменти перегляду.
+
+Рекомендація:
+
+- editing toolbar приховувати у view;
+- zoom, pan, export залишати доступними;
+- status і перемикач показувати в header.
+
+======================================================================
+24. ІНФОРМАЦІЙНА КАРТКА ОБ’ЄКТА
+======================================================================
+
+Reader:
+
+- відкриває картку;
+- поля disabled або readOnly;
+- кнопка «Зберегти» не відображається.
+
+Editor у view mode:
+
+- відкриває картку;
+- поля readOnly;
+- бачить, що схема у режимі перегляду;
+- може перейти в edit через header.
+
+Editor у edit mode:
+
+- поля доступні;
+- кнопка «Зберегти» доступна.
+
+Код:
+
+const hasUpdatePermission =
+  useCan(
+    PERMISSIONS.DRAWING_NODE_UPDATE,
+    schemeResource
+  );
+
+const workspaceMode =
+  useAuthStore(
+    (state) =>
+      state.workspaceMode
+  );
+
+const editable =
+  hasUpdatePermission
+  && workspaceMode
+    === ACCESS_MODES.EDIT;
+
+<input
+  value={name}
+  readOnly={!editable}
+  onChange={
+    editable
+      ? handleNameChange
+      : undefined
+  }
+/>
+
+{editable && (
+  <button
+    onClick={handleSave}
+  >
+    Зберегти
+  </button>
+)}
+
+======================================================================
+25. CONTROLLER GUARD
+======================================================================
+
+UI-перевірка не є достатньою.
+
+Приклад:
+
+import {
+  ACCESS_MODES,
+  PERMISSIONS,
+  can,
+  useAuthStore,
+} from "@/features/auth";
+
+import {
+  useCanvasStore,
+} from "@/entities/canvas";
+
+export const canvasController = {
+  addNode(node) {
+    const authState =
+      useAuthStore.getState();
+
+    const canvasState =
+      useCanvasStore.getState();
+
+    const resource =
+      canvasState.currentSchemeResource;
+
+    const allowed =
+      can(
+        authState.currentUser,
+        PERMISSIONS.DRAWING_NODE_CREATE,
+        resource
+      )
+      && authState.workspaceMode
+        === ACCESS_MODES.EDIT;
+
+    if (!allowed) {
+      throw new Error(
+        "Недостатньо прав для створення об’єкта"
+      );
+    }
+
+    canvasState.addNode(node);
+  },
+
+  moveNode(
+    nodeId,
+    position
+  ) {
+    const authState =
+      useAuthStore.getState();
+
+    const canvasState =
+      useCanvasStore.getState();
+
+    const resource =
+      canvasState.currentSchemeResource;
+
+    const allowed =
+      can(
+        authState.currentUser,
+        PERMISSIONS.DRAWING_OBJECT_MOVE,
+        resource
+      )
+      && authState.workspaceMode
+        === ACCESS_MODES.EDIT;
+
+    if (!allowed) {
+      throw new Error(
+        "Недостатньо прав для переміщення об’єкта"
+      );
+    }
+
+    canvasState.moveNode(
+      nodeId,
+      position
+    );
+  },
+};
+
+======================================================================
+26. УНІВЕРСАЛЬНИЙ GUARD ДЛЯ MUTATION
+======================================================================
+
+Файл:
+
+src/features/auth/model/accessGuards.js
+
+Код:
+
+import {
+  ACCESS_MODES,
+  useAuthStore,
+} from "./useAuthStore";
+import { can } from "./accessPolicy";
+
+export function assertCan(
+  permission,
+  resource
+) {
+  const {
+    currentUser,
+  } = useAuthStore.getState();
+
+  const allowed = can(
+    currentUser,
+    permission,
+    resource
+  );
+
+  if (!allowed) {
+    throw new Error(
+      `Access denied: ${permission}`
+    );
+  }
+}
+
+export function assertCanMutate(
+  permission,
+  resource
+) {
+  const {
+    currentUser,
+    workspaceMode,
+  } = useAuthStore.getState();
+
+  const allowedByRole = can(
+    currentUser,
+    permission,
+    resource
+  );
+
+  const allowedByMode =
+    workspaceMode
+      === ACCESS_MODES.EDIT
+    || workspaceMode
+      === ACCESS_MODES.ADMIN;
+
+  if (
+    !allowedByRole
+    || !allowedByMode
+  ) {
+    throw new Error(
+      `Mutation denied: ${permission}`
+    );
+  }
+}
+
+У controller:
+
+addNode(node) {
+  const canvas =
+    useCanvasStore.getState();
+
+  assertCanMutate(
+    PERMISSIONS.DRAWING_NODE_CREATE,
+    canvas.currentSchemeResource
+  );
+
+  canvas.addNode(node);
+}
+
+======================================================================
+27. ПОВЕДІНКА ADMINISTRATOR
+======================================================================
+
+Для administrator рекомендована поведінка:
+
+- статус у header:
+  «Режим адміністрування»;
+- view/edit перемикач не показувати;
+- administrator працює в окремому admin mode;
+- admin mode дозволяє виконувати permissions administrator;
+- administrative UI показувати лише за permissions:
+  user.manage,
+  role.manage,
+  department.manage,
+  toolbox.manageCatalog.
+
+Не треба писати:
+
+if (role === "administrator") {
+  показати все
+}
+
+Треба:
+
+can(
+  user,
+  PERMISSIONS.ROLE_MANAGE,
+  resource
+)
+
+Статус admin у header — це лише зрозуміле повідомлення користувачу.
+
+======================================================================
+28. ПОВЕДІНКА READER
+======================================================================
+
+Reader:
+
+- завжди отримує workspaceMode = "view";
+- не бачить перемикач;
+- бачить статус «Режим перегляду»;
+- не може вручну встановити edit через requestWorkspaceMode;
+- може виконувати тільки свої permissions;
+- може переглядати доступні схеми;
+- може взаємодіяти з UI, який не змінює документ.
+
+======================================================================
+29. ПОВЕДІНКА EDITOR
+======================================================================
+
+Editor:
+
+- після входу отримує workspaceMode = "view";
+- у header бачить перемикач;
+- у view mode:
+  - схема read-only;
+  - кнопки мутацій приховані/disabled;
+  - pan/zoom/view працюють;
+- після переходу в edit:
+  - доступні дозволені editing actions;
+- може повернутися у view без втрати ролі.
+
+======================================================================
+30. ПОВЕДІНКА КОРИСТУВАЧА З ДВОМА РОЛЯМИ
+======================================================================
+
+Варіант 1:
+
+editor + reader в одному department.
+
+Результат:
+
+- permissions об’єднуються;
+- користувач має право редагувати;
+- у header бачить view/edit;
+- reader не обмежує editor.
+
+Варіант 2:
+
+editor у department-electric,
+reader у department-water.
+
+Коли відкрито scheme з department-electric:
+
+- canEnterEditMode = true;
+- показується view/edit switch.
+
+Коли відкрито scheme з department-water:
+
+- canEnterEditMode = false;
+- switch зникає;
+- показується «Режим перегляду»;
+- workspaceMode потрібно автоматично скинути у view.
+
+======================================================================
+31. АВТОМАТИЧНЕ СКИДАННЯ EDIT ПРИ ЗМІНІ СХЕМИ
+======================================================================
+
+Це важливо для користувача з різними ролями в різних відділах.
+
+Приклад hook на сторінці схеми:
+
+import { useEffect } from "react";
+import {
+  ACCESS_MODES,
+  PERMISSIONS,
+  can,
+  useAuthStore,
+} from "@/features/auth";
+
+export function useSyncAccessMode(
+  resource
+) {
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  const workspaceMode =
+    useAuthStore(
+      (state) =>
+        state.workspaceMode
+    );
+
+  const requestWorkspaceMode =
+    useAuthStore(
+      (state) =>
+        state.requestWorkspaceMode
+    );
+
+  useEffect(() => {
+    if (!resource) {
+      return;
+    }
+
+    const canEditResource =
+      can(
+        currentUser,
+        PERMISSIONS.SCHEME_UPDATE,
+        resource
+      );
+
+    if (
+      !canEditResource
+      && workspaceMode
+        === ACCESS_MODES.EDIT
+    ) {
+      requestWorkspaceMode(
+        ACCESS_MODES.VIEW,
+        resource
+      );
+    }
+  }, [
+    currentUser,
+    resource,
+    workspaceMode,
+    requestWorkspaceMode,
+  ]);
+}
+
+На сторінці:
+
+useSyncAccessMode(
+  schemeResource
+);
+
+Сценарій:
+
+1. Користувач редагує електричну схему.
+2. Переходить на водну схему.
+3. Там він лише reader.
+4. Hook автоматично переводить mode у view.
+5. Header показує «Режим перегляду».
+6. Editing toolbar вимикається.
+
+======================================================================
+32. ПАНЕЛЬ ІНСТРУМЕНТІВ ДЛЯ ВІДДІЛІВ
+======================================================================
+
+Глобальний каталог:
+
+src/entities/toolbox-item/model/toolboxItems.js
+
+export const TOOLBOX_ITEMS = [
+  {
+    id: "pump",
+    name: "Насос",
+    categoryId: "equipment",
+    requiredPermission:
+      "toolbox.useItem",
+    isActive: true,
+    factoryType: "pump",
+  },
+
+  {
+    id: "transformer",
+    name: "Трансформатор",
+    categoryId: "equipment",
+    requiredPermission:
+      "toolbox.useItem",
+    isActive: true,
+    factoryType:
+      "transformer",
+  },
+
+  {
+    id: "text",
+    name: "Текст",
+    categoryId: "annotations",
+    requiredPermission:
+      "toolbox.useItem",
+    isActive: true,
+    factoryType: "text",
+  },
+];
+
+Набори:
+
+export const TOOLBOX_SETS = {
+  common: [
+    "text",
+    "connector",
+  ],
+
+  measuring: [
+    "sensor",
+  ],
+
+  electric: [
+    "transformer",
+  ],
+
+  water: [
+    "pump",
+    "valve",
+  ],
+};
+
+Профілі:
+
+export const DEPARTMENT_TOOLBOX_PROFILES = {
+  "dep-electric": [
+    ...TOOLBOX_SETS.common,
+    ...TOOLBOX_SETS.measuring,
+    ...TOOLBOX_SETS.electric,
+  ],
+
+  "dep-water": [
+    ...TOOLBOX_SETS.common,
+    ...TOOLBOX_SETS.measuring,
+    ...TOOLBOX_SETS.water,
+  ],
+};
+
+Спільні об’єкти не дублюються.
+У профілях використовуються ID.
+
+======================================================================
+33. АЛЬБОМИ СХЕМ
+======================================================================
+
+Permission визначає:
+
+- чи користувач бачить альбом;
+- чи може редагувати;
+- чи може видаляти.
+
+UI state визначає:
+
+- який department розгорнутий;
+- які групи згорнуті.
+
+Алгоритм:
+
+1. API повертає лише доступні album.
+2. Frontend групує їх за departmentId.
+3. Department користувача показується першим.
+4. Його група розгорнута.
+5. Інші доступні групи згорнуті.
+
+Приклад:
+
+const defaultExpandedDepartmentIds =
+  currentUser.departmentIds;
+
+const isExpandedByDefault =
+  defaultExpandedDepartmentIds.includes(
+    department.id
+  );
+
+======================================================================
+34. ДОСТУПИ ЗА ПОСАДАМИ
+======================================================================
+
+Не змішувати position з role.
+
+Пізніше можна додати:
+
+src/features/auth/model/positionPermissions.js
+
+export const POSITION_PERMISSIONS = {
+  "chief-engineer": [
+    "scheme.view",
+    "scheme.update",
+    "scheme.exportPdf",
+  ],
+
+  "department-head": [
+    "album.view",
+    "album.update",
+    "album.manageMembers",
+    "scheme.view",
+    "scheme.update",
+  ],
+};
+
+Після цього getEffectivePermissions може об’єднати:
+
+- role permissions;
+- position permissions;
+- personal overrides.
+
+На першому етапі реалізацію посад можна відкласти.
+
+======================================================================
+35. МОДЕЛЬ БД
+======================================================================
+
+users
+- id
+- name
+- email
+- status
+
+departments
+- id
+- name
+- code
+
+positions
+- id
+- name
+- code
+
+user_departments
+- user_id
+- department_id
+
+user_positions
+- user_id
+- position_id
+- department_id
+
+roles
+- id
+- code
+- name
+
+permissions
+- id
+- code
+- name
+
+role_permissions
+- role_id
+- permission_id
+
+user_role_assignments
+- id
+- user_id
+- role_id
+- scope_type
+- scope_id
+- starts_at
+- expires_at
+
+permission_overrides
+- id
+- user_id
+- permission_id
+- effect
+- scope_type
+- scope_id
+
+albums
+- id
+- department_id
+- owner_id
+- name
+- visibility
+
+album_pages
+- id
+- album_id
+- name
+- order_index
+
+schemes
+- id
+- album_page_id
+- owner_id
+- name
+
+toolbox_items
+- id
+- code
+- name
+- category_id
+- factory_type
+- is_active
+
+toolbox_sets
+- id
+- code
+- name
+
+toolbox_set_items
+- toolbox_set_id
+- toolbox_item_id
+
+department_toolbox_sets
+- department_id
+- toolbox_set_id
+
+======================================================================
+36. API / SERVER
+======================================================================
+
+Frontend permissions потрібні для UX.
+
+Реальна безпека повинна бути на server.
+
+API flow:
+
+1. Визначити current user із сесії.
+2. Завантажити role assignments.
+3. Завантажити resource з БД.
+4. Побудувати access resource.
+5. Виконати server-side can().
+6. Дозволити або відхилити операцію.
+
+Не довіряти:
+
+- ролям із Zustand;
+- workspaceMode;
+- disabled кнопкам;
+- departmentId від клієнта без перевірки.
+
+workspaceMode взагалі не є security permission.
+Це лише режим UI.
+
+======================================================================
+37. ACCESS DENIED ERROR
+======================================================================
+
+Файл:
+
+src/features/auth/model/accessErrors.js
+
+Код:
+
+export class AccessDeniedError
+  extends Error {
+  constructor(permission) {
+    super(
+      `Access denied: ${permission}`
+    );
+
+    this.name =
+      "AccessDeniedError";
+
+    this.permission =
+      permission;
+  }
+}
+
+У guard:
+
+throw new AccessDeniedError(
+  permission
+);
+
+У UI:
+
+try {
+  canvasController.addNode(
+    node
+  );
+} catch (error) {
+  if (
+    error.name
+      === "AccessDeniedError"
+  ) {
+    showToast(
+      "Недостатньо прав для виконання дії"
+    );
+
+    return;
+  }
+
+  throw error;
+}
+
+======================================================================
+38. ЗАХИСТ НА ТРЬОХ РІВНЯХ
+======================================================================
+
+Рівень 1. UI
+
+- hide/disable кнопок;
+- readOnly fields;
+- status у header;
+- view/edit switch.
+
+Рівень 2. Controller/store
+
+- assertCanMutate;
+- заборона mutating methods;
+- захист hotkeys та context menu.
+
+Рівень 3. API
+
+- повторна перевірка на backend;
+- server-side user identity;
+- server-side resource lookup.
+
+======================================================================
+39. ПОРЯДОК ВПРОВАДЖЕННЯ
+======================================================================
+
+ЕТАП 1
+
+Створити:
+
+features/auth/model/permissions.js
+features/auth/model/rolePermissions.js
+features/auth/model/mockUsers.js
+features/auth/model/accessPolicy.js
+features/auth/model/useAuthStore.js
+
+ЕТАП 2
+
+Створити public API:
+
+features/auth/index.js
+
+ЕТАП 3
+
+Ініціалізувати mock user при запуску.
+
+ЕТАП 4
+
+Створити schemeResource для поточної схеми.
+
+ЕТАП 5
+
+Додати в header:
+
+AccessModeControl
+
+ЕТАП 6
+
+Додати useSyncAccessMode на сторінку схеми.
+
+ЕТАП 7
+
+Підключити mode до Konva draggable.
+
+ЕТАП 8
+
+Підключити mode до toolbar.
+
+ЕТАП 9
+
+Підключити readOnly до інформаційних карток.
+
+ЕТАП 10
+
+Додати assertCanMutate у controller.
+
+ЕТАП 11
+
+Поступово захистити:
+
+- create node;
+- update node;
+- delete node;
+- create edge;
+- update edge;
+- delete edge;
+- move;
+- save;
+- import.
+
+ЕТАП 12
+
+Підключити backend і БД.
+
+======================================================================
+40. ПІДСУМКОВА ЛОГІКА HEADER
+======================================================================
+
+Reader:
+
+- статус: «Режим перегляду»;
+- switch: відсутній.
+
+Editor:
+
+- за замовчуванням: «Режим перегляду»;
+- switch: Перегляд / Редагування;
+- після перемикання:
+  «Режим редагування».
+
+Administrator:
+
+- статус:
+  «Режим адміністрування»;
+- switch view/edit:
+  не показується;
+- доступ до адміністративного UI:
+  через permissions.
+
+Editor + reader в одному scope:
+
+- показується editor поведінка;
+- permissions об’єднуються;
+- доступний switch.
+
+Editor у scope A + reader у scope B:
+
+- у scope A:
+  доступний switch;
+- у scope B:
+  тільки «Режим перегляду»;
+- при переході A → B edit автоматично скидається у view.
+
+======================================================================
+41. ГОЛОВНА РЕКОМЕНДАЦІЯ
+======================================================================
+
+Основною одиницею перевірки має бути permission.
+
+Role лише групує permissions.
+
+Scope визначає, де діє роль.
+
+useAuthStore зберігає:
+
+- currentUser;
+- roleAssignments;
+- activeDepartmentId;
+- workspaceMode;
+- auth initialization.
+
+can() визначає:
+
+- чи є permission;
+- чи діє роль для resource.
+
+workspaceMode визначає:
+
+- чи користувач зараз переглядає;
+- чи користувач зараз редагує;
+- чи користувач перебуває в admin mode.
+
+Для мутації потрібно:
+
+can(user, permission, resource)
+&&
+workspaceMode дозволяє mutation.
+
+Цей підхід:
+
+- не змінює FSD;
+- працює на JavaScript;
+- підтримує декілька ролей;
+- дозволяє безпечний view/edit режим;
+- дозволяє виводити статус у header;
+- готовий до майбутньої БД;
+- не потребує повного переписування проєкту.

@@ -1,0 +1,2991 @@
+ПАКЕТ ДОПРАЦЮВАНЬ
+СТОРІНКА АДМІНІСТРУВАННЯ ДОСТУПІВ
+Next.js + MUI + Zustand + Feature-Sliced Design + JavaScript
+
+======================================================================
+1. МЕТА
+======================================================================
+
+Реалізувати сторінку адміністрування доступів, яка дозволяє:
+
+- відкривати сторінку лише користувачу з роллю administrator;
+- шукати користувача;
+- переглядати призначені йому ролі;
+- призначати одну або декілька ролей;
+- задавати scope для ролі;
+- додатково виставляти permissions;
+- зберігати зміни;
+- поки працювати без БД через mock repository;
+- у майбутньому замінити mock repository на API/БД без зміни UI;
+- використовувати MUI;
+- вписуватись у Feature-Sliced Design;
+- працювати на JavaScript, без TypeScript.
+
+======================================================================
+2. РЕКОМЕНДОВАНА FSD-СТРУКТУРА
+======================================================================
+
+src/
+  app/
+    admin/
+      access/
+        page.jsx
+
+  features/
+    auth/
+      model/
+        permissions.js
+        rolePermissions.js
+        accessPolicy.js
+        useAuthStore.js
+      ui/
+        AccessDenied.jsx
+      index.js
+
+    admin-access/
+      api/
+        adminAccessRepository.js
+        mockAdminAccessRepository.js
+
+      model/
+        constants.js
+        mappers.js
+        useAdminAccessStore.js
+        validators.js
+
+      ui/
+        AdminAccessPage.jsx
+        UserSearch.jsx
+        UserAccessEditor.jsx
+        RoleAssignmentCard.jsx
+        PermissionSelector.jsx
+        AdminPageGuard.jsx
+
+      index.js
+
+  entities/
+    user/
+      model/
+        mockUsers.js
+
+  widgets/
+    header/
+      ui/
+        AppHeader.jsx
+
+Цей пакет додає нову feature admin-access і не потребує
+перебудови існуючих slices.
+
+======================================================================
+3. ЗАГАЛЬНИЙ СЦЕНАРІЙ РОБОТИ
+======================================================================
+
+1. Користувач відкриває /admin/access.
+2. AdminPageGuard перевіряє:
+   can(currentUser, PERMISSIONS.ROLE_MANAGE, globalResource)
+3. Якщо права немає:
+   показується сторінка «Доступ заборонено».
+4. Якщо користувач administrator:
+   відкривається адміністративна сторінка.
+5. Адміністратор вводить ім’я або email користувача.
+6. Mock repository повертає список користувачів.
+7. Адміністратор вибирає користувача.
+8. Завантажуються roleAssignments і permissionOverrides.
+9. Адміністратор змінює ролі, scope і permissions.
+10. Натискає «Зберегти».
+11. Store викликає repository.saveUserAccess().
+12. Поки що зміни зберігаються у пам’яті mock repository.
+13. Пізніше repository буде замінений на API.
+
+======================================================================
+4. РОЗШИРЕННЯ PERMISSIONS
+======================================================================
+
+У файл:
+
+src/features/auth/model/permissions.js
+
+додати:
+
+export const PERMISSIONS = {
+  // ...існуючі permissions
+
+  USER_VIEW: "user.view",
+  USER_MANAGE: "user.manage",
+  ROLE_VIEW: "role.view",
+  ROLE_MANAGE: "role.manage",
+  PERMISSION_MANAGE: "permission.manage",
+  DEPARTMENT_MANAGE: "department.manage",
+};
+
+Для administrator у rolePermissions.js:
+
+administrator: [
+  // ...існуючі permissions
+
+  PERMISSIONS.USER_VIEW,
+  PERMISSIONS.USER_MANAGE,
+  PERMISSIONS.ROLE_VIEW,
+  PERMISSIONS.ROLE_MANAGE,
+  PERMISSIONS.PERMISSION_MANAGE,
+  PERMISSIONS.DEPARTMENT_MANAGE,
+],
+
+Для reader/editor ці permissions не додавати.
+
+======================================================================
+5. ADMIN RESOURCE
+======================================================================
+
+Для перевірки адміністративної сторінки достатньо global resource.
+
+Приклад:
+
+export const ADMIN_RESOURCE = {
+  type: "global",
+  id: "admin-access",
+};
+
+Використання:
+
+can(
+  currentUser,
+  PERMISSIONS.ROLE_MANAGE,
+  ADMIN_RESOURCE
+)
+
+Якщо administrator має scope.type === "global",
+доступ буде дозволено.
+
+======================================================================
+6. MOCK-КОРИСТУВАЧІ
+======================================================================
+
+Файл:
+
+src/entities/user/model/mockUsers.js
+
+Код:
+
+export const MOCK_USERS = [
+  {
+    id: "user-1",
+    name: "Іван Петренко",
+    email: "ivan.petrenko@example.com",
+    departmentIds: [
+      "dep-electric",
+    ],
+    positions: [
+      {
+        positionId: "engineer",
+        departmentId: "dep-electric",
+      },
+    ],
+    roleAssignments: [
+      {
+        id: "assignment-1",
+        roleId: "editor",
+        scope: {
+          type: "department",
+          id: "dep-electric",
+        },
+      },
+    ],
+    permissionOverrides: [],
+  },
+
+  {
+    id: "user-2",
+    name: "Олена Коваль",
+    email: "olena.koval@example.com",
+    departmentIds: [
+      "dep-water",
+    ],
+    positions: [
+      {
+        positionId: "specialist",
+        departmentId: "dep-water",
+      },
+    ],
+    roleAssignments: [
+      {
+        id: "assignment-2",
+        roleId: "reader",
+        scope: {
+          type: "department",
+          id: "dep-water",
+        },
+      },
+    ],
+    permissionOverrides: [
+      {
+        id: "override-1",
+        permission:
+          "scheme.exportPdf",
+        effect: "allow",
+        scope: {
+          type: "department",
+          id: "dep-water",
+        },
+      },
+    ],
+  },
+];
+
+======================================================================
+7. КОНСТАНТИ ADMIN ACCESS
+======================================================================
+
+Файл:
+
+src/features/admin-access/model/constants.js
+
+Код:
+
+export const AVAILABLE_ROLES = [
+  {
+    id: "reader",
+    label: "Reader",
+    description:
+      "Перегляд доступних альбомів і схем.",
+  },
+  {
+    id: "editor",
+    label: "Editor",
+    description:
+      "Перегляд і редагування доступних схем.",
+  },
+  {
+    id: "administrator",
+    label: "Administrator",
+    description:
+      "Керування користувачами, ролями та доступами.",
+  },
+];
+
+export const SCOPE_TYPES = [
+  {
+    id: "global",
+    label: "Глобальний",
+  },
+  {
+    id: "department",
+    label: "Відділ",
+  },
+  {
+    id: "album",
+    label: "Альбом",
+  },
+  {
+    id: "albumPage",
+    label: "Сторінка альбому",
+  },
+  {
+    id: "scheme",
+    label: "Схема",
+  },
+];
+
+export const MOCK_DEPARTMENTS = [
+  {
+    id: "dep-electric",
+    name: "Електротехнічний відділ",
+  },
+  {
+    id: "dep-water",
+    name: "Відділ водопостачання",
+  },
+];
+
+export const MANAGEABLE_PERMISSIONS = [
+  {
+    id: "album.view",
+    label: "Перегляд альбомів",
+    group: "Альбоми",
+  },
+  {
+    id: "album.update",
+    label: "Редагування альбомів",
+    group: "Альбоми",
+  },
+  {
+    id: "album.delete",
+    label: "Видалення альбомів",
+    group: "Альбоми",
+  },
+  {
+    id: "scheme.view",
+    label: "Перегляд схем",
+    group: "Схеми",
+  },
+  {
+    id: "scheme.update",
+    label: "Редагування схем",
+    group: "Схеми",
+  },
+  {
+    id: "scheme.delete",
+    label: "Видалення схем",
+    group: "Схеми",
+  },
+  {
+    id: "scheme.exportPdf",
+    label: "Експорт PDF",
+    group: "Схеми",
+  },
+  {
+    id: "drawing.node.create",
+    label: "Створення об’єктів",
+    group: "Полотно",
+  },
+  {
+    id: "drawing.node.update",
+    label: "Редагування об’єктів",
+    group: "Полотно",
+  },
+  {
+    id: "drawing.node.delete",
+    label: "Видалення об’єктів",
+    group: "Полотно",
+  },
+  {
+    id: "drawing.object.move",
+    label: "Переміщення об’єктів",
+    group: "Полотно",
+  },
+  {
+    id: "toolbox.useItem",
+    label: "Використання панелі інструментів",
+    group: "Інструменти",
+  },
+  {
+    id: "role.manage",
+    label: "Керування ролями",
+    group: "Адміністрування",
+  },
+  {
+    id: "user.manage",
+    label: "Керування користувачами",
+    group: "Адміністрування",
+  },
+];
+
+======================================================================
+8. REPOSITORY INTERFACE
+======================================================================
+
+JavaScript не має interface як TypeScript,
+тому використовуємо контракт через набір методів.
+
+Файл:
+
+src/features/admin-access/api/adminAccessRepository.js
+
+Код:
+
+export const adminAccessRepository = {
+  async searchUsers(query) {
+    throw new Error(
+      "searchUsers() is not implemented"
+    );
+  },
+
+  async getUserAccess(userId) {
+    throw new Error(
+      "getUserAccess() is not implemented"
+    );
+  },
+
+  async saveUserAccess(
+    userId,
+    accessData
+  ) {
+    throw new Error(
+      "saveUserAccess() is not implemented"
+    );
+  },
+};
+
+Контракт:
+
+searchUsers(query)
+  -> Promise<Array<User>>
+
+getUserAccess(userId)
+  -> Promise<{
+       user,
+       roleAssignments,
+       permissionOverrides
+     }>
+
+saveUserAccess(userId, accessData)
+  -> Promise<savedAccessData>
+
+======================================================================
+9. MOCK REPOSITORY
+======================================================================
+
+Файл:
+
+src/features/admin-access/api/mockAdminAccessRepository.js
+
+Код:
+
+import {
+  MOCK_USERS,
+} from "@/entities/user/model/mockUsers";
+
+const delay = (ms) => {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
+let usersDatabase =
+  structuredClone(MOCK_USERS);
+
+function normalizeText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+export const mockAdminAccessRepository = {
+  async searchUsers(query) {
+    await delay(250);
+
+    const normalizedQuery =
+      normalizeText(query);
+
+    if (!normalizedQuery) {
+      return usersDatabase.map(
+        (user) => ({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          departmentIds:
+            user.departmentIds,
+        })
+      );
+    }
+
+    return usersDatabase
+      .filter((user) => {
+        const name =
+          normalizeText(user.name);
+
+        const email =
+          normalizeText(user.email);
+
+        return (
+          name.includes(normalizedQuery)
+          || email.includes(
+            normalizedQuery
+          )
+        );
+      })
+      .map((user) => ({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        departmentIds:
+          user.departmentIds,
+      }));
+  },
+
+  async getUserAccess(userId) {
+    await delay(200);
+
+    const user =
+      usersDatabase.find(
+        (item) =>
+          item.id === userId
+      );
+
+    if (!user) {
+      throw new Error(
+        "Користувача не знайдено"
+      );
+    }
+
+    return structuredClone({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        departmentIds:
+          user.departmentIds,
+        positions:
+          user.positions || [],
+      },
+
+      roleAssignments:
+        user.roleAssignments || [],
+
+      permissionOverrides:
+        user.permissionOverrides || [],
+    });
+  },
+
+  async saveUserAccess(
+    userId,
+    accessData
+  ) {
+    await delay(400);
+
+    const index =
+      usersDatabase.findIndex(
+        (item) =>
+          item.id === userId
+      );
+
+    if (index === -1) {
+      throw new Error(
+        "Користувача не знайдено"
+      );
+    }
+
+    usersDatabase[index] = {
+      ...usersDatabase[index],
+
+      roleAssignments:
+        structuredClone(
+          accessData.roleAssignments
+        ),
+
+      permissionOverrides:
+        structuredClone(
+          accessData.permissionOverrides
+        ),
+    };
+
+    return structuredClone({
+      userId,
+
+      roleAssignments:
+        usersDatabase[index]
+          .roleAssignments,
+
+      permissionOverrides:
+        usersDatabase[index]
+          .permissionOverrides,
+    });
+  },
+};
+
+Примітка:
+
+structuredClone підтримується у сучасних браузерах і Node.js.
+Якщо середовище старіше:
+
+const clone = (value) =>
+  JSON.parse(JSON.stringify(value));
+
+======================================================================
+10. ПЕРЕМИКАННЯ MOCK / API REPOSITORY
+======================================================================
+
+Файл:
+
+src/features/admin-access/api/index.js
+
+Код:
+
+import {
+  mockAdminAccessRepository,
+} from "./mockAdminAccessRepository";
+
+export const adminAccessApi =
+  mockAdminAccessRepository;
+
+Після підключення backend достатньо замінити:
+
+export const adminAccessApi =
+  apiAdminAccessRepository;
+
+UI та store змінювати не потрібно.
+
+======================================================================
+11. STORE СТОРІНКИ АДМІНІСТРУВАННЯ
+======================================================================
+
+Файл:
+
+src/features/admin-access/model/useAdminAccessStore.js
+
+Код:
+
+import { create } from "zustand";
+import {
+  adminAccessApi,
+} from "../api";
+
+function createId(prefix) {
+  return (
+    `${prefix}-`
+    + Date.now()
+    + "-"
+    + Math.random()
+      .toString(36)
+      .slice(2, 8)
+  );
+}
+
+export const useAdminAccessStore =
+  create((set, get) => ({
+    searchQuery: "",
+    searchResults: [],
+    selectedUserId: null,
+    selectedUser: null,
+
+    roleAssignments: [],
+    permissionOverrides: [],
+
+    isSearching: false,
+    isLoadingUser: false,
+    isSaving: false,
+
+    searchError: null,
+    loadError: null,
+    saveError: null,
+    saveSuccess: false,
+
+    setSearchQuery: (
+      searchQuery
+    ) => {
+      set({
+        searchQuery,
+        searchError: null,
+      });
+    },
+
+    searchUsers: async () => {
+      const query =
+        get().searchQuery;
+
+      set({
+        isSearching: true,
+        searchError: null,
+      });
+
+      try {
+        const searchResults =
+          await adminAccessApi
+            .searchUsers(query);
+
+        set({
+          searchResults,
+          isSearching: false,
+        });
+      } catch (error) {
+        set({
+          isSearching: false,
+          searchError:
+            error.message
+            || "Помилка пошуку",
+        });
+      }
+    },
+
+    selectUser: async (
+      userId
+    ) => {
+      set({
+        selectedUserId: userId,
+        selectedUser: null,
+        roleAssignments: [],
+        permissionOverrides: [],
+        isLoadingUser: true,
+        loadError: null,
+        saveError: null,
+        saveSuccess: false,
+      });
+
+      try {
+        const data =
+          await adminAccessApi
+            .getUserAccess(userId);
+
+        set({
+          selectedUser:
+            data.user,
+
+          roleAssignments:
+            data.roleAssignments,
+
+          permissionOverrides:
+            data.permissionOverrides,
+
+          isLoadingUser: false,
+        });
+      } catch (error) {
+        set({
+          isLoadingUser: false,
+          loadError:
+            error.message
+            || "Помилка завантаження",
+        });
+      }
+    },
+
+    addRoleAssignment: () => {
+      set((state) => ({
+        roleAssignments: [
+          ...state.roleAssignments,
+          {
+            id: createId(
+              "role-assignment"
+            ),
+            roleId: "reader",
+            scope: {
+              type: "department",
+              id:
+                state.selectedUser
+                  ?.departmentIds?.[0]
+                || "",
+            },
+          },
+        ],
+
+        saveSuccess: false,
+      }));
+    },
+
+    updateRoleAssignment: (
+      assignmentId,
+      patch
+    ) => {
+      set((state) => ({
+        roleAssignments:
+          state.roleAssignments.map(
+            (assignment) => {
+              if (
+                assignment.id
+                !== assignmentId
+              ) {
+                return assignment;
+              }
+
+              return {
+                ...assignment,
+                ...patch,
+
+                scope: patch.scope
+                  ? {
+                      ...assignment.scope,
+                      ...patch.scope,
+                    }
+                  : assignment.scope,
+              };
+            }
+          ),
+
+        saveSuccess: false,
+      }));
+    },
+
+    removeRoleAssignment: (
+      assignmentId
+    ) => {
+      set((state) => ({
+        roleAssignments:
+          state.roleAssignments.filter(
+            (assignment) =>
+              assignment.id
+              !== assignmentId
+          ),
+
+        saveSuccess: false,
+      }));
+    },
+
+    togglePermissionOverride: ({
+      permission,
+      effect,
+      scope,
+    }) => {
+      set((state) => {
+        const existing =
+          state.permissionOverrides
+            .find((item) => {
+              return (
+                item.permission
+                  === permission
+                && item.effect
+                  === effect
+                && item.scope.type
+                  === scope.type
+                && item.scope.id
+                  === scope.id
+              );
+            });
+
+        if (existing) {
+          return {
+            permissionOverrides:
+              state.permissionOverrides
+                .filter(
+                  (item) =>
+                    item.id
+                    !== existing.id
+                ),
+
+            saveSuccess: false,
+          };
+        }
+
+        return {
+          permissionOverrides: [
+            ...state.permissionOverrides,
+            {
+              id: createId(
+                "permission-override"
+              ),
+              permission,
+              effect,
+              scope,
+            },
+          ],
+
+          saveSuccess: false,
+        };
+      });
+    },
+
+    saveUserAccess: async () => {
+      const {
+        selectedUserId,
+        roleAssignments,
+        permissionOverrides,
+      } = get();
+
+      if (!selectedUserId) {
+        set({
+          saveError:
+            "Спочатку виберіть користувача",
+        });
+
+        return false;
+      }
+
+      set({
+        isSaving: true,
+        saveError: null,
+        saveSuccess: false,
+      });
+
+      try {
+        await adminAccessApi
+          .saveUserAccess(
+            selectedUserId,
+            {
+              roleAssignments,
+              permissionOverrides,
+            }
+          );
+
+        set({
+          isSaving: false,
+          saveSuccess: true,
+        });
+
+        return true;
+      } catch (error) {
+        set({
+          isSaving: false,
+          saveError:
+            error.message
+            || "Помилка збереження",
+        });
+
+        return false;
+      }
+    },
+
+    reset: () => {
+      set({
+        searchQuery: "",
+        searchResults: [],
+        selectedUserId: null,
+        selectedUser: null,
+        roleAssignments: [],
+        permissionOverrides: [],
+        isSearching: false,
+        isLoadingUser: false,
+        isSaving: false,
+        searchError: null,
+        loadError: null,
+        saveError: null,
+        saveSuccess: false,
+      });
+    },
+  }));
+
+======================================================================
+12. ВАЛІДАЦІЯ
+======================================================================
+
+Файл:
+
+src/features/admin-access/model/validators.js
+
+Код:
+
+export function validateAccessForm({
+  roleAssignments,
+}) {
+  const errors = [];
+
+  roleAssignments.forEach(
+    (assignment, index) => {
+      if (!assignment.roleId) {
+        errors.push(
+          `Роль №${index + 1}: не вибрана роль`
+        );
+      }
+
+      if (
+        !assignment.scope
+        || !assignment.scope.type
+      ) {
+        errors.push(
+          `Роль №${index + 1}: не вибраний scope`
+        );
+      }
+
+      if (
+        assignment.scope?.type
+          !== "global"
+        && !assignment.scope?.id
+      ) {
+        errors.push(
+          `Роль №${index + 1}: не вибраний об’єкт scope`
+        );
+      }
+    }
+  );
+
+  const hasDuplicate =
+    roleAssignments.some(
+      (assignment, index) => {
+        return roleAssignments.some(
+          (
+            comparedAssignment,
+            comparedIndex
+          ) => {
+            return (
+              index
+                !== comparedIndex
+              && assignment.roleId
+                === comparedAssignment.roleId
+              && assignment.scope?.type
+                === comparedAssignment.scope?.type
+              && assignment.scope?.id
+                === comparedAssignment.scope?.id
+            );
+          }
+        );
+      }
+    );
+
+  if (hasDuplicate) {
+    errors.push(
+      "Є дублікати однакових ролей у тому самому scope"
+    );
+  }
+
+  return {
+    isValid:
+      errors.length === 0,
+    errors,
+  };
+}
+
+======================================================================
+13. GUARD ДЛЯ ADMIN PAGE
+======================================================================
+
+Файл:
+
+src/features/admin-access/ui/AdminPageGuard.jsx
+
+Код:
+
+"use client";
+
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Paper,
+  Typography,
+} from "@mui/material";
+
+import { useRouter } from "next/navigation";
+
+import {
+  PERMISSIONS,
+  can,
+  useAuthStore,
+} from "@/features/auth";
+
+const ADMIN_RESOURCE = {
+  type: "global",
+  id: "admin-access",
+};
+
+export function AdminPageGuard({
+  children,
+}) {
+  const router = useRouter();
+
+  const currentUser =
+    useAuthStore(
+      (state) =>
+        state.currentUser
+    );
+
+  const isInitialized =
+    useAuthStore(
+      (state) =>
+        state.isInitialized
+    );
+
+  if (!isInitialized) {
+    return (
+      <Box
+        sx={{
+          minHeight: "50vh",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  const allowed = can(
+    currentUser,
+    PERMISSIONS.ROLE_MANAGE,
+    ADMIN_RESOURCE
+  );
+
+  if (!allowed) {
+    return (
+      <Box
+        sx={{
+          maxWidth: 720,
+          mx: "auto",
+          py: 6,
+          px: 2,
+        }}
+      >
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 4,
+          }}
+        >
+          <Alert
+            severity="error"
+            sx={{
+              mb: 3,
+            }}
+          >
+            Доступ заборонено
+          </Alert>
+
+          <Typography
+            variant="h5"
+            component="h1"
+            gutterBottom
+          >
+            У вас немає прав для
+            керування ролями
+          </Typography>
+
+          <Typography
+            color="text.secondary"
+            sx={{
+              mb: 3,
+            }}
+          >
+            Ця сторінка доступна
+            лише користувачу з
+            адміністративним дозволом
+            role.manage.
+          </Typography>
+
+          <Button
+            variant="contained"
+            onClick={() => {
+              router.push("/");
+            }}
+          >
+            На головну
+          </Button>
+        </Paper>
+      </Box>
+    );
+  }
+
+  return children;
+}
+
+ВАЖЛИВО:
+
+Guard на frontend потрібен для UX.
+Після появи backend API також має перевіряти administrator.
+
+======================================================================
+14. ПОШУК КОРИСТУВАЧА
+======================================================================
+
+Файл:
+
+src/features/admin-access/ui/UserSearch.jsx
+
+Код:
+
+"use client";
+
+import {
+  Alert,
+  Autocomplete,
+  Box,
+  Button,
+  CircularProgress,
+  TextField,
+} from "@mui/material";
+
+import {
+  useAdminAccessStore,
+} from "../model/useAdminAccessStore";
+
+export function UserSearch() {
+  const searchQuery =
+    useAdminAccessStore(
+      (state) =>
+        state.searchQuery
+    );
+
+  const searchResults =
+    useAdminAccessStore(
+      (state) =>
+        state.searchResults
+    );
+
+  const selectedUserId =
+    useAdminAccessStore(
+      (state) =>
+        state.selectedUserId
+    );
+
+  const isSearching =
+    useAdminAccessStore(
+      (state) =>
+        state.isSearching
+    );
+
+  const searchError =
+    useAdminAccessStore(
+      (state) =>
+        state.searchError
+    );
+
+  const setSearchQuery =
+    useAdminAccessStore(
+      (state) =>
+        state.setSearchQuery
+    );
+
+  const searchUsers =
+    useAdminAccessStore(
+      (state) =>
+        state.searchUsers
+    );
+
+  const selectUser =
+    useAdminAccessStore(
+      (state) =>
+        state.selectUser
+    );
+
+  const selectedOption =
+    searchResults.find(
+      (user) =>
+        user.id
+        === selectedUserId
+    ) || null;
+
+  return (
+    <Box>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: {
+            xs: "1fr",
+            md: "1fr auto",
+          },
+          gap: 2,
+          alignItems: "start",
+        }}
+      >
+        <Autocomplete
+          options={
+            searchResults
+          }
+          value={
+            selectedOption
+          }
+          loading={
+            isSearching
+          }
+          filterOptions={(options) =>
+            options
+          }
+          getOptionLabel={(
+            option
+          ) => {
+            if (!option) {
+              return "";
+            }
+
+            return (
+              `${option.name} — `
+              + option.email
+            );
+          }}
+          isOptionEqualToValue={(
+            option,
+            value
+          ) => {
+            return (
+              option.id
+              === value.id
+            );
+          }}
+          onInputChange={(
+            event,
+            value,
+            reason
+          ) => {
+            if (
+              reason === "input"
+              || reason === "clear"
+            ) {
+              setSearchQuery(value);
+            }
+          }}
+          onChange={(
+            event,
+            value
+          ) => {
+            if (value?.id) {
+              selectUser(value.id);
+            }
+          }}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label="Пошук користувача"
+              placeholder={
+                "Введіть ім’я або email"
+              }
+              value={searchQuery}
+              InputProps={{
+                ...params.InputProps,
+                endAdornment: (
+                  <>
+                    {isSearching && (
+                      <CircularProgress
+                        size={18}
+                      />
+                    )}
+
+                    {
+                      params.InputProps
+                        .endAdornment
+                    }
+                  </>
+                ),
+              }}
+            />
+          )}
+        />
+
+        <Button
+          variant="outlined"
+          disabled={isSearching}
+          onClick={searchUsers}
+          sx={{
+            minHeight: 56,
+          }}
+        >
+          Знайти
+        </Button>
+      </Box>
+
+      {searchError && (
+        <Alert
+          severity="error"
+          sx={{
+            mt: 2,
+          }}
+        >
+          {searchError}
+        </Alert>
+      )}
+    </Box>
+  );
+}
+
+Початкове завантаження 1–2 користувачів:
+
+у AdminAccessPage викликати searchUsers() при mount.
+
+======================================================================
+15. КАРТКА ПРИЗНАЧЕННЯ РОЛІ
+======================================================================
+
+Файл:
+
+src/features/admin-access/ui/RoleAssignmentCard.jsx
+
+Код:
+
+"use client";
+
+import {
+  Card,
+  CardContent,
+  Grid,
+  IconButton,
+  MenuItem,
+  TextField,
+  Tooltip,
+} from "@mui/material";
+
+import DeleteOutlineIcon
+  from "@mui/icons-material/DeleteOutline";
+
+import {
+  AVAILABLE_ROLES,
+  MOCK_DEPARTMENTS,
+  SCOPE_TYPES,
+} from "../model/constants";
+
+export function RoleAssignmentCard({
+  assignment,
+  onChange,
+  onRemove,
+}) {
+  const scopeType =
+    assignment.scope?.type
+    || "department";
+
+  const requiresScopeId =
+    scopeType !== "global";
+
+  function handleRoleChange(
+    event
+  ) {
+    onChange({
+      roleId: event.target.value,
+    });
+  }
+
+  function handleScopeTypeChange(
+    event
+  ) {
+    const nextType =
+      event.target.value;
+
+    onChange({
+      scope: {
+        type: nextType,
+        id:
+          nextType === "global"
+            ? undefined
+            : "",
+      },
+    });
+  }
+
+  function handleScopeIdChange(
+    event
+  ) {
+    onChange({
+      scope: {
+        id: event.target.value,
+      },
+    });
+  }
+
+  return (
+    <Card
+      variant="outlined"
+    >
+      <CardContent>
+        <Grid
+          container
+          spacing={2}
+          alignItems="center"
+        >
+          <Grid
+            item
+            xs={12}
+            md={3}
+          >
+            <TextField
+              select
+              fullWidth
+              label="Роль"
+              value={
+                assignment.roleId
+                || ""
+              }
+              onChange={
+                handleRoleChange
+              }
+            >
+              {
+                AVAILABLE_ROLES.map(
+                  (role) => (
+                    <MenuItem
+                      key={role.id}
+                      value={role.id}
+                    >
+                      {role.label}
+                    </MenuItem>
+                  )
+                )
+              }
+            </TextField>
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={3}
+          >
+            <TextField
+              select
+              fullWidth
+              label="Область дії"
+              value={scopeType}
+              onChange={
+                handleScopeTypeChange
+              }
+            >
+              {
+                SCOPE_TYPES.map(
+                  (scope) => (
+                    <MenuItem
+                      key={scope.id}
+                      value={scope.id}
+                    >
+                      {scope.label}
+                    </MenuItem>
+                  )
+                )
+              }
+            </TextField>
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={5}
+          >
+            {
+              scopeType
+                === "department"
+              ? (
+                <TextField
+                  select
+                  fullWidth
+                  label="Відділ"
+                  value={
+                    assignment.scope
+                      ?.id
+                    || ""
+                  }
+                  onChange={
+                    handleScopeIdChange
+                  }
+                >
+                  {
+                    MOCK_DEPARTMENTS.map(
+                      (department) => (
+                        <MenuItem
+                          key={
+                            department.id
+                          }
+                          value={
+                            department.id
+                          }
+                        >
+                          {
+                            department.name
+                          }
+                        </MenuItem>
+                      )
+                    )
+                  }
+                </TextField>
+              )
+              : (
+                <TextField
+                  fullWidth
+                  disabled={
+                    !requiresScopeId
+                  }
+                  label={
+                    requiresScopeId
+                      ? "ID ресурсу"
+                      : "Глобальний доступ"
+                  }
+                  value={
+                    assignment.scope
+                      ?.id
+                    || ""
+                  }
+                  onChange={
+                    handleScopeIdChange
+                  }
+                  placeholder={
+                    requiresScopeId
+                      ? "Введіть ID ресурсу"
+                      : ""
+                  }
+                />
+              )
+            }
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={1}
+            sx={{
+              textAlign: "right",
+            }}
+          >
+            <Tooltip
+              title="Видалити роль"
+            >
+              <IconButton
+                color="error"
+                onClick={onRemove}
+              >
+                <DeleteOutlineIcon />
+              </IconButton>
+            </Tooltip>
+          </Grid>
+        </Grid>
+      </CardContent>
+    </Card>
+  );
+}
+
+======================================================================
+16. ВИБІР PERMISSION OVERRIDES
+======================================================================
+
+Ролі повинні бути основним способом видачі доступів.
+
+Окремі permissions використовувати лише як винятки.
+
+Наприклад:
+
+- дозволити editor видалення альбому;
+- заборонити конкретному editor видалення схеми;
+- дозволити reader export PDF.
+
+Файл:
+
+src/features/admin-access/ui/PermissionSelector.jsx
+
+Код:
+
+"use client";
+
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Box,
+  Chip,
+  FormControl,
+  FormControlLabel,
+  FormLabel,
+  MenuItem,
+  Radio,
+  RadioGroup,
+  Select,
+  Stack,
+  Switch,
+  Typography,
+} from "@mui/material";
+
+import ExpandMoreIcon
+  from "@mui/icons-material/ExpandMore";
+
+import {
+  MANAGEABLE_PERMISSIONS,
+  MOCK_DEPARTMENTS,
+} from "../model/constants";
+
+function groupPermissions() {
+  return MANAGEABLE_PERMISSIONS
+    .reduce((result, item) => {
+      if (!result[item.group]) {
+        result[item.group] = [];
+      }
+
+      result[item.group].push(
+        item
+      );
+
+      return result;
+    }, {});
+}
+
+const groupedPermissions =
+  groupPermissions();
+
+export function PermissionSelector({
+  permissionOverrides,
+  onToggle,
+}) {
+  const [
+    effect,
+    setEffect,
+  ] = React.useState("allow");
+
+  const [
+    departmentId,
+    setDepartmentId,
+  ] = React.useState(
+    MOCK_DEPARTMENTS[0]?.id
+    || ""
+  );
+
+  function isSelected(
+    permission
+  ) {
+    return permissionOverrides.some(
+      (item) => {
+        return (
+          item.permission
+            === permission
+          && item.effect
+            === effect
+          && item.scope?.type
+            === "department"
+          && item.scope?.id
+            === departmentId
+        );
+      }
+    );
+  }
+
+  return (
+    <Stack spacing={3}>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: {
+            xs: "1fr",
+            md: "1fr 1fr",
+          },
+          gap: 2,
+        }}
+      >
+        <FormControl>
+          <FormLabel>
+            Тип правила
+          </FormLabel>
+
+          <RadioGroup
+            row
+            value={effect}
+            onChange={(event) => {
+              setEffect(
+                event.target.value
+              );
+            }}
+          >
+            <FormControlLabel
+              value="allow"
+              control={<Radio />}
+              label="Дозволити"
+            />
+
+            <FormControlLabel
+              value="deny"
+              control={<Radio />}
+              label="Заборонити"
+            />
+          </RadioGroup>
+        </FormControl>
+
+        <FormControl fullWidth>
+          <FormLabel
+            sx={{
+              mb: 1,
+            }}
+          >
+            Відділ
+          </FormLabel>
+
+          <Select
+            value={departmentId}
+            onChange={(event) => {
+              setDepartmentId(
+                event.target.value
+              );
+            }}
+          >
+            {
+              MOCK_DEPARTMENTS.map(
+                (department) => (
+                  <MenuItem
+                    key={department.id}
+                    value={department.id}
+                  >
+                    {department.name}
+                  </MenuItem>
+                )
+              )
+            }
+          </Select>
+        </FormControl>
+      </Box>
+
+      <Box>
+        {
+          Object.entries(
+            groupedPermissions
+          ).map(
+            ([
+              group,
+              permissions,
+            ]) => (
+              <Accordion
+                key={group}
+                disableGutters
+              >
+                <AccordionSummary
+                  expandIcon={
+                    <ExpandMoreIcon />
+                  }
+                >
+                  <Typography
+                    fontWeight={600}
+                  >
+                    {group}
+                  </Typography>
+                </AccordionSummary>
+
+                <AccordionDetails>
+                  <Stack spacing={1}>
+                    {
+                      permissions.map(
+                        (permission) => {
+                          const checked =
+                            isSelected(
+                              permission.id
+                            );
+
+                          return (
+                            <FormControlLabel
+                              key={
+                                permission.id
+                              }
+                              control={
+                                <Switch
+                                  checked={
+                                    checked
+                                  }
+                                  onChange={() => {
+                                    onToggle({
+                                      permission:
+                                        permission.id,
+
+                                      effect,
+
+                                      scope: {
+                                        type:
+                                          "department",
+                                        id:
+                                          departmentId,
+                                      },
+                                    });
+                                  }}
+                                />
+                              }
+                              label={
+                                permission.label
+                              }
+                            />
+                          );
+                        }
+                      )
+                    }
+                  </Stack>
+                </AccordionDetails>
+              </Accordion>
+            )
+          )
+        }
+      </Box>
+
+      {
+        permissionOverrides.length
+          > 0
+        && (
+          <Box>
+            <Typography
+              variant="subtitle2"
+              sx={{
+                mb: 1,
+              }}
+            >
+              Активні винятки
+            </Typography>
+
+            <Stack
+              direction="row"
+              spacing={1}
+              useFlexGap
+              flexWrap="wrap"
+            >
+              {
+                permissionOverrides.map(
+                  (item) => (
+                    <Chip
+                      key={item.id}
+                      color={
+                        item.effect
+                          === "allow"
+                          ? "success"
+                          : "error"
+                      }
+                      label={
+                        `${item.effect}: `
+                        + item.permission
+                        + " / "
+                        + (
+                          item.scope?.id
+                          || item.scope?.type
+                        )
+                      }
+                    />
+                  )
+                )
+              }
+            </Stack>
+          </Box>
+        )
+      }
+    </Stack>
+  );
+}
+
+ВАЖЛИВО:
+
+На початку файлу додати:
+
+import React from "react";
+
+======================================================================
+17. РЕДАКТОР ДОСТУПІВ КОРИСТУВАЧА
+======================================================================
+
+Файл:
+
+src/features/admin-access/ui/UserAccessEditor.jsx
+
+Код:
+
+"use client";
+
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Divider,
+  Paper,
+  Stack,
+  Tab,
+  Tabs,
+  Typography,
+} from "@mui/material";
+
+import AddIcon
+  from "@mui/icons-material/Add";
+
+import SaveIcon
+  from "@mui/icons-material/Save";
+
+import React from "react";
+
+import {
+  useAdminAccessStore,
+} from "../model/useAdminAccessStore";
+
+import {
+  validateAccessForm,
+} from "../model/validators";
+
+import {
+  RoleAssignmentCard,
+} from "./RoleAssignmentCard";
+
+import {
+  PermissionSelector,
+} from "./PermissionSelector";
+
+export function UserAccessEditor() {
+  const [
+    tab,
+    setTab,
+  ] = React.useState(0);
+
+  const [
+    validationErrors,
+    setValidationErrors,
+  ] = React.useState([]);
+
+  const selectedUser =
+    useAdminAccessStore(
+      (state) =>
+        state.selectedUser
+    );
+
+  const roleAssignments =
+    useAdminAccessStore(
+      (state) =>
+        state.roleAssignments
+    );
+
+  const permissionOverrides =
+    useAdminAccessStore(
+      (state) =>
+        state.permissionOverrides
+    );
+
+  const isLoadingUser =
+    useAdminAccessStore(
+      (state) =>
+        state.isLoadingUser
+    );
+
+  const isSaving =
+    useAdminAccessStore(
+      (state) =>
+        state.isSaving
+    );
+
+  const loadError =
+    useAdminAccessStore(
+      (state) =>
+        state.loadError
+    );
+
+  const saveError =
+    useAdminAccessStore(
+      (state) =>
+        state.saveError
+    );
+
+  const saveSuccess =
+    useAdminAccessStore(
+      (state) =>
+        state.saveSuccess
+    );
+
+  const addRoleAssignment =
+    useAdminAccessStore(
+      (state) =>
+        state.addRoleAssignment
+    );
+
+  const updateRoleAssignment =
+    useAdminAccessStore(
+      (state) =>
+        state.updateRoleAssignment
+    );
+
+  const removeRoleAssignment =
+    useAdminAccessStore(
+      (state) =>
+        state.removeRoleAssignment
+    );
+
+  const togglePermissionOverride =
+    useAdminAccessStore(
+      (state) =>
+        state.togglePermissionOverride
+    );
+
+  const saveUserAccess =
+    useAdminAccessStore(
+      (state) =>
+        state.saveUserAccess
+    );
+
+  if (isLoadingUser) {
+    return (
+      <Box
+        sx={{
+          minHeight: 240,
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <Alert severity="error">
+        {loadError}
+      </Alert>
+    );
+  }
+
+  if (!selectedUser) {
+    return (
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 4,
+          textAlign: "center",
+        }}
+      >
+        <Typography
+          variant="h6"
+          gutterBottom
+        >
+          Користувача не вибрано
+        </Typography>
+
+        <Typography
+          color="text.secondary"
+        >
+          Знайдіть і виберіть
+          користувача для налаштування
+          ролей та дозволів.
+        </Typography>
+      </Paper>
+    );
+  }
+
+  async function handleSave() {
+    const validation =
+      validateAccessForm({
+        roleAssignments,
+      });
+
+    if (!validation.isValid) {
+      setValidationErrors(
+        validation.errors
+      );
+
+      return;
+    }
+
+    setValidationErrors([]);
+
+    await saveUserAccess();
+  }
+
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        overflow: "hidden",
+      }}
+    >
+      <Box
+        sx={{
+          p: 3,
+        }}
+      >
+        <Typography
+          variant="h5"
+          component="h2"
+        >
+          {selectedUser.name}
+        </Typography>
+
+        <Typography
+          color="text.secondary"
+        >
+          {selectedUser.email}
+        </Typography>
+      </Box>
+
+      <Divider />
+
+      <Tabs
+        value={tab}
+        onChange={(
+          event,
+          value
+        ) => {
+          setTab(value);
+        }}
+        sx={{
+          px: 2,
+        }}
+      >
+        <Tab label="Ролі" />
+        <Tab label="Дозволи" />
+      </Tabs>
+
+      <Divider />
+
+      <Box
+        sx={{
+          p: 3,
+        }}
+      >
+        {
+          validationErrors.length
+            > 0
+          && (
+            <Alert
+              severity="error"
+              sx={{
+                mb: 3,
+              }}
+            >
+              <ul
+                style={{
+                  margin: 0,
+                  paddingLeft: 20,
+                }}
+              >
+                {
+                  validationErrors.map(
+                    (error) => (
+                      <li key={error}>
+                        {error}
+                      </li>
+                    )
+                  )
+                }
+              </ul>
+            </Alert>
+          )
+        }
+
+        {saveError && (
+          <Alert
+            severity="error"
+            sx={{
+              mb: 3,
+            }}
+          >
+            {saveError}
+          </Alert>
+        )}
+
+        {saveSuccess && (
+          <Alert
+            severity="success"
+            sx={{
+              mb: 3,
+            }}
+          >
+            Доступи користувача
+            збережено
+          </Alert>
+        )}
+
+        {tab === 0 && (
+          <Stack spacing={2}>
+            {
+              roleAssignments.map(
+                (assignment) => (
+                  <RoleAssignmentCard
+                    key={assignment.id}
+                    assignment={
+                      assignment
+                    }
+                    onChange={(patch) => {
+                      updateRoleAssignment(
+                        assignment.id,
+                        patch
+                      );
+                    }}
+                    onRemove={() => {
+                      removeRoleAssignment(
+                        assignment.id
+                      );
+                    }}
+                  />
+                )
+              )
+            }
+
+            {
+              roleAssignments.length
+                === 0
+              && (
+                <Alert
+                  severity="info"
+                >
+                  У користувача немає
+                  призначених ролей.
+                </Alert>
+              )
+            }
+
+            <Box>
+              <Button
+                variant="outlined"
+                startIcon={<AddIcon />}
+                onClick={
+                  addRoleAssignment
+                }
+              >
+                Додати роль
+              </Button>
+            </Box>
+          </Stack>
+        )}
+
+        {tab === 1 && (
+          <PermissionSelector
+            permissionOverrides={
+              permissionOverrides
+            }
+            onToggle={
+              togglePermissionOverride
+            }
+          />
+        )}
+      </Box>
+
+      <Divider />
+
+      <Box
+        sx={{
+          p: 2,
+          display: "flex",
+          justifyContent: "flex-end",
+        }}
+      >
+        <Button
+          variant="contained"
+          startIcon={
+            isSaving
+              ? (
+                <CircularProgress
+                  size={18}
+                  color="inherit"
+                />
+              )
+              : <SaveIcon />
+          }
+          disabled={isSaving}
+          onClick={handleSave}
+        >
+          Зберегти
+        </Button>
+      </Box>
+    </Paper>
+  );
+}
+
+======================================================================
+18. ГОЛОВНИЙ КОМПОНЕНТ СТОРІНКИ
+======================================================================
+
+Файл:
+
+src/features/admin-access/ui/AdminAccessPage.jsx
+
+Код:
+
+"use client";
+
+import React from "react";
+
+import {
+  Box,
+  Container,
+  Paper,
+  Stack,
+  Typography,
+} from "@mui/material";
+
+import {
+  useAdminAccessStore,
+} from "../model/useAdminAccessStore";
+
+import {
+  UserSearch,
+} from "./UserSearch";
+
+import {
+  UserAccessEditor,
+} from "./UserAccessEditor";
+
+export function AdminAccessPage() {
+  const searchUsers =
+    useAdminAccessStore(
+      (state) =>
+        state.searchUsers
+    );
+
+  const reset =
+    useAdminAccessStore(
+      (state) =>
+        state.reset
+    );
+
+  React.useEffect(() => {
+    searchUsers();
+
+    return () => {
+      reset();
+    };
+  }, [
+    searchUsers,
+    reset,
+  ]);
+
+  return (
+    <Container
+      maxWidth="xl"
+      sx={{
+        py: 4,
+      }}
+    >
+      <Stack spacing={3}>
+        <Box>
+          <Typography
+            variant="h4"
+            component="h1"
+            gutterBottom
+          >
+            Керування доступами
+          </Typography>
+
+          <Typography
+            color="text.secondary"
+          >
+            Пошук користувачів,
+            призначення ролей і
+            налаштування індивідуальних
+            дозволів.
+          </Typography>
+        </Box>
+
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 3,
+          }}
+        >
+          <UserSearch />
+        </Paper>
+
+        <UserAccessEditor />
+      </Stack>
+    </Container>
+  );
+}
+
+======================================================================
+19. PUBLIC API FEATURE
+======================================================================
+
+Файл:
+
+src/features/admin-access/index.js
+
+Код:
+
+export {
+  AdminAccessPage,
+} from "./ui/AdminAccessPage";
+
+export {
+  AdminPageGuard,
+} from "./ui/AdminPageGuard";
+
+export {
+  UserSearch,
+} from "./ui/UserSearch";
+
+export {
+  UserAccessEditor,
+} from "./ui/UserAccessEditor";
+
+export {
+  useAdminAccessStore,
+} from "./model/useAdminAccessStore";
+
+======================================================================
+20. NEXT.JS APP ROUTER PAGE
+======================================================================
+
+Файл:
+
+src/app/admin/access/page.jsx
+
+Код:
+
+import {
+  AdminAccessPage,
+  AdminPageGuard,
+} from "@/features/admin-access";
+
+export const metadata = {
+  title:
+    "Керування доступами",
+};
+
+export default function Page() {
+  return (
+    <AdminPageGuard>
+      <AdminAccessPage />
+    </AdminPageGuard>
+  );
+}
+
+Якщо сторінка використовує лише client components,
+page.jsx може залишатися server component,
+оскільки дочірні компоненти вже мають "use client".
+
+======================================================================
+21. ПУНКТ У HEADER / ADMIN MENU
+======================================================================
+
+У header пункт адміністрування також показувати через permission.
+
+Приклад:
+
+"use client";
+
+import {
+  MenuItem,
+} from "@mui/material";
+
+import { useRouter }
+  from "next/navigation";
+
+import {
+  PERMISSIONS,
+  useCan,
+} from "@/features/auth";
+
+const ADMIN_RESOURCE = {
+  type: "global",
+  id: "admin-access",
+};
+
+export function AdminAccessMenuItem() {
+  const router = useRouter();
+
+  const allowed = useCan(
+    PERMISSIONS.ROLE_MANAGE,
+    ADMIN_RESOURCE
+  );
+
+  if (!allowed) {
+    return null;
+  }
+
+  return (
+    <MenuItem
+      onClick={() => {
+        router.push(
+          "/admin/access"
+        );
+      }}
+    >
+      Керування доступами
+    </MenuItem>
+  );
+}
+
+======================================================================
+22. BACKEND API В МАЙБУТНЬОМУ
+======================================================================
+
+Після підключення БД додати API:
+
+GET /api/admin/users?search=...
+GET /api/admin/users/:id/access
+PUT /api/admin/users/:id/access
+
+Приклад repository:
+
+Файл:
+
+src/features/admin-access/api/apiAdminAccessRepository.js
+
+Код:
+
+async function parseResponse(
+  response
+) {
+  if (!response.ok) {
+    const errorData =
+      await response.json()
+        .catch(() => null);
+
+    throw new Error(
+      errorData?.message
+      || "Помилка API"
+    );
+  }
+
+  return response.json();
+}
+
+export const apiAdminAccessRepository = {
+  async searchUsers(query) {
+    const params =
+      new URLSearchParams();
+
+    if (query) {
+      params.set(
+        "search",
+        query
+      );
+    }
+
+    const response =
+      await fetch(
+        `/api/admin/users?${params}`,
+        {
+          method: "GET",
+          credentials: "include",
+        }
+      );
+
+    return parseResponse(
+      response
+    );
+  },
+
+  async getUserAccess(userId) {
+    const response =
+      await fetch(
+        `/api/admin/users/${userId}/access`,
+        {
+          method: "GET",
+          credentials: "include",
+        }
+      );
+
+    return parseResponse(
+      response
+    );
+  },
+
+  async saveUserAccess(
+    userId,
+    accessData
+  ) {
+    const response =
+      await fetch(
+        `/api/admin/users/${userId}/access`,
+        {
+          method: "PUT",
+          credentials: "include",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify(
+            accessData
+          ),
+        }
+      );
+
+    return parseResponse(
+      response
+    );
+  },
+};
+
+У api/index.js:
+
+import {
+  apiAdminAccessRepository,
+} from "./apiAdminAccessRepository";
+
+export const adminAccessApi =
+  apiAdminAccessRepository;
+
+======================================================================
+23. ПЕРЕВІРКА НА SERVER
+======================================================================
+
+Frontend guard не є достатнім.
+
+Кожен admin endpoint повинен:
+
+1. отримати користувача із server session;
+2. перевірити його роль/permission;
+3. відхилити запит із 403, якщо немає role.manage;
+4. не довіряти currentUser із Zustand;
+5. перевірити дані roleAssignments;
+6. виконати транзакцію в БД;
+7. записати audit log.
+
+Умовний server helper:
+
+export async function assertAdministrator(
+  sessionUser
+) {
+  const allowed =
+    await serverCan(
+      sessionUser.id,
+      "role.manage",
+      {
+        type: "global",
+      }
+    );
+
+  if (!allowed) {
+    const error =
+      new Error(
+        "Forbidden"
+      );
+
+    error.status = 403;
+
+    throw error;
+  }
+}
+
+======================================================================
+24. РЕКОМЕНДОВАНА МОДЕЛЬ БД
+======================================================================
+
+users
+- id
+- name
+- email
+- status
+
+roles
+- id
+- code
+- name
+
+permissions
+- id
+- code
+- name
+
+role_permissions
+- role_id
+- permission_id
+
+user_role_assignments
+- id
+- user_id
+- role_id
+- scope_type
+- scope_id
+- created_by
+- created_at
+- updated_at
+
+permission_overrides
+- id
+- user_id
+- permission_id
+- effect
+- scope_type
+- scope_id
+- created_by
+- created_at
+
+audit_logs
+- id
+- actor_user_id
+- target_user_id
+- action
+- resource_type
+- resource_id
+- before_data
+- after_data
+- created_at
+
+======================================================================
+25. ФОРМАТ ЗАПИТУ НА ЗБЕРЕЖЕННЯ
+======================================================================
+
+PUT /api/admin/users/user-1/access
+
+Body:
+
+{
+  "roleAssignments": [
+    {
+      "id": "assignment-1",
+      "roleId": "editor",
+      "scope": {
+        "type": "department",
+        "id": "dep-electric"
+      }
+    },
+    {
+      "id": "assignment-3",
+      "roleId": "reader",
+      "scope": {
+        "type": "department",
+        "id": "dep-water"
+      }
+    }
+  ],
+
+  "permissionOverrides": [
+    {
+      "id": "override-10",
+      "permission":
+        "scheme.delete",
+      "effect": "deny",
+      "scope": {
+        "type": "department",
+        "id": "dep-electric"
+      }
+    }
+  ]
+}
+
+======================================================================
+26. БЕЗПЕКА ВИДАЧІ ADMINISTRATOR
+======================================================================
+
+Окремо рекомендується обмежити видачу administrator.
+
+Не кожен administrator обов’язково повинен мати право
+призначати інших administrator.
+
+Можна додати permission:
+
+role.assignAdministrator
+
+Тоді:
+
+- role.manage дозволяє видавати reader/editor;
+- role.assignAdministrator дозволяє видавати administrator.
+
+У RoleAssignmentCard:
+
+const canAssignAdministrator =
+  useCan(
+    PERMISSIONS
+      .ROLE_ASSIGN_ADMINISTRATOR,
+    ADMIN_RESOURCE
+  );
+
+AVAILABLE_ROLES.filter(
+  (role) => {
+    if (
+      role.id
+        !== "administrator"
+    ) {
+      return true;
+    }
+
+    return canAssignAdministrator;
+  }
+);
+
+На backend ця перевірка обов’язкова.
+
+======================================================================
+27. UX-РЕКОМЕНДАЦІЇ
+======================================================================
+
+1. Перед збереженням показувати попередження,
+   якщо користувачу видається administrator.
+
+2. Для critical roles можна додати Dialog підтвердження.
+
+3. Permission overrides показувати окремо від ролей,
+   щоб користувач не плутав базові ролі та винятки.
+
+4. Використовувати deny дуже обережно.
+
+5. Не дозволяти дублікати однакових role assignments.
+
+6. Показувати effective permissions окремою read-only вкладкою.
+
+7. Показувати, звідки permission отримано:
+   role / position / override.
+
+8. Після збереження оновлювати auth session користувача
+   або інвалідовувати permission cache.
+
+======================================================================
+28. МОЖЛИВЕ РОЗШИРЕННЯ: EFFECTIVE PERMISSIONS
+======================================================================
+
+Можна додати третю вкладку:
+
+- Ролі;
+- Дозволи;
+- Підсумковий доступ.
+
+Підсумковий доступ обчислює:
+
+role permissions
++
+position permissions
++
+allow overrides
+-
+deny overrides
+
+Приклад:
+
+export function calculateEffectivePermissions({
+  roleAssignments,
+  permissionOverrides,
+  resource,
+}) {
+  const permissions =
+    new Set();
+
+  // 1. Додати permissions ролей.
+  // 2. Додати allow overrides.
+  // 3. Видалити deny overrides.
+  // 4. Повернути масив.
+}
+
+======================================================================
+29. МІНІМАЛЬНИЙ ПОРЯДОК ВПРОВАДЖЕННЯ
+======================================================================
+
+ЕТАП 1
+
+Додати permissions:
+
+user.view
+user.manage
+role.view
+role.manage
+permission.manage
+
+ЕТАП 2
+
+Додати mock users.
+
+ЕТАП 3
+
+Додати mockAdminAccessRepository.
+
+ЕТАП 4
+
+Додати useAdminAccessStore.
+
+ЕТАП 5
+
+Додати AdminPageGuard.
+
+ЕТАП 6
+
+Додати UserSearch.
+
+ЕТАП 7
+
+Додати UserAccessEditor.
+
+ЕТАП 8
+
+Додати RoleAssignmentCard.
+
+ЕТАП 9
+
+Додати PermissionSelector.
+
+ЕТАП 10
+
+Створити:
+
+/admin/access
+
+ЕТАП 11
+
+Додати пункт у header лише для administrator.
+
+ЕТАП 12
+
+Після появи backend замінити repository.
+
+======================================================================
+30. ПІДСУМКОВА АРХІТЕКТУРА
+======================================================================
+
+App Router Page
+  ↓
+AdminPageGuard
+  ↓
+can(
+  currentUser,
+  role.manage,
+  globalResource
+)
+  ↓
+AdminAccessPage
+  ├── UserSearch
+  └── UserAccessEditor
+        ├── RoleAssignmentCard
+        └── PermissionSelector
+  ↓
+useAdminAccessStore
+  ↓
+adminAccessApi
+  ↓
+mockAdminAccessRepository
+  ↓
+у майбутньому API + БД
+
+======================================================================
+31. ГОЛОВНА РЕКОМЕНДАЦІЯ
+======================================================================
+
+UI не повинен напряму працювати з MOCK_USERS.
+
+UI працює тільки через adminAccessApi.
+
+Зараз:
+
+adminAccessApi =
+  mockAdminAccessRepository
+
+Пізніше:
+
+adminAccessApi =
+  apiAdminAccessRepository
+
+Завдяки цьому:
+
+- сторінка не змінюється;
+- MUI-компоненти не змінюються;
+- Zustand store майже не змінюється;
+- змінюється лише джерело даних;
+- логіка готова до БД;
+- FSD залишається збереженим;
+- доступ до сторінки централізовано захищений.
