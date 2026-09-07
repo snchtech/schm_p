@@ -1,0 +1,7355 @@
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 6
+// ПУНКТ 9 REFINEMENT:
+// ортогональне редагування branch + endpoint handle + insert/delete vertex
+// + snap to grid + SVG sync
+// ============================================================================
+//
+// ДОДАНО:
+// 1. Жорстке збереження ортогональності branch.
+// 2. Drag vertex без появи діагональних сегментів.
+// 3. Draggable endpoint handle.
+// 4. Double click по segment -> insert bend.
+// 5. Delete selected vertex.
+// 6. Snap до сітки.
+// 7. Нормалізація зайвих/колінеарних точок.
+// 8. Selected branch vertex state.
+// 9. SVG export використовує ту саму normalized geometry.
+// 10. Підготовлено keyboard delete та context-menu actions.
+//
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 5
+// ПУНКТ 9: групове підключення ЗВТ + глобальне керування realtime
+// ============================================================================
+//
+// ДОДАНО ДО ПУНКТУ 8:
+// - глобальне керування realtime на рівні схеми;
+// - окремо: "отримувати realtime" і "показувати realtime на Canvas";
+// - індивідуальний showOnCanvas ЗВТ зберігається;
+// - глобальний перемикач НЕ змінює налаштування кожного ЗВТ.
+//
+// ПУНКТ 9:
+// - окрема сутність zvtBranches[];
+// - кожна групова магістраль ОБОВ'ЯЗКОВО має root attachedTo node або edge;
+// - ламана ортогональна;
+// - декілька ЗВТ підключаються короткими відгалуженнями до однієї магістралі;
+// - ZVT може бути direct або branch member;
+// - direct leader для branch member не малюється;
+// - branch route та member taps серіалізуються;
+// - підготовлено controller/store/layer/context-menu;
+// - передбачено ручне редагування вершин магістралі.
+//
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 4
+// ПУНКТ 8: підготовка Інформаційної картки, Каталогу та realtime/WebSocket
+// ============================================================================
+//
+// АРХІТЕКТУРНЕ РІШЕННЯ:
+// persisted configuration != runtime telemetry.
+//
+// У JSON діаграми зберігаємо тільки:
+// - catalog.itemId / equipmentId;
+// - telemetry.sensorId;
+// - налаштування каналу, unit, precision, staleAfterMs;
+// - чи показувати realtime value на Canvas.
+//
+// Поточне realtime значення НЕ зберігаємо в JSON.
+// Воно живе окремо в Zustand: zvtRuntimeById.
+//
+// Це дозволяє:
+// - безпечно save/load схему;
+// - не записувати застарілі значення;
+// - змінити WebSocket/API без зміни графічної моделі;
+// - у майбутньому завантажувати Інформаційну картку з БД/Каталогу.
+//
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 3
+// ПУНКТ 6: точне приєднання до node + сторона приєднання
+// ============================================================================
+//
+// РЕАЛІЗОВАНО:
+// 1. sourceSide: auto / top / bottom / left / right.
+// 2. symbolSide: auto / top / bottom / left / right.
+// 3. Точка node anchor проєктується точно на межу node.
+// 4. Підтримано node.positionOrigin = "center".
+// 5. Підтримано точні node.connectionAnchors для складних фігур.
+// 6. Ортогональна лінія має source stub та symbol stub.
+// 7. При drag node anchor перераховується з актуальних nodes[].
+// 8. При фіксованій стороні drag ЗВТ не перемикає сторону node.
+// 9. У ZvtLayer додано marker фактичної точки anchor для selected ZVT.
+// 10. Canvas та SVG використовують однакову route geometry.
+// 11. Старий route.preferredSide підтримується для сумісності.
+//
+// УВАЖНО ПРОЧИТАТИ блок:
+// STEP 3 — ОБОВ'ЯЗКОВА ІНТЕГРАЦІЙНА ПЕРЕВІРКА NODE GEOMETRY
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 2
+// Графічні умовні позначення виду вимірюваного параметру
+// ============================================================================
+//
+// ДОДАНО:
+// - F: мале коло + вертикальна ніжка + риска з двома короткими штрихами;
+// - P: мале коло + вертикальна ніжка + одна нижня риска;
+// - L: мале коло + горизонтальна ніжка + прапорець;
+// - T: мале коло + вертикальна ніжка + дві паралельні нижні риски;
+// - ae / pH: мале коло + вертикальна ніжка + нижня риска;
+// - графічний знак автоматично залежить від вибраного parameter;
+// - літера F/P/L/T/ae/pH продовжує відображатися всередині основного кола ЗВТ;
+// - додано showParameterGraphicMark;
+// - додано parameterGraphicScale;
+// - Canvas та SVG export використовують ту саму семантику.
+//
+// ПРИМІТКА:
+// Геометрія символів відтворена за наданим скріншотом 1.
+// Якщо нормативний еталон має точні розміри/відступи, їх можна винести
+// в окремий словник ZVT_PARAMETER_GRAPHIC_STYLES без зміни моделі даних.
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE — STEP 1
+// Оновлення символьних позначень, режиму "за місцем", M/custom,
+// знаку +/- та базових розмірів символу
+// ============================================================================
+//
+// Реалізовано на цьому кроці:
+// 1) Виправлено формування виду вимірюваного параметру.
+// 2) Для адресата можна обрати M1..M6 або власний текст замість M.
+// 3) + / - можна показувати перед або після M / власного напису.
+// 4) Для installPlace="local" відображаються і функціональна ознака,
+//    і вид параметру, але без горизонтальної лінії.
+// 5) Додано цифрові індекси parameterSuffix та functionSuffix.
+// 6) Зменшено дефолтний radius до 22.
+// 7) Додано style.arrowSize і style.signalLength.
+// 8) Canvas і SVG renderer використовують однакову логіку.
+//
+// ВАЖЛИВО:
+// Старі JSON залишаються сумісними: нові поля мають fallback-значення.
+// ============================================================================
+
+// ============================================================================
+// ZVT FEATURE PACKAGE
+// Next.js + React Konva + MUI + Zustand
+// ============================================================================
+// PURPOSE:
+// Готовий стартовий пакет для реалізації графічного елементу ЗВТ:
+// - окрема сутність zvts[] на рівні store
+// - форма створення/редагування через MUI Dialog
+// - прив'язка до node або edge/connector
+// - ортогональна лінія приєднання
+// - рендер символу ЗВТ на Konva canvas
+// - drag символу
+// - context menu item "Додати ЗВТ"
+// - JSON serialization-ready структура
+// - PDF/SVG export-ready модель
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtDictionaries.js
+// ============================================================================
+
+export const ZVT_INSTALL_PLACES = [
+  {
+    value: "local",
+    label: "За місцем",
+    description: "Коло без горизонтальної лінії",
+    hasDivider: false,
+  },
+  {
+    value: "BTY",
+    label: "BTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+  {
+    value: "MTY",
+    label: "MTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+  {
+    value: "RTY",
+    label: "RTY",
+    description: "Коло з горизонтальною лінією",
+    hasDivider: true,
+  },
+];
+
+export const ZVT_PARAMETERS = [
+  {
+    value: "F",
+    label: "F — витрата",
+    graphicMark: "flow",
+  },
+  {
+    value: "P",
+    label: "P — тиск",
+    graphicMark: "pressure",
+  },
+  {
+    value: "L",
+    label: "L — рівень",
+    graphicMark: "level",
+  },
+  {
+    value: "T",
+    label: "T — температура",
+    graphicMark: "temperature",
+  },
+  {
+    value: "ae",
+    label: "ae — електропровідність",
+    graphicMark: "conductivity",
+  },
+  {
+    value: "pH",
+    label: "pH — pH середовища",
+    graphicMark: "conductivity",
+  },
+];
+
+export const ZVT_FUNCTION_SIGNS = [
+  { value: "A", label: "A — сигналізація" },
+  { value: "B", label: "B — режимні блокування" },
+  { value: "C", label: "C — регулювання" },
+  { value: "F", label: "F — блокування" },
+  { value: "J", label: "J — покази на стрілочних приладах" },
+  { value: "R", label: "R — реєстрація на записуючих приладах" },
+  { value: "S", label: "S — захисти" },
+];
+
+export const ZVT_SIGNAL_DIRECTIONS = [
+  { value: "none", label: "Не передається" },
+  { value: "left", label: "Вліво" },
+  { value: "right", label: "Вправо" },
+];
+
+export const ZVT_RECIPIENTS = [
+  { value: "1", label: "1 — дисплей" },
+  { value: "2", label: "2 — сигналізація" },
+  { value: "3", label: "3 — розрахунки" },
+  { value: "4", label: "4 — реєстрація періодична" },
+  { value: "5", label: "5 — реєстрація відхилень" },
+  { value: "6", label: "6 — реєстрація дискретних сигналів" },
+];
+
+export const ZVT_ACTION_SIGNS = [
+  { value: "none", label: "Без позначення" },
+  { value: "+", label: "+" },
+  { value: "-", label: "-" },
+];
+
+export const ZVT_ACTION_SIGN_POSITIONS = [
+  { value: "before", label: "Перед M / написом" },
+  { value: "after", label: "Після M / напису" },
+];
+
+export const ZVT_RECIPIENT_LABEL_MODES = [
+  { value: "M", label: "Стандартне позначення M" },
+  { value: "custom", label: "Власний напис" },
+];
+
+export const ZVT_CONNECTION_SIDES = [
+  { value: "auto", label: "Автоматично" },
+  { value: "top", label: "Верх" },
+  { value: "bottom", label: "Низ" },
+  { value: "left", label: "Ліво" },
+  { value: "right", label: "Право" },
+];
+
+export const ZVT_SYMBOL_CONNECTION_SIDES = [
+  { value: "auto", label: "Автоматично" },
+  { value: "top", label: "Верх кружечка ЗВТ" },
+  { value: "bottom", label: "Низ кружечка ЗВТ" },
+  { value: "left", label: "Ліва сторона кружечка ЗВТ" },
+  { value: "right", label: "Права сторона кружечка ЗВТ" },
+];
+
+export function getZvtInstallPlace(value) {
+  return ZVT_INSTALL_PLACES.find((item) => item.value === value) || ZVT_INSTALL_PLACES[0];
+}
+
+export function getZvtParameterLabel(value) {
+  return ZVT_PARAMETERS.find((item) => item.value === value)?.label || value;
+}
+
+export function getZvtParameter(value) {
+  return ZVT_PARAMETERS.find((item) => item.value === value) || ZVT_PARAMETERS[0];
+}
+
+export function getZvtParameterGraphicMark(value) {
+  return getZvtParameter(value)?.graphicMark || "pressure";
+}
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtModel.js
+// ============================================================================
+
+export function createZvt({
+  id = crypto.randomUUID(),
+  attachedTo,
+  anchor = {},
+  position = {},
+  data = {},
+  route = {},
+  style = {},
+  integration = {},
+} = {}) {
+  return {
+    id,
+    kind: "zvt",
+
+    attachedTo: attachedTo || {
+      type: "none",
+      id: null,
+      segmentId: null,
+    },
+
+    anchor: {
+      x: anchor.x ?? 0,
+      y: anchor.y ?? 0,
+      side: anchor.side ?? null,
+    },
+
+    position: {
+      x: position.x ?? 0,
+      y: position.y ?? 0,
+    },
+
+    route: {
+      type: route.type || "orthogonal",
+      vertices: Array.isArray(route.vertices) ? route.vertices : [],
+
+      sourceSide:
+        route.sourceSide ||
+        route.preferredSide ||
+        "auto",
+
+      symbolSide: route.symbolSide || "auto",
+      sourceOffset: route.sourceOffset ?? 18,
+      symbolOffset: route.symbolOffset ?? 12,
+
+      preferredSide:
+        route.preferredSide ||
+        route.sourceSide ||
+        "auto",
+    },
+
+    data: {
+      installPlace: data.installPlace || "local",
+
+      parameter: data.parameter || "F",
+      showParameterGraphicMark:
+        data.showParameterGraphicMark ?? true,
+      parameterSuffix: data.parameterSuffix || "",
+
+      functionSigns: Array.isArray(data.functionSigns)
+        ? data.functionSigns
+        : [],
+      functionSuffix: data.functionSuffix || "",
+
+      signal: {
+        enabled: data.signal?.enabled ?? false,
+        direction:
+          data.signal?.direction || "right",
+      },
+
+      recipients: Array.isArray(data.recipients)
+        ? data.recipients
+        : [],
+
+      recipientLabelMode:
+        data.recipientLabelMode || "M",
+
+      recipientCustomText:
+        data.recipientCustomText || "",
+
+      actionSign:
+        data.actionSign || "none",
+
+      actionSignPosition:
+        data.actionSignPosition || "before",
+
+      tag: data.tag || "",
+      comment: data.comment || "",
+    },
+
+    /**
+     * Persisted integration configuration.
+     *
+     * Тут НЕ повинно бути поточного value/timestamp/quality.
+     * Поточна телеметрія зберігається у zvtRuntimeById.
+     */
+    integration: {
+      catalog: {
+        // Первинний ключ запису Каталогу / БД.
+        itemId:
+          integration.catalog?.itemId ?? "",
+
+        // Необов'язковий технічний ID обладнання,
+        // якщо Каталог і обладнання матимуть різні ключі.
+        equipmentId:
+          integration.catalog?.equipmentId ?? "",
+      },
+
+      telemetry: {
+        enabled:
+          integration.telemetry?.enabled ?? false,
+
+        // Ідентифікатор датчика, який задає користувач.
+        sensorId:
+          integration.telemetry?.sensorId ?? "",
+
+        // Поле payload WebSocket, з якого брати значення.
+        valueField:
+          integration.telemetry?.valueField || "value",
+
+        // Необов'язково: окреме поле timestamp у payload.
+        timestampField:
+          integration.telemetry?.timestampField || "timestamp",
+
+        // Необов'язково: поле якості даних.
+        qualityField:
+          integration.telemetry?.qualityField || "quality",
+
+        // Одиниця вимірювання для Canvas/Info Card.
+        unit:
+          integration.telemetry?.unit || "",
+
+        precision:
+          Number.isFinite(integration.telemetry?.precision)
+            ? integration.telemetry.precision
+            : 2,
+
+        // Через скільки мс значення вважаємо stale.
+        staleAfterMs:
+          Number.isFinite(integration.telemetry?.staleAfterMs)
+            ? integration.telemetry.staleAfterMs
+            : 15000,
+
+        // Чи показувати значення безпосередньо біля ЗВТ.
+        showOnCanvas:
+          integration.telemetry?.showOnCanvas ?? false,
+      },
+    },
+
+    style: {
+      radius: style.radius ?? 22,
+      stroke: style.stroke || "black",
+      strokeWidth: style.strokeWidth ?? 2,
+      fill: style.fill || "white",
+      fontFamily:
+        style.fontFamily || "Roboto Condensed",
+      fontSize: style.fontSize ?? 13,
+      smallFontSize: style.smallFontSize ?? 12,
+      selectedStroke:
+        style.selectedStroke || "#2F80ED",
+
+      arrowSize: style.arrowSize ?? 8,
+      signalLength: style.signalLength ?? 82,
+      parameterGraphicScale:
+        style.parameterGraphicScale ?? 1,
+
+      // Realtime label.
+      realtimeFontSize:
+        style.realtimeFontSize ?? 12,
+      realtimeOffsetY:
+        style.realtimeOffsetY ?? 10,
+    },
+
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+export function updateZvtData(
+  zvt,
+  nextData,
+  nextStyle = null,
+  nextRoute = null,
+  nextIntegration = null
+) {
+  return {
+    ...zvt,
+
+    data: {
+      ...zvt.data,
+      ...nextData,
+      signal: {
+        ...zvt.data?.signal,
+        ...nextData?.signal,
+      },
+    },
+
+    style: nextStyle
+      ? {
+          ...zvt.style,
+          ...nextStyle,
+        }
+      : zvt.style,
+
+    route: nextRoute
+      ? {
+          ...zvt.route,
+          ...nextRoute,
+          preferredSide:
+            nextRoute.sourceSide ??
+            nextRoute.preferredSide ??
+            zvt.route?.preferredSide ??
+            "auto",
+        }
+      : zvt.route,
+
+    integration: nextIntegration
+      ? {
+          ...zvt.integration,
+
+          catalog: {
+            ...zvt.integration?.catalog,
+            ...nextIntegration.catalog,
+          },
+
+          telemetry: {
+            ...zvt.integration?.telemetry,
+            ...nextIntegration.telemetry,
+          },
+        }
+      : zvt.integration,
+
+    updatedAt: Date.now(),
+  };
+}
+
+export function moveZvt(zvt, position) {
+  return {
+    ...zvt,
+    position: {
+      x: position.x,
+      y: position.y,
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+
+// FILE: src/lib/zvt/zvtGeometry.js
+// ============================================================================
+
+const VALID_SIDES = new Set(["top", "bottom", "left", "right"]);
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function isValidSide(side) {
+  return VALID_SIDES.has(side);
+}
+
+function sideVector(side) {
+  switch (side) {
+    case "top":
+      return { x: 0, y: -1 };
+    case "bottom":
+      return { x: 0, y: 1 };
+    case "left":
+      return { x: -1, y: 0 };
+    case "right":
+      return { x: 1, y: 0 };
+    default:
+      return { x: 0, y: 0 };
+  }
+}
+
+/**
+ * Канонічні bounds node.
+ *
+ * Пріоритет:
+ * 1. node.geometry.bounds
+ * 2. node.bounds
+ * 3. node.position + node.size
+ * 4. node.x/y + node.width/height
+ *
+ * Якщо у твоєму NodesLayer position є ЦЕНТРОМ, а не top-left,
+ * вистав node.positionOrigin = "center".
+ *
+ * Це прибирає типову причину зміщеного anchor:
+ * різне трактування node.position у NodesLayer і ZVT geometry.
+ */
+export function getZvtNodeBounds(node) {
+  const explicit =
+    node?.geometry?.bounds ||
+    node?.bounds ||
+    null;
+
+  if (explicit) {
+    const x = explicit.x ?? explicit.left ?? 0;
+    const y = explicit.y ?? explicit.top ?? 0;
+    const width =
+      explicit.width ??
+      ((explicit.right ?? x) - x) ??
+      120;
+    const height =
+      explicit.height ??
+      ((explicit.bottom ?? y) - y) ??
+      60;
+
+    return {
+      x,
+      y,
+      width,
+      height,
+      left: x,
+      top: y,
+      right: x + width,
+      bottom: y + height,
+      centerX: x + width / 2,
+      centerY: y + height / 2,
+    };
+  }
+
+  const width = node?.size?.width ?? node?.width ?? 120;
+  const height = node?.size?.height ?? node?.height ?? 60;
+
+  let x = node?.position?.x ?? node?.x ?? 0;
+  let y = node?.position?.y ?? node?.y ?? 0;
+
+  if (node?.positionOrigin === "center") {
+    x -= width / 2;
+    y -= height / 2;
+  }
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    left: x,
+    top: y,
+    right: x + width,
+    bottom: y + height,
+    centerX: x + width / 2,
+    centerY: y + height / 2,
+  };
+}
+
+/**
+ * Якщо node вже має свої точні anchors — використовуємо їх.
+ *
+ * Підтримувані варіанти:
+ *
+ * node.connectionAnchors = {
+ *   top: { x, y },
+ *   bottom: { x, y },
+ *   left: { x, y },
+ *   right: { x, y },
+ * }
+ *
+ * або node.anchors з такою самою структурою.
+ *
+ * Це найкращий варіант для НЕпрямокутних node:
+ * circle, valve, custom SVG, складна Konva-фігура тощо.
+ */
+function getExplicitNodeAnchor(node, side) {
+  const anchors = node?.connectionAnchors || node?.anchors;
+  const point = anchors?.[side];
+
+  if (
+    point &&
+    Number.isFinite(point.x) &&
+    Number.isFinite(point.y)
+  ) {
+    return {
+      x: point.x,
+      y: point.y,
+      side,
+    };
+  }
+
+  return null;
+}
+
+function getNearestNodeSide(bounds, target) {
+  const candidates = [
+    {
+      side: "left",
+      d: Math.abs(target.x - bounds.left),
+    },
+    {
+      side: "right",
+      d: Math.abs(target.x - bounds.right),
+    },
+    {
+      side: "top",
+      d: Math.abs(target.y - bounds.top),
+    },
+    {
+      side: "bottom",
+      d: Math.abs(target.y - bounds.bottom),
+    },
+  ];
+
+  candidates.sort((a, b) => a.d - b.d);
+  return candidates[0].side;
+}
+
+/**
+ * Точка на ФАКТИЧНОМУ краї прямокутних bounds.
+ *
+ * Для left/right проєктуємо y символу на вертикальну сторону.
+ * Для top/bottom проєктуємо x символу на горизонтальну сторону.
+ *
+ * Тому лінія не "стрибає" в центр сторони і не виглядає зміщеною.
+ */
+function projectPointToNodeSide(bounds, side, target) {
+  switch (side) {
+    case "left":
+      return {
+        x: bounds.left,
+        y: clamp(target.y, bounds.top, bounds.bottom),
+        side,
+      };
+
+    case "right":
+      return {
+        x: bounds.right,
+        y: clamp(target.y, bounds.top, bounds.bottom),
+        side,
+      };
+
+    case "top":
+      return {
+        x: clamp(target.x, bounds.left, bounds.right),
+        y: bounds.top,
+        side,
+      };
+
+    case "bottom":
+      return {
+        x: clamp(target.x, bounds.left, bounds.right),
+        y: bounds.bottom,
+        side,
+      };
+
+    default:
+      return {
+        x: bounds.centerX,
+        y: bounds.centerY,
+        side: null,
+      };
+  }
+}
+
+function getEdgeCenter(edge) {
+  const points = edge?.geometry?.points || [];
+
+  if (points.length >= 4) {
+    const middleIndex = Math.max(
+      0,
+      Math.floor(points.length / 4) * 2 - 2
+    );
+
+    const x1 = points[middleIndex] ?? points[0];
+    const y1 = points[middleIndex + 1] ?? points[1];
+    const x2 = points[middleIndex + 2] ?? points[points.length - 2];
+    const y2 = points[middleIndex + 3] ?? points[points.length - 1];
+
+    return {
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+    };
+  }
+
+  return {
+    x: edge?.geometry?.start?.x ?? edge?.start?.x ?? 0,
+    y: edge?.geometry?.start?.y ?? edge?.start?.y ?? 0,
+  };
+}
+
+function getEdgeSegmentCenter(edge, segmentId) {
+  const segment = edge?.geometry?.segmentsMeta?.find(
+    (seg) => seg.id === segmentId
+  );
+
+  if (!segment) return getEdgeCenter(edge);
+
+  return {
+    x: (segment.x1 + segment.x2) / 2,
+    y: (segment.y1 + segment.y2) / 2,
+  };
+}
+
+/**
+ * Визначає anchor ЗВТ.
+ *
+ * NODE:
+ * - route.sourceSide = auto => найближча сторона;
+ * - route.sourceSide = top/bottom/left/right => чітко задана сторона.
+ *
+ * EDGE:
+ * - поточна логіка segmentId/center збережена.
+ */
+export function resolveZvtAnchor(zvt, nodes = [], edges = []) {
+  if (!zvt?.attachedTo) {
+    return {
+      x: zvt?.anchor?.x ?? 0,
+      y: zvt?.anchor?.y ?? 0,
+      side: zvt?.anchor?.side ?? null,
+    };
+  }
+
+  if (zvt.attachedTo.type === "node") {
+    const node = nodes.find(
+      (item) => item.id === zvt.attachedTo.id
+    );
+
+    if (!node) {
+      return zvt.anchor || {
+        x: 0,
+        y: 0,
+        side: null,
+      };
+    }
+
+    const bounds = getZvtNodeBounds(node);
+    const target = zvt.position || {
+      x: bounds.centerX + 100,
+      y: bounds.centerY,
+    };
+
+    const requestedSide =
+      zvt.route?.sourceSide ||
+      zvt.route?.preferredSide ||
+      "auto";
+
+    const resolvedSide = isValidSide(requestedSide)
+      ? requestedSide
+      : getNearestNodeSide(bounds, target);
+
+    // Для складних фігур NodesLayer може дати точний anchor.
+    const explicitAnchor = getExplicitNodeAnchor(
+      node,
+      resolvedSide
+    );
+
+    if (explicitAnchor) {
+      return explicitAnchor;
+    }
+
+    return projectPointToNodeSide(
+      bounds,
+      resolvedSide,
+      target
+    );
+  }
+
+  if (zvt.attachedTo.type === "edge") {
+    const edge = edges.find(
+      (item) => item.id === zvt.attachedTo.id
+    );
+
+    if (!edge) {
+      return zvt.anchor || {
+        x: 0,
+        y: 0,
+        side: null,
+      };
+    }
+
+    const center = zvt.attachedTo.segmentId
+      ? getEdgeSegmentCenter(
+          edge,
+          zvt.attachedTo.segmentId
+        )
+      : getEdgeCenter(edge);
+
+    return {
+      x: center.x,
+      y: center.y,
+      side: null,
+    };
+  }
+
+  return zvt.anchor || {
+    x: 0,
+    y: 0,
+    side: null,
+  };
+}
+
+/**
+ * Початкова позиція нового ЗВТ тепер залежить від вибраної сторони node.
+ */
+export function createInitialZvtPosition(
+  anchor,
+  sourceSide = "auto"
+) {
+  const distance = 110;
+
+  switch (sourceSide) {
+    case "top":
+      return {
+        x: anchor.x,
+        y: anchor.y - distance,
+      };
+
+    case "bottom":
+      return {
+        x: anchor.x,
+        y: anchor.y + distance,
+      };
+
+    case "left":
+      return {
+        x: anchor.x - distance,
+        y: anchor.y,
+      };
+
+    case "right":
+      return {
+        x: anchor.x + distance,
+        y: anchor.y,
+      };
+
+    default:
+      return {
+        x: anchor.x + 110,
+        y: anchor.y - 75,
+      };
+  }
+}
+
+function resolveAutoSymbolSide(anchor, symbol) {
+  const dx = anchor.x - symbol.x;
+  const dy = anchor.y - symbol.y;
+
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx < 0 ? "left" : "right";
+  }
+
+  return dy < 0 ? "top" : "bottom";
+}
+
+function getSymbolAttachPoint(
+  symbol,
+  radius,
+  requestedSide,
+  anchor
+) {
+  const side = isValidSide(requestedSide)
+    ? requestedSide
+    : resolveAutoSymbolSide(anchor, symbol);
+
+  switch (side) {
+    case "top":
+      return {
+        x: symbol.x,
+        y: symbol.y - radius,
+        side,
+      };
+
+    case "bottom":
+      return {
+        x: symbol.x,
+        y: symbol.y + radius,
+        side,
+      };
+
+    case "left":
+      return {
+        x: symbol.x - radius,
+        y: symbol.y,
+        side,
+      };
+
+    case "right":
+      return {
+        x: symbol.x + radius,
+        y: symbol.y,
+        side,
+      };
+
+    default:
+      return {
+        x: symbol.x,
+        y: symbol.y,
+        side: "left",
+      };
+  }
+}
+
+function dedupeOrthogonalPoints(points) {
+  if (!Array.isArray(points) || points.length < 4) {
+    return points || [];
+  }
+
+  const result = [];
+
+  for (let i = 0; i < points.length; i += 2) {
+    const x = points[i];
+    const y = points[i + 1];
+
+    const prevX = result[result.length - 2];
+    const prevY = result[result.length - 1];
+
+    if (prevX === x && prevY === y) continue;
+
+    result.push(x, y);
+  }
+
+  return result;
+}
+
+/**
+ * Ортогональна траса:
+ *
+ * node anchor
+ *   -> короткий source stub
+ *   -> ламана
+ *   -> короткий symbol stub
+ *   -> край кружечка ЗВТ
+ *
+ * Таким чином перший відрізок гарантовано виходить
+ * перпендикулярно до вибраної сторони node.
+ */
+export function buildZvtLeaderRoute({
+  anchor,
+  symbol,
+  radius = 22,
+  sourceSide = null,
+  symbolSide = "auto",
+  sourceOffset = 18,
+  symbolOffset = 12,
+}) {
+  if (!anchor || !symbol) return [];
+
+  const resolvedSourceSide = isValidSide(sourceSide)
+    ? sourceSide
+    : isValidSide(anchor.side)
+      ? anchor.side
+      : null;
+
+  const target = getSymbolAttachPoint(
+    symbol,
+    radius,
+    symbolSide,
+    anchor
+  );
+
+  // Для edge sourceSide може бути null.
+  // Тоді визначаємо напрямок від edge до ЗВТ автоматично.
+  const effectiveSourceSide =
+    resolvedSourceSide ||
+    (() => {
+      const dx = symbol.x - anchor.x;
+      const dy = symbol.y - anchor.y;
+
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        return dx >= 0 ? "right" : "left";
+      }
+
+      return dy >= 0 ? "bottom" : "top";
+    })();
+
+  const sourceVector = sideVector(effectiveSourceSide);
+  const targetVector = sideVector(target.side);
+
+  const sourceStub = {
+    x: anchor.x + sourceVector.x * sourceOffset,
+    y: anchor.y + sourceVector.y * sourceOffset,
+  };
+
+  const targetStub = {
+    x: target.x + targetVector.x * symbolOffset,
+    y: target.y + targetVector.y * symbolOffset,
+  };
+
+  const points = [
+    anchor.x,
+    anchor.y,
+    sourceStub.x,
+    sourceStub.y,
+  ];
+
+  const sourceHorizontal =
+    effectiveSourceSide === "left" ||
+    effectiveSourceSide === "right";
+
+  const targetHorizontal =
+    target.side === "left" ||
+    target.side === "right";
+
+  if (sourceHorizontal && targetHorizontal) {
+    const midX =
+      (sourceStub.x + targetStub.x) / 2;
+
+    points.push(
+      midX,
+      sourceStub.y,
+      midX,
+      targetStub.y
+    );
+  } else if (!sourceHorizontal && !targetHorizontal) {
+    const midY =
+      (sourceStub.y + targetStub.y) / 2;
+
+    points.push(
+      sourceStub.x,
+      midY,
+      targetStub.x,
+      midY
+    );
+  } else if (sourceHorizontal && !targetHorizontal) {
+    points.push(
+      targetStub.x,
+      sourceStub.y
+    );
+  } else {
+    points.push(
+      sourceStub.x,
+      targetStub.y
+    );
+  }
+
+  points.push(
+    targetStub.x,
+    targetStub.y,
+    target.x,
+    target.y
+  );
+
+  return dedupeOrthogonalPoints(points);
+}
+
+export function buildZvtSignalGeometry(zvt) {
+  const radius = zvt?.style?.radius ?? 22;
+  const x = zvt?.position?.x ?? 0;
+  const y = zvt?.position?.y ?? 0;
+  const signal = zvt?.data?.signal;
+
+  if (!signal?.enabled) return null;
+
+  const direction = signal.direction || "right";
+  const sign = direction === "left" ? -1 : 1;
+  const signalLength = Math.max(
+    30,
+    zvt?.style?.signalLength ?? 82
+  );
+  const arrowSize = Math.max(
+    4,
+    zvt?.style?.arrowSize ?? 8
+  );
+
+  const startX = x + sign * radius;
+  const endX =
+    x + sign * (radius + signalLength);
+  const lineY = y;
+
+  const arrowPoints =
+    direction === "right"
+      ? [
+          endX,
+          lineY,
+          endX - arrowSize,
+          lineY - arrowSize / 2,
+          endX - arrowSize,
+          lineY + arrowSize / 2,
+        ]
+      : [
+          endX,
+          lineY,
+          endX + arrowSize,
+          lineY - arrowSize / 2,
+          endX + arrowSize,
+          lineY + arrowSize / 2,
+        ];
+
+  const labelX =
+    direction === "right"
+      ? startX + 8
+      : endX;
+
+  return {
+    line: [
+      startX,
+      lineY,
+      endX,
+      lineY,
+    ],
+    arrowPoints,
+    labelX,
+    labelY: y - 30,
+    labelWidth: Math.abs(endX - startX),
+  };
+}
+
+
+// FILE: src/components/zvt/ZvtParameterGraphicMark.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Circle, Group, Line } from "react-konva";
+import { getZvtParameterGraphicMark } from "@/lib/zvt/zvtDictionaries";
+
+/**
+ * Графічне позначення виду вимірюваного параметру зі скріншота 1.
+ *
+ * Важливо:
+ * - це НЕ основне коло ЗВТ;
+ * - це окремий малий умовний знак, який може відображатися біля/над ЗВТ;
+ * - літера параметру (F/P/L/T/ae/pH) як і раніше формується всередині кола ЗВТ.
+ *
+ * Нормалізована система координат:
+ * centerX / centerY — центр малого кружечка;
+ * stemLength — довжина ніжки;
+ * baseWidth — ширина нижньої риски.
+ */
+export default function ZvtParameterGraphicMark({
+  parameter,
+  x = 0,
+  y = 0,
+  scale = 1,
+  stroke = "black",
+  strokeWidth = 1.8,
+  listening = false,
+}) {
+  const mark = getZvtParameterGraphicMark(parameter);
+
+  const circleRadius = 7 * scale;
+  const stemLength = 18 * scale;
+  const baseHalf = 11 * scale;
+  const sw = strokeWidth * scale;
+
+  const cx = x;
+  const cy = y;
+  const circleBottom = cy + circleRadius;
+  const stemBottom = circleBottom + stemLength;
+
+  return (
+    <Group listening={listening}>
+      <Circle
+        x={cx}
+        y={cy}
+        radius={circleRadius}
+        stroke={stroke}
+        strokeWidth={sw}
+      />
+
+      {mark === "level" ? (
+        <>
+          {/* L — рівень: горизонтальна ніжка праворуч + прапорець. */}
+          <Line
+            points={[
+              cx + circleRadius,
+              cy,
+              cx + circleRadius + 16 * scale,
+              cy,
+            ]}
+            stroke={stroke}
+            strokeWidth={sw}
+          />
+
+          <Line
+            points={[
+              cx + circleRadius + 16 * scale,
+              cy,
+              cx + circleRadius + 10 * scale,
+              cy - 4 * scale,
+              cx + circleRadius + 10 * scale,
+              cy + 4 * scale,
+              cx + circleRadius + 16 * scale,
+              cy,
+            ]}
+            closed
+            stroke={stroke}
+            strokeWidth={sw}
+          />
+        </>
+      ) : (
+        <>
+          <Line
+            points={[cx, circleBottom, cx, stemBottom]}
+            stroke={stroke}
+            strokeWidth={sw}
+          />
+
+          {mark === "flow" && (
+            <>
+              {/* F — витрата: горизонтальна риска + дві короткі вертикальні риски. */}
+              <Line
+                points={[
+                  cx - baseHalf,
+                  stemBottom - 2 * scale,
+                  cx + baseHalf,
+                  stemBottom - 2 * scale,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+              <Line
+                points={[
+                  cx - 4 * scale,
+                  stemBottom - 6 * scale,
+                  cx - 4 * scale,
+                  stemBottom + 3 * scale,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+              <Line
+                points={[
+                  cx + 4 * scale,
+                  stemBottom - 6 * scale,
+                  cx + 4 * scale,
+                  stemBottom + 3 * scale,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+            </>
+          )}
+
+          {mark === "pressure" && (
+            <>
+              {/* P — тиск: одна нижня горизонтальна риска. */}
+              <Line
+                points={[
+                  cx - baseHalf,
+                  stemBottom,
+                  cx + baseHalf,
+                  stemBottom,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+            </>
+          )}
+
+          {mark === "temperature" && (
+            <>
+              {/* T — температура: дві паралельні горизонтальні риски. */}
+              <Line
+                points={[
+                  cx - baseHalf,
+                  stemBottom - 3 * scale,
+                  cx + baseHalf,
+                  stemBottom - 3 * scale,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+              <Line
+                points={[
+                  cx - baseHalf,
+                  stemBottom + 2 * scale,
+                  cx + baseHalf,
+                  stemBottom + 2 * scale,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+            </>
+          )}
+
+          {mark === "conductivity" && (
+            <>
+              {/* ae / pH — електропровідність / pH: довша нижня риска. */}
+              <Line
+                points={[
+                  cx - 13 * scale,
+                  stemBottom,
+                  cx + 13 * scale,
+                  stemBottom,
+                ]}
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+            </>
+          )}
+        </>
+      )}
+    </Group>
+  );
+}
+
+
+// ============================================================================
+// FILE: src/components/zvt/ZvtSymbol.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import { Group, Circle, Line, Text } from "react-konva";
+import { getZvtInstallPlace } from "@/lib/zvt/zvtDictionaries";
+import { buildZvtSignalGeometry } from "@/lib/zvt/zvtGeometry";
+import ZvtParameterGraphicMark from "@/components/zvt/ZvtParameterGraphicMark";
+
+function buildParameterLabel(zvt) {
+  const parameter = zvt.data?.parameter || "";
+  const suffix = zvt.data?.parameterSuffix || "";
+  return `${parameter}${suffix}`;
+}
+
+function buildFunctionLabel(zvt) {
+  const signs = Array.isArray(zvt.data?.functionSigns)
+    ? zvt.data.functionSigns.join("")
+    : "";
+  const suffix = zvt.data?.functionSuffix || "";
+  return `${signs}${suffix}`;
+}
+
+function buildRecipientBaseLabel(zvt) {
+  const mode = zvt.data?.recipientLabelMode || "M";
+
+  if (mode === "custom") {
+    return (zvt.data?.recipientCustomText || "").trim();
+  }
+
+  const recipients = Array.isArray(zvt.data?.recipients)
+    ? zvt.data.recipients
+    : [];
+
+  if (!recipients.length) return "M";
+  return `M${recipients.join(",")}`;
+}
+
+function renderParameterGraphicMarkSvg(zvt, {
+  x,
+  y,
+  stroke = "black",
+  strokeWidth = 1.6,
+} = {}) {
+  const parameter = zvt.data?.parameter || "F";
+  const scale = zvt.style?.parameterGraphicScale ?? 1;
+
+  const map = {
+    F: "flow",
+    P: "pressure",
+    L: "level",
+    T: "temperature",
+    ae: "conductivity",
+    pH: "conductivity",
+  };
+
+  const mark = map[parameter] || "pressure";
+  const r = 7 * scale;
+  const stemLength = 18 * scale;
+  const baseHalf = 11 * scale;
+  const circleBottom = y + r;
+  const stemBottom = circleBottom + stemLength;
+  const sw = strokeWidth * scale;
+
+  let svg = `<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`;
+
+  if (mark === "level") {
+    const sx = x + r;
+    const ex = sx + 16 * scale;
+
+    svg += `<line x1="${sx}" y1="${y}" x2="${ex}" y2="${y}" stroke="${stroke}" stroke-width="${sw}" />`;
+    svg += `<polyline points="${ex},${y} ${ex - 6 * scale},${y - 4 * scale} ${ex - 6 * scale},${y + 4 * scale} ${ex},${y}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`;
+    return svg;
+  }
+
+  svg += `<line x1="${x}" y1="${circleBottom}" x2="${x}" y2="${stemBottom}" stroke="${stroke}" stroke-width="${sw}" />`;
+
+  if (mark === "flow") {
+    svg += `<line x1="${x - baseHalf}" y1="${stemBottom - 2 * scale}" x2="${x + baseHalf}" y2="${stemBottom - 2 * scale}" stroke="${stroke}" stroke-width="${sw}" />`;
+    svg += `<line x1="${x - 4 * scale}" y1="${stemBottom - 6 * scale}" x2="${x - 4 * scale}" y2="${stemBottom + 3 * scale}" stroke="${stroke}" stroke-width="${sw}" />`;
+    svg += `<line x1="${x + 4 * scale}" y1="${stemBottom - 6 * scale}" x2="${x + 4 * scale}" y2="${stemBottom + 3 * scale}" stroke="${stroke}" stroke-width="${sw}" />`;
+  }
+
+  if (mark === "pressure") {
+    svg += `<line x1="${x - baseHalf}" y1="${stemBottom}" x2="${x + baseHalf}" y2="${stemBottom}" stroke="${stroke}" stroke-width="${sw}" />`;
+  }
+
+  if (mark === "temperature") {
+    svg += `<line x1="${x - baseHalf}" y1="${stemBottom - 3 * scale}" x2="${x + baseHalf}" y2="${stemBottom - 3 * scale}" stroke="${stroke}" stroke-width="${sw}" />`;
+    svg += `<line x1="${x - baseHalf}" y1="${stemBottom + 2 * scale}" x2="${x + baseHalf}" y2="${stemBottom + 2 * scale}" stroke="${stroke}" stroke-width="${sw}" />`;
+  }
+
+  if (mark === "conductivity") {
+    svg += `<line x1="${x - 13 * scale}" y1="${stemBottom}" x2="${x + 13 * scale}" y2="${stemBottom}" stroke="${stroke}" stroke-width="${sw}" />`;
+  }
+
+  return svg;
+}
+
+function buildSignalLabel(zvt) {
+  const base = buildRecipientBaseLabel(zvt);
+  const actionSign = zvt.data?.actionSign || "none";
+  const position = zvt.data?.actionSignPosition || "before";
+
+  if (!base) return "";
+  if (actionSign === "none") return base;
+
+  return position === "after"
+    ? `${base} ${actionSign}`
+    : `${actionSign} ${base}`;
+}
+
+function formatRealtimeValue(zvt, runtime) {
+  if (!runtime) return "";
+
+  const telemetry = zvt.integration?.telemetry;
+  if (!telemetry?.enabled || !telemetry?.showOnCanvas) {
+    return "";
+  }
+
+  if (runtime.connectionState === "error") {
+    return "ERR";
+  }
+
+  if (runtime.value === null || runtime.value === undefined) {
+    return runtime.connectionState === "connecting"
+      ? "..."
+      : "";
+  }
+
+  const precision = Number.isFinite(telemetry.precision)
+    ? telemetry.precision
+    : 2;
+
+  const numeric = Number(runtime.value);
+  const valueText = Number.isFinite(numeric)
+    ? numeric.toFixed(precision)
+    : String(runtime.value);
+
+  const unit = runtime.unit || telemetry.unit || "";
+
+  return unit
+    ? `${valueText} ${unit}`
+    : valueText;
+}
+
+function isRealtimeStale(zvt, runtime) {
+  const receivedAt = runtime?.receivedAt;
+  if (!receivedAt) return false;
+
+  const staleAfterMs =
+    zvt.integration?.telemetry?.staleAfterMs ?? 15000;
+
+  return Date.now() - receivedAt > staleAfterMs;
+}
+
+export default function ZvtSymbol({
+  zvt,
+  runtime = null,
+  showRealtime = true,
+  selected = false,
+  draggable = true,
+  onClick,
+  onDblClick,
+  onContextMenu,
+  onDragMove,
+  onDragEnd,
+}) {
+  const x = zvt.position?.x ?? 0;
+  const y = zvt.position?.y ?? 0;
+  const radius = zvt.style?.radius ?? 22;
+  const stroke = selected ? zvt.style?.selectedStroke || "#2F80ED" : zvt.style?.stroke || "black";
+  const strokeWidth = selected ? Math.max(zvt.style?.strokeWidth || 2, 3) : zvt.style?.strokeWidth || 2;
+  const fill = zvt.style?.fill || "white";
+  const fontFamily = zvt.style?.fontFamily || "Roboto Condensed";
+  const fontSize = zvt.style?.fontSize ?? 13;
+  const smallFontSize = zvt.style?.smallFontSize ?? 12;
+
+  const installPlace = getZvtInstallPlace(zvt.data?.installPlace);
+  const functionLabel = buildFunctionLabel(zvt);
+  const parameterLabel = buildParameterLabel(zvt);
+  const signalGeometry = buildZvtSignalGeometry(zvt);
+  const signalLabel = buildSignalLabel(zvt);
+
+  // Графічне позначення виду параметру можна вимкнути на рівні data,
+  // але для нових ЗВТ за замовчуванням воно відображається.
+  const showParameterGraphicMark = zvt.data?.showParameterGraphicMark ?? true;
+  const parameterGraphicScale = zvt.style?.parameterGraphicScale ?? 1;
+
+  const hasFunctionLabel = Boolean(functionLabel);
+  const hasParameterLabel = Boolean(parameterLabel);
+
+  const realtimeText = showRealtime
+    ? formatRealtimeValue(zvt, runtime)
+    : "";
+  const realtimeStale = isRealtimeStale(zvt, runtime);
+  const realtimeFontSize =
+    zvt.style?.realtimeFontSize ?? 12;
+  const realtimeOffsetY =
+    zvt.style?.realtimeOffsetY ?? 10;
+
+  return (
+    <Group
+      x={x}
+      y={y}
+      draggable={draggable}
+      onClick={onClick}
+      onTap={onClick}
+      onDblClick={onDblClick}
+      onContextMenu={onContextMenu}
+      onDragMove={onDragMove}
+      onDragEnd={onDragEnd}
+    >
+      <Circle
+        x={0}
+        y={0}
+        radius={radius}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+      />
+
+      {showParameterGraphicMark && (
+        <ZvtParameterGraphicMark
+          parameter={zvt.data?.parameter}
+          x={0}
+          y={-radius - 12 * parameterGraphicScale}
+          scale={parameterGraphicScale}
+          stroke={stroke}
+          strokeWidth={1.6}
+          listening={false}
+        />
+      )}
+
+      {installPlace.hasDivider && (
+        <Line
+          points={[-radius, 0, radius, 0]}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+        />
+      )}
+
+      {installPlace.hasDivider ? (
+        <>
+          <Text
+            x={-radius}
+            y={-radius + 3}
+            width={radius * 2}
+            height={radius - 3}
+            text={functionLabel}
+            fontFamily={fontFamily}
+            fontSize={fontSize}
+            fontStyle="bold"
+            align="center"
+            verticalAlign="middle"
+            fill="black"
+          />
+
+          <Text
+            x={-radius}
+            y={1}
+            width={radius * 2}
+            height={radius - 2}
+            text={parameterLabel}
+            fontFamily={fontFamily}
+            fontSize={fontSize}
+            fontStyle="bold"
+            align="center"
+            verticalAlign="middle"
+            fill="black"
+          />
+        </>
+      ) : (
+        <>
+          {/* "За місцем": обидва написи є, але горизонтальної лінії немає. */}
+          {hasFunctionLabel && (
+            <Text
+              x={-radius}
+              y={hasParameterLabel ? -radius + 5 : -fontSize / 2}
+              width={radius * 2}
+              height={fontSize + 4}
+              text={functionLabel}
+              fontFamily={fontFamily}
+              fontSize={fontSize}
+              fontStyle="bold"
+              align="center"
+              verticalAlign="middle"
+              fill="black"
+            />
+          )}
+
+          {hasParameterLabel && (
+            <Text
+              x={-radius}
+              y={hasFunctionLabel ? 2 : -fontSize / 2}
+              width={radius * 2}
+              height={fontSize + 4}
+              text={parameterLabel}
+              fontFamily={fontFamily}
+              fontSize={fontSize}
+              fontStyle="bold"
+              align="center"
+              verticalAlign="middle"
+              fill="black"
+            />
+          )}
+        </>
+      )}
+
+      {realtimeText && (
+        <Text
+          x={-radius * 2}
+          y={radius + realtimeOffsetY}
+          width={radius * 4}
+          text={
+            realtimeStale
+              ? `${realtimeText} • stale`
+              : realtimeText
+          }
+          fontFamily={fontFamily}
+          fontSize={realtimeFontSize}
+          fontStyle="bold"
+          align="center"
+          fill="black"
+          opacity={realtimeStale ? 0.55 : 1}
+          listening={false}
+        />
+      )}
+
+      {signalGeometry && (
+        <>
+          <Line
+            points={signalGeometry.line.map((value, index) => (index % 2 === 0 ? value - x : value - y))}
+            stroke="black"
+            strokeWidth={2}
+            dash={[18, 8]}
+          />
+
+          <Line
+            points={signalGeometry.arrowPoints.map((value, index) => (index % 2 === 0 ? value - x : value - y))}
+            closed
+            fill="black"
+            stroke="black"
+            strokeWidth={1}
+          />
+
+          <Text
+            x={signalGeometry.labelX - x}
+            y={signalGeometry.labelY - y}
+            width={signalGeometry.labelWidth}
+            text={signalLabel}
+            fontFamily={fontFamily}
+            fontSize={smallFontSize + 1}
+            fontStyle="bold"
+            fill="black"
+            align={zvt.data?.signal?.direction === "left" ? "left" : "left"}
+          />
+        </>
+      )}
+    </Group>
+  );
+}
+
+
+// ============================================================================
+// ============================================================================
+// FILE: src/lib/zvt/zvtBranchModel.js
+// ============================================================================
+
+export function createZvtBranch({
+  id = crypto.randomUUID(),
+  attachedTo,
+  route = {},
+  style = {},
+} = {}) {
+  if (
+    !attachedTo ||
+    !["node", "edge"].includes(attachedTo.type) ||
+    !attachedTo.id
+  ) {
+    throw new Error(
+      "ZVT branch root must be attached to node or edge"
+    );
+  }
+
+  return {
+    id,
+    kind: "zvtBranch",
+
+    // ROOT CONNECTION — обов'язковий.
+    attachedTo: {
+      type: attachedTo.type,
+      id: attachedTo.id,
+      segmentId: attachedTo.segmentId || null,
+    },
+
+    route: {
+      sourceSide:
+        route.sourceSide || "auto",
+
+      sourceOffset:
+        route.sourceOffset ?? 18,
+
+      // Координати у world/canvas space.
+      // Першою точкою фактично є dynamic root anchor,
+      // тому її сюди НЕ зберігаємо.
+      vertices: Array.isArray(route.vertices)
+        ? route.vertices
+        : [],
+
+      // Кінцева точка магістралі.
+      endPoint: route.endPoint || null,
+    },
+
+    style: {
+      stroke: style.stroke || "black",
+      strokeWidth: style.strokeWidth ?? 2,
+      dash: Array.isArray(style.dash)
+        ? style.dash
+        : [],
+    },
+
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+export function updateZvtBranch(
+  branch,
+  patch = {}
+) {
+  return {
+    ...branch,
+
+    ...patch,
+
+    route: {
+      ...branch.route,
+      ...(patch.route || {}),
+    },
+
+    style: {
+      ...branch.style,
+      ...(patch.style || {}),
+    },
+
+    updatedAt: Date.now(),
+  };
+}
+
+
+// ============================================================================
+// FILE: src/lib/zvt/zvtBranchGeometry.js
+// ============================================================================
+
+import {
+  buildZvtLeaderRoute,
+  resolveZvtAnchor,
+} from "@/lib/zvt/zvtGeometry";
+
+export const ZVT_BRANCH_GRID_SIZE = 10;
+
+export function snapZvtBranchValue(
+  value,
+  gridSize = ZVT_BRANCH_GRID_SIZE
+) {
+  if (!gridSize || gridSize <= 1) {
+    return value;
+  }
+
+  return Math.round(value / gridSize) * gridSize;
+}
+
+export function snapZvtBranchPoint(
+  point,
+  gridSize = ZVT_BRANCH_GRID_SIZE
+) {
+  return {
+    x: snapZvtBranchValue(
+      point.x,
+      gridSize
+    ),
+    y: snapZvtBranchValue(
+      point.y,
+      gridSize
+    ),
+  };
+}
+
+function samePoint(a, b) {
+  return (
+    a &&
+    b &&
+    a.x === b.x &&
+    a.y === b.y
+  );
+}
+
+function isHorizontal(a, b) {
+  return a.y === b.y;
+}
+
+function isVertical(a, b) {
+  return a.x === b.x;
+}
+
+function isOrthogonal(a, b) {
+  return (
+    isHorizontal(a, b) ||
+    isVertical(a, b)
+  );
+}
+
+function isCollinearOrthogonal(
+  a,
+  b,
+  c
+) {
+  return (
+    (
+      a.x === b.x &&
+      b.x === c.x
+    ) ||
+    (
+      a.y === b.y &&
+      b.y === c.y
+    )
+  );
+}
+
+function dedupePoints(points) {
+  const result = [];
+
+  for (const point of points) {
+    if (
+      !result.length ||
+      !samePoint(
+        result[result.length - 1],
+        point
+      )
+    ) {
+      result.push(point);
+    }
+  }
+
+  return result;
+}
+
+export function simplifyOrthogonalPoints(
+  points
+) {
+  const deduped =
+    dedupePoints(points);
+
+  if (deduped.length <= 2) {
+    return deduped;
+  }
+
+  const result = [
+    deduped[0],
+  ];
+
+  for (
+    let i = 1;
+    i < deduped.length - 1;
+    i++
+  ) {
+    const prev =
+      result[result.length - 1];
+
+    const current =
+      deduped[i];
+
+    const next =
+      deduped[i + 1];
+
+    if (
+      isCollinearOrthogonal(
+        prev,
+        current,
+        next
+      )
+    ) {
+      continue;
+    }
+
+    result.push(current);
+  }
+
+  result.push(
+    deduped[deduped.length - 1]
+  );
+
+  return result;
+}
+
+function distanceSq(a, b) {
+  const dx =
+    a.x - b.x;
+
+  const dy =
+    a.y - b.y;
+
+  return dx * dx + dy * dy;
+}
+
+function projectToSegment(
+  point,
+  a,
+  b
+) {
+  const dx =
+    b.x - a.x;
+
+  const dy =
+    b.y - a.y;
+
+  const lengthSq =
+    dx * dx + dy * dy;
+
+  if (!lengthSq) {
+    return {
+      point: { ...a },
+      t: 0,
+      distanceSq:
+        distanceSq(point, a),
+    };
+  }
+
+  let t =
+    (
+      (point.x - a.x) * dx +
+      (point.y - a.y) * dy
+    ) /
+    lengthSq;
+
+  t =
+    Math.max(
+      0,
+      Math.min(1, t)
+    );
+
+  const projected = {
+    x: a.x + dx * t,
+    y: a.y + dy * t,
+  };
+
+  return {
+    point: projected,
+    t,
+    distanceSq:
+      distanceSq(
+        point,
+        projected
+      ),
+  };
+}
+
+/**
+ * root anchor branch.
+ */
+export function resolveZvtBranchRootAnchor(
+  branch,
+  nodes,
+  edges
+) {
+  const referencePoint =
+    branch.route?.vertices?.[0] ||
+    branch.route?.endPoint ||
+    { x: 0, y: 0 };
+
+  const pseudoZvt = {
+    attachedTo:
+      branch.attachedTo,
+
+    route: {
+      sourceSide:
+        branch.route?.sourceSide ||
+        "auto",
+    },
+
+    position:
+      referencePoint,
+
+    anchor: {
+      x: 0,
+      y: 0,
+      side: null,
+    },
+  };
+
+  return resolveZvtAnchor(
+    pseudoZvt,
+    nodes,
+    edges
+  );
+}
+
+function createDefaultBranchEnd(
+  root,
+  sourceSide
+) {
+  const distance = 150;
+
+  switch (sourceSide) {
+    case "left":
+      return {
+        x: root.x - distance,
+        y: root.y,
+      };
+
+    case "top":
+      return {
+        x: root.x,
+        y: root.y - distance,
+      };
+
+    case "bottom":
+      return {
+        x: root.x,
+        y: root.y + distance,
+      };
+
+    case "right":
+    default:
+      return {
+        x: root.x + distance,
+        y: root.y,
+      };
+  }
+}
+
+/**
+ * Гарантує, що кожен наступний segment є горизонтальним або вертикальним.
+ *
+ * Якщо в persisted JSON випадково потрапили діагональні точки,
+ * функція вставить проміжний bend.
+ */
+export function orthogonalizeBranchPoints(
+  points,
+  {
+    prefer = "horizontal-first",
+  } = {}
+) {
+  if (!points?.length) {
+    return [];
+  }
+
+  const result = [
+    { ...points[0] },
+  ];
+
+  for (
+    let i = 1;
+    i < points.length;
+    i++
+  ) {
+    const prev =
+      result[result.length - 1];
+
+    const next = {
+      ...points[i],
+    };
+
+    if (
+      isOrthogonal(
+        prev,
+        next
+      )
+    ) {
+      result.push(next);
+      continue;
+    }
+
+    const bend =
+      prefer === "vertical-first"
+        ? {
+            x: prev.x,
+            y: next.y,
+          }
+        : {
+            x: next.x,
+            y: prev.y,
+          };
+
+    result.push(
+      bend,
+      next
+    );
+  }
+
+  return simplifyOrthogonalPoints(
+    result
+  );
+}
+
+/**
+ * Повна route geometry branch.
+ * root є dynamic і НЕ зберігається в persisted vertices.
+ */
+export function buildZvtBranchPoints(
+  branch,
+  nodes,
+  edges
+) {
+  const root =
+    resolveZvtBranchRootAnchor(
+      branch,
+      nodes,
+      edges
+    );
+
+  const vertices =
+    branch.route?.vertices || [];
+
+  const endPoint =
+    branch.route?.endPoint ||
+    createDefaultBranchEnd(
+      root,
+      root.side ||
+        branch.route?.sourceSide ||
+        "right"
+    );
+
+  return orthogonalizeBranchPoints(
+    [
+      root,
+      ...vertices,
+      endPoint,
+    ],
+    {
+      prefer:
+        branch.route
+          ?.orthogonalPreference ||
+        "horizontal-first",
+    }
+  );
+}
+
+/**
+ * Ортогональне переміщення interior vertex.
+ *
+ * Замість вільного x/y:
+ * - орієнтація prev->vertex зберігається;
+ * - орієнтація vertex->next зберігається;
+ * - сусідні точки коригуються за потреби.
+ *
+ * Повертає НОВИЙ масив повних points включно root/end.
+ */
+export function moveOrthogonalBranchVertex(
+  points,
+  index,
+  nextPoint,
+  {
+    gridSize =
+      ZVT_BRANCH_GRID_SIZE,
+  } = {}
+) {
+  if (
+    index <= 0 ||
+    index >= points.length - 1
+  ) {
+    return points;
+  }
+
+  const snapped =
+    snapZvtBranchPoint(
+      nextPoint,
+      gridSize
+    );
+
+  const result =
+    points.map((p) => ({
+      ...p,
+    }));
+
+  const prev =
+    result[index - 1];
+
+  const current =
+    result[index];
+
+  const next =
+    result[index + 1];
+
+  const prevHorizontal =
+    isHorizontal(
+      prev,
+      current
+    );
+
+  const nextHorizontal =
+    isHorizontal(
+      current,
+      next
+    );
+
+  /**
+   * Corner:
+   * prev H + next V
+   * або prev V + next H
+   *
+   * Тоді можна вільно рухати corner,
+   * а координати сусідів підлаштовуємо.
+   */
+  if (
+    prevHorizontal &&
+    !nextHorizontal
+  ) {
+    result[index] = snapped;
+
+    result[index - 1] = {
+      ...prev,
+      y: snapped.y,
+    };
+
+    result[index + 1] = {
+      ...next,
+      x: snapped.x,
+    };
+  } else if (
+    !prevHorizontal &&
+    nextHorizontal
+  ) {
+    result[index] = snapped;
+
+    result[index - 1] = {
+      ...prev,
+      x: snapped.x,
+    };
+
+    result[index + 1] = {
+      ...next,
+      y: snapped.y,
+    };
+  } else if (
+    prevHorizontal &&
+    nextHorizontal
+  ) {
+    /**
+     * Обидва сегменти горизонтальні.
+     * Рухається тільки Y,
+     * X залишаємо.
+     */
+    result[index] = {
+      x: current.x,
+      y: snapped.y,
+    };
+
+    result[index - 1] = {
+      ...prev,
+      y: snapped.y,
+    };
+
+    result[index + 1] = {
+      ...next,
+      y: snapped.y,
+    };
+  } else {
+    /**
+     * Обидва вертикальні.
+     * Рухається тільки X.
+     */
+    result[index] = {
+      x: snapped.x,
+      y: current.y,
+    };
+
+    result[index - 1] = {
+      ...prev,
+      x: snapped.x,
+    };
+
+    result[index + 1] = {
+      ...next,
+      x: snapped.x,
+    };
+  }
+
+  return simplifyOrthogonalPoints(
+    orthogonalizeBranchPoints(
+      result
+    )
+  );
+}
+
+/**
+ * Рух endpoint.
+ *
+ * Останній segment лишається ортогональним:
+ * - якщо був horizontal -> endpoint рухаємо по x,
+ *   а y прив'язуємо до prev;
+ * - якщо vertical -> endpoint рухаємо по y,
+ *   x прив'язуємо до prev.
+ *
+ * Якщо користувач тягне далеко по іншій осі —
+ * створюємо новий corner перед endpoint.
+ */
+export function moveOrthogonalBranchEndpoint(
+  points,
+  nextPoint,
+  {
+    gridSize =
+      ZVT_BRANCH_GRID_SIZE,
+  } = {}
+) {
+  if (
+    !points ||
+    points.length < 2
+  ) {
+    return points;
+  }
+
+  const snapped =
+    snapZvtBranchPoint(
+      nextPoint,
+      gridSize
+    );
+
+  const result =
+    points.map((p) => ({
+      ...p,
+    }));
+
+  const lastIndex =
+    result.length - 1;
+
+  const prev =
+    result[lastIndex - 1];
+
+  const current =
+    result[lastIndex];
+
+  if (
+    isHorizontal(
+      prev,
+      current
+    )
+  ) {
+    result[lastIndex] = {
+      x: snapped.x,
+      y: prev.y,
+    };
+
+    if (
+      Math.abs(
+        snapped.y - prev.y
+      ) >= gridSize
+    ) {
+      result.splice(
+        lastIndex,
+        0,
+        {
+          x: snapped.x,
+          y: prev.y,
+        }
+      );
+
+      result[result.length - 1] = {
+        x: snapped.x,
+        y: snapped.y,
+      };
+    }
+  } else {
+    result[lastIndex] = {
+      x: prev.x,
+      y: snapped.y,
+    };
+
+    if (
+      Math.abs(
+        snapped.x - prev.x
+      ) >= gridSize
+    ) {
+      result.splice(
+        lastIndex,
+        0,
+        {
+          x: prev.x,
+          y: snapped.y,
+        }
+      );
+
+      result[result.length - 1] = {
+        x: snapped.x,
+        y: snapped.y,
+      };
+    }
+  }
+
+  return simplifyOrthogonalPoints(
+    orthogonalizeBranchPoints(
+      result
+    )
+  );
+}
+
+/**
+ * Double click по segment.
+ *
+ * Для horizontal segment вставляємо ДВІ точки,
+ * щоб створити ортогональний dog-leg,
+ * а не одну точку, яка дала б діагоналі.
+ *
+ * Для UX користувач потім може drag нову пару.
+ */
+export function insertOrthogonalBranchBend(
+  points,
+  segmentIndex,
+  clickPoint,
+  {
+    gridSize =
+      ZVT_BRANCH_GRID_SIZE,
+    bendOffset =
+      ZVT_BRANCH_GRID_SIZE * 2,
+  } = {}
+) {
+  if (
+    segmentIndex < 0 ||
+    segmentIndex >=
+      points.length - 1
+  ) {
+    return points;
+  }
+
+  const a =
+    points[segmentIndex];
+
+  const b =
+    points[segmentIndex + 1];
+
+  const snapped =
+    snapZvtBranchPoint(
+      clickPoint,
+      gridSize
+    );
+
+  const result =
+    points.map((p) => ({
+      ...p,
+    }));
+
+  if (
+    isHorizontal(a, b)
+  ) {
+    const x =
+      Math.max(
+        Math.min(
+          snapped.x,
+          Math.max(a.x, b.x)
+        ),
+        Math.min(a.x, b.x)
+      );
+
+    const y =
+      snapZvtBranchValue(
+        snapped.y === a.y
+          ? a.y + bendOffset
+          : snapped.y,
+        gridSize
+      );
+
+    result.splice(
+      segmentIndex + 1,
+      0,
+      {
+        x,
+        y: a.y,
+      },
+      {
+        x,
+        y,
+      },
+      {
+        x:
+          Math.min(
+            Math.max(
+              x + bendOffset,
+              Math.min(a.x, b.x)
+            ),
+            Math.max(a.x, b.x)
+          ),
+        y,
+      },
+      {
+        x:
+          Math.min(
+            Math.max(
+              x + bendOffset,
+              Math.min(a.x, b.x)
+            ),
+            Math.max(a.x, b.x)
+          ),
+        y: a.y,
+      }
+    );
+  } else {
+    const y =
+      Math.max(
+        Math.min(
+          snapped.y,
+          Math.max(a.y, b.y)
+        ),
+        Math.min(a.y, b.y)
+      );
+
+    const x =
+      snapZvtBranchValue(
+        snapped.x === a.x
+          ? a.x + bendOffset
+          : snapped.x,
+        gridSize
+      );
+
+    result.splice(
+      segmentIndex + 1,
+      0,
+      {
+        x: a.x,
+        y,
+      },
+      {
+        x,
+        y,
+      },
+      {
+        x,
+        y:
+          Math.min(
+            Math.max(
+              y + bendOffset,
+              Math.min(a.y, b.y)
+            ),
+            Math.max(a.y, b.y)
+          ),
+      },
+      {
+        x: a.x,
+        y:
+          Math.min(
+            Math.max(
+              y + bendOffset,
+              Math.min(a.y, b.y)
+            ),
+            Math.max(a.y, b.y)
+          ),
+      }
+    );
+  }
+
+  return simplifyOrthogonalPoints(
+    orthogonalizeBranchPoints(
+      result
+    )
+  );
+}
+
+/**
+ * Видалення interior vertex.
+ *
+ * Після видалення route знову orthogonalize.
+ */
+export function removeOrthogonalBranchVertex(
+  points,
+  index
+) {
+  if (
+    index <= 0 ||
+    index >= points.length - 1
+  ) {
+    return points;
+  }
+
+  const result =
+    points.filter(
+      (_, i) =>
+        i !== index
+    );
+
+  return simplifyOrthogonalPoints(
+    orthogonalizeBranchPoints(
+      result
+    )
+  );
+}
+
+/**
+ * Перетворити full points назад у persisted route.
+ * points[0] = dynamic root, не серіалізуємо.
+ * остання = endPoint.
+ */
+export function fullBranchPointsToRoute(
+  points,
+  oldRoute = {}
+) {
+  if (
+    !points ||
+    points.length < 2
+  ) {
+    return {
+      ...oldRoute,
+      vertices: [],
+      endPoint: null,
+    };
+  }
+
+  const middle =
+    points.slice(
+      1,
+      -1
+    );
+
+  return {
+    ...oldRoute,
+
+    vertices:
+      middle.map(
+        (point, index) => ({
+          id:
+            point.id ||
+            oldRoute.vertices?.[index]
+              ?.id ||
+            crypto.randomUUID(),
+          x: point.x,
+          y: point.y,
+        })
+      ),
+
+    endPoint: {
+      x:
+        points[
+          points.length - 1
+        ].x,
+
+      y:
+        points[
+          points.length - 1
+        ].y,
+    },
+  };
+}
+
+export function findNearestBranchTap(
+  branchPoints,
+  zvtPosition
+) {
+  let best = null;
+
+  for (
+    let i = 0;
+    i < branchPoints.length - 1;
+    i++
+  ) {
+    const a =
+      branchPoints[i];
+
+    const b =
+      branchPoints[i + 1];
+
+    const candidate =
+      projectToSegment(
+        zvtPosition,
+        a,
+        b
+      );
+
+    if (
+      !best ||
+      candidate.distanceSq <
+        best.distanceSq
+    ) {
+      best = {
+        segmentIndex: i,
+        t: candidate.t,
+        point:
+          candidate.point,
+        distanceSq:
+          candidate.distanceSq,
+      };
+    }
+  }
+
+  return best;
+}
+
+export function resolveFixedBranchTap(
+  branchPoints,
+  tap
+) {
+  const index =
+    Math.max(
+      0,
+      Math.min(
+        branchPoints.length - 2,
+        tap?.segmentIndex ?? 0
+      )
+    );
+
+  const a =
+    branchPoints[index];
+
+  const b =
+    branchPoints[index + 1];
+
+  const t =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        tap?.t ?? 0.5
+      )
+    );
+
+  return {
+    segmentIndex: index,
+    t,
+
+    point: {
+      x:
+        a.x +
+        (b.x - a.x) * t,
+
+      y:
+        a.y +
+        (b.y - a.y) * t,
+    },
+  };
+}
+
+export function resolveZvtBranchTap(
+  branchPoints,
+  zvt
+) {
+  const tap =
+    zvt.route?.branchTap;
+
+  if (
+    tap?.mode === "fixed"
+  ) {
+    return resolveFixedBranchTap(
+      branchPoints,
+      tap
+    );
+  }
+
+  return findNearestBranchTap(
+    branchPoints,
+    zvt.position
+  );
+}
+
+export function buildZvtBranchMemberLeader({
+  branchPoints,
+  zvt,
+}) {
+  const tap =
+    resolveZvtBranchTap(
+      branchPoints,
+      zvt
+    );
+
+  if (!tap?.point) {
+    return [];
+  }
+
+  return buildZvtLeaderRoute({
+    anchor: {
+      x: tap.point.x,
+      y: tap.point.y,
+      side: null,
+    },
+
+    symbol:
+      zvt.position,
+
+    radius:
+      zvt.style?.radius ?? 22,
+
+    sourceSide:
+      null,
+
+    symbolSide:
+      zvt.route?.symbolSide ||
+      "auto",
+
+    sourceOffset:
+      zvt.route
+        ?.branchSourceOffset ?? 0,
+
+    symbolOffset:
+      zvt.route
+        ?.symbolOffset ?? 12,
+  });
+}
+
+export function branchPointsToKonva(
+  branch,
+  nodes,
+  edges
+) {
+  return buildZvtBranchPoints(
+    branch,
+    nodes,
+    edges
+  ).flatMap(
+    (point) => [
+      point.x,
+      point.y,
+    ]
+  );
+}
+
+/**
+ * Hit-test segment by pointer position.
+ */
+export function findNearestBranchSegment(
+  branchPoints,
+  pointer
+) {
+  let best = null;
+
+  for (
+    let i = 0;
+    i < branchPoints.length - 1;
+    i++
+  ) {
+    const candidate =
+      projectToSegment(
+        pointer,
+        branchPoints[i],
+        branchPoints[i + 1]
+      );
+
+    if (
+      !best ||
+      candidate.distanceSq <
+        best.distanceSq
+    ) {
+      best = {
+        segmentIndex: i,
+        point:
+          candidate.point,
+        distanceSq:
+          candidate.distanceSq,
+      };
+    }
+  }
+
+  return best;
+}
+
+
+
+// FILE: src/components/zvt/ZvtBranchLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+
+import {
+  Circle,
+  Group,
+  Line,
+} from "react-konva";
+
+import {
+  useCanvasStore,
+} from "@/store/useCanvasStore";
+
+import {
+  buildZvtBranchMemberLeader,
+  buildZvtBranchPoints,
+  findNearestBranchSegment,
+} from "@/lib/zvt/zvtBranchGeometry";
+
+import {
+  canvasController,
+} from "@/controllers/canvasController";
+
+function eventToStagePoint(e) {
+  const stage =
+    e.target.getStage();
+
+  return (
+    stage?.getPointerPosition() ||
+    null
+  );
+}
+
+export default function ZvtBranchLayer() {
+  const branches =
+    useCanvasStore(
+      (s) => s.zvtBranches || []
+    );
+
+  const zvts =
+    useCanvasStore(
+      (s) => s.zvts || []
+    );
+
+  const nodes =
+    useCanvasStore(
+      (s) => s.nodes || []
+    );
+
+  const edges =
+    useCanvasStore(
+      (s) => s.edges || []
+    );
+
+  const selection =
+    useCanvasStore(
+      (s) => s.selection
+    );
+
+  const branchEdit =
+    useCanvasStore(
+      (s) =>
+        s.zvtBranchEdit || null
+    );
+
+  const setSelection =
+    useCanvasStore(
+      (s) => s.setSelection
+    );
+
+  const setZvtBranchEdit =
+    useCanvasStore(
+      (s) =>
+        s.setZvtBranchEdit
+    );
+
+  const accessMode =
+    useCanvasStore(
+      (s) =>
+        s.accessMode || "editor"
+    );
+
+  const readOnly =
+    accessMode === "reader";
+
+  return (
+    <>
+      {branches.map((branch) => {
+        const selected =
+          selection?.type ===
+            "zvtBranch" &&
+          selection?.id ===
+            branch.id;
+
+        const branchPoints =
+          buildZvtBranchPoints(
+            branch,
+            nodes,
+            edges
+          );
+
+        const branchFlat =
+          branchPoints.flatMap(
+            (point) => [
+              point.x,
+              point.y,
+            ]
+          );
+
+        const members =
+          zvts.filter(
+            (zvt) =>
+              zvt.route?.branchId ===
+              branch.id
+          );
+
+        return (
+          <Group key={branch.id}>
+            <Line
+              points={branchFlat}
+              stroke={
+                selected
+                  ? "#2F80ED"
+                  : branch.style
+                      ?.stroke ||
+                    "black"
+              }
+              strokeWidth={
+                selected
+                  ? Math.max(
+                      branch.style
+                        ?.strokeWidth ||
+                        2,
+                      3
+                    )
+                  : branch.style
+                      ?.strokeWidth ||
+                    2
+              }
+              dash={
+                branch.style
+                  ?.dash || []
+              }
+              lineCap="round"
+              lineJoin="round"
+              hitStrokeWidth={14}
+
+              onClick={(e) => {
+                e.cancelBubble = true;
+
+                setSelection?.({
+                  type:
+                    "zvtBranch",
+                  id: branch.id,
+                });
+              }}
+
+              onDblClick={(e) => {
+                if (readOnly) {
+                  return;
+                }
+
+                e.cancelBubble = true;
+
+                const pointer =
+                  eventToStagePoint(e);
+
+                if (!pointer) {
+                  return;
+                }
+
+                const nearest =
+                  findNearestBranchSegment(
+                    branchPoints,
+                    pointer
+                  );
+
+                if (!nearest) {
+                  return;
+                }
+
+                canvasController
+                  .insertZvtBranchBend?.(
+                    branch.id,
+                    nearest
+                      .segmentIndex,
+                    pointer
+                  );
+              }}
+
+              onContextMenu={(e) => {
+                e.evt.preventDefault();
+                e.cancelBubble = true;
+
+                canvasController
+                  .handleZvtBranchContextMenu?.(
+                    e,
+                    branch
+                  );
+              }}
+            />
+
+            {members.map((zvt) => {
+              const leader =
+                buildZvtBranchMemberLeader({
+                  branchPoints,
+                  zvt,
+                });
+
+              return (
+                <Line
+                  key={
+                    `${branch.id}:` +
+                    `${zvt.id}`
+                  }
+                  points={leader}
+                  stroke={
+                    zvt.style
+                      ?.stroke ||
+                    "black"
+                  }
+                  strokeWidth={
+                    zvt.style
+                      ?.strokeWidth ||
+                    2
+                  }
+                  lineCap="round"
+                  lineJoin="round"
+                  listening={false}
+                />
+              );
+            })}
+
+            {/*
+              INTERIOR VERTEX HANDLES.
+              full branchPoints:
+              0 = root
+              last = endpoint
+              only 1..last-1 are editable vertices.
+            */}
+            {!readOnly &&
+              selected &&
+              branchPoints
+                .slice(
+                  1,
+                  -1
+                )
+                .map(
+                  (
+                    point,
+                    localIndex
+                  ) => {
+                    const fullIndex =
+                      localIndex + 1;
+
+                    const isActive =
+                      branchEdit
+                        ?.branchId ===
+                          branch.id &&
+                      branchEdit
+                        ?.vertexIndex ===
+                          fullIndex;
+
+                    return (
+                      <Circle
+                        key={
+                          `branch:` +
+                          `${branch.id}:` +
+                          `vertex:` +
+                          `${fullIndex}`
+                        }
+                        x={point.x}
+                        y={point.y}
+                        radius={
+                          isActive
+                            ? 6
+                            : 5
+                        }
+                        fill="white"
+                        stroke="#2F80ED"
+                        strokeWidth={2}
+                        draggable
+
+                        onMouseDown={(
+                          e
+                        ) => {
+                          e.cancelBubble =
+                            true;
+
+                          setZvtBranchEdit?.({
+                            branchId:
+                              branch.id,
+                            vertexIndex:
+                              fullIndex,
+                          });
+                        }}
+
+                        onDragMove={(
+                          e
+                        ) => {
+                          canvasController
+                            .moveZvtBranchVertexOrthogonal?.(
+                              branch.id,
+                              fullIndex,
+                              {
+                                x:
+                                  e.target.x(),
+                                y:
+                                  e.target.y(),
+                              }
+                            );
+                        }}
+
+                        onDragEnd={(
+                          e
+                        ) => {
+                          canvasController
+                            .moveZvtBranchVertexOrthogonal?.(
+                              branch.id,
+                              fullIndex,
+                              {
+                                x:
+                                  e.target.x(),
+                                y:
+                                  e.target.y(),
+                              }
+                            );
+                        }}
+                      />
+                    );
+                  }
+                )}
+
+            {/*
+              ENDPOINT HANDLE.
+              Root handle intentionally absent:
+              root належить node/edge і не може бути "відірваний".
+            */}
+            {!readOnly &&
+              selected &&
+              branchPoints.length >=
+                2 && (
+                <Circle
+                  x={
+                    branchPoints[
+                      branchPoints.length -
+                        1
+                    ].x
+                  }
+                  y={
+                    branchPoints[
+                      branchPoints.length -
+                        1
+                    ].y
+                  }
+                  radius={6}
+                  fill="#fff"
+                  stroke="#2F80ED"
+                  strokeWidth={2}
+                  draggable
+
+                  onMouseDown={(
+                    e
+                  ) => {
+                    e.cancelBubble =
+                      true;
+
+                    setZvtBranchEdit?.({
+                      branchId:
+                        branch.id,
+
+                      endpoint: true,
+                    });
+                  }}
+
+                  onDragMove={(
+                    e
+                  ) => {
+                    canvasController
+                      .moveZvtBranchEndpointOrthogonal?.(
+                        branch.id,
+                        {
+                          x:
+                            e.target.x(),
+                          y:
+                            e.target.y(),
+                        }
+                      );
+                  }}
+
+                  onDragEnd={(
+                    e
+                  ) => {
+                    canvasController
+                      .moveZvtBranchEndpointOrthogonal?.(
+                        branch.id,
+                        {
+                          x:
+                            e.target.x(),
+                          y:
+                            e.target.y(),
+                        }
+                      );
+                  }}
+                />
+              )}
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+
+
+// BRANCH DATA MODEL — EXAMPLE
+// ============================================================================
+//
+// zvtBranches: [
+//   {
+//     id: "branch-1",
+//     kind: "zvtBranch",
+//
+//     // ОБОВ'ЯЗКОВО node або edge.
+//     attachedTo: {
+//       type: "node",
+//       id: "node-10",
+//     },
+//
+//     route: {
+//       sourceSide: "right",
+//       sourceOffset: 18,
+//
+//       vertices: [
+//         { id: "v1", x: 500, y: 300 },
+//         { id: "v2", x: 500, y: 500 },
+//       ],
+//
+//       endPoint: {
+//         x: 850,
+//         y: 500,
+//       },
+//     },
+//   },
+// ]
+//
+// ZVT member:
+//
+// {
+//   ...
+//   route: {
+//     ...
+//     branchId: "branch-1",
+//
+//     branchTap: {
+//       // auto — найближча точка магістралі.
+//       mode: "auto",
+//
+//       // fixed — зафіксований segmentIndex + t.
+//       // mode: "fixed",
+//       // segmentIndex: 1,
+//       // t: 0.35,
+//     },
+//   }
+// }
+//
+// ============================================================================
+
+// FILE: src/components/zvt/ZvtLayer.jsx
+// ============================================================================
+
+"use client";
+
+import React from "react";
+import {
+  Circle,
+  Group,
+  Line,
+} from "react-konva";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import ZvtSymbol from "@/components/zvt/ZvtSymbol";
+
+import {
+  buildZvtLeaderRoute,
+  resolveZvtAnchor,
+} from "@/lib/zvt/zvtGeometry";
+
+export default function ZvtLayer() {
+  const zvts = useCanvasStore((s) => s.zvts || []);
+  const nodes = useCanvasStore((s) => s.nodes || []);
+  const edges = useCanvasStore((s) => s.edges || []);
+  const selection = useCanvasStore((s) => s.selection);
+  const zvtRuntimeById = useCanvasStore(
+    (s) => s.zvtRuntimeById || {}
+  );
+
+  const showRealtimeOnCanvas =
+    useCanvasStore(
+      (s) =>
+        s.zvtSettings
+          ?.showRealtimeOnCanvas ?? true
+    );
+  const setSelection = useCanvasStore((s) => s.setSelection);
+  const accessMode = useCanvasStore(
+    (s) => s.accessMode || "editor"
+  );
+
+  const readOnly = accessMode === "reader";
+
+  return (
+    <>
+      {zvts.map((zvt) => {
+        const selected =
+          selection?.type === "zvt" &&
+          selection?.id === zvt.id;
+
+        /**
+         * КЛЮЧОВА ЗМІНА:
+         * anchor НЕ беремо зі старого zvt.anchor як постійну координату.
+         * Він щоразу перераховується з актуального nodes[] / edges[].
+         *
+         * Тому після переміщення node лінія ЗВТ перебудовується разом із ним.
+         */
+        const anchor = resolveZvtAnchor(
+          zvt,
+          nodes,
+          edges
+        );
+
+        const leaderPoints = buildZvtLeaderRoute({
+          anchor,
+          symbol: zvt.position,
+          radius: zvt.style?.radius ?? 22,
+
+          sourceSide:
+            zvt.attachedTo?.type === "node"
+              ? (
+                  zvt.route?.sourceSide ||
+                  zvt.route?.preferredSide ||
+                  anchor.side
+                )
+              : null,
+
+          symbolSide:
+            zvt.route?.symbolSide || "auto",
+
+          sourceOffset:
+            zvt.route?.sourceOffset ?? 18,
+
+          symbolOffset:
+            zvt.route?.symbolOffset ?? 12,
+        });
+
+        return (
+          <Group key={zvt.id}>
+            {!zvt.route?.branchId &&
+              leaderPoints.length >= 4 && (
+              <Line
+                points={leaderPoints}
+                stroke={
+                  selected
+                    ? zvt.style?.selectedStroke ||
+                      "#2F80ED"
+                    : zvt.style?.stroke || "black"
+                }
+                strokeWidth={selected ? 2.5 : 2}
+                lineCap="round"
+                lineJoin="round"
+                listening={false}
+              />
+            )}
+
+            {/*
+              Малий anchor marker показуємо тільки для вибраного ЗВТ.
+              Це дуже корисно для візуальної перевірки:
+              точка повинна лежати РІВНО на межі node.
+            */}
+            {selected &&
+              zvt.attachedTo?.type === "node" && (
+                <Circle
+                  x={anchor.x}
+                  y={anchor.y}
+                  radius={4}
+                  fill="white"
+                  stroke={
+                    zvt.style?.selectedStroke ||
+                    "#2F80ED"
+                  }
+                  strokeWidth={2}
+                  listening={false}
+                />
+              )}
+
+            <ZvtSymbol
+              zvt={zvt}
+              runtime={zvtRuntimeById[zvt.id] || null}
+              showRealtime={showRealtimeOnCanvas}
+              selected={selected}
+              draggable={!readOnly}
+              onClick={(e) => {
+                e.cancelBubble = true;
+                setSelection?.({
+                  type: "zvt",
+                  id: zvt.id,
+                });
+              }}
+              onDblClick={(e) => {
+                e.cancelBubble = true;
+                canvasController.openZvtEditor?.({
+                  zvtId: zvt.id,
+                  attachedTo: zvt.attachedTo,
+                });
+              }}
+              onContextMenu={(e) => {
+                e.evt.preventDefault();
+                e.cancelBubble = true;
+                canvasController.handleZvtContextMenu?.(
+                  e,
+                  zvt
+                );
+              }}
+              onDragMove={(e) => {
+                canvasController.moveZvt?.(
+                  zvt.id,
+                  {
+                    x: e.target.x(),
+                    y: e.target.y(),
+                  }
+                );
+              }}
+              onDragEnd={(e) => {
+                canvasController.moveZvt?.(
+                  zvt.id,
+                  {
+                    x: e.target.x(),
+                    y: e.target.y(),
+                  }
+                );
+              }}
+            />
+          </Group>
+        );
+      })}
+    </>
+  );
+}
+
+
+// FILE: src/components/zvt/ZvtEditorModal.jsx
+// ============================================================================
+
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControl,
+  FormControlLabel,
+  FormGroup,
+  FormLabel,
+  Radio,
+  RadioGroup,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { canvasController } from "@/controllers/canvasController";
+import {
+  ZVT_ACTION_SIGNS,
+  ZVT_ACTION_SIGN_POSITIONS,
+  ZVT_FUNCTION_SIGNS,
+  ZVT_INSTALL_PLACES,
+  ZVT_PARAMETERS,
+  ZVT_RECIPIENTS,
+  ZVT_RECIPIENT_LABEL_MODES,
+  ZVT_SIGNAL_DIRECTIONS,
+  ZVT_CONNECTION_SIDES,
+  ZVT_SYMBOL_CONNECTION_SIDES,
+} from "@/lib/zvt/zvtDictionaries";
+
+function toggleArrayValue(array, value) {
+  if (array.includes(value)) {
+    return array.filter((item) => item !== value);
+  }
+
+  return [...array, value];
+}
+
+function onlyDigits(value) {
+  return value.replace(/\D/g, "");
+}
+
+export default function ZvtEditorModal() {
+  const zvtEditor = useCanvasStore((s) => s.zvtEditor);
+  const zvts = useCanvasStore((s) => s.zvts || []);
+  const accessMode = useCanvasStore((s) => s.accessMode || "editor");
+
+  const readOnly = accessMode === "reader";
+  const open = !!zvtEditor;
+
+  const existing = useMemo(() => {
+    if (!zvtEditor?.zvtId) return null;
+    return zvts.find((item) => item.id === zvtEditor.zvtId) || null;
+  }, [zvtEditor, zvts]);
+
+  const [installPlace, setInstallPlace] = useState("local");
+  const [parameter, setParameter] = useState("F");
+  const [parameterSuffix, setParameterSuffix] = useState("");
+  const [showParameterGraphicMark, setShowParameterGraphicMark] = useState(true);
+  const [parameterGraphicScale, setParameterGraphicScale] = useState(1);
+  const [functionSigns, setFunctionSigns] = useState([]);
+  const [functionSuffix, setFunctionSuffix] = useState("");
+
+  const [signalDirection, setSignalDirection] = useState("none");
+  const [recipientLabelMode, setRecipientLabelMode] = useState("M");
+  const [recipients, setRecipients] = useState([]);
+  const [recipientCustomText, setRecipientCustomText] = useState("");
+
+  const [actionSign, setActionSign] = useState("none");
+  const [actionSignPosition, setActionSignPosition] = useState("before");
+
+  const [radius, setRadius] = useState(22);
+  const [arrowSize, setArrowSize] = useState(8);
+  const [signalLength, setSignalLength] = useState(82);
+
+  const [sourceSide, setSourceSide] = useState("auto");
+  const [symbolSide, setSymbolSide] = useState("auto");
+  const [sourceOffset, setSourceOffset] = useState(18);
+  const [symbolOffset, setSymbolOffset] = useState(12);
+
+  // STEP 4 — Catalog / realtime
+  const [catalogItemId, setCatalogItemId] = useState("");
+  const [equipmentId, setEquipmentId] = useState("");
+
+  const [telemetryEnabled, setTelemetryEnabled] =
+    useState(false);
+  const [sensorId, setSensorId] = useState("");
+  const [telemetryValueField, setTelemetryValueField] =
+    useState("value");
+  const [telemetryUnit, setTelemetryUnit] = useState("");
+  const [telemetryPrecision, setTelemetryPrecision] =
+    useState(2);
+  const [telemetryStaleAfterMs, setTelemetryStaleAfterMs] =
+    useState(15000);
+  const [showTelemetryOnCanvas, setShowTelemetryOnCanvas] =
+    useState(false);
+
+  const [tag, setTag] = useState("");
+  const [comment, setComment] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+
+    if (existing) {
+      setInstallPlace(existing.data?.installPlace || "local");
+      setParameter(existing.data?.parameter || "F");
+      setParameterSuffix(existing.data?.parameterSuffix || "");
+      setShowParameterGraphicMark(existing.data?.showParameterGraphicMark ?? true);
+      setParameterGraphicScale(existing.style?.parameterGraphicScale ?? 1);
+      setFunctionSigns(existing.data?.functionSigns || []);
+      setFunctionSuffix(existing.data?.functionSuffix || "");
+
+      setSignalDirection(
+        existing.data?.signal?.enabled
+          ? existing.data?.signal?.direction || "right"
+          : "none"
+      );
+
+      setRecipientLabelMode(existing.data?.recipientLabelMode || "M");
+      setRecipients(existing.data?.recipients || []);
+      setRecipientCustomText(existing.data?.recipientCustomText || "");
+
+      setActionSign(existing.data?.actionSign || "none");
+      setActionSignPosition(existing.data?.actionSignPosition || "before");
+
+      setRadius(existing.style?.radius ?? 22);
+      setArrowSize(existing.style?.arrowSize ?? 8);
+      setSignalLength(existing.style?.signalLength ?? 82);
+
+      setSourceSide(
+        existing.route?.sourceSide ||
+        existing.route?.preferredSide ||
+        "auto"
+      );
+      setSymbolSide(existing.route?.symbolSide || "auto");
+      setSourceOffset(existing.route?.sourceOffset ?? 18);
+      setSymbolOffset(existing.route?.symbolOffset ?? 12);
+
+      setCatalogItemId(
+        existing.integration?.catalog?.itemId || ""
+      );
+      setEquipmentId(
+        existing.integration?.catalog?.equipmentId || ""
+      );
+
+      setTelemetryEnabled(
+        existing.integration?.telemetry?.enabled ?? false
+      );
+      setSensorId(
+        existing.integration?.telemetry?.sensorId || ""
+      );
+      setTelemetryValueField(
+        existing.integration?.telemetry?.valueField || "value"
+      );
+      setTelemetryUnit(
+        existing.integration?.telemetry?.unit || ""
+      );
+      setTelemetryPrecision(
+        existing.integration?.telemetry?.precision ?? 2
+      );
+      setTelemetryStaleAfterMs(
+        existing.integration?.telemetry?.staleAfterMs ?? 15000
+      );
+      setShowTelemetryOnCanvas(
+        existing.integration?.telemetry?.showOnCanvas ?? false
+      );
+
+      setTag(existing.data?.tag || "");
+      setComment(existing.data?.comment || "");
+      return;
+    }
+
+    setInstallPlace("local");
+    setParameter("F");
+    setParameterSuffix("");
+    setShowParameterGraphicMark(true);
+    setParameterGraphicScale(1);
+    setFunctionSigns([]);
+    setFunctionSuffix("");
+
+    setSignalDirection("none");
+    setRecipientLabelMode("M");
+    setRecipients([]);
+    setRecipientCustomText("");
+
+    setActionSign("none");
+    setActionSignPosition("before");
+
+    setRadius(22);
+    setArrowSize(8);
+    setSignalLength(82);
+
+    setSourceSide("auto");
+    setSymbolSide("auto");
+    setSourceOffset(18);
+    setSymbolOffset(12);
+
+    setCatalogItemId("");
+    setEquipmentId("");
+
+    setTelemetryEnabled(false);
+    setSensorId("");
+    setTelemetryValueField("value");
+    setTelemetryUnit("");
+    setTelemetryPrecision(2);
+    setTelemetryStaleAfterMs(15000);
+    setShowTelemetryOnCanvas(false);
+
+    setTag("");
+    setComment("");
+  }, [open, existing]);
+
+  const handleRecipientModeChange = (nextMode) => {
+    setRecipientLabelMode(nextMode);
+
+    // Взаємовиключення режимів:
+    // M => власний напис не використовується.
+    // custom => список M1..M6 не використовується.
+    if (nextMode === "M") {
+      setRecipientCustomText("");
+    } else {
+      setRecipients([]);
+    }
+  };
+
+  const handleClose = () => {
+    canvasController.closeZvtEditor?.();
+  };
+
+  const handleSave = () => {
+    if (readOnly) return;
+
+    const payload = {
+      installPlace,
+      parameter,
+      parameterSuffix,
+      showParameterGraphicMark,
+      functionSigns,
+      functionSuffix,
+
+      signal: {
+        enabled: signalDirection !== "none",
+        direction: signalDirection === "none" ? "right" : signalDirection,
+      },
+
+      recipientLabelMode,
+      recipients: recipientLabelMode === "M" ? recipients : [],
+      recipientCustomText: recipientLabelMode === "custom" ? recipientCustomText.trim() : "",
+
+      actionSign,
+      actionSignPosition,
+
+      tag,
+      comment,
+    };
+
+    const integration = {
+      catalog: {
+        itemId: catalogItemId.trim(),
+        equipmentId: equipmentId.trim(),
+      },
+
+      telemetry: {
+        enabled:
+          telemetryEnabled && Boolean(sensorId.trim()),
+
+        sensorId: sensorId.trim(),
+        valueField:
+          telemetryValueField.trim() || "value",
+        timestampField: "timestamp",
+        qualityField: "quality",
+
+        unit: telemetryUnit.trim(),
+
+        precision: Math.max(
+          0,
+          Math.min(
+            8,
+            Number(telemetryPrecision) || 0
+          )
+        ),
+
+        staleAfterMs: Math.max(
+          1000,
+          Math.min(
+            600000,
+            Number(telemetryStaleAfterMs) || 15000
+          )
+        ),
+
+        showOnCanvas: showTelemetryOnCanvas,
+      },
+    };
+
+    const route = {
+      sourceSide,
+      symbolSide,
+      sourceOffset: Math.max(
+        0,
+        Math.min(100, Number(sourceOffset) || 18)
+      ),
+      symbolOffset: Math.max(
+        0,
+        Math.min(100, Number(symbolOffset) || 12)
+      ),
+    };
+
+    const style = {
+      radius: Math.max(14, Math.min(60, Number(radius) || 22)),
+      arrowSize: Math.max(4, Math.min(30, Number(arrowSize) || 8)),
+      signalLength: Math.max(30, Math.min(240, Number(signalLength) || 82)),
+      parameterGraphicScale: Math.max(
+        0.6,
+        Math.min(2.5, Number(parameterGraphicScale) || 1)
+      ),
+    };
+
+    if (existing) {
+      canvasController.updateZvtFromEditor?.(
+        existing.id,
+        payload,
+        style,
+        route,
+        integration
+      );
+    } else {
+      canvasController.createZvtFromEditor?.({
+        attachedTo: zvtEditor?.attachedTo,
+        data: payload,
+        style,
+        route,
+        integration,
+      });
+    }
+  };
+
+  const customRecipientMode = recipientLabelMode === "custom";
+  const mRecipientMode = recipientLabelMode === "M";
+  const signalDisabled = signalDirection === "none";
+  const attachedToType =
+    existing?.attachedTo?.type ||
+    zvtEditor?.attachedTo?.type ||
+    "none";
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
+      <DialogTitle>ЗВТ</DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={3}>
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Місце встановлення
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={installPlace}
+                onChange={(e) => setInstallPlace(e.target.value)}
+              >
+                {ZVT_INSTALL_PLACES.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Вид вимірюваного параметру
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={parameter}
+                onChange={(e) => setParameter(e.target.value)}
+              >
+                {ZVT_PARAMETERS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+
+            <TextField
+              label="Цифра / індекс до виду параметру"
+              placeholder="Напр. 1 → T1"
+              value={parameterSuffix}
+              onChange={(e) => setParameterSuffix(onlyDigits(e.target.value))}
+              disabled={readOnly}
+              inputProps={{ inputMode: "numeric", maxLength: 4 }}
+              sx={{ mt: 1.5, maxWidth: 280 }}
+            />
+
+            <FormControlLabel
+              sx={{ mt: 1.5, ml: 1 }}
+              control={
+                <Checkbox
+                  checked={showParameterGraphicMark}
+                  onChange={(e) => setShowParameterGraphicMark(e.target.checked)}
+                  disabled={readOnly}
+                />
+              }
+              label="Показувати графічний умовний знак параметру"
+            />
+
+            <TextField
+              label="Масштаб графічного знаку"
+              type="number"
+              value={parameterGraphicScale}
+              onChange={(e) => setParameterGraphicScale(e.target.value)}
+              disabled={readOnly || !showParameterGraphicMark}
+              inputProps={{ min: 0.6, max: 2.5, step: 0.1 }}
+              sx={{ mt: 1.5, ml: { sm: 2 }, maxWidth: 240 }}
+            />
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <FormControl component="fieldset" disabled={readOnly}>
+              <FormLabel component="legend">
+                Функціональна ознака вимірюваного параметру
+              </FormLabel>
+
+              <FormGroup row>
+                {ZVT_FUNCTION_SIGNS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    control={
+                      <Checkbox
+                        checked={functionSigns.includes(item.value)}
+                        onChange={() =>
+                          setFunctionSigns((current) =>
+                            toggleArrayValue(current, item.value)
+                          )
+                        }
+                      />
+                    }
+                    label={item.label}
+                  />
+                ))}
+              </FormGroup>
+            </FormControl>
+
+            <TextField
+              label="Цифра / індекс до функціональної ознаки"
+              placeholder="Напр. 2 → SB2"
+              value={functionSuffix}
+              onChange={(e) => setFunctionSuffix(onlyDigits(e.target.value))}
+              disabled={readOnly}
+              inputProps={{ inputMode: "numeric", maxLength: 4 }}
+              sx={{ mt: 1.5, maxWidth: 320 }}
+            />
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Передача сигналу
+            </Typography>
+
+            <FormControl disabled={readOnly}>
+              <RadioGroup
+                row
+                value={signalDirection}
+                onChange={(e) => setSignalDirection(e.target.value)}
+              >
+                {ZVT_SIGNAL_DIRECTIONS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Позначення адресата сигналу
+            </Typography>
+
+            <FormControl disabled={readOnly || signalDisabled}>
+              <RadioGroup
+                row
+                value={recipientLabelMode}
+                onChange={(e) => handleRecipientModeChange(e.target.value)}
+              >
+                {ZVT_RECIPIENT_LABEL_MODES.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Box>
+            <FormControl
+              component="fieldset"
+              disabled={readOnly || signalDisabled || !mRecipientMode}
+            >
+              <FormLabel component="legend">M — адресат</FormLabel>
+
+              <FormGroup row>
+                {ZVT_RECIPIENTS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    control={
+                      <Checkbox
+                        checked={recipients.includes(item.value)}
+                        onChange={() =>
+                          setRecipients((current) =>
+                            toggleArrayValue(current, item.value)
+                          )
+                        }
+                      />
+                    }
+                    label={item.label}
+                  />
+                ))}
+              </FormGroup>
+            </FormControl>
+
+            <TextField
+              label="Власний напис замість M"
+              placeholder="Напр. PLC, ША, МС..."
+              value={recipientCustomText}
+              onChange={(e) => setRecipientCustomText(e.target.value)}
+              disabled={readOnly || signalDisabled || !customRecipientMode}
+              fullWidth
+              sx={{ mt: 1.5 }}
+            />
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Знак + / - біля позначення адресата
+            </Typography>
+
+            <FormControl disabled={readOnly || signalDisabled}>
+              <RadioGroup
+                row
+                value={actionSign}
+                onChange={(e) => setActionSign(e.target.value)}
+              >
+                {ZVT_ACTION_SIGNS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+
+            <FormControl
+              disabled={readOnly || signalDisabled || actionSign === "none"}
+              sx={{ mt: 1 }}
+            >
+              <RadioGroup
+                row
+                value={actionSignPosition}
+                onChange={(e) => setActionSignPosition(e.target.value)}
+              >
+                {ZVT_ACTION_SIGN_POSITIONS.map((item) => (
+                  <FormControlLabel
+                    key={item.value}
+                    value={item.value}
+                    control={<Radio />}
+                    label={item.label}
+                  />
+                ))}
+              </RadioGroup>
+            </FormControl>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Приєднання ЗВТ
+            </Typography>
+
+            {attachedToType === "node" ? (
+              <>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mb: 1 }}
+                >
+                  Вкажіть сторону node, з якої повинна виходити
+                  з'єднувальна лінія.
+                </Typography>
+
+                <FormControl disabled={readOnly}>
+                  <FormLabel>
+                    Сторона приєднання до об'єкта
+                  </FormLabel>
+
+                  <RadioGroup
+                    row
+                    value={sourceSide}
+                    onChange={(e) =>
+                      setSourceSide(e.target.value)
+                    }
+                  >
+                    {ZVT_CONNECTION_SIDES.map((item) => (
+                      <FormControlLabel
+                        key={item.value}
+                        value={item.value}
+                        control={<Radio />}
+                        label={item.label}
+                      />
+                    ))}
+                  </RadioGroup>
+                </FormControl>
+              </>
+            ) : (
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mb: 1.5 }}
+              >
+                Для приєднання до connector/edge точка береться
+                з вибраного segmentId. Сторона node тут не
+                використовується.
+              </Typography>
+            )}
+
+            <Box sx={{ mt: 2 }}>
+              <FormControl disabled={readOnly}>
+                <FormLabel>
+                  Сторона входу лінії у кружечок ЗВТ
+                </FormLabel>
+
+                <RadioGroup
+                  row
+                  value={symbolSide}
+                  onChange={(e) =>
+                    setSymbolSide(e.target.value)
+                  }
+                >
+                  {ZVT_SYMBOL_CONNECTION_SIDES.map((item) => (
+                    <FormControlLabel
+                      key={item.value}
+                      value={item.value}
+                      control={<Radio />}
+                      label={item.label}
+                    />
+                  ))}
+                </RadioGroup>
+              </FormControl>
+            </Box>
+
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+              sx={{ mt: 2 }}
+            >
+              <TextField
+                label="Відступ від node"
+                type="number"
+                value={sourceOffset}
+                onChange={(e) =>
+                  setSourceOffset(e.target.value)
+                }
+                disabled={readOnly}
+                inputProps={{
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                }}
+              />
+
+              <TextField
+                label="Відступ перед ЗВТ"
+                type="number"
+                value={symbolOffset}
+                onChange={(e) =>
+                  setSymbolOffset(e.target.value)
+                }
+                disabled={readOnly}
+                inputProps={{
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                }}
+              />
+            </Stack>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Розміри символу
+            </Typography>
+
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <TextField
+                label="Радіус кола"
+                type="number"
+                value={radius}
+                onChange={(e) => setRadius(e.target.value)}
+                disabled={readOnly}
+                inputProps={{ min: 14, max: 60, step: 1 }}
+              />
+
+              <TextField
+                label="Розмір стрілки"
+                type="number"
+                value={arrowSize}
+                onChange={(e) => setArrowSize(e.target.value)}
+                disabled={readOnly || signalDisabled}
+                inputProps={{ min: 4, max: 30, step: 1 }}
+              />
+
+              <TextField
+                label="Довжина сигнальної лінії"
+                type="number"
+                value={signalLength}
+                onChange={(e) => setSignalLength(e.target.value)}
+                disabled={readOnly || signalDisabled}
+                inputProps={{ min: 30, max: 240, step: 2 }}
+              />
+            </Stack>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Інформаційна картка / Каталог
+            </Typography>
+
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ mb: 1.5 }}
+            >
+              На цьому етапі зберігаємо тільки ідентифікатори.
+              Після підключення БД за catalogItemId можна буде
+              завантажувати повну Інформаційну картку обладнання.
+            </Typography>
+
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+            >
+              <TextField
+                label="Catalog item ID"
+                value={catalogItemId}
+                onChange={(e) =>
+                  setCatalogItemId(e.target.value)
+                }
+                disabled={readOnly}
+                fullWidth
+              />
+
+              <TextField
+                label="Equipment ID"
+                value={equipmentId}
+                onChange={(e) =>
+                  setEquipmentId(e.target.value)
+                }
+                disabled={readOnly}
+                fullWidth
+              />
+            </Stack>
+          </Box>
+
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Realtime / WebSocket
+            </Typography>
+
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={telemetryEnabled}
+                  onChange={(e) =>
+                    setTelemetryEnabled(e.target.checked)
+                  }
+                  disabled={readOnly}
+                />
+              }
+              label="Отримувати значення датчика у реальному часі"
+            />
+
+            <TextField
+              label="Sensor ID"
+              placeholder="Напр. SENSOR-PT-101"
+              value={sensorId}
+              onChange={(e) =>
+                setSensorId(e.target.value)
+              }
+              disabled={readOnly || !telemetryEnabled}
+              fullWidth
+              sx={{ mt: 1 }}
+            />
+
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+              sx={{ mt: 2 }}
+            >
+              <TextField
+                label="Поле значення у WebSocket payload"
+                value={telemetryValueField}
+                onChange={(e) =>
+                  setTelemetryValueField(e.target.value)
+                }
+                disabled={readOnly || !telemetryEnabled}
+                fullWidth
+              />
+
+              <TextField
+                label="Одиниця"
+                placeholder="°C, bar, %, m³/h..."
+                value={telemetryUnit}
+                onChange={(e) =>
+                  setTelemetryUnit(e.target.value)
+                }
+                disabled={readOnly || !telemetryEnabled}
+                sx={{ minWidth: 180 }}
+              />
+
+              <TextField
+                label="Знаків після коми"
+                type="number"
+                value={telemetryPrecision}
+                onChange={(e) =>
+                  setTelemetryPrecision(e.target.value)
+                }
+                disabled={readOnly || !telemetryEnabled}
+                inputProps={{
+                  min: 0,
+                  max: 8,
+                  step: 1,
+                }}
+                sx={{ minWidth: 180 }}
+              />
+            </Stack>
+
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+              alignItems={{ sm: "center" }}
+              sx={{ mt: 2 }}
+            >
+              <TextField
+                label="Stale timeout, ms"
+                type="number"
+                value={telemetryStaleAfterMs}
+                onChange={(e) =>
+                  setTelemetryStaleAfterMs(e.target.value)
+                }
+                disabled={readOnly || !telemetryEnabled}
+                inputProps={{
+                  min: 1000,
+                  max: 600000,
+                  step: 1000,
+                }}
+              />
+
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={showTelemetryOnCanvas}
+                    onChange={(e) =>
+                      setShowTelemetryOnCanvas(
+                        e.target.checked
+                      )
+                    }
+                    disabled={
+                      readOnly || !telemetryEnabled
+                    }
+                  />
+                }
+                label="Показувати поточне значення біля ЗВТ"
+              />
+            </Stack>
+          </Box>
+
+          <Divider />
+
+          <TextField
+            label="Позначення / тег"
+            value={tag}
+            onChange={(e) => setTag(e.target.value)}
+            disabled={readOnly}
+            fullWidth
+          />
+
+          <TextField
+            label="Коментар"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            disabled={readOnly}
+            minRows={3}
+            multiline
+            fullWidth
+          />
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose}>Закрити</Button>
+
+        {!readOnly && (
+          <Button variant="contained" onClick={handleSave}>
+            Зберегти
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+// ============================================================================
+// FILE: src/store/useCanvasStore.js
+// PATCH: вставити у твій existing store
+// ============================================================================
+
+// 1) PERSISTED STATE
+
+zvts: [],
+zvtBranches: [],
+zvtEditor: null,
+
+// Runtime UI state for branch editing.
+// НЕ серіалізувати.
+zvtBranchEdit: null,
+
+// Глобальні налаштування ЗВТ для поточної схеми.
+// Їх можна винести у "Картку схеми" / Diagram settings.
+zvtSettings: {
+  realtimeEnabled: true,
+  showRealtimeOnCanvas: true,
+},
+
+// 2) RUNTIME STATE — НЕ серіалізувати у JSON.
+//
+// Структура:
+// zvtRuntimeById[zvtId] = {
+//   sensorId,
+//   value,
+//   rawValue,
+//   unit,
+//   timestamp,
+//   quality,
+//   connectionState,
+//   receivedAt,
+//   error,
+// }
+
+zvtRuntimeById: {},
+
+// 3) PERSISTED ACTIONS
+
+addZvt: (zvt) =>
+  set((s) => ({
+    zvts: [...(s.zvts || []), zvt],
+  })),
+
+replaceZvt: (id, nextZvt) =>
+  set((s) => ({
+    zvts: (s.zvts || []).map((zvt) =>
+      zvt.id === id ? nextZvt : zvt
+    ),
+  })),
+
+removeZvt: (id) =>
+  set((s) => {
+    const nextRuntime = {
+      ...(s.zvtRuntimeById || {}),
+    };
+
+    delete nextRuntime[id];
+
+    return {
+      zvts: (s.zvts || []).filter(
+        (zvt) => zvt.id !== id
+      ),
+
+      zvtRuntimeById: nextRuntime,
+
+      selection:
+        s.selection?.type === "zvt" &&
+        s.selection?.id === id
+          ? null
+          : s.selection,
+    };
+  }),
+
+setZvtEditor: (zvtEditor) =>
+  set({ zvtEditor }),
+
+clearZvtEditor: () =>
+  set({ zvtEditor: null }),
+
+setZvtBranchEdit: (value) =>
+  set({
+    zvtBranchEdit: value,
+  }),
+
+clearZvtBranchEdit: () =>
+  set({
+    zvtBranchEdit: null,
+  }),
+
+// 4) RUNTIME TELEMETRY ACTIONS
+
+setZvtRuntime: (zvtId, patch) =>
+  set((s) => ({
+    zvtRuntimeById: {
+      ...(s.zvtRuntimeById || {}),
+
+      [zvtId]: {
+        ...(s.zvtRuntimeById?.[zvtId] || {}),
+        ...patch,
+      },
+    },
+  })),
+
+clearZvtRuntime: (zvtId) =>
+  set((s) => {
+    const next = {
+      ...(s.zvtRuntimeById || {}),
+    };
+
+    delete next[zvtId];
+
+    return {
+      zvtRuntimeById: next,
+    };
+  }),
+
+resetAllZvtRuntime: () =>
+  set({
+    zvtRuntimeById: {},
+  }),
+
+// 4.1) DIAGRAM-LEVEL ZVT SETTINGS
+
+setZvtRealtimeEnabled: (enabled) =>
+  set((s) => ({
+    zvtSettings: {
+      ...(s.zvtSettings || {}),
+      realtimeEnabled: !!enabled,
+    },
+  })),
+
+setZvtShowRealtimeOnCanvas: (enabled) =>
+  set((s) => ({
+    zvtSettings: {
+      ...(s.zvtSettings || {}),
+      showRealtimeOnCanvas: !!enabled,
+    },
+  })),
+
+// 4.2) ZVT BRANCHES
+
+addZvtBranch: (branch) =>
+  set((s) => ({
+    zvtBranches: [
+      ...(s.zvtBranches || []),
+      branch,
+    ],
+  })),
+
+replaceZvtBranch: (id, nextBranch) =>
+  set((s) => ({
+    zvtBranches: (s.zvtBranches || []).map(
+      (branch) =>
+        branch.id === id
+          ? nextBranch
+          : branch
+    ),
+  })),
+
+removeZvtBranch: (id) =>
+  set((s) => ({
+    zvtBranches: (s.zvtBranches || []).filter(
+      (branch) => branch.id !== id
+    ),
+
+    // При видаленні branch ЗВТ не видаляємо.
+    // Вони просто стають direct/непідключеними до branch.
+    zvts: (s.zvts || []).map((zvt) =>
+      zvt.route?.branchId === id
+        ? {
+            ...zvt,
+            route: {
+              ...zvt.route,
+              branchId: null,
+            },
+          }
+        : zvt
+    ),
+  })),
+
+// 5) JSON SAVE/LOAD PATCH
+//
+// У replaceDocumentState додати:
+zvts: Array.isArray(document.zvts)
+  ? document.zvts
+  : [],
+
+zvtBranches: Array.isArray(document.zvtBranches)
+  ? document.zvtBranches
+  : [],
+
+zvtSettings: {
+  realtimeEnabled:
+    document.zvtSettings?.realtimeEnabled ?? true,
+
+  showRealtimeOnCanvas:
+    document.zvtSettings?.showRealtimeOnCanvas ?? true,
+},
+//
+// І ВАЖЛИВО:
+// runtime треба очистити при відкритті іншої схеми:
+zvtRuntimeById: {},
+//
+// НЕ додавати zvtRuntimeById у buildDiagramDocument().
+
+
+// FILE: src/controllers/canvasController.js
+// PATCH: imports
+// ============================================================================
+
+import { createZvt, moveZvt, updateZvtData } from "@/lib/zvt/zvtModel";
+import {
+  createZvtBranch,
+  updateZvtBranch,
+} from "@/lib/zvt/zvtBranchModel";
+import {
+  buildZvtBranchPoints,
+  fullBranchPointsToRoute,
+  insertOrthogonalBranchBend,
+  moveOrthogonalBranchEndpoint,
+  moveOrthogonalBranchVertex,
+  removeOrthogonalBranchVertex,
+} from "@/lib/zvt/zvtBranchGeometry";
+import { createInitialZvtPosition, resolveZvtAnchor } from "@/lib/zvt/zvtGeometry";
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH: вставити методи в об'єкт canvasController
+// ============================================================================
+
+openZvtEditor({
+  attachedTo = null,
+  zvtId = null,
+} = {}) {
+  const store = useCanvasStore.getState();
+
+  store.setZvtEditor?.({
+    attachedTo,
+    zvtId,
+  });
+},
+
+closeZvtEditor() {
+  const store = useCanvasStore.getState();
+  store.clearZvtEditor?.();
+},
+
+createZvtFromEditor({
+  attachedTo,
+  data,
+  style = {},
+  route = {},
+  integration = {},
+}) {
+  const store = useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") === "reader"
+  ) {
+    return;
+  }
+
+  if (!attachedTo?.type || !attachedTo?.id) {
+    return;
+  }
+
+  /**
+   * Спочатку створюємо temp із route,
+   * бо resolveZvtAnchor повинен уже знати sourceSide.
+   */
+  const tempZvt = createZvt({
+    attachedTo,
+    data,
+    style,
+    route,
+    integration,
+  });
+
+  const anchor = resolveZvtAnchor(
+    tempZvt,
+    store.nodes,
+    store.edges
+  );
+
+  const position = createInitialZvtPosition(
+    anchor,
+    anchor.side
+  );
+
+  const zvt = createZvt({
+    attachedTo,
+    anchor,
+    position,
+    data,
+    style,
+    route,
+    integration,
+  });
+
+  store.addZvt?.(zvt);
+  store.setSelection?.({
+    type: "zvt",
+    id: zvt.id,
+  });
+  store.clearZvtEditor?.();
+},
+
+updateZvtFromEditor(
+  zvtId,
+  data,
+  style = {},
+  route = {},
+  integration = {}
+) {
+  const store = useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") === "reader"
+  ) {
+    return;
+  }
+
+  const zvt = (store.zvts || []).find(
+    (item) => item.id === zvtId
+  );
+
+  if (!zvt) return;
+
+  const next = updateZvtData(
+    zvt,
+    data,
+    style,
+    route,
+    integration
+  );
+
+  store.replaceZvt?.(zvtId, next);
+  store.clearZvtEditor?.();
+},
+
+moveZvt(zvtId, position) {
+  const store = useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") === "reader"
+  ) {
+    return;
+  }
+
+  const zvt = (store.zvts || []).find(
+    (item) => item.id === zvtId
+  );
+
+  if (!zvt) return;
+
+  const next = moveZvt(
+    zvt,
+    position
+  );
+
+  store.replaceZvt?.(
+    zvtId,
+    next
+  );
+},
+
+handleZvtContextMenu(e, zvt) {
+  e.evt.preventDefault();
+
+  const stage = e.target.getStage();
+  const pointer = stage?.getPointerPosition();
+
+  if (!pointer) return;
+
+  const store = useCanvasStore.getState();
+
+  store.setContextMenu?.({
+    type: "zvt",
+    zvtId: zvt.id,
+    x: pointer.x,
+    y: pointer.y,
+  });
+},
+
+editZvtFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (
+    !menu ||
+    menu.type !== "zvt" ||
+    !menu.zvtId
+  ) {
+    return;
+  }
+
+  const zvt = (store.zvts || []).find(
+    (item) => item.id === menu.zvtId
+  );
+
+  if (!zvt) return;
+
+  store.setZvtEditor?.({
+    zvtId: zvt.id,
+    attachedTo: zvt.attachedTo,
+  });
+
+  store.clearContextMenu?.();
+},
+
+deleteZvtFromContextMenu() {
+  const store = useCanvasStore.getState();
+  const menu = store.contextMenu;
+
+  if (
+    (store.accessMode || "editor") === "reader"
+  ) {
+    return;
+  }
+
+  if (
+    !menu ||
+    menu.type !== "zvt" ||
+    !menu.zvtId
+  ) {
+    return;
+  }
+
+  store.removeZvt?.(
+    menu.zvtId
+  );
+  store.clearContextMenu?.();
+},
+
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH STEP 5 — ZVT BRANCH METHODS
+// ============================================================================
+
+createZvtBranch({
+  attachedTo,
+  sourceSide = "auto",
+  endPoint = null,
+}) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  if (
+    !attachedTo?.id ||
+    !["node", "edge"].includes(
+      attachedTo.type
+    )
+  ) {
+    return;
+  }
+
+  const branch =
+    createZvtBranch({
+      attachedTo,
+
+      route: {
+        sourceSide,
+        endPoint,
+      },
+    });
+
+  store.addZvtBranch?.(branch);
+
+  store.setSelection?.({
+    type: "zvtBranch",
+    id: branch.id,
+  });
+},
+
+deleteZvtBranch(branchId) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  store.removeZvtBranch?.(
+    branchId
+  );
+},
+
+attachZvtToBranch(
+  zvtId,
+  branchId,
+  {
+    tapMode = "auto",
+    segmentIndex = 0,
+    t = 0.5,
+  } = {}
+) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  const zvt =
+    (store.zvts || [])
+      .find(
+        (item) =>
+          item.id === zvtId
+      );
+
+  if (!branch || !zvt) return;
+
+  store.replaceZvt?.(
+    zvtId,
+    {
+      ...zvt,
+
+      route: {
+        ...zvt.route,
+
+        branchId,
+
+        branchTap: {
+          mode: tapMode,
+
+          ...(tapMode === "fixed"
+            ? {
+                segmentIndex,
+                t,
+              }
+            : {}),
+        },
+      },
+
+      updatedAt: Date.now(),
+    }
+  );
+},
+
+detachZvtFromBranch(zvtId) {
+  const store =
+    useCanvasStore.getState();
+
+  const zvt =
+    (store.zvts || [])
+      .find(
+        (item) =>
+          item.id === zvtId
+      );
+
+  if (!zvt) return;
+
+  store.replaceZvt?.(
+    zvtId,
+    {
+      ...zvt,
+
+      route: {
+        ...zvt.route,
+        branchId: null,
+        branchTap: null,
+      },
+
+      updatedAt: Date.now(),
+    }
+  );
+},
+
+moveZvtBranchVertex(
+  branchId,
+  vertexIndex,
+  position
+) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const vertices = [
+    ...(branch.route?.vertices || []),
+  ];
+
+  if (!vertices[vertexIndex]) {
+    return;
+  }
+
+  vertices[vertexIndex] = {
+    ...vertices[vertexIndex],
+    x: position.x,
+    y: position.y,
+  };
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route: {
+          vertices,
+        },
+      }
+    )
+  );
+},
+
+addZvtBranchVertex(
+  branchId,
+  position
+) {
+  const store =
+    useCanvasStore.getState();
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const vertices = [
+    ...(branch.route?.vertices || []),
+
+    {
+      id: crypto.randomUUID(),
+      x: position.x,
+      y: position.y,
+    },
+  ];
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route: {
+          vertices,
+        },
+      }
+    )
+  );
+},
+
+handleZvtBranchContextMenu(
+  e,
+  branch
+) {
+  const stage =
+    e.target.getStage();
+
+  const pointer =
+    stage?.getPointerPosition();
+
+  if (!pointer) return;
+
+  const store =
+    useCanvasStore.getState();
+
+  store.setContextMenu?.({
+    type: "zvtBranch",
+    branchId: branch.id,
+    x: pointer.x,
+    y: pointer.y,
+  });
+},
+
+
+// ============================================================================
+// FILE: src/controllers/canvasController.js
+// PATCH STEP 6 — ORTHOGONAL BRANCH EDIT METHODS
+// ============================================================================
+
+moveZvtBranchVertexOrthogonal(
+  branchId,
+  fullPointIndex,
+  position
+) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const fullPoints =
+    buildZvtBranchPoints(
+      branch,
+      store.nodes || [],
+      store.edges || []
+    );
+
+  const nextPoints =
+    moveOrthogonalBranchVertex(
+      fullPoints,
+      fullPointIndex,
+      position,
+      {
+        gridSize:
+          store.gridSize || 10,
+      }
+    );
+
+  const nextRoute =
+    fullBranchPointsToRoute(
+      nextPoints,
+      branch.route
+    );
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route:
+          nextRoute,
+      }
+    )
+  );
+},
+
+moveZvtBranchEndpointOrthogonal(
+  branchId,
+  position
+) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const fullPoints =
+    buildZvtBranchPoints(
+      branch,
+      store.nodes || [],
+      store.edges || []
+    );
+
+  const nextPoints =
+    moveOrthogonalBranchEndpoint(
+      fullPoints,
+      position,
+      {
+        gridSize:
+          store.gridSize || 10,
+      }
+    );
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route:
+          fullBranchPointsToRoute(
+            nextPoints,
+            branch.route
+          ),
+      }
+    )
+  );
+},
+
+insertZvtBranchBend(
+  branchId,
+  segmentIndex,
+  pointer
+) {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const fullPoints =
+    buildZvtBranchPoints(
+      branch,
+      store.nodes || [],
+      store.edges || []
+    );
+
+  const nextPoints =
+    insertOrthogonalBranchBend(
+      fullPoints,
+      segmentIndex,
+      pointer,
+      {
+        gridSize:
+          store.gridSize || 10,
+      }
+    );
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route:
+          fullBranchPointsToRoute(
+            nextPoints,
+            branch.route
+          ),
+      }
+    )
+  );
+},
+
+deleteSelectedZvtBranchVertex() {
+  const store =
+    useCanvasStore.getState();
+
+  if (
+    (store.accessMode || "editor") ===
+    "reader"
+  ) {
+    return;
+  }
+
+  const edit =
+    store.zvtBranchEdit;
+
+  if (
+    !edit?.branchId ||
+    !Number.isInteger(
+      edit.vertexIndex
+    )
+  ) {
+    return;
+  }
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id ===
+          edit.branchId
+      );
+
+  if (!branch) return;
+
+  const fullPoints =
+    buildZvtBranchPoints(
+      branch,
+      store.nodes || [],
+      store.edges || []
+    );
+
+  const nextPoints =
+    removeOrthogonalBranchVertex(
+      fullPoints,
+      edit.vertexIndex
+    );
+
+  store.replaceZvtBranch?.(
+    branch.id,
+    updateZvtBranch(
+      branch,
+      {
+        route:
+          fullBranchPointsToRoute(
+            nextPoints,
+            branch.route
+          ),
+      }
+    )
+  );
+
+  store.clearZvtBranchEdit?.();
+},
+
+normalizeZvtBranch(
+  branchId
+) {
+  const store =
+    useCanvasStore.getState();
+
+  const branch =
+    (store.zvtBranches || [])
+      .find(
+        (item) =>
+          item.id === branchId
+      );
+
+  if (!branch) return;
+
+  const fullPoints =
+    buildZvtBranchPoints(
+      branch,
+      store.nodes || [],
+      store.edges || []
+    );
+
+  store.replaceZvtBranch?.(
+    branchId,
+    updateZvtBranch(
+      branch,
+      {
+        route:
+          fullBranchPointsToRoute(
+            fullPoints,
+            branch.route
+          ),
+      }
+    )
+  );
+},
+
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: imports
+// ============================================================================
+
+import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати в меню node
+// ============================================================================
+
+{contextMenu?.type === "node" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openZvtEditor?.({
+        attachedTo: {
+          type: "node",
+          id: contextMenu.nodeId,
+        },
+      });
+      clearContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <SettingsInputComponentIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Додати ЗВТ</ListItemText>
+  </MenuItem>
+)}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати в меню connector/edge
+// ============================================================================
+
+{contextMenu?.type === "connector" && (
+  <MenuItem
+    onClick={() => {
+      canvasController.openZvtEditor?.({
+        attachedTo: {
+          type: "edge",
+          id: contextMenu.edgeId,
+          segmentId: contextMenu.segmentId || null,
+        },
+      });
+      clearContextMenu?.();
+    }}
+  >
+    <ListItemIcon>
+      <SettingsInputComponentIcon fontSize="small" />
+    </ListItemIcon>
+    <ListItemText>Додати ЗВТ</ListItemText>
+  </MenuItem>
+)}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+// PATCH: додати меню для самого ZVT
+// ============================================================================
+
+{contextMenu?.type === "zvt" && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController.editZvtFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <EditOutlinedIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Редагувати ЗВТ</ListItemText>
+    </MenuItem>
+
+    <MenuItem
+      onClick={() => {
+        canvasController.deleteZvtFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <DeleteOutlineIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Видалити ЗВТ</ListItemText>
+    </MenuItem>
+  </>
+)}
+
+
+
+// ============================================================================
+
+
+// ============================================================================
+// PATCH STEP 5 — NODE CONTEXT MENU
+// ============================================================================
+//
+// Додати ще один MenuItem:
+//
+// <MenuItem
+//   onClick={() => {
+//     canvasController.createZvtBranch?.({
+//       attachedTo: {
+//         type: "node",
+//         id: contextMenu.nodeId,
+//       },
+//     });
+//
+//     clearContextMenu?.();
+//   }}
+// >
+//   <ListItemText>
+//     Додати групову лінію ЗВТ
+//   </ListItemText>
+// </MenuItem>
+//
+// ============================================================================
+// PATCH STEP 5 — EDGE/CONNECTOR CONTEXT MENU
+// ============================================================================
+//
+// <MenuItem
+//   onClick={() => {
+//     canvasController.createZvtBranch?.({
+//       attachedTo: {
+//         type: "edge",
+//         id: contextMenu.edgeId,
+//         segmentId:
+//           contextMenu.segmentId || null,
+//       },
+//     });
+//
+//     clearContextMenu?.();
+//   }}
+// >
+//   <ListItemText>
+//     Додати групову лінію ЗВТ
+//   </ListItemText>
+// </MenuItem>
+//
+// ============================================================================
+// PATCH STEP 5 — ZVT CONTEXT MENU
+// ============================================================================
+//
+// Для UX краще мати submenu/select:
+// "Підключити до групової лінії..."
+// зі списком zvtBranches.
+//
+// При виборі:
+// canvasController.attachZvtToBranch(
+//   zvt.id,
+//   branchId,
+//   { tapMode: "auto" }
+// );
+//
+// Якщо route.branchId існує:
+// "Від'єднати від групової лінії"
+//
+// canvasController.detachZvtFromBranch(zvt.id);
+//
+// ============================================================================
+// PATCH STEP 5 — ZVT BRANCH CONTEXT MENU
+// ============================================================================
+//
+// contextMenu.type === "zvtBranch":
+//
+// - Додати точку зламу
+// - Видалити групову лінію
+//
+// Для "Додати точку зламу":
+// використай позицію contextMenu x/y,
+// перераховану у canvas/world coordinates,
+// і виклич:
+//
+// canvasController.addZvtBranchVertex(
+//   contextMenu.branchId,
+//   { x, y }
+// );
+//
+// ============================================================================
+// ============================================================================
+// FILE: src/components/zvt/ZvtBranchKeyboardShortcuts.jsx
+// ============================================================================
+
+"use client";
+
+import {
+  useEffect,
+} from "react";
+
+import {
+  useCanvasStore,
+} from "@/store/useCanvasStore";
+
+import {
+  canvasController,
+} from "@/controllers/canvasController";
+
+/**
+ * Монтувати один раз поза Stage.
+ */
+export default function ZvtBranchKeyboardShortcuts() {
+  const accessMode =
+    useCanvasStore(
+      (s) =>
+        s.accessMode || "editor"
+    );
+
+  useEffect(() => {
+    const handleKeyDown = (
+      event
+    ) => {
+      if (
+        accessMode === "reader"
+      ) {
+        return;
+      }
+
+      const target =
+        event.target;
+
+      const tagName =
+        target?.tagName
+          ?.toLowerCase();
+
+      if (
+        tagName === "input" ||
+        tagName === "textarea" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      if (
+        event.key === "Delete" ||
+        event.key === "Backspace"
+      ) {
+        const edit =
+          useCanvasStore
+            .getState()
+            .zvtBranchEdit;
+
+        if (
+          edit?.branchId &&
+          Number.isInteger(
+            edit.vertexIndex
+          )
+        ) {
+          event.preventDefault();
+
+          canvasController
+            .deleteSelectedZvtBranchVertex?.();
+        }
+      }
+    };
+
+    window.addEventListener(
+      "keydown",
+      handleKeyDown
+    );
+
+    return () => {
+      window.removeEventListener(
+        "keydown",
+        handleKeyDown
+      );
+    };
+  }, [accessMode]);
+
+  return null;
+}
+
+
+// ============================================================================
+// PATCH EditorCanvas imports
+// ============================================================================
+
+import ZvtBranchKeyboardShortcuts
+  from "@/components/zvt/ZvtBranchKeyboardShortcuts";
+
+
+// ============================================================================
+// PATCH EditorCanvas outside Stage
+// ============================================================================
+
+<ZvtBranchKeyboardShortcuts />
+
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: imports
+// ============================================================================
+
+import ZvtBranchLayer from "@/components/zvt/ZvtBranchLayer";
+import ZvtLayer from "@/components/zvt/ZvtLayer";
+import ZvtEditorModal from "@/components/zvt/ZvtEditorModal";
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: render layers
+// ============================================================================
+
+<ConnectorsLayer />
+<NodesLayer />
+<AnnotationsLayer />
+
+{/* Branch trunk and member taps behind ZVT symbols. */}
+<ZvtBranchLayer />
+<ZvtLayer />
+
+<AttachmentBadgesLayer />
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH: render modals outside Stage
+// ============================================================================
+
+<ZvtEditorModal />
+
+
+
+// ============================================================================
+// FILE: src/services/zvt/zvtRealtimeClient.js
+// ============================================================================
+
+/**
+ * Низькорівневий WebSocket client.
+ *
+ * Він НЕ знає про React/Konva.
+ * Його задача:
+ * - connect;
+ * - subscribe sensorIds;
+ * - normalize incoming messages;
+ * - передати normalized telemetry у callback.
+ *
+ * Очікуваний payload за замовчуванням:
+ *
+ * {
+ *   "sensorId": "SENSOR-PT-101",
+ *   "value": 12.34,
+ *   "timestamp": "2026-09-07T16:40:00Z",
+ *   "quality": "good"
+ * }
+ *
+ * Якщо backend матиме інший формат —
+ * змінюємо тільки normalizeMessage/subscribeMessageFactory.
+ */
+
+export class ZvtRealtimeClient {
+  constructor({
+    url,
+    onTelemetry,
+    onStateChange,
+    subscribeMessageFactory,
+  }) {
+    this.url = url;
+    this.onTelemetry = onTelemetry;
+    this.onStateChange = onStateChange;
+
+    this.subscribeMessageFactory =
+      subscribeMessageFactory ||
+      ((sensorIds) => ({
+        type: "subscribe",
+        sensorIds,
+      }));
+
+    this.socket = null;
+    this.sensorIds = [];
+    this.reconnectTimer = null;
+    this.closedManually = false;
+  }
+
+  connect(sensorIds = []) {
+    this.sensorIds = [
+      ...new Set(sensorIds.filter(Boolean)),
+    ];
+
+    if (!this.url || this.sensorIds.length === 0) {
+      return;
+    }
+
+    this.closedManually = false;
+    this.onStateChange?.("connecting");
+
+    this.socket = new WebSocket(this.url);
+
+    this.socket.onopen = () => {
+      this.onStateChange?.("connected");
+      this.sendSubscription();
+    };
+
+    this.socket.onmessage = (event) => {
+      try {
+        const raw = JSON.parse(event.data);
+        const normalized = this.normalizeMessage(raw);
+
+        if (normalized) {
+          this.onTelemetry?.(normalized);
+        }
+      } catch (error) {
+        console.warn(
+          "[ZVT realtime] invalid message",
+          error
+        );
+      }
+    };
+
+    this.socket.onerror = () => {
+      this.onStateChange?.("error");
+    };
+
+    this.socket.onclose = () => {
+      this.onStateChange?.("disconnected");
+
+      if (!this.closedManually) {
+        this.scheduleReconnect();
+      }
+    };
+  }
+
+  updateSubscriptions(sensorIds = []) {
+    this.sensorIds = [
+      ...new Set(sensorIds.filter(Boolean)),
+    ];
+
+    if (this.sensorIds.length === 0) {
+      this.disconnect();
+      return;
+    }
+
+    if (
+      !this.socket ||
+      this.socket.readyState === WebSocket.CLOSED
+    ) {
+      this.connect(this.sensorIds);
+      return;
+    }
+
+    if (
+      this.socket.readyState === WebSocket.OPEN
+    ) {
+      this.sendSubscription();
+    }
+  }
+
+  sendSubscription() {
+    if (
+      !this.socket ||
+      this.socket.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+
+    this.socket.send(
+      JSON.stringify(
+        this.subscribeMessageFactory(this.sensorIds)
+      )
+    );
+  }
+
+  normalizeMessage(raw) {
+    if (!raw || !raw.sensorId) return null;
+
+    return {
+      sensorId: String(raw.sensorId),
+      value: raw.value,
+      timestamp:
+        raw.timestamp || new Date().toISOString(),
+      quality: raw.quality || "unknown",
+      raw,
+    };
+  }
+
+  scheduleReconnect() {
+    clearTimeout(this.reconnectTimer);
+
+    this.reconnectTimer = setTimeout(() => {
+      this.connect(this.sensorIds);
+    }, 3000);
+  }
+
+  disconnect() {
+    this.closedManually = true;
+    clearTimeout(this.reconnectTimer);
+
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+  }
+}
+
+
+
+// ============================================================================
+// FILE: src/components/zvt/ZvtRealtimeBridge.jsx
+// ============================================================================
+
+"use client";
+
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import { ZvtRealtimeClient } from "@/services/zvt/zvtRealtimeClient";
+
+/**
+ * React bridge між persisted zvt.integration і runtime Zustand.
+ *
+ * Монтувати ОДИН раз поза <Stage>.
+ *
+ * НЕ створювати WebSocket у кожному ZvtSymbol.
+ * Інакше 50 ЗВТ = 50 socket connections.
+ */
+export default function ZvtRealtimeBridge() {
+  const zvts = useCanvasStore((s) => s.zvts || []);
+  const setZvtRuntime = useCanvasStore(
+    (s) => s.setZvtRuntime
+  );
+
+  const realtimeEnabled = useCanvasStore(
+    (s) =>
+      s.zvtSettings?.realtimeEnabled ?? true
+  );
+
+  const clientRef = useRef(null);
+
+  const bindings = useMemo(() => {
+    return (zvts || [])
+      .filter(
+        (zvt) =>
+          zvt.integration?.telemetry?.enabled &&
+          zvt.integration?.telemetry?.sensorId
+      )
+      .map((zvt) => ({
+        zvtId: zvt.id,
+        sensorId:
+          zvt.integration.telemetry.sensorId,
+        config: zvt.integration.telemetry,
+      }));
+  }, [zvts]);
+
+  const bindingBySensorId = useMemo(() => {
+    const map = new Map();
+
+    for (const binding of bindings) {
+      const list =
+        map.get(binding.sensorId) || [];
+
+      list.push(binding);
+      map.set(binding.sensorId, list);
+    }
+
+    return map;
+  }, [bindings]);
+
+  const sensorIds = useMemo(
+    () => bindings.map((item) => item.sensorId),
+    [bindings]
+  );
+
+  useEffect(() => {
+    const url =
+      process.env.NEXT_PUBLIC_ZVT_WS_URL;
+
+    if (!realtimeEnabled) {
+      return;
+    }
+
+    if (!url) {
+      // Поки backend не підключений — просто нічого не робимо.
+      return;
+    }
+
+    const client = new ZvtRealtimeClient({
+      url,
+
+      onTelemetry: (message) => {
+        const currentBindings =
+          bindingBySensorId.get(message.sensorId) || [];
+
+        for (const binding of currentBindings) {
+          const config = binding.config;
+
+          /**
+           * Якщо backend надалі передаватиме raw payload
+           * з іншим valueField, можна брати значення так:
+           */
+          const rawValue =
+            message.raw?.[config.valueField] ??
+            message.value;
+
+          const timestamp =
+            message.raw?.[config.timestampField] ??
+            message.timestamp;
+
+          const quality =
+            message.raw?.[config.qualityField] ??
+            message.quality;
+
+          setZvtRuntime?.(
+            binding.zvtId,
+            {
+              sensorId: message.sensorId,
+              rawValue,
+              value: rawValue,
+              unit: config.unit || "",
+              timestamp,
+              quality,
+              connectionState: "connected",
+              receivedAt: Date.now(),
+              error: null,
+            }
+          );
+        }
+      },
+
+      onStateChange: (state) => {
+        for (const binding of bindings) {
+          setZvtRuntime?.(
+            binding.zvtId,
+            {
+              sensorId: binding.sensorId,
+              connectionState: state,
+            }
+          );
+        }
+      },
+    });
+
+    clientRef.current = client;
+    client.connect(sensorIds);
+
+    return () => {
+      client.disconnect();
+      clientRef.current = null;
+    };
+  }, [
+    bindingBySensorId,
+    bindings,
+    sensorIds,
+    setZvtRuntime,
+    realtimeEnabled,
+  ]);
+
+  return null;
+}
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH STEP 4: imports
+// ============================================================================
+
+import ZvtRealtimeBridge from "@/components/zvt/ZvtRealtimeBridge";
+
+
+
+// ============================================================================
+// FILE: src/components/canvas/EditorCanvas.jsx
+// PATCH STEP 4: render OUTSIDE Stage
+// ============================================================================
+
+{/* Один WebSocket bridge на всю схему. */}
+<ZvtRealtimeBridge />
+
+
+
+// ============================================================================
+
+// ============================================================================
+
+// ============================================================================
+// FILE: src/components/diagram/DiagramSettingsCard.jsx
+// PATCH STEP 5 — ГЛОБАЛЬНЕ КЕРУВАННЯ REALTIME
+// ============================================================================
+//
+// Цей блок можна вставити у вашу існуючу "Картку схеми".
+// Назва компонента умовна — адаптуй до свого FSD.
+//
+// imports:
+//
+// import {
+//   FormControlLabel,
+//   Switch,
+//   Stack,
+//   Typography,
+// } from "@mui/material";
+//
+// import { useCanvasStore } from "@/store/useCanvasStore";
+//
+// component:
+//
+// const realtimeEnabled = useCanvasStore(
+//   (s) => s.zvtSettings?.realtimeEnabled ?? true
+// );
+//
+// const showRealtimeOnCanvas = useCanvasStore(
+//   (s) =>
+//     s.zvtSettings?.showRealtimeOnCanvas ?? true
+// );
+//
+// const setZvtRealtimeEnabled = useCanvasStore(
+//   (s) => s.setZvtRealtimeEnabled
+// );
+//
+// const setZvtShowRealtimeOnCanvas = useCanvasStore(
+//   (s) => s.setZvtShowRealtimeOnCanvas
+// );
+//
+// render:
+//
+// <Stack spacing={1}>
+//   <Typography variant="subtitle2">
+//     ЗВТ — дані реального часу
+//   </Typography>
+//
+//   <FormControlLabel
+//     control={
+//       <Switch
+//         checked={realtimeEnabled}
+//         onChange={(e) =>
+//           setZvtRealtimeEnabled?.(
+//             e.target.checked
+//           )
+//         }
+//       />
+//     }
+//     label="Отримувати realtime-дані для цієї схеми"
+//   />
+//
+//   <FormControlLabel
+//     control={
+//       <Switch
+//         checked={showRealtimeOnCanvas}
+//         onChange={(e) =>
+//           setZvtShowRealtimeOnCanvas?.(
+//             e.target.checked
+//           )
+//         }
+//         disabled={!realtimeEnabled}
+//       />
+//     }
+//     label="Показувати realtime-значення на схемі"
+//   />
+// </Stack>
+//
+// ПОВЕДІНКА:
+//
+// realtimeEnabled = false:
+// - WebSocket bridge не підключається;
+// - індивідуальні sensorId НЕ стираються;
+// - при повторному ON все продовжує працювати.
+//
+// showRealtimeOnCanvas = false:
+// - WebSocket продовжує отримувати дані;
+// - runtime state оновлюється;
+// - значення просто НЕ малюються біля ZVT.
+//
+// Це дозволяє мати:
+// 1) realtime повністю OFF;
+// 2) realtime ON, але Canvas labels OFF;
+// 3) realtime ON + Canvas labels ON.
+//
+// ============================================================================
+
+// FILE: src/lib/serialization/buildDiagramDocument.js
+// PATCH: додати zvts
+// ============================================================================
+
+zvts: Array.isArray(store.zvts) ? store.zvts : [],
+zvtBranches: Array.isArray(store.zvtBranches)
+  ? store.zvtBranches
+  : [],
+zvtBranches: Array.isArray(store.zvtBranches)
+  ? store.zvtBranches
+  : [],
+zvtSettings: {
+  realtimeEnabled:
+    store.zvtSettings?.realtimeEnabled ?? true,
+  showRealtimeOnCanvas:
+    store.zvtSettings?.showRealtimeOnCanvas ?? true,
+},
+
+
+
+// ============================================================================
+// FILE: src/lib/serialization/normalizeDiagram.js
+// PATCH: додати дефолт
+// ============================================================================
+
+export function normalizeDiagramDocument(document) {
+  return {
+    ...document,
+    nodes: Array.isArray(document.nodes) ? document.nodes : [],
+    edges: Array.isArray(document.edges) ? document.edges : [],
+    annotations: Array.isArray(document.annotations) ? document.annotations : [],
+    zvts: Array.isArray(document.zvts) ? document.zvts : [],
+    zvtBranches: Array.isArray(document.zvtBranches)
+      ? document.zvtBranches
+      : [],
+    zvtSettings: {
+      realtimeEnabled:
+        document.zvtSettings?.realtimeEnabled ?? true,
+      showRealtimeOnCanvas:
+        document.zvtSettings?.showRealtimeOnCanvas ?? true,
+    },
+    attachments: Array.isArray(document.attachments) ? document.attachments : [],
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/export/zvtSvgRenderer.js
+// ============================================================================
+
+import { getZvtInstallPlace } from "@/lib/zvt/zvtDictionaries";
+import { buildZvtLeaderRoute, buildZvtSignalGeometry, resolveZvtAnchor } from "@/lib/zvt/zvtGeometry";
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function pointsToSvg(points) {
+  const pairs = [];
+  for (let i = 0; i < points.length; i += 2) {
+    pairs.push(`${points[i]},${points[i + 1]}`);
+  }
+  return pairs.join(" ");
+}
+
+function buildParameterLabel(zvt) {
+  return `${zvt.data?.parameter || ""}${zvt.data?.parameterSuffix || ""}`;
+}
+
+function buildFunctionLabel(zvt) {
+  const signs = Array.isArray(zvt.data?.functionSigns)
+    ? zvt.data.functionSigns.join("")
+    : "";
+  return `${signs}${zvt.data?.functionSuffix || ""}`;
+}
+
+function buildSignalLabel(zvt) {
+  const mode = zvt.data?.recipientLabelMode || "M";
+
+  let base = "";
+  if (mode === "custom") {
+    base = (zvt.data?.recipientCustomText || "").trim();
+  } else {
+    const recipients = Array.isArray(zvt.data?.recipients)
+      ? zvt.data.recipients
+      : [];
+    base = recipients.length ? `M${recipients.join(",")}` : "M";
+  }
+
+  const sign = zvt.data?.actionSign || "none";
+  const signPosition = zvt.data?.actionSignPosition || "before";
+
+  if (!base || sign === "none") return base;
+  return signPosition === "after"
+    ? `${base} ${sign}`
+    : `${sign} ${base}`;
+}
+
+export function renderZvtSvg(zvt, scene) {
+  const nodes = scene.nodes || [];
+  const edges = scene.edges || [];
+
+  const x = zvt.position?.x ?? 0;
+  const y = zvt.position?.y ?? 0;
+  const r = zvt.style?.radius ?? 22;
+  const installPlace = getZvtInstallPlace(zvt.data?.installPlace);
+  const functionLabel = buildFunctionLabel(zvt);
+  const parameterLabel = buildParameterLabel(zvt);
+  const stroke = zvt.style?.stroke || "black";
+  const strokeWidth = zvt.style?.strokeWidth ?? 2;
+  const fontFamily = zvt.style?.fontFamily || "Roboto Condensed";
+  const fontSize = zvt.style?.fontSize ?? 13;
+
+  const anchor = resolveZvtAnchor(zvt, nodes, edges);
+  const leader = buildZvtLeaderRoute({
+    anchor,
+    symbol: zvt.position,
+    radius: r,
+    sourceSide:
+      zvt.attachedTo?.type === "node"
+        ? (
+            zvt.route?.sourceSide ||
+            zvt.route?.preferredSide ||
+            anchor.side
+          )
+        : null,
+    symbolSide: zvt.route?.symbolSide || "auto",
+    sourceOffset: zvt.route?.sourceOffset ?? 18,
+    symbolOffset: zvt.route?.symbolOffset ?? 12,
+  });
+  const signal = buildZvtSignalGeometry(zvt);
+  const signalLabel = buildSignalLabel(zvt);
+
+  let svg = "";
+
+  if (leader.length >= 4) {
+    svg += `<polyline points="${pointsToSvg(leader)}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" />`;
+  }
+
+  svg += `<circle cx="${x}" cy="${y}" r="${r}" fill="white" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+
+  if (zvt.data?.showParameterGraphicMark ?? true) {
+    const graphicScale = zvt.style?.parameterGraphicScale ?? 1;
+    svg += renderParameterGraphicMarkSvg(zvt, {
+      x,
+      y: y - r - 12 * graphicScale,
+      stroke,
+      strokeWidth: 1.6,
+    });
+  }
+
+  if (installPlace.hasDivider) {
+    svg += `<line x1="${x - r}" y1="${y}" x2="${x + r}" y2="${y}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+    svg += `<text x="${x}" y="${y - 8}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(functionLabel)}</text>`;
+    svg += `<text x="${x}" y="${y + 12}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(parameterLabel)}</text>`;
+  } else {
+    // "За місцем": функціональна ознака + вид параметру без горизонтальної лінії.
+    if (functionLabel && parameterLabel) {
+      svg += `<text x="${x}" y="${y - 7}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(functionLabel)}</text>`;
+      svg += `<text x="${x}" y="${y + 8}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(parameterLabel)}</text>`;
+    } else {
+      const single = functionLabel || parameterLabel;
+      svg += `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(single)}</text>`;
+    }
+  }
+
+  if (signal) {
+    svg += `<polyline points="${pointsToSvg(signal.line)}" fill="none" stroke="black" stroke-width="2" stroke-dasharray="18 8" />`;
+    svg += `<polygon points="${pointsToSvg(signal.arrowPoints)}" fill="black" stroke="black" stroke-width="1" />`;
+    svg += `<text x="${signal.labelX}" y="${signal.labelY + 13}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="700">${esc(signalLabel)}</text>`;
+  }
+
+  return svg;
+}
+
+export function renderZvtsSvg(scene) {
+  return (scene.zvts || []).map((zvt) => renderZvtSvg(zvt, scene)).join("\n");
+}
+
+
+// ============================================================================
+// FILE: src/lib/export/svgRenderer.js
+// PATCH: імпортувати і додати renderZvtsSvg(scene)
+// ============================================================================
+
+import { renderZvtsSvg } from "@/lib/export/zvtSvgRenderer";
+
+// усередині renderSvg(scene), після nodes/connectors/annotations:
+
+${"${renderZvtsSvg(scene)}"}
+
+
+
+// ============================================================================
+// FILE: src/lib/export/buildExportScene.js
+// PATCH: додати zvts
+// ============================================================================
+
+zvts: Array.isArray(store.zvts) ? store.zvts : [],
+
+
+
+// ============================================================================
+// IMPORTANT NOTES
+// ============================================================================
+// 1. ZVT винесено як окрему сутність zvts[], не як annotations[].
+// 2. attachedTo підтримує node та edge.
+// 3. Для edge підтримується segmentId, якщо context menu передає segmentId.
+// 4. Лінія приєднання ортогональна і будується окремим zvtGeometry.
+// 5. Символ можна drag-ати; anchor перераховується від node/edge.
+// 6. Подвійний клік по ЗВТ відкриває форму редагування.
+// 7. Context menu по ЗВТ дозволяє редагувати/видалити.
+// 8. accessMode === "reader" блокує редагування та drag.
+// 9. Для JSON save/load треба додати zvts у document.
+// 10. Для PDF/SVG export треба додати renderZvtsSvg(scene).
+// ============================================================================
+
+
+// ============================================================================
+// STEP 3 — ОБОВ'ЯЗКОВА ІНТЕГРАЦІЙНА ПЕРЕВІРКА NODE GEOMETRY
+// ============================================================================
+//
+// Пункт 6 виправляє геометрію на стороні ЗВТ, але є одна важлива умова:
+//
+// ZvtLayer та NodesLayer повинні однаково трактувати координати node.
+//
+// Варіант A — position = TOP-LEFT:
+// --------------------------------
+// node = {
+//   id: "...",
+//   position: { x: 100, y: 200 },
+//   size: { width: 120, height: 60 },
+// }
+//
+// Нічого додатково не потрібно.
+//
+// Варіант B — position = CENTER:
+// ------------------------------
+// node = {
+//   id: "...",
+//   position: { x: 160, y: 230 },
+//   size: { width: 120, height: 60 },
+//   positionOrigin: "center",
+// }
+//
+// ВАЖЛИВО:
+// якщо NodesLayer реально малює Group/Circle/Rect від центру,
+// але store не містить positionOrigin="center",
+// anchor буде зміщений на width/2 та height/2.
+//
+// ---------------------------------------------------------------------------
+// РЕКОМЕНДОВАНО ДЛЯ СКЛАДНИХ ФІГУР
+// ---------------------------------------------------------------------------
+//
+// Якщо node не прямокутний (circle, valve, custom SVG, equipment shape),
+// НЕ треба намагатися вгадувати точку за bounding box.
+//
+// Додай у модель node точні connectionAnchors:
+//
+// node = {
+//   ...,
+//   connectionAnchors: {
+//     top:    { x: 160, y: 200 },
+//     bottom: { x: 160, y: 260 },
+//     left:   { x: 100, y: 230 },
+//     right:  { x: 220, y: 230 },
+//   },
+// }
+//
+// resolveZvtAnchor() автоматично використає їх першими.
+//
+// Це дає один і той самий контракт для:
+// - звичайних connectors;
+// - ЗВТ;
+// - майбутніх групових ZVT branches;
+// - будь-яких інших attached elements.
+//
+// ---------------------------------------------------------------------------
+// ЩО ВІДБУВАЄТЬСЯ ПРИ DRAG NODE
+// ---------------------------------------------------------------------------
+//
+// ZvtLayer читає актуальний nodes[] із Zustand.
+// resolveZvtAnchor() виконується на кожному render.
+// Тому при оновленні node.position:
+// 1. anchor переходить разом із node;
+// 2. ламана перебудовується;
+// 3. сам ZVT лишається там, де його розмістив користувач.
+//
+// ---------------------------------------------------------------------------
+// ЩО ВІДБУВАЄТЬСЯ ПРИ DRAG ZVT
+// ---------------------------------------------------------------------------
+//
+// sourceSide = "auto":
+//   anchor може автоматично перейти на найближчу сторону node.
+//
+// sourceSide = top/bottom/left/right:
+//   сторона ЗАФІКСОВАНА.
+//   При drag ЗВТ точка рухається тільки вздовж обраної сторони.
+//
+// Це саме та поведінка, яка потрібна для ручного контролю схеми.
+//
+// ---------------------------------------------------------------------------
+// BACKWARD COMPATIBILITY
+// ---------------------------------------------------------------------------
+//
+// Старі zvt:
+// route.preferredSide => автоматично підхоплюється як route.sourceSide.
+// Якщо поля немає:
+// sourceSide = "auto"
+// symbolSide = "auto"
+// sourceOffset = 18
+// symbolOffset = 12
+//
+// Старі JSON не потрібно мігрувати окремим скриптом.
+// ============================================================================
+
+
+// ============================================================================
+// STEP 3 — QUICK TEST CHECKLIST
+// ============================================================================
+//
+// TEST 1:
+// - Створити ЗВТ на node.
+// - sourceSide = right.
+// EXPECT:
+// - anchor рівно на правій межі;
+// - перший сегмент іде горизонтально вправо.
+//
+// TEST 2:
+// - sourceSide = top.
+// EXPECT:
+// - anchor на верхній межі;
+// - перший сегмент іде вертикально вверх.
+//
+// TEST 3:
+// - Перетягнути ZVT навколо node при sourceSide=right.
+// EXPECT:
+// - anchor НЕ переходить на left/top/bottom;
+// - він лише ковзає по правій стороні.
+//
+// TEST 4:
+// - sourceSide = auto.
+// - Перетягнути ZVT з правого боку node на лівий.
+// EXPECT:
+// - anchor автоматично переходить right -> left.
+//
+// TEST 5:
+// - Перемістити сам node.
+// EXPECT:
+// - anchor і leader line рухаються разом із node.
+//
+// TEST 6:
+// - symbolSide = bottom.
+// EXPECT:
+// - останній сегмент входить у нижню точку кружечка ЗВТ.
+//
+// TEST 7:
+// - Вибрати ZVT.
+// EXPECT:
+// - на node видно малий selection anchor marker.
+// - marker лежить точно на межі фігури.
+//
+// TEST 8:
+// - Експорт SVG.
+// EXPECT:
+// - leader route збігається з route на Canvas.
+// ============================================================================
+
+
+// ============================================================================
+// STEP 4 — normalizeDiagramDocument / backward compatibility
+// ============================================================================
+//
+// Старі zvt можуть не мати integration.
+// Тому при читанні НЕ звертайся до:
+//   zvt.integration.telemetry.sensorId
+// без optional chaining.
+//
+// Поточні компоненти вже використовують:
+//   zvt.integration?.telemetry?.sensorId
+//
+// Якщо хочеш централізовано нормалізувати старі JSON,
+// можеш при load зробити:
+//
+// zvts: (document.zvts || []).map((zvt) =>
+//   createZvt({
+//     ...zvt,
+//     id: zvt.id,
+//     attachedTo: zvt.attachedTo,
+//     anchor: zvt.anchor,
+//     position: zvt.position,
+//     data: zvt.data,
+//     route: zvt.route,
+//     style: zvt.style,
+//     integration: zvt.integration,
+//   })
+// )
+//
+// Але це НЕ обов'язково для цього пакету.
+//
+// ============================================================================
+// STEP 4 — ЩО СЕРІАЛІЗУЄМО
+// ============================================================================
+//
+// buildDiagramDocument():
+//   zvts: store.zvts
+//
+// Це автоматично включає zvt.integration.
+//
+// НЕ ДОДАВАТИ:
+//   zvtRuntimeById
+//
+// Бо value/timestamp/connectionState є runtime даними,
+// а не частиною схеми.
+//
+// ============================================================================
+// STEP 4 — МАЙБУТНЯ ІНФОРМАЦІЙНА КАРТКА
+// ============================================================================
+//
+// Рекомендована схема:
+//
+// ZVT (diagram)
+//   |
+//   +-- integration.catalog.itemId
+//   |
+//   +---- GET /api/catalog/:itemId
+//          |
+//          +-- name
+//          +-- manufacturer
+//          +-- model
+//          +-- serialNumber
+//          +-- range
+//          +-- calibration
+//          +-- documentation
+//          +-- ...
+//
+// Сам ЗВТ НЕ повинен дублювати всю картку Каталогу.
+// У схемі зберігається ID, а картка завантажується з БД.
+//
+// Це дозволить:
+// - оновити Каталог один раз;
+// - усі схеми бачать актуальну картку;
+// - не роздувати JSON діаграми.
+//
+// ============================================================================
+// STEP 4 — REALTIME DATA FLOW
+// ============================================================================
+//
+//                       persisted
+//   ZVT ─────────────> sensorId
+//                       |
+//                       v
+//              ZvtRealtimeBridge
+//                       |
+//                    1 socket
+//                       |
+//                       v
+//                WebSocket backend
+//                       |
+//                       v
+//              normalized message
+//                       |
+//                       v
+//               zvtRuntimeById
+//                  /         \
+//                 v           v
+//            ZvtSymbol    Info Card
+//
+// Ключове правило:
+// НЕ відкривати WebSocket окремо на кожен ЗВТ.
+//
+// ============================================================================
+// STEP 4 — QUICK TEST
+// ============================================================================
+//
+// TEST 1:
+// - Створити ЗВТ.
+// - Вказати catalogItemId.
+// - Save/load JSON.
+// EXPECT:
+// - ID зберігається.
+//
+// TEST 2:
+// - telemetry enabled = false.
+// EXPECT:
+// - WebSocket subscription для цього ЗВТ не створюється.
+//
+// TEST 3:
+// - enabled=true, sensorId порожній.
+// EXPECT:
+// - при save enabled фактично буде false.
+//
+// TEST 4:
+// - enabled=true, sensorId="SENSOR-1".
+// - NEXT_PUBLIC_ZVT_WS_URL не задано.
+// EXPECT:
+// - UI не падає;
+// - bridge просто не підключається.
+//
+// TEST 5:
+// - backend надсилає:
+//   {sensorId:"SENSOR-1", value:12.34}
+// EXPECT:
+// - zvtRuntimeById[zvtId].value = 12.34.
+//
+// TEST 6:
+// - showOnCanvas=true.
+// EXPECT:
+// - під кружечком ЗВТ видно "12.34 <unit>". 
+//
+// TEST 7:
+// - перестають надходити дані довше staleAfterMs.
+// EXPECT:
+// - label має suffix "• stale" і меншу opacity.
+//
+// TEST 8:
+// - Save diagram while realtime value exists.
+// EXPECT:
+// - value НЕ потрапляє у JSON.
+//
+// TEST 9:
+// - Видалити ZVT.
+// EXPECT:
+// - runtime entry для його zvtId також видаляється.
+//
+// ============================================================================
+
+
+// ============================================================================
+// FILE: src/lib/export/zvtBranchSvgRenderer.js
+// ============================================================================
+
+import {
+  buildZvtBranchMemberLeader,
+  buildZvtBranchPoints,
+} from "@/lib/zvt/zvtBranchGeometry";
+
+function flatPointsToSvg(
+  flat
+) {
+  const pairs = [];
+
+  for (
+    let i = 0;
+    i < flat.length;
+    i += 2
+  ) {
+    pairs.push(
+      `${flat[i]},${flat[i + 1]}`
+    );
+  }
+
+  return pairs.join(" ");
+}
+
+function objectPointsToSvg(
+  points
+) {
+  return points
+    .map(
+      (point) =>
+        `${point.x},${point.y}`
+    )
+    .join(" ");
+}
+
+export function renderZvtBranchesSvg(
+  scene
+) {
+  const branches =
+    scene.zvtBranches || [];
+
+  const zvts =
+    scene.zvts || [];
+
+  return branches
+    .map((branch) => {
+      /**
+       * КЛЮЧОВО:
+       * buildZvtBranchPoints()
+       * вже:
+       * - resolve dynamic root;
+       * - orthogonalize;
+       * - simplify.
+       *
+       * Тому SVG = Canvas geometry.
+       */
+      const branchPoints =
+        buildZvtBranchPoints(
+          branch,
+          scene.nodes || [],
+          scene.edges || []
+        );
+
+      const dash =
+        branch.style?.dash?.length
+          ? ` stroke-dasharray="${branch.style.dash.join(" ")}"`
+          : "";
+
+      let svg =
+        `<polyline ` +
+        `points="${objectPointsToSvg(branchPoints)}" ` +
+        `fill="none" ` +
+        `stroke="${branch.style?.stroke || "black"}" ` +
+        `stroke-width="${branch.style?.strokeWidth ?? 2}" ` +
+        `stroke-linecap="round" ` +
+        `stroke-linejoin="round"` +
+        `${dash} />`;
+
+      const members =
+        zvts.filter(
+          (zvt) =>
+            zvt.route?.branchId ===
+            branch.id
+        );
+
+      for (
+        const zvt of members
+      ) {
+        const leader =
+          buildZvtBranchMemberLeader({
+            branchPoints,
+            zvt,
+          });
+
+        if (
+          leader.length >= 4
+        ) {
+          svg +=
+            `<polyline ` +
+            `points="${flatPointsToSvg(leader)}" ` +
+            `fill="none" ` +
+            `stroke="${zvt.style?.stroke || "black"}" ` +
+            `stroke-width="${zvt.style?.strokeWidth ?? 2}" ` +
+            `stroke-linecap="round" ` +
+            `stroke-linejoin="round" />`;
+        }
+      }
+
+      return svg;
+    })
+    .join("\n");
+}
+
+
+// ============================================================================
+// FILE: src/lib/export/svgRenderer.js
+// PATCH STEP 6
+// ============================================================================
+//
+// import {
+//   renderZvtBranchesSvg
+// } from "@/lib/export/zvtBranchSvgRenderer";
+//
+// render order:
+//
+// ${"${renderZvtBranchesSvg(scene)}"}
+// ${"${renderZvtsSvg(scene)}"}
+//
+// ВАЖЛИВО:
+// handle circles, selection stroke, edit points,
+// branchEdit state НЕ експортуються.
+//
+// SVG містить тільки:
+// - normalized branch;
+// - member leaders;
+// - ZVT symbols.
+//
+// ============================================================================
+
+
+// ============================================================================
+// STEP 5 — UI/UX ПІДХІД ДЛЯ ГРУПОВОГО ПІДКЛЮЧЕННЯ
+// ============================================================================
+//
+// РЕКОМЕНДОВАНА МОДЕЛЬ:
+//
+// [NODE / EDGE]
+//      |
+//      |  root connection
+//      |
+//      +====================+==========+==========
+//                           |          |
+//                          ZVT        ZVT
+//                                      |
+//                                     ZVT
+//
+// "====" — одна zvtBranch.
+// "|"    — короткі member leaders.
+//
+// ЧОМУ НЕ СТВОРЮВАТИ 5 НЕЗАЛЕЖНИХ CONNECTOR:
+// ------------------------------------------------------------
+// 1. На схемі виникає накладання ліній.
+// 2. Редагування спільної траси стає майже неможливим.
+// 3. Переміщення source node треба синхронізувати з N connectors.
+// 4. Візуально це не відповідає технічній схемі зі скріншота 4.
+//
+// ЧОМУ ZVT BRANCH — ОКРЕМА СУТНІСТЬ:
+// ------------------------------------------------------------
+// - має один обов'язковий root;
+// - має одну ламану трасу;
+// - N приладів "сідають" на неї;
+// - branch можна виділити/редагувати/видалити;
+// - branch легко експортувати;
+// - branch надалі може отримати власні властивості.
+//
+// ============================================================================
+// ОБОВ'ЯЗКОВА ІНВАРІАНТА
+// ============================================================================
+//
+// zvtBranch.attachedTo.type ∈ {"node", "edge"}.
+//
+// Branch БЕЗ root заборонений.
+//
+// Це означає:
+// навіть якщо окремий ZVT підключений тільки до branch,
+// у графі зв'язків завжди існує:
+//
+// ZVT -> ZVT_BRANCH -> NODE/EDGE
+//
+// Тобто групове підключення не створює "висячих" системних connector.
+//
+// ============================================================================
+// UX FLOW
+// ============================================================================
+//
+// ВАРІАНТ 1 — ВІД ОБ'ЄКТА
+//
+// Right click NODE
+//   -> "Додати групову лінію ЗВТ"
+//   -> з'являється коротка магістраль
+//   -> drag endpoint / add bend
+//   -> вибрати ZVT
+//   -> "Підключити до групової лінії"
+//   -> branch auto tap.
+//
+// ВАРІАНТ 2 — ВІД CONNECTOR
+//
+// Right click connector segment
+//   -> "Додати групову лінію ЗВТ"
+//   -> root = edge + segmentId
+//   -> далі та сама логіка.
+//
+// ============================================================================
+// РЕДАГУВАННЯ ЛАМАНОЇ
+// ============================================================================
+//
+// selected zvtBranch:
+// - показує handles на vertices;
+// - drag handle змінює точку зламу;
+// - context menu branch:
+//     "Додати точку зламу"
+//     "Видалити точку зламу"
+//     "Видалити групову лінію"
+//
+// На наступному refinement-кроці рекомендовано:
+// - enforce orthogonal vertex movement;
+// - double click segment -> insert vertex;
+// - Delete -> remove selected vertex;
+// - endpoint drag;
+// - snap 5/10 px.
+//
+// ============================================================================
+// AUTO TAP VS FIXED TAP
+// ============================================================================
+//
+// default:
+// branchTap.mode = "auto"
+//
+// При drag ZVT точка підключення автоматично переходить
+// на найближчий сегмент branch.
+//
+// Для технічних схем це найзручніше.
+//
+// Якщо користувачу треба зафіксувати місце:
+//
+// branchTap = {
+//   mode: "fixed",
+//   segmentIndex: 2,
+//   t: 0.35,
+// }
+//
+// t:
+// 0   = початок сегмента
+// 0.5 = середина
+// 1   = кінець.
+//
+// ============================================================================
+// ЯК ПРАЦЮЄ GLOBAL REALTIME TOGGLE З ПУНКТУ 8
+// ============================================================================
+//
+// Рівень 1 — diagram:
+//
+// zvtSettings.realtimeEnabled
+//
+// OFF:
+// - WebSocket не працює для цієї схеми.
+//
+// ON:
+// - bridge підписується на enabled sensorIds.
+//
+// Рівень 2 — diagram display:
+//
+// zvtSettings.showRealtimeOnCanvas
+//
+// OFF:
+// - socket працює;
+// - runtime values оновлюються;
+// - на схемі їх не видно.
+//
+// Рівень 3 — individual ZVT:
+//
+// zvt.integration.telemetry.showOnCanvas
+//
+// Якщо global display ON,
+// кожен ZVT все одно може індивідуально дозволити/заборонити label.
+//
+// Ефективна умова:
+//
+// GLOBAL realtime enabled
+// AND GLOBAL show on canvas
+// AND ZVT telemetry enabled
+// AND ZVT showOnCanvas
+//
+// ============================================================================
+// ЩО ЩЕ РЕКОМЕНДОВАНО ДОДАТИ ДО ZVT В МАЙБУТНЬОМУ
+// ============================================================================
+//
+// 1. ZvtInfoCardModal
+// 2. Catalog picker/autocomplete
+// 3. realtime quality indicator
+// 4. alarm limits:
+//    HH / H / L / LL
+// 5. realtime history mini chart
+// 6. branch endpoint handle
+// 7. branch segment selection
+// 8. orthogonal snap/router
+// 9. branch labels
+// 10. undo/redo commands для branch operations
+//
+// ============================================================================
+// STEP 5 — QUICK TEST
+// ============================================================================
+//
+// TEST 1:
+// create branch from node.
+// EXPECT:
+// branch.attachedTo = node.
+//
+// TEST 2:
+// create branch from edge segment.
+// EXPECT:
+// attachedTo.type=edge + segmentId.
+//
+// TEST 3:
+// attach 3 ZVT to one branch.
+// EXPECT:
+// one trunk + 3 short member leaders.
+//
+// TEST 4:
+// drag ZVT with branchTap.mode=auto.
+// EXPECT:
+// tap moves to nearest branch segment.
+//
+// TEST 5:
+// delete branch.
+// EXPECT:
+// ZVT remain;
+// route.branchId cleared.
+//
+// TEST 6:
+// move source node.
+// EXPECT:
+// branch root moves with node.
+//
+// TEST 7:
+// turn zvtSettings.showRealtimeOnCanvas OFF.
+// EXPECT:
+// realtime labels disappear;
+// WebSocket stays connected.
+//
+// TEST 8:
+// turn zvtSettings.realtimeEnabled OFF.
+// EXPECT:
+// bridge disconnects / does not connect;
+// sensor IDs remain saved.
+//
+// TEST 9:
+// save/load diagram.
+// EXPECT:
+// zvtBranches + zvtSettings persist;
+// zvtRuntimeById does NOT persist.
+//
+// ============================================================================
+
+// ============================================================================
+// STEP 6 — CONTEXT MENU REFINEMENT
+// ============================================================================
+//
+// Для contextMenu.type === "zvtBranch":
+//
+// 1. "Додати точку зламу"
+//    -> краще викликати insertZvtBranchBend,
+//       а не старий addZvtBranchVertex.
+//
+// 2. "Нормалізувати трасу"
+//    -> canvasController.normalizeZvtBranch(branchId)
+//
+// 3. "Видалити групову лінію"
+//
+// Для vertex:
+// - вибір vertex виконується click/mousedown по handle;
+// - Delete / Backspace видаляє selected interior vertex.
+//
+// ROOT:
+// - видалити/drag не можна.
+// - root контролюється attachedTo.
+//
+// ENDPOINT:
+// - drag дозволено;
+// - delete endpoint не потрібно;
+// - branch завжди має хоча б root + endpoint.
+//
+// ============================================================================
+// STEP 6 — DOUBLE CLICK INSERT UX
+// ============================================================================
+//
+// Double click по branch segment:
+//
+// horizontal:
+// -----------+
+//            |
+//            +--------
+//
+// vertical:
+//      |
+//      +------
+//             |
+//             |
+//
+// Тобто вставляється orthogonal dog-leg,
+// а не одна "вільна" point.
+//
+// Це важливо: одна point всередині прямого segment
+// при зміщенні майже неминуче створює diagonal.
+//
+// ============================================================================
+// STEP 6 — SNAP TO GRID
+// ============================================================================
+//
+// Default:
+// ZVT_BRANCH_GRID_SIZE = 10.
+//
+// Controller використовує:
+// store.gridSize || 10
+//
+// Якщо у вашому Canvas вже є глобальний gridSize,
+// branch автоматично використовуватиме його.
+//
+// Якщо snap треба вимикати:
+// передавайте gridSize=1.
+//
+// ============================================================================
+// STEP 6 — ORTHOGONAL INVARIANT
+// ============================================================================
+//
+// Для кожної пари сусідніх точок:
+//
+// point[i].x === point[i+1].x
+// OR
+// point[i].y === point[i+1].y
+//
+// Якщо старий JSON містить diagonal,
+// buildZvtBranchPoints() автоматично вставляє bend.
+//
+// Отже навіть legacy branch SVG/Canvas буде ортогональним.
+//
+// ============================================================================
+// STEP 6 — TEST CHECKLIST
+// ============================================================================
+//
+// TEST 1:
+// selected branch -> drag interior corner.
+// EXPECT:
+// жодного diagonal segment.
+//
+// TEST 2:
+// drag endpoint horizontally.
+// EXPECT:
+// останній segment horizontal.
+//
+// TEST 3:
+// drag endpoint далеко по іншій осі.
+// EXPECT:
+// додається orthogonal corner.
+//
+// TEST 4:
+// double click horizontal segment.
+// EXPECT:
+// вставляється dog-leg.
+//
+// TEST 5:
+// double click vertical segment.
+// EXPECT:
+// вставляється dog-leg.
+//
+// TEST 6:
+// select interior handle + Delete.
+// EXPECT:
+// vertex видалено,
+// branch лишається orthogonal.
+//
+// TEST 7:
+// drag на координату 137, 244 при grid=10.
+// EXPECT:
+// snap приблизно 140, 240.
+//
+// TEST 8:
+// load persisted branch із diagonal vertices.
+// EXPECT:
+// render автоматично orthogonal.
+//
+// TEST 9:
+// SVG export.
+// EXPECT:
+// SVG branch geometry == Canvas geometry;
+// handles/select state відсутні.
+//
+// TEST 10:
+// move source node.
+// EXPECT:
+// root перебудовується;
+// branch все ще orthogonal.
+//
+// ============================================================================

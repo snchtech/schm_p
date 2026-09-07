@@ -1,0 +1,147 @@
+Так навіть чистіше. Якщо у вас окремий DNS для API і окремий для Next.js, я б розділив їх через два `server` блоки Nginx.
+
+Наприклад:
+
+```text
+app.example.com      → Next.js
+api.example.com      → Node.js API
+```
+
+Тоді схема буде така:
+
+```text
+Internet
+   │
+   ├── app.example.com
+   │        ↓
+   │      Nginx
+   │        ↓
+   │   127.0.0.1:3000
+   │        ↓
+   │   Next.js container
+   │
+   └── api.example.com
+            ↓
+          Nginx
+            ↓
+       127.0.0.1:4000
+            ↓
+       Node.js API container
+```
+
+Ваш `docker-compose.yml` при цьому майже не змінюється:
+
+```yaml
+services:
+  api:
+    build:
+      context: ./api
+    container_name: myproject-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+    ports:
+      - "127.0.0.1:4000:4000"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: myproject-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+```
+
+Для Next.js Nginx:
+
+```nginx
+server {
+    listen 80;
+    server_name app.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Для API окремо:
+
+```nginx
+server {
+    listen 80;
+    server_name api.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+У frontend тоді API URL задаєте через змінну середовища, наприклад:
+
+```env
+NEXT_PUBLIC_API_URL=https://api.example.com
+```
+
+І в коді:
+
+```js
+const API_URL = process.env.NEXT_PUBLIC_API_URL;
+
+fetch(`${API_URL}/users`);
+```
+
+Тут є один важливий момент: оскільки frontend і API працюють на різних доменах, вам, скоріш за все, треба буде правильно налаштувати CORS на Node.js API.
+
+Наприклад для Express:
+
+```js
+import cors from 'cors';
+
+app.use(cors({
+  origin: 'https://app.example.com',
+  credentials: true,
+}));
+```
+
+Якщо у вас авторизація через cookies, тоді треба буде ще уважно налаштувати `SameSite`, `Secure` і `credentials`.
+
+Адміністратору сервера я б уже написав трохи інакше:
+
+> Потрібно розгорнути новий проєкт через Docker.
+> Є два DNS:
+>
+> * `app.example.com` — Next.js frontend;
+> * `api.example.com` — Node.js API.
+>
+> Потрібно:
+>
+> * встановити Docker Engine і Docker Compose plugin;
+> * налаштувати Nginx:
+>
+>   * `app.example.com` → `127.0.0.1:3000`;
+>   * `api.example.com` → `127.0.0.1:4000`;
+> * налаштувати SSL для обох DNS;
+> * зовнішній доступ до портів `3000` і `4000` не відкривати;
+> * перевірити, що ці порти не зайняті іншими сервісами;
+> * надати мені права на каталог проєкту та, за можливості, право запускати Docker Compose.
+
+Для вашого випадку така схема навіть краща за варіант `/api` на одному домені: frontend і backend чітко розділені, їх можна незалежно оновлювати, масштабувати й адмініструвати. Єдине, що треба одразу акуратно продумати — CORS і авторизацію між двома доменами.
