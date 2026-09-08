@@ -1,0 +1,2783 @@
+// ============================================================================
+// ELEMENT INFO CARD PACKAGE — UNIVERSAL STATE / PARAMETERS / FUTURE DB READY
+// ============================================================================
+//
+// PURPOSE
+// ----------------------------------------------------------------------------
+// Цей пакет доопрацьовує інформаційну картку об'єкта для node / edge.
+//
+// Основні цілі:
+// 1. Дані інформаційної картки реально зберігаються у state.
+// 2. Дані картки зберігаються безпосередньо всередині node / edge,
+//    а не в окремому дубльованому state.
+// 3. Графічні параметри Canvas відокремлені від бізнес-параметрів об'єкта.
+// 4. Параметри об'єкта реалізовані універсально:
+//    - діаметр;
+//    - тиск;
+//    - матеріал;
+//    - тип приводу;
+//    - будь-які інші параметри в майбутньому.
+// 5. Значення параметрів можуть вибиратися із довідників, щоб уникати
+//    дублювання типу:
+//      100
+//      DN100
+//      ДН100
+//      dn-100
+//      Ø100
+// 6. Підхід одразу готовий до майбутньої БД.
+// 7. Ролі editor / reader та access-control у цьому пакеті НЕ використовуються.
+//    Контроль доступу планується реалізовувати глобально.
+// 8. UI побудований на MUI.
+// 9. Код — JavaScript, без TypeScript.
+//
+// STACK ASSUMPTIONS
+// ----------------------------------------------------------------------------
+// - Next.js / React
+// - Zustand
+// - MUI
+// - Konva
+// - централізований canvasController
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 1. РЕКОМЕНДОВАНА СТРУКТУРА NODE
+// ============================================================================
+//
+// ВАЖЛИВО:
+// data містить графічні властивості.
+// elementData містить інформаційну картку та бізнес-параметри.
+//
+// Приклад:
+//
+// {
+//   id: "82c57c1a-76a8-4f05-a873-756062b793a8",
+//   type: "circle",
+//
+//   position: {
+//     x: 300,
+//     y: 200
+//   },
+//
+//   data: {
+//     width: 60,
+//     height: 60,
+//     radius: 30,
+//     fill: "gray",
+//     stroke: "black",
+//     strokeWidth: 2
+//   },
+//
+//   elementData: {
+//     title: "Засувка №12",
+//     equipmentId: "eq-valve-014",
+//     markId: "mark-valve",
+//
+//     parameters: [
+//       {
+//         optionId: "option-diameter",
+//         libraryValueId: "diameter-dn100"
+//       },
+//       {
+//         optionId: "option-pressure",
+//         libraryValueId: "pressure-pn16"
+//       }
+//     ],
+//
+//     updatedAt: null
+//   }
+// }
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 2. РЕКОМЕНДОВАНА СТРУКТУРА EDGE
+// ============================================================================
+//
+// elementData має точно таку саму структуру, як у node.
+//
+// {
+//   id: "3c0fdb61-4b03-4d38-acd3-476759b6d8a9",
+//   kind: "connector",
+//   pathType: "orthogonal-elbow",
+//   connectorType: "orthogonal-elbow",
+//
+//   start: { ... },
+//   end: { ... },
+//   route: { ... },
+//   endcaps: { ... },
+//   behavior: { ... },
+//   geometry: { ... },
+//   style: {
+//     stroke: "black",
+//     strokeWidth: 2
+//   },
+//
+//   elementData: {
+//     title: "Трубопровід №1",
+//     equipmentId: null,
+//     markId: "mark-pipeline",
+//
+//     parameters: [
+//       {
+//         optionId: "option-diameter",
+//         libraryValueId: "diameter-dn150"
+//       }
+//     ],
+//
+//     updatedAt: null
+//   }
+// }
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 3. ЧОМУ НЕ ОКРЕМИЙ STATE ДЛЯ ІНФОРМАЦІЙНОЇ КАРТКИ
+// ============================================================================
+//
+// НЕ рекомендується:
+//
+// elementInfoById: {
+//   node_1: {...},
+//   edge_2: {...}
+// }
+//
+// Причина:
+// node / edge вже існує у state.
+// Якщо картку зберігати окремо, виникає дублювання і необхідність синхронізації:
+//
+// - видалення node;
+// - видалення edge;
+// - копіювання;
+// - paste;
+// - import;
+// - export;
+// - undo / redo;
+// - save diagram;
+// - load diagram.
+//
+// Тому:
+// elementData повинен бути частиною node / edge.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/element/elementDataModel.js
+// FULL FILE
+// ============================================================================
+
+export function createDefaultElementData(existing = {}) {
+  return {
+    title: existing.title ?? "",
+
+    // Ідентифікатор обладнання / об'єкта у майбутній БД.
+    equipmentId: existing.equipmentId ?? null,
+
+    // Марка / тип / клас елемента із довідника element_mark.
+    markId: existing.markId ?? null,
+
+    // Універсальний набір параметрів.
+    parameters: Array.isArray(existing.parameters)
+      ? existing.parameters
+      : [],
+
+    updatedAt: existing.updatedAt ?? null,
+  };
+}
+
+export function patchElementData(existing = {}, patch = {}) {
+  return {
+    ...createDefaultElementData(existing),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function normalizeElementParameter(parameter = {}) {
+  return {
+    optionId: parameter.optionId ?? null,
+
+    // Для параметра типу "library".
+    libraryValueId: parameter.libraryValueId ?? null,
+
+    // Для typed value.
+    numberValue:
+      typeof parameter.numberValue === "number"
+        ? parameter.numberValue
+        : null,
+
+    textValue:
+      typeof parameter.textValue === "string"
+        ? parameter.textValue
+        : null,
+
+    booleanValue:
+      typeof parameter.booleanValue === "boolean"
+        ? parameter.booleanValue
+        : null,
+  };
+}
+
+export function normalizeElementData(existing = {}) {
+  return {
+    ...createDefaultElementData(existing),
+    parameters: Array.isArray(existing.parameters)
+      ? existing.parameters.map(normalizeElementParameter)
+      : [],
+  };
+}
+
+
+
+// ============================================================================
+// FILE: src/lib/element/elementHelpers.js
+// FULL FILE
+// ============================================================================
+
+import { createDefaultElementData } from "./elementDataModel";
+
+export function getElementByTarget(store, target) {
+  if (!target?.type || !target?.id) return null;
+
+  if (target.type === "node") {
+    return store.nodes.find((node) => node.id === target.id) || null;
+  }
+
+  if (target.type === "edge") {
+    return store.edges.find((edge) => edge.id === target.id) || null;
+  }
+
+  return null;
+}
+
+export function normalizeNode(node) {
+  return {
+    ...node,
+    elementData: createDefaultElementData(node.elementData || {}),
+  };
+}
+
+export function normalizeEdge(edge) {
+  return {
+    ...edge,
+    elementData: createDefaultElementData(edge.elementData || {}),
+  };
+}
+
+export function normalizeDiagramData({ nodes = [], edges = [] } = {}) {
+  return {
+    nodes: nodes.map(normalizeNode),
+    edges: edges.map(normalizeEdge),
+  };
+}
+
+
+
+// ============================================================================
+// 4. MOCK-ДОВІДНИКИ
+// ============================================================================
+//
+// Тимчасово всі довідники локальні.
+// Після підключення backend реалізація repository змінюється,
+// але UI та controller залишаються практично без змін.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// FILE: src/lib/element/repositories/elementMarkRepository.js
+// FULL FILE
+// ============================================================================
+
+const DEMO_MARKS = Object.freeze([
+  {
+    id: "mark-valve",
+    code: "VALVE",
+    name: "Запірна арматура",
+    elementType: "node",
+    active: true,
+  },
+  {
+    id: "mark-pump",
+    code: "PUMP",
+    name: "Насос",
+    elementType: "node",
+    active: true,
+  },
+  {
+    id: "mark-pipeline",
+    code: "PIPE",
+    name: "Трубопровід",
+    elementType: "edge",
+    active: true,
+  },
+  {
+    id: "mark-universal",
+    code: "GENERIC",
+    name: "Універсальний елемент",
+    elementType: "both",
+    active: true,
+  },
+]);
+
+export const elementMarkRepository = {
+  async listMarks({ elementType } = {}) {
+    return DEMO_MARKS.filter((item) => {
+      if (!item.active) return false;
+      if (!elementType) return true;
+
+      return (
+        item.elementType === elementType ||
+        item.elementType === "both"
+      );
+    });
+  },
+
+  async getMarkById(id) {
+    return DEMO_MARKS.find((item) => item.id === id) || null;
+  },
+};
+
+
+
+// ============================================================================
+// FILE: src/lib/element/repositories/elementOptionRepository.js
+// FULL FILE
+// ============================================================================
+
+const DEMO_OPTIONS = Object.freeze([
+  {
+    id: "option-diameter",
+    code: "DIAMETER",
+    name: "Діаметр",
+    valueType: "library",
+    unit: null,
+    active: true,
+  },
+  {
+    id: "option-pressure",
+    code: "PRESSURE",
+    name: "Тиск",
+    valueType: "library",
+    unit: null,
+    active: true,
+  },
+  {
+    id: "option-material",
+    code: "MATERIAL",
+    name: "Матеріал",
+    valueType: "library",
+    unit: null,
+    active: true,
+  },
+  {
+    id: "option-length",
+    code: "LENGTH",
+    name: "Довжина",
+    valueType: "number",
+    unit: "м",
+    active: true,
+  },
+  {
+    id: "option-note",
+    code: "NOTE",
+    name: "Примітка",
+    valueType: "text",
+    unit: null,
+    active: true,
+  },
+  {
+    id: "option-is-reserve",
+    code: "IS_RESERVE",
+    name: "Резервне обладнання",
+    valueType: "boolean",
+    unit: null,
+    active: true,
+  },
+]);
+
+const DEMO_MARK_OPTIONS = Object.freeze([
+  {
+    markId: "mark-valve",
+    optionId: "option-diameter",
+    required: true,
+    sortOrder: 10,
+  },
+  {
+    markId: "mark-valve",
+    optionId: "option-pressure",
+    required: false,
+    sortOrder: 20,
+  },
+  {
+    markId: "mark-valve",
+    optionId: "option-material",
+    required: false,
+    sortOrder: 30,
+  },
+
+  {
+    markId: "mark-pump",
+    optionId: "option-pressure",
+    required: false,
+    sortOrder: 10,
+  },
+  {
+    markId: "mark-pump",
+    optionId: "option-is-reserve",
+    required: false,
+    sortOrder: 20,
+  },
+
+  {
+    markId: "mark-pipeline",
+    optionId: "option-diameter",
+    required: true,
+    sortOrder: 10,
+  },
+  {
+    markId: "mark-pipeline",
+    optionId: "option-material",
+    required: false,
+    sortOrder: 20,
+  },
+  {
+    markId: "mark-pipeline",
+    optionId: "option-length",
+    required: false,
+    sortOrder: 30,
+  },
+
+  {
+    markId: "mark-universal",
+    optionId: "option-note",
+    required: false,
+    sortOrder: 10,
+  },
+]);
+
+export const elementOptionRepository = {
+  async listOptions({ markId } = {}) {
+    if (!markId) return [];
+
+    const links = DEMO_MARK_OPTIONS
+      .filter((item) => item.markId === markId)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    return links
+      .map((link) => {
+        const option = DEMO_OPTIONS.find(
+          (item) => item.id === link.optionId
+        );
+
+        if (!option || !option.active) return null;
+
+        return {
+          ...option,
+          required: link.required,
+          sortOrder: link.sortOrder,
+        };
+      })
+      .filter(Boolean);
+  },
+
+  async getOptionById(id) {
+    return DEMO_OPTIONS.find((item) => item.id === id) || null;
+  },
+};
+
+
+
+// ============================================================================
+// FILE: src/lib/element/repositories/elementOptionLibraryRepository.js
+// FULL FILE
+// ============================================================================
+
+const DEMO_OPTION_VALUES = Object.freeze([
+  {
+    id: "diameter-dn50",
+    optionId: "option-diameter",
+    code: "DN50",
+    name: "DN 50",
+    sortOrder: 10,
+    active: true,
+  },
+  {
+    id: "diameter-dn80",
+    optionId: "option-diameter",
+    code: "DN80",
+    name: "DN 80",
+    sortOrder: 20,
+    active: true,
+  },
+  {
+    id: "diameter-dn100",
+    optionId: "option-diameter",
+    code: "DN100",
+    name: "DN 100",
+    sortOrder: 30,
+    active: true,
+  },
+  {
+    id: "diameter-dn150",
+    optionId: "option-diameter",
+    code: "DN150",
+    name: "DN 150",
+    sortOrder: 40,
+    active: true,
+  },
+
+  {
+    id: "pressure-pn10",
+    optionId: "option-pressure",
+    code: "PN10",
+    name: "PN 10",
+    sortOrder: 10,
+    active: true,
+  },
+  {
+    id: "pressure-pn16",
+    optionId: "option-pressure",
+    code: "PN16",
+    name: "PN 16",
+    sortOrder: 20,
+    active: true,
+  },
+  {
+    id: "pressure-pn25",
+    optionId: "option-pressure",
+    code: "PN25",
+    name: "PN 25",
+    sortOrder: 30,
+    active: true,
+  },
+
+  {
+    id: "material-steel",
+    optionId: "option-material",
+    code: "STEEL",
+    name: "Сталь",
+    sortOrder: 10,
+    active: true,
+  },
+  {
+    id: "material-stainless",
+    optionId: "option-material",
+    code: "STAINLESS",
+    name: "Нержавіюча сталь",
+    sortOrder: 20,
+    active: true,
+  },
+  {
+    id: "material-polyethylene",
+    optionId: "option-material",
+    code: "PE",
+    name: "Поліетилен",
+    sortOrder: 30,
+    active: true,
+  },
+]);
+
+export const elementOptionLibraryRepository = {
+  async listValues(optionId) {
+    return DEMO_OPTION_VALUES
+      .filter(
+        (item) =>
+          item.optionId === optionId &&
+          item.active
+      )
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+  },
+
+  async getValueById(id) {
+    return DEMO_OPTION_VALUES.find((item) => item.id === id) || null;
+  },
+};
+
+
+
+// ============================================================================
+// FILE: src/lib/equipment/equipmentRepository.js
+// FULL FILE
+// ============================================================================
+//
+// equipmentSnapshot більше НЕ використовується.
+// Джерелом істини є equipmentId.
+//
+// ============================================================================
+
+const DEMO_EQUIPMENT = Object.freeze([
+  {
+    id: "eq-pump-001",
+    code: "P-001",
+    name: "Насос циркуляційний №1",
+    type: "pump",
+  },
+  {
+    id: "eq-valve-014",
+    code: "V-014",
+    name: "Засувка запірна №14",
+    type: "valve",
+  },
+  {
+    id: "eq-tank-003",
+    code: "T-003",
+    name: "Резервуар технологічний №3",
+    type: "tank",
+  },
+  {
+    id: "eq-sensor-021",
+    code: "S-021",
+    name: "Датчик тиску №21",
+    type: "sensor",
+  },
+]);
+
+export const equipmentRepository = {
+  async listEquipment({ search = "" } = {}) {
+    const normalizedSearch = search.trim().toLowerCase();
+
+    if (!normalizedSearch) {
+      return [...DEMO_EQUIPMENT];
+    }
+
+    return DEMO_EQUIPMENT.filter((item) => {
+      const value =
+        `${item.code} ${item.name} ${item.type}`.toLowerCase();
+
+      return value.includes(normalizedSearch);
+    });
+  },
+
+  async getEquipmentById(id) {
+    return DEMO_EQUIPMENT.find((item) => item.id === id) || null;
+  },
+};
+
+
+
+// ============================================================================
+// 5. ZUSTAND STORE
+// ============================================================================
+//
+// FILE: src/store/useCanvasStore.js
+//
+// ДОДАТИ У ПОТОЧНИЙ STORE.
+//
+// Ролі тут НЕ зберігаються.
+// accessControl тут НЕ використовується.
+//
+// ============================================================================
+
+/*
+
+elementInfoDialog: null,
+
+setElementInfoDialog: (elementInfoDialog) =>
+  set({ elementInfoDialog }),
+
+clearElementInfoDialog: () =>
+  set({ elementInfoDialog: null }),
+
+updateElementData: (target, patch) =>
+  set((state) => {
+    if (!target?.type || !target?.id) {
+      return state;
+    }
+
+    const patchEntity = (entity) => {
+      if (entity.id !== target.id) {
+        return entity;
+      }
+
+      return {
+        ...entity,
+        elementData: {
+          ...createDefaultElementData(entity.elementData),
+          ...patch,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    };
+
+    if (target.type === "node") {
+      return {
+        nodes: state.nodes.map(patchEntity),
+      };
+    }
+
+    if (target.type === "edge") {
+      return {
+        edges: state.edges.map(patchEntity),
+      };
+    }
+
+    return state;
+  }),
+
+*/
+
+//
+// Не забути import:
+//
+// import {
+//   createDefaultElementData,
+// } from "@/lib/element/elementDataModel";
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 6. CANVAS CONTROLLER
+// ============================================================================
+//
+// FILE: src/controllers/canvasController.js
+//
+// У цьому пакеті немає перевірок role / permission.
+// Глобальний access layer буде підключено окремо.
+//
+// ============================================================================
+
+/*
+
+import { useCanvasStore } from "@/store/useCanvasStore";
+import {
+  getElementByTarget,
+} from "@/lib/element/elementHelpers";
+
+function getTargetFromContextMenu(contextMenu) {
+  if (!contextMenu) return null;
+
+  if (
+    contextMenu.type === "node" &&
+    contextMenu.nodeId
+  ) {
+    return {
+      type: "node",
+      id: contextMenu.nodeId,
+    };
+  }
+
+  if (
+    (
+      contextMenu.type === "edge" ||
+      contextMenu.type === "connector"
+    ) &&
+    contextMenu.edgeId
+  ) {
+    return {
+      type: "edge",
+      id: contextMenu.edgeId,
+    };
+  }
+
+  return null;
+}
+
+export const canvasController = {
+  // ...existing methods
+
+  openElementInfoCard(target, mode = "view") {
+    const store = useCanvasStore.getState();
+
+    const entity = getElementByTarget(
+      store,
+      target
+    );
+
+    if (!entity) {
+      return false;
+    }
+
+    store.setElementInfoDialog?.({
+      target: {
+        type: target.type,
+        id: target.id,
+      },
+      mode,
+    });
+
+    store.clearContextMenu?.();
+
+    return true;
+  },
+
+  openElementInfoView(target) {
+    return this.openElementInfoCard(
+      target,
+      "view"
+    );
+  },
+
+  openElementInfoEdit(target) {
+    return this.openElementInfoCard(
+      target,
+      "edit"
+    );
+  },
+
+  openElementInfoViewFromContextMenu() {
+    const store = useCanvasStore.getState();
+
+    const target = getTargetFromContextMenu(
+      store.contextMenu
+    );
+
+    if (!target) return false;
+
+    return this.openElementInfoView(target);
+  },
+
+  openElementInfoEditFromContextMenu() {
+    const store = useCanvasStore.getState();
+
+    const target = getTargetFromContextMenu(
+      store.contextMenu
+    );
+
+    if (!target) return false;
+
+    return this.openElementInfoEdit(target);
+  },
+
+  switchElementInfoToEdit() {
+    const store = useCanvasStore.getState();
+    const dialog = store.elementInfoDialog;
+
+    if (!dialog?.target) {
+      return false;
+    }
+
+    store.setElementInfoDialog?.({
+      ...dialog,
+      mode: "edit",
+    });
+
+    return true;
+  },
+
+  closeElementInfoCard() {
+    useCanvasStore
+      .getState()
+      .clearElementInfoDialog?.();
+  },
+
+  saveElementInfoCard({
+    title,
+    equipmentId,
+    markId,
+    parameters,
+  }) {
+    const store = useCanvasStore.getState();
+    const dialog = store.elementInfoDialog;
+
+    if (
+      !dialog?.target ||
+      dialog.mode !== "edit"
+    ) {
+      return false;
+    }
+
+    const entity = getElementByTarget(
+      store,
+      dialog.target
+    );
+
+    if (!entity) {
+      return false;
+    }
+
+    store.updateElementData?.(
+      dialog.target,
+      {
+        title: title?.trim?.() || "",
+        equipmentId: equipmentId || null,
+        markId: markId || null,
+        parameters: Array.isArray(parameters)
+          ? parameters
+          : [],
+      }
+    );
+
+    store.clearElementInfoDialog?.();
+
+    return true;
+  },
+};
+
+*/
+
+
+
+// ============================================================================
+// 7. PARAMETER HELPERS
+// ============================================================================
+//
+// FILE: src/lib/element/elementParameterHelpers.js
+// FULL FILE
+//
+// ============================================================================
+
+export function getParameterByOptionId(
+  parameters = [],
+  optionId
+) {
+  return (
+    parameters.find(
+      (item) => item.optionId === optionId
+    ) || null
+  );
+}
+
+export function upsertParameter(
+  parameters = [],
+  nextParameter
+) {
+  const normalized = Array.isArray(parameters)
+    ? parameters
+    : [];
+
+  const exists = normalized.some(
+    (item) =>
+      item.optionId === nextParameter.optionId
+  );
+
+  if (!exists) {
+    return [
+      ...normalized,
+      nextParameter,
+    ];
+  }
+
+  return normalized.map((item) =>
+    item.optionId === nextParameter.optionId
+      ? {
+          ...item,
+          ...nextParameter,
+        }
+      : item
+  );
+}
+
+export function removeParameter(
+  parameters = [],
+  optionId
+) {
+  return parameters.filter(
+    (item) => item.optionId !== optionId
+  );
+}
+
+export function createEmptyParameter(option) {
+  const base = {
+    optionId: option.id,
+    libraryValueId: null,
+    numberValue: null,
+    textValue: null,
+    booleanValue: null,
+  };
+
+  if (option.valueType === "boolean") {
+    return {
+      ...base,
+      booleanValue: false,
+    };
+  }
+
+  return base;
+}
+
+
+
+// ============================================================================
+// 8. DYNAMIC PARAMETER FIELD
+// ============================================================================
+//
+// FILE: src/components/canvas/ElementParameterField.jsx
+// FULL FILE
+//
+// Компонент сам вибирає тип UI залежно від option.valueType.
+//
+// ============================================================================
+
+"use client";
+
+import React, {
+  useEffect,
+  useState,
+} from "react";
+
+import {
+  Autocomplete,
+  CircularProgress,
+  FormControlLabel,
+  Switch,
+  TextField,
+} from "@mui/material";
+
+import {
+  elementOptionLibraryRepository,
+} from "@/lib/element/repositories/elementOptionLibraryRepository";
+
+export default function ElementParameterField({
+  option,
+  value,
+  disabled = false,
+  onChange,
+}) {
+  const [libraryOptions, setLibraryOptions] =
+    useState([]);
+
+  const [loading, setLoading] =
+    useState(false);
+
+  useEffect(() => {
+    if (option.valueType !== "library") {
+      return;
+    }
+
+    let active = true;
+
+    async function loadValues() {
+      setLoading(true);
+
+      try {
+        const items =
+          await elementOptionLibraryRepository
+            .listValues(option.id);
+
+        if (active) {
+          setLibraryOptions(items);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadValues();
+
+    return () => {
+      active = false;
+    };
+  }, [
+    option.id,
+    option.valueType,
+  ]);
+
+  if (option.valueType === "library") {
+    const selected =
+      libraryOptions.find(
+        (item) =>
+          item.id === value?.libraryValueId
+      ) || null;
+
+    return (
+      <Autocomplete
+        options={libraryOptions}
+        value={selected}
+        disabled={disabled || loading}
+        loading={loading}
+        isOptionEqualToValue={
+          (optionItem, valueItem) =>
+            optionItem.id === valueItem.id
+        }
+        getOptionLabel={(item) =>
+          item
+            ? `${item.code} — ${item.name}`
+            : ""
+        }
+        onChange={(_event, selectedValue) => {
+          onChange({
+            optionId: option.id,
+            libraryValueId:
+              selectedValue?.id || null,
+            numberValue: null,
+            textValue: null,
+            booleanValue: null,
+          });
+        }}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            label={option.name}
+            required={option.required}
+            InputProps={{
+              ...params.InputProps,
+              endAdornment: (
+                <>
+                  {loading ? (
+                    <CircularProgress
+                      size={20}
+                    />
+                  ) : null}
+
+                  {
+                    params.InputProps
+                      .endAdornment
+                  }
+                </>
+              ),
+            }}
+          />
+        )}
+      />
+    );
+  }
+
+  if (option.valueType === "number") {
+    return (
+      <TextField
+        type="number"
+        fullWidth
+        label={
+          option.unit
+            ? `${option.name} (${option.unit})`
+            : option.name
+        }
+        required={option.required}
+        disabled={disabled}
+        value={
+          value?.numberValue ?? ""
+        }
+        onChange={(event) => {
+          const raw = event.target.value;
+
+          onChange({
+            optionId: option.id,
+            libraryValueId: null,
+            numberValue:
+              raw === ""
+                ? null
+                : Number(raw),
+            textValue: null,
+            booleanValue: null,
+          });
+        }}
+      />
+    );
+  }
+
+  if (option.valueType === "boolean") {
+    return (
+      <FormControlLabel
+        control={
+          <Switch
+            checked={
+              value?.booleanValue === true
+            }
+            disabled={disabled}
+            onChange={(event) => {
+              onChange({
+                optionId: option.id,
+                libraryValueId: null,
+                numberValue: null,
+                textValue: null,
+                booleanValue:
+                  event.target.checked,
+              });
+            }}
+          />
+        }
+        label={option.name}
+      />
+    );
+  }
+
+  return (
+    <TextField
+      fullWidth
+      label={option.name}
+      required={option.required}
+      disabled={disabled}
+      value={value?.textValue ?? ""}
+      onChange={(event) => {
+        onChange({
+          optionId: option.id,
+          libraryValueId: null,
+          numberValue: null,
+          textValue:
+            event.target.value,
+          booleanValue: null,
+        });
+      }}
+    />
+  );
+}
+
+
+
+// ============================================================================
+// 9. ELEMENT INFO CARD MODAL
+// ============================================================================
+//
+// FILE: src/components/canvas/ElementInfoCardModal.jsx
+// FULL FILE
+//
+// Ролі тут НЕ перевіряються.
+// Якщо глобальний access layer забороняє edit,
+// він повинен не викликати edit mode.
+//
+// ============================================================================
+
+"use client";
+
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import {
+  Alert,
+  Autocomplete,
+  Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+import EditOutlinedIcon
+  from "@mui/icons-material/EditOutlined";
+
+import {
+  useCanvasStore,
+} from "@/store/useCanvasStore";
+
+import {
+  canvasController,
+} from "@/controllers/canvasController";
+
+import {
+  createDefaultElementData,
+} from "@/lib/element/elementDataModel";
+
+import {
+  equipmentRepository,
+} from "@/lib/equipment/equipmentRepository";
+
+import {
+  elementMarkRepository,
+} from "@/lib/element/repositories/elementMarkRepository";
+
+import {
+  elementOptionRepository,
+} from "@/lib/element/repositories/elementOptionRepository";
+
+import ElementParameterField
+  from "./ElementParameterField";
+
+import {
+  getParameterByOptionId,
+  upsertParameter,
+} from "@/lib/element/elementParameterHelpers";
+
+export default function ElementInfoCardModal() {
+  const dialog = useCanvasStore(
+    (state) => state.elementInfoDialog
+  );
+
+  const nodes = useCanvasStore(
+    (state) => state.nodes
+  );
+
+  const edges = useCanvasStore(
+    (state) => state.edges
+  );
+
+  const [title, setTitle] =
+    useState("");
+
+  const [equipmentOptions, setEquipmentOptions] =
+    useState([]);
+
+  const [selectedEquipment, setSelectedEquipment] =
+    useState(null);
+
+  const [markOptions, setMarkOptions] =
+    useState([]);
+
+  const [selectedMark, setSelectedMark] =
+    useState(null);
+
+  const [parameterDefinitions, setParameterDefinitions] =
+    useState([]);
+
+  const [parameters, setParameters] =
+    useState([]);
+
+  const [isLoading, setIsLoading] =
+    useState(false);
+
+  const [loadError, setLoadError] =
+    useState("");
+
+  const open =
+    Boolean(dialog?.target);
+
+  const isEditMode =
+    dialog?.mode === "edit";
+
+  const entity = useMemo(() => {
+    if (!dialog?.target) {
+      return null;
+    }
+
+    if (dialog.target.type === "node") {
+      return (
+        nodes.find(
+          (node) =>
+            node.id === dialog.target.id
+        ) || null
+      );
+    }
+
+    if (dialog.target.type === "edge") {
+      return (
+        edges.find(
+          (edge) =>
+            edge.id === dialog.target.id
+        ) || null
+      );
+    }
+
+    return null;
+  }, [
+    dialog,
+    nodes,
+    edges,
+  ]);
+
+  const elementData = useMemo(
+    () =>
+      createDefaultElementData(
+        entity?.elementData || {}
+      ),
+    [entity]
+  );
+
+  useEffect(() => {
+    if (!open) return;
+
+    let active = true;
+
+    async function loadInitialData() {
+      setIsLoading(true);
+      setLoadError("");
+
+      try {
+        const [
+          equipment,
+          marks,
+        ] = await Promise.all([
+          equipmentRepository.listEquipment(),
+          elementMarkRepository.listMarks({
+            elementType:
+              dialog.target.type,
+          }),
+        ]);
+
+        if (!active) return;
+
+        setEquipmentOptions(equipment);
+        setMarkOptions(marks);
+
+        setTitle(
+          elementData.title || ""
+        );
+
+        setParameters(
+          elementData.parameters || []
+        );
+
+        const selectedEquipmentItem =
+          elementData.equipmentId
+            ? await equipmentRepository
+                .getEquipmentById(
+                  elementData.equipmentId
+                )
+            : null;
+
+        if (!active) return;
+
+        setSelectedEquipment(
+          selectedEquipmentItem
+        );
+
+        const selectedMarkItem =
+          elementData.markId
+            ? marks.find(
+                (item) =>
+                  item.id ===
+                  elementData.markId
+              ) ||
+              await elementMarkRepository
+                .getMarkById(
+                  elementData.markId
+                )
+            : null;
+
+        if (!active) return;
+
+        setSelectedMark(
+          selectedMarkItem || null
+        );
+
+        if (selectedMarkItem?.id) {
+          const definitions =
+            await elementOptionRepository
+              .listOptions({
+                markId:
+                  selectedMarkItem.id,
+              });
+
+          if (!active) return;
+
+          setParameterDefinitions(
+            definitions
+          );
+        } else {
+          setParameterDefinitions([]);
+        }
+      } catch (error) {
+        console.error(
+          "Failed to load element info card",
+          error
+        );
+
+        if (active) {
+          setLoadError(
+            "Не вдалося завантажити довідники."
+          );
+        }
+      } finally {
+        if (active) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    loadInitialData();
+
+    return () => {
+      active = false;
+    };
+  }, [
+    open,
+    dialog?.target?.type,
+    dialog?.target?.id,
+  ]);
+
+  async function handleMarkChange(
+    _event,
+    nextMark
+  ) {
+    setSelectedMark(nextMark);
+
+    if (!nextMark) {
+      setParameterDefinitions([]);
+      setParameters([]);
+      return;
+    }
+
+    const definitions =
+      await elementOptionRepository
+        .listOptions({
+          markId: nextMark.id,
+        });
+
+    setParameterDefinitions(
+      definitions
+    );
+
+    // При зміні mark залишаємо тільки параметри,
+    // які дозволені новою маркою.
+    const allowedIds =
+      new Set(
+        definitions.map(
+          (item) => item.id
+        )
+      );
+
+    setParameters(
+      (current) =>
+        current.filter(
+          (item) =>
+            allowedIds.has(
+              item.optionId
+            )
+        )
+    );
+  }
+
+  function handleParameterChange(
+    nextParameter
+  ) {
+    setParameters(
+      (current) =>
+        upsertParameter(
+          current,
+          nextParameter
+        )
+    );
+  }
+
+  function handleClose() {
+    canvasController
+      .closeElementInfoCard?.();
+  }
+
+  function handleStartEdit() {
+    canvasController
+      .switchElementInfoToEdit?.();
+  }
+
+  function handleSave() {
+    canvasController
+      .saveElementInfoCard?.({
+        title,
+        equipmentId:
+          selectedEquipment?.id || null,
+        markId:
+          selectedMark?.id || null,
+        parameters,
+      });
+  }
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onClose={handleClose}
+      fullWidth
+      maxWidth="md"
+    >
+      <DialogTitle>
+        {
+          isEditMode
+            ? "Редагування картки об’єкта"
+            : "Картка об’єкта"
+        }
+      </DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2.5}>
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            flexWrap="wrap"
+          >
+            <Chip
+              size="small"
+              label={
+                dialog?.target?.type ===
+                "node"
+                  ? "Node"
+                  : "Edge"
+              }
+            />
+
+            <Typography
+              variant="caption"
+              color="text.secondary"
+            >
+              ID: {
+                dialog?.target?.id
+              }
+            </Typography>
+
+            <Chip
+              size="small"
+              variant="outlined"
+              label={
+                isEditMode
+                  ? "Редагування"
+                  : "Перегляд"
+              }
+            />
+          </Stack>
+
+          <Divider />
+
+          {loadError && (
+            <Alert severity="error">
+              {loadError}
+            </Alert>
+          )}
+
+          <TextField
+            label="Назва об’єкта"
+            value={title}
+            onChange={(event) =>
+              setTitle(
+                event.target.value
+              )
+            }
+            fullWidth
+            disabled={!isEditMode}
+            inputProps={{
+              maxLength: 255,
+            }}
+          />
+
+          <Autocomplete
+            options={equipmentOptions}
+            value={selectedEquipment}
+            disabled={
+              !isEditMode ||
+              isLoading
+            }
+            loading={isLoading}
+            onChange={(
+              _event,
+              value
+            ) =>
+              setSelectedEquipment(
+                value
+              )
+            }
+            isOptionEqualToValue={(
+              option,
+              value
+            ) =>
+              option.id === value.id
+            }
+            getOptionLabel={(option) =>
+              option
+                ? `${option.code} — ${option.name}`
+                : ""
+            }
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Обладнання"
+                placeholder={
+                  "Оберіть обладнання з довідника"
+                }
+                InputProps={{
+                  ...params.InputProps,
+                  endAdornment: (
+                    <>
+                      {isLoading ? (
+                        <CircularProgress
+                          size={20}
+                        />
+                      ) : null}
+
+                      {
+                        params
+                          .InputProps
+                          .endAdornment
+                      }
+                    </>
+                  ),
+                }}
+              />
+            )}
+          />
+
+          <Autocomplete
+            options={markOptions}
+            value={selectedMark}
+            disabled={
+              !isEditMode ||
+              isLoading
+            }
+            onChange={
+              handleMarkChange
+            }
+            isOptionEqualToValue={(
+              option,
+              value
+            ) =>
+              option.id === value.id
+            }
+            getOptionLabel={(option) =>
+              option
+                ? `${option.code} — ${option.name}`
+                : ""
+            }
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Марка / тип елемента"
+                placeholder={
+                  "Оберіть тип елемента"
+                }
+              />
+            )}
+          />
+
+          {selectedMark && (
+            <>
+              <Divider />
+
+              <Typography
+                variant="subtitle1"
+                fontWeight={600}
+              >
+                Параметри
+              </Typography>
+
+              {parameterDefinitions.length ===
+              0 ? (
+                <Typography
+                  color="text.secondary"
+                >
+                  Для вибраної марки
+                  параметри не задані.
+                </Typography>
+              ) : (
+                <Stack spacing={2}>
+                  {
+                    parameterDefinitions.map(
+                      (option) => (
+                        <ElementParameterField
+                          key={option.id}
+                          option={option}
+                          disabled={
+                            !isEditMode
+                          }
+                          value={
+                            getParameterByOptionId(
+                              parameters,
+                              option.id
+                            )
+                          }
+                          onChange={
+                            handleParameterChange
+                          }
+                        />
+                      )
+                    )
+                  }
+                </Stack>
+              )}
+            </>
+          )}
+
+          <Alert severity="info">
+            Довідники зараз локальні.
+            Після підключення API / БД
+            UI може залишитися без
+            структурної переробки.
+          </Alert>
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={handleClose}>
+          {
+            isEditMode
+              ? "Скасувати"
+              : "Закрити"
+          }
+        </Button>
+
+        {!isEditMode && (
+          <Button
+            variant="outlined"
+            startIcon={
+              <EditOutlinedIcon />
+            }
+            onClick={handleStartEdit}
+          >
+            Редагувати
+          </Button>
+        )}
+
+        {isEditMode && (
+          <Button
+            variant="contained"
+            onClick={handleSave}
+            disabled={!title.trim()}
+          >
+            Зберегти
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
+
+// ============================================================================
+// 10. CONTEXT MENU
+// ============================================================================
+//
+// FILE: src/components/canvas/CanvasContextMenu.jsx
+//
+// У цьому пакеті команди показуються без role-check.
+// Глобальний рівень доступу в майбутньому може:
+// - приховати "Редагувати картку";
+// - блокувати команду;
+// - або перевіряти permission перед викликом controller.
+//
+// ============================================================================
+
+/*
+
+import InfoOutlinedIcon
+  from "@mui/icons-material/InfoOutlined";
+
+import EditOutlinedIcon
+  from "@mui/icons-material/EditOutlined";
+
+import {
+  canvasController,
+} from "@/controllers/canvasController";
+
+...
+
+{["node", "edge", "connector"].includes(
+  contextMenu?.type
+) && (
+  <>
+    <MenuItem
+      onClick={() => {
+        canvasController
+          .openElementInfoViewFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <InfoOutlinedIcon
+          fontSize="small"
+        />
+      </ListItemIcon>
+
+      <ListItemText>
+        Переглянути картку
+      </ListItemText>
+    </MenuItem>
+
+    <MenuItem
+      onClick={() => {
+        canvasController
+          .openElementInfoEditFromContextMenu?.();
+      }}
+    >
+      <ListItemIcon>
+        <EditOutlinedIcon
+          fontSize="small"
+        />
+      </ListItemIcon>
+
+      <ListItemText>
+        Редагувати картку
+      </ListItemText>
+    </MenuItem>
+
+    <Divider />
+  </>
+)}
+
+*/
+
+
+
+// ============================================================================
+// 11. NODE EVENTS
+// ============================================================================
+//
+// Подвійний клік відкриває картку.
+// Context menu працює як раніше.
+//
+// ============================================================================
+
+/*
+
+<Group
+  onDblClick={(event) => {
+    event.cancelBubble = true;
+
+    canvasController
+      .openElementInfoView?.({
+        type: "node",
+        id: node.id,
+      });
+  }}
+
+  onDblTap={(event) => {
+    event.cancelBubble = true;
+
+    canvasController
+      .openElementInfoView?.({
+        type: "node",
+        id: node.id,
+      });
+  }}
+
+  onContextMenu={(event) => {
+    event.evt.preventDefault();
+    event.cancelBubble = true;
+
+    useCanvasStore
+      .getState()
+      .setContextMenu?.({
+        type: "node",
+        nodeId: node.id,
+        x: event.evt.clientX,
+        y: event.evt.clientY,
+      });
+  }}
+>
+  ...existing node rendering
+</Group>
+
+*/
+
+
+
+// ============================================================================
+// 12. EDGE EVENTS
+// ============================================================================
+
+/*
+
+<Line
+  {...existingProps}
+
+  onDblClick={(event) => {
+    event.cancelBubble = true;
+
+    canvasController
+      .openElementInfoView?.({
+        type: "edge",
+        id: edge.id,
+      });
+  }}
+
+  onDblTap={(event) => {
+    event.cancelBubble = true;
+
+    canvasController
+      .openElementInfoView?.({
+        type: "edge",
+        id: edge.id,
+      });
+  }}
+
+  onContextMenu={(event) => {
+    event.evt.preventDefault();
+    event.cancelBubble = true;
+
+    useCanvasStore
+      .getState()
+      .setContextMenu?.({
+        type:
+          edge.kind === "connector"
+            ? "connector"
+            : "edge",
+
+        edgeId: edge.id,
+        x: event.evt.clientX,
+        y: event.evt.clientY,
+      });
+  }}
+/>
+
+*/
+
+
+
+// ============================================================================
+// 13. EDITOR CANVAS
+// ============================================================================
+//
+// Модальне вікно треба рендерити один раз.
+// Не всередині Konva Stage.
+//
+// ============================================================================
+
+/*
+
+import CanvasContextMenu
+  from "@/components/canvas/CanvasContextMenu";
+
+import ElementInfoCardModal
+  from "@/components/canvas/ElementInfoCardModal";
+
+export default function EditorCanvas() {
+  return (
+    <>
+      <Stage>
+        ...
+      </Stage>
+
+      <CanvasContextMenu />
+
+      <ElementInfoCardModal />
+    </>
+  );
+}
+
+*/
+
+
+
+// ============================================================================
+// 14. NORMALIZATION ПРИ LOAD / IMPORT
+// ============================================================================
+//
+// Якщо старі схеми не містять elementData,
+// після load/import вони повинні отримати default structure.
+//
+// ============================================================================
+
+/*
+
+import {
+  normalizeDiagramData,
+} from "@/lib/element/elementHelpers";
+
+const normalized =
+  normalizeDiagramData(
+    loadedDiagram
+  );
+
+set({
+  nodes: normalized.nodes,
+  edges: normalized.edges,
+});
+
+*/
+
+
+
+// ============================================================================
+// 15. ПРИКЛАД SERIALIZED NODE
+// ============================================================================
+
+/*
+
+{
+  "id": "node_1",
+  "type": "circle",
+  "position": {
+    "x": 300,
+    "y": 200
+  },
+  "data": {
+    "width": 60,
+    "height": 60,
+    "radius": 30,
+    "fill": "gray",
+    "stroke": "black",
+    "strokeWidth": 2
+  },
+  "elementData": {
+    "title": "Засувка №12",
+    "equipmentId": "eq-valve-014",
+    "markId": "mark-valve",
+    "parameters": [
+      {
+        "optionId": "option-diameter",
+        "libraryValueId": "diameter-dn100",
+        "numberValue": null,
+        "textValue": null,
+        "booleanValue": null
+      },
+      {
+        "optionId": "option-pressure",
+        "libraryValueId": "pressure-pn16",
+        "numberValue": null,
+        "textValue": null,
+        "booleanValue": null
+      }
+    ],
+    "updatedAt": "2026-09-08T18:00:00.000Z"
+  }
+}
+
+*/
+
+
+
+// ============================================================================
+// 16. РЕКОМЕНДОВАНА МОДЕЛЬ БД
+// ============================================================================
+//
+// element_mark
+// ------------
+// id
+// code
+// name
+// element_type       // node / edge / both
+// active
+//
+//
+//
+// element_option
+// --------------
+// id
+// code
+// name
+// value_type         // library / number / text / boolean
+// unit
+// active
+//
+//
+//
+// element_option_library
+// ----------------------
+// id
+// option_id
+// code
+// name
+// sort_order
+// active
+//
+//
+//
+// element_mark_option
+// -------------------
+// mark_id
+// option_id
+// required
+// sort_order
+//
+//
+//
+// element_parameter_value
+// -----------------------
+// id
+// element_id
+// element_type       // node / edge
+// option_id
+//
+// library_value_id   // якщо value_type = library
+// number_value       // якщо value_type = number
+// text_value         // якщо value_type = text
+// boolean_value      // якщо value_type = boolean
+//
+//
+//
+// equipment
+// ---------
+// id
+// code
+// name
+// ...
+//
+//
+//
+// element / diagram object table
+// ------------------------------
+// id
+// diagram_id
+// element_type
+// equipment_id
+// mark_id
+// title
+// ...
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 17. ЧОМУ element_parameter_value ПОТРІБНА ОКРЕМО
+// ============================================================================
+//
+// element_option_library — це довідник допустимих значень.
+//
+// Наприклад:
+//
+// element_option:
+//   id = option-diameter
+//   name = "Діаметр"
+//   value_type = library
+//
+// element_option_library:
+//   DN50
+//   DN80
+//   DN100
+//   DN150
+//
+// Але конкретний node / edge повинен окремо зберігати:
+//
+// element_id = edge_123
+// option_id = option-diameter
+// library_value_id = diameter-dn100
+//
+// Тобто:
+//
+// element_option_library
+//     = "ЯКІ ЗНАЧЕННЯ МОЖНА ВИБРАТИ"
+//
+// element_parameter_value
+//     = "ЯКЕ ЗНАЧЕННЯ ВИБРАНО ДЛЯ ЦЬОГО ЕЛЕМЕНТА"
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 18. JSON ЧИ УНІВЕРСАЛЬНА ТАБЛИЦЯ
+// ============================================================================
+//
+// Варіант 1 — JSON:
+//
+// element.parameters_json = [
+//   {
+//     optionId: "...",
+//     libraryValueId: "..."
+//   }
+// ]
+//
+// Плюси:
+// - просто зберігати;
+// - швидко реалізувати;
+// - зручно для snapshot схеми.
+//
+// Мінуси:
+// - складніше фільтрувати по параметрах;
+// - складніше робити SQL-звіти;
+// - складніше забезпечити foreign key;
+// - складніше контролювати довідникові значення.
+//
+//
+//
+// Варіант 2 — element_parameter_value:
+//
+// Плюси:
+// - нормальна реляційна модель;
+// - foreign key;
+// - пошук по параметрах;
+// - індекси;
+// - звіти;
+// - фільтрація;
+// - контроль цілісності.
+//
+// Мінус:
+// - більше таблиць.
+//
+//
+//
+// РЕКОМЕНДАЦІЯ:
+//
+// Для робочої БД:
+//   element_parameter_value
+//
+// Для JSON diagram snapshot:
+//   elementData.parameters
+//
+// Тобто можна використовувати обидва формати:
+// state / export = JSON;
+// persistence / search / reports = relational DB.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 19. НЕ ЗМІШУВАТИ ГРАФІЧНУ ШИРИНУ І ФІЗИЧНИЙ ДІАМЕТР
+// ============================================================================
+//
+// ПРИКЛАД НЕПРАВИЛЬНО:
+//
+// data: {
+//   width: 100
+// }
+//
+// і вважати це DN100.
+//
+//
+//
+// ПРАВИЛЬНО:
+//
+// data: {
+//   width: 60
+// }
+//
+// elementData: {
+//   parameters: [
+//     {
+//       optionId: "option-diameter",
+//       libraryValueId: "diameter-dn100"
+//     }
+//   ]
+// }
+//
+// Canvas width = графіка.
+// DN100 = технологічна характеристика.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 20. FUTURE API CONTRACTS
+// ============================================================================
+//
+// Після підключення backend залишити ті ж repository contracts.
+//
+// ============================================================================
+
+/*
+
+elementMarkRepository.listMarks({
+  elementType
+});
+
+elementMarkRepository.getMarkById(id);
+
+
+
+elementOptionRepository.listOptions({
+  markId
+});
+
+elementOptionRepository.getOptionById(id);
+
+
+
+elementOptionLibraryRepository.listValues(
+  optionId
+);
+
+elementOptionLibraryRepository.getValueById(
+  id
+);
+
+
+
+equipmentRepository.listEquipment({
+  search
+});
+
+equipmentRepository.getEquipmentById(
+  id
+);
+
+*/
+
+
+
+// ============================================================================
+// 21. ПРИКЛАД FUTURE API IMPLEMENTATION
+// ============================================================================
+
+/*
+
+export const elementOptionRepository = {
+  async listOptions({
+    markId,
+    signal,
+  } = {}) {
+    const params =
+      new URLSearchParams();
+
+    if (markId) {
+      params.set(
+        "markId",
+        markId
+      );
+    }
+
+    const response =
+      await fetch(
+        `/api/element-options?${params}`,
+        { signal }
+      );
+
+    if (!response.ok) {
+      throw new Error(
+        "Element options request failed"
+      );
+    }
+
+    return response.json();
+  },
+};
+
+*/
+
+
+
+// ============================================================================
+// 22. ACCESS CONTROL
+// ============================================================================
+//
+// У ЦЬОМУ ПАКЕТІ ACCESS CONTROL ВІДКЛЮЧЕНИЙ.
+//
+// Видалено залежність від:
+//
+// - USER_ROLES
+// - PERMISSIONS
+// - hasPermission
+// - userRole
+//
+// Глобальний access layer у майбутньому може:
+// 1. не показувати edit command;
+// 2. не дозволяти відкрити edit mode;
+// 3. захищати API endpoint;
+// 4. перевіряти право на backend.
+//
+// UI-перевірка ніколи не повинна бути єдиним захистом.
+// Backend повинен незалежно перевіряти permission.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 23. MIGRATION З ПОПЕРЕДНЬОЇ СТРУКТУРИ info
+// ============================================================================
+//
+// Старий пакет використовував:
+//
+// info: {
+//   title,
+//   equipmentId,
+//   equipmentSnapshot,
+//   systemId,
+//   externalId,
+//   parameters,
+//   updatedAt
+// }
+//
+// Нова структура:
+//
+// elementData: {
+//   title,
+//   equipmentId,
+//   markId,
+//   parameters,
+//   updatedAt
+// }
+//
+// equipmentSnapshot видаляється.
+//
+// systemId / externalId не включені в базову модель.
+// Якщо вони реально потрібні як бізнес-поля,
+// їх можна повернути окремо.
+//
+// ============================================================================
+
+/*
+
+export function migrateLegacyElementInfo(entity) {
+  if (!entity) {
+    return entity;
+  }
+
+  if (entity.elementData) {
+    return entity;
+  }
+
+  const legacyInfo =
+    entity.info || {};
+
+  return {
+    ...entity,
+
+    elementData: {
+      title:
+        legacyInfo.title ?? "",
+
+      equipmentId:
+        legacyInfo.equipmentId ?? null,
+
+      markId: null,
+
+      parameters:
+        Array.isArray(
+          legacyInfo.parameters
+        )
+          ? legacyInfo.parameters
+          : [],
+
+      updatedAt:
+        legacyInfo.updatedAt ?? null,
+    },
+  };
+}
+
+*/
+
+
+
+// ============================================================================
+// 24. РЕКОМЕНДОВАНА ПОСЛІДОВНІСТЬ ІНТЕГРАЦІЇ
+// ============================================================================
+//
+// STEP 1.
+// Додати:
+//   src/lib/element/elementDataModel.js
+//
+// STEP 2.
+// Додати:
+//   src/lib/element/elementHelpers.js
+//
+// STEP 3.
+// Додати repositories:
+//   elementMarkRepository.js
+//   elementOptionRepository.js
+//   elementOptionLibraryRepository.js
+//
+// STEP 4.
+// Оновити equipmentRepository.
+// equipmentSnapshot більше не використовувати.
+//
+// STEP 5.
+// У useCanvasStore додати:
+//   elementInfoDialog
+//   setElementInfoDialog
+//   clearElementInfoDialog
+//   updateElementData
+//
+// STEP 6.
+// При створенні нового node / edge
+// можна одразу додавати:
+//
+// elementData:
+//   createDefaultElementData()
+//
+// або нормалізувати при load.
+//
+// STEP 7.
+// Оновити canvasController.
+//
+// STEP 8.
+// Додати:
+//   elementParameterHelpers.js
+//
+// STEP 9.
+// Додати:
+//   ElementParameterField.jsx
+//
+// STEP 10.
+// Замінити поточний ElementInfoCardModal.jsx.
+//
+// STEP 11.
+// Прибрати role-check з:
+//   ElementInfoCardModal
+//   CanvasContextMenu
+//   canvasController
+//
+// STEP 12.
+// Перевірити double click node.
+//
+// STEP 13.
+// Перевірити double click edge.
+//
+// STEP 14.
+// Перевірити context menu.
+//
+// STEP 15.
+// Перевірити save:
+// після натискання "Зберегти"
+// elementData має змінитися безпосередньо
+// у відповідному node / edge.
+//
+// STEP 16.
+// Перевірити serialized state.
+//
+// STEP 17.
+// Додати normalize при load / import.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 25. ЩО ПЕРЕВІРИТИ ПІСЛЯ ІНТЕГРАЦІЇ
+// ============================================================================
+//
+// NODE:
+//
+// 1. Створити node.
+// 2. Відкрити картку.
+// 3. Ввести title.
+// 4. Вибрати equipment.
+// 5. Вибрати mark.
+// 6. Вибрати DN.
+// 7. Натиснути "Зберегти".
+//
+// У Zustand повинен з'явитися:
+//
+// node.elementData
+//
+//
+//
+// EDGE:
+//
+// 1. Створити edge.
+// 2. Відкрити картку.
+// 3. Ввести title.
+// 4. Вибрати mark "Трубопровід".
+// 5. Вибрати diameter.
+// 6. Ввести length.
+// 7. Зберегти.
+//
+// У Zustand:
+//
+// edge.elementData
+//
+//
+//
+// REOPEN:
+//
+// 1. Закрити картку.
+// 2. Відкрити повторно.
+//
+// Значення повинні підтягнутися зі state.
+//
+//
+//
+// CHANGE MARK:
+//
+// Якщо:
+//
+// mark-valve
+// має diameter + pressure
+//
+// а потім вибрано:
+//
+// mark-pump
+//
+// параметри, які нова марка не підтримує,
+// видаляються з локального form-state.
+//
+// Остаточно у node / edge вони потраплять
+// тільки після Save.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 26. ВАЖЛИВЕ УТОЧНЕННЯ ЩОДО ЗМІНИ MARK
+// ============================================================================
+//
+// Поточний код при зміні mark видаляє параметри,
+// які не входять до нового mark.
+//
+// Це логічно для строгого довідникового підходу.
+//
+// Але якщо в майбутньому потрібно:
+// - зберігати "приховані" параметри;
+// - дозволити повернути стару mark;
+// - вести історію;
+//
+// тоді parameters не треба одразу очищати.
+//
+// Можна натомість:
+// - показувати тільки allowed parameters;
+// - зберігати повний масив;
+// - або очищати тільки при Save.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 27. РЕКОМЕНДАЦІЯ ЩОДО ID
+// ============================================================================
+//
+// Не використовувати як optionId:
+//   "diameter"
+//
+// якщо в БД будуть реальні UUID / numeric IDs.
+//
+// Краще у frontend demo:
+//
+//   option-diameter
+//
+// а після БД:
+//
+//   optionId = id запису element_option.
+//
+// Те саме:
+// - markId;
+// - libraryValueId;
+// - equipmentId.
+//
+// code зберігається окремо і потрібен для:
+// - читабельності;
+// - інтеграцій;
+// - пошуку;
+// - import/export.
+//
+// ============================================================================
+
+
+
+// ============================================================================
+// 28. FINAL RESULT
+// ============================================================================
+//
+// Після інтеграції:
+//
+// 1. Node та edge мають однаковий блок elementData.
+//
+// 2. Дані інформаційної картки зберігаються прямо в state:
+//      nodes[].elementData
+//      edges[].elementData
+//
+// 3. Немає окремого дубльованого state для карток.
+//
+// 4. Графічні властивості відокремлені від технологічних.
+//
+// 5. title зберігається в elementData.
+//
+// 6. equipment зберігається через equipmentId.
+//
+// 7. equipmentSnapshot більше не використовується.
+//
+// 8. markId визначає тип / марку об'єкта.
+//
+// 9. Доступні параметри підтягуються за markId.
+//
+// 10. Параметри не зашиті в JSX.
+//
+// 11. Діаметр / тиск / матеріал та інші dictionary values
+//     вибираються із контрольованого довідника.
+//
+// 12. Підтримані valueType:
+//       library
+//       number
+//       text
+//       boolean
+//
+// 13. Один універсальний updateElementData працює
+//     і для node, і для edge.
+//
+// 14. Поточна реалізація працює на mock repositories.
+//
+// 15. У майбутньому repositories можна замінити API.
+//
+// 16. Структура parameters готова до перенесення
+//     у universal DB table element_parameter_value.
+//
+// 17. Access control з пакета прибраний.
+//     Його можна підключити глобально.
+//
+// 18. Модель готова до JSON serialization,
+//     import/export та подальшого persistence.
+//
+// ============================================================================
