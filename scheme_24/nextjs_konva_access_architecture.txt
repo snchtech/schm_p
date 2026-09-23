@@ -1,0 +1,221 @@
+АРХІТЕКТУРА СИСТЕМИ ДОСТУПУ ДЛЯ NEXT.JS + KONVA
+Версія 1.0 | 23.09.2026 | JavaScript (без TypeScript)
+
+1. КЛЮЧОВЕ РІШЕННЯ
+
+Використати гібрид RBAC + ABAC + scope:
+- RBAC: користувач отримує одну або кілька ролей; ролі містять permissions.
+- ABAC: правила враховують підрозділ, тип схеми, власника та стан документа.
+- Scope: дозвіл діє на all, department:<id>, own або конкретний ресурс.
+
+Не кодувати перевірки на кшталт role === 'editor' у десятках компонентів. Компоненти перевіряють лише permissions через єдиний policy engine. Роль підрозділу не повинна підміняти фактичну належність користувача до підрозділу: departmentId береться з довіреного профілю, а доступ до чужого підрозділу оформлюється окремим scoped grant.
+
+2. МОДЕЛЬ ПРАВ
+
+Базові permissions:
+- app.access
+- scheme.list, scheme.view, scheme.create, scheme.update, scheme.delete
+- canvas.view, canvas.edit, canvas.export
+- element.view, element.create, element.update, element.delete
+- element.card.view, element.card.edit
+- attachment.view, attachment.add, attachment.delete
+- layer.view, layer.edit
+- admin.users.view, admin.roles.assign, admin.roles.revoke, admin.membership.remove
+- admin.roles.manage (окреме, лише для уповноважених адміністраторів)
+
+Ролі (приклади, не жорстко закодований перелік):
+- reader: перегляд схем, canvas, елементів і дозволених вкладень.
+- editor: права reader + редагування в межах виданого scope.
+- administrator: керування призначеннями в межах власного підрозділу; не отримує автоматично права редагувати всі схеми.
+- super_administrator: адміністрування користувачів усіх підрозділів, відповідно до окремих політик; надзвичайні дії аудіюються.
+- department:<code>: атрибут або група користувачів, а не універсальний дозвіл.
+- position:<code>: майбутня роль посади з окремими permissions.
+- scheme_type:equipment / scheme_type:premises: окремі гранти для доступу до категорій схем.
+
+Важливо: тип схеми та дію краще моделювати двома незалежними умовами: permission scheme.view/update + дозволений schemeType. Наприклад editor + equipment дає редагування обладнання, але не приміщень. Якщо для типів потрібні різні права, використати grants {permission, schemeType, scope}.
+
+Правила комбінування:
+- Декілька ролей об'єднують grants (union), але КОЖЕН grant зберігає власний scope; не можна окремо об'єднати всі permissions і всі scopes, інакше виникне ескалація.
+- Для виконання дії потрібен один повний відповідний grant, який одночасно задовольняє permission, schemeType, department і resource.
+- За замовчуванням deny; відсутність потрібних даних — deny.
+- На першому етапі не вводити загальні deny-ролі; явні заборони потребують чітко визначеного пріоритету.
+- Права адміністратора не означають автоматичного права видавати будь-яку роль: перелік grantable roles обмежується серверною політикою.
+
+3. ПРИКЛАДИ ПОЛІТИК
+
+reader + equipment + department A:
+- може переглядати схеми обладнання підрозділу A;
+- не може редагувати та не бачить приміщення без додаткового grant.
+
+editor + equipment + department A + reader + premises + department B:
+- може редагувати обладнання A;
+- може переглядати приміщення B;
+- не може редагувати приміщення B.
+
+administrator підрозділу A:
+- бачить користувачів A та керує лише дозволеними призначеннями;
+- не може сам собі видати super_administrator;
+- не може призначити грант із ширшим scope, ніж дозволяє серверна політика.
+
+4. РЕКОМЕНДОВАНА СТРУКТУРА ПРОЄКТУ
+
+src/
+  access/
+    permissions.js          // константи permissions
+    roleCatalog.js          // тимчасовий довідник ролей
+    policy.js               // чиста функція can(subject, action, resource)
+    useAccess.js            // React hook для UI
+    AccessGate.jsx          // приховати/заблокувати елементи UI
+  stores/
+    useAuthStore.js         // користувач і серверні grants
+    useCanvasStore.js       // наявний Zustand store
+  canvas/
+    canvasController.js     // наявний контролер + перевірки мутацій
+  components/admin/
+    UserRoleAdmin.jsx
+    UserRoleEditor.jsx
+  app/api/admin/             // приклад лише якщо API в Next.js
+
+Якщо API — окремий Node.js-сервіс, policy engine для безпеки має працювати саме в API. Спільний JS-пакет @project/access-policy може використовуватись і в Next.js, і в Node.js, але сервер перевіряє grants за власними довіреними даними.
+
+5. ПРИКЛАД ЧИСТОЇ POLICY-ФУНКЦІЇ (JS)
+
+// src/access/policy.js
+export function can(subject, permission, resource = {}) {
+  if (!subject?.active || !Array.isArray(subject.grants)) return false;
+  return subject.grants.some((grant) => {
+    if (grant.permission !== permission) return false;
+    if (grant.schemeType && grant.schemeType !== resource.schemeType) return false;
+    if (grant.scope?.kind === 'department' &&
+        grant.scope.departmentId !== resource.departmentId) return false;
+    if (grant.scope?.kind === 'own' && grant.scope.userId !== resource.ownerId) return false;
+    if (grant.scope?.kind === 'resource' && grant.scope.resourceId !== resource.id) return false;
+    if (!grant.scope || !['all', 'department', 'own', 'resource'].includes(grant.scope.kind)) return false;
+    return true;
+  });
+}
+
+// subject.grants — сервером сформовані ЕФЕКТИВНІ grants.
+// Для own grant сервер записує userId із перевіреної сесії.
+// У production додати перевірку стану ресурсу, tenant та версії політики.
+// Це приклад базового механізму, а не повна реалізація авторизації.
+
+6. ІНТЕГРАЦІЯ ІЗ canvasController.js
+
+Створити єдину таблицю команд і потрібних permissions:
+- selectElement, pan, zoom: canvas.view
+- addNode, addEdge, addBranch, addZvt: element.create
+- moveElement, resizeElement, updateElement: element.update
+- deleteElement, deleteBranch, deleteZvt: element.delete
+- editCard: element.card.edit
+- addAttachment: attachment.add
+- deleteAttachment: attachment.delete
+- changeLayer: layer.edit
+- exportScheme: canvas.export
+
+Перед КОЖНОЮ мутацією контролер викликає policy.can() з фактичним ресурсом. Включити клавіатурні скорочення, drag-and-drop, контекстне меню, undo/redo, вставлення, імпорт JSON, пакетні операції та автозбереження: жоден обхід UI не повинен дозволяти зміну без перевірки. Для пакетних дій перевіряти всі змінювані ресурси. Undo/redo не повинні повертати недозволені зміни.
+
+Приклад обгортки:
+
+function executeCanvasCommand({ permission, resource, run, subject }) {
+  if (!can(subject, permission, resource)) {
+    return { ok: false, reason: 'FORBIDDEN' };
+  }
+  return { ok: true, result: run() };
+}
+
+Для багатьох схем/типів одночасно контролер повинен отримувати актуальний context (schemeId, schemeType, departmentId, status). Під час перемикання схеми не використовувати старі дозволи з попередньої схеми.
+
+7. ІНТЕГРАЦІЯ ІЗ Zustand useCanvasStore.js
+
+- Залишити canvas state окремо від auth/access state.
+- У useAuthStore тримати subject, effectiveGrants, policyVersion, isLoading.
+- У useCanvasStore тримати activeScheme metadata, nodes, edges, branches, layers, selection, history.
+- Всі зміни canvas спрямувати через перевірені actions/controller. Не експортувати необмежені setNodes/setEdges для довільного використання компонентами.
+- Якщо технічно можливо викликати useCanvasStore.setState напряму, клієнтські перевірки все одно не є безпековою межею: API перевіряє кожен запис.
+- При зміні grants або logout очищати вибір, відкриті редактори, history та кеш заборонених схем; припиняти незбережені операції.
+- Сервер має відхиляти старі токени/сесії відповідно до механізму відкликання або policyVersion.
+
+8. ІНТЕГРАЦІЯ ІЗ LAYERS І MUI
+
+- AccessGate permission="element.create" resource={activeScheme}: приховує кнопку додавання.
+- Для недоступної, але корисної дії можна показати disabled із Tooltip «Недостатньо прав».
+- Меню Layers формується з конфігурації {id, label, permission, component} і фільтрується централізовано.
+- У Konva шарі read-only вимкнути draggable, Transformer, редагування anchors, створення branch та контекстні команди; pan/zoom залишити доступними читачу.
+- Інформаційна картка: reader — перегляд, editor із element.card.edit — редагування; поля і кнопка Save також перевіряються.
+- Доступ до attachments перевіряти окремо від доступу до схеми, якщо файли мають іншу класифікацію.
+- Не завантажувати приховані дані в браузер: API фільтрує схеми, елементи, файли і метадані на сервері.
+
+9. АДМІН-ПАНЕЛЬ
+
+Маршрут /admin/access (MUI):
+- Поле пошуку користувача, фільтр підрозділу (тільки super_administrator), таблиця користувачів, статус доступу.
+- Картка користувача: базова інформація з довіреного каталогу, поточні ролі, scope, типи схем, попередній перегляд ефективних прав.
+- Призначити/зняти роль, окремо задати дозволений підрозділ та тип схеми, зберегти зміни.
+- Видалити користувача з рольової системи застосунку (revocation + деактивація membership), НЕ видаляти його корпоративний обліковий запис і не стирати історію авторства.
+- Підтвердження для небезпечних дій, аудит хто/коли/кому/що змінив.
+- Захист від самопризначення вищих прав і від видалення останнього super_administrator.
+
+Серверні правила:
+- administrator: search/list/assign/revoke лише в межах власного departmentId і лише ролі з allowlist;
+- super_administrator: користувачі всіх підрозділів, але критичні ролі — за спеціальною процедурою;
+- користувач із кількома підрозділами повинен мати явний active admin scope; не розширювати його автоматично до всіх;
+- кожен endpoint повторно перевіряє actor, target, роль, scope, версію запису і можливість виконання дії.
+
+Приклад API:
+GET    /api/admin/users?query=&departmentId=&page=
+GET    /api/admin/users/:id/grants
+PUT    /api/admin/users/:id/grants  // із version для optimistic locking
+DELETE /api/admin/users/:id/membership
+GET    /api/access/me
+GET    /api/access/role-catalog
+
+Для API повертати 401 (немає автентифікації), 403 (немає права), 409 (конфлікт версій), 422 (некоректний grant). Відокремити право бачити користувачів від права змінювати їхні ролі.
+
+10. МОДЕЛЬ БД (ОРІЄНТОВНА)
+
+users(id, external_identity_id, department_id, status)
+departments(id, code, name, parent_id)
+app_memberships(user_id, app_id, status, version, created_at, updated_at)
+roles(id, code, name, is_system, status)
+permissions(id, code, description)
+role_permissions(role_id, permission_id)
+user_role_assignments(id, user_id, role_id, scope_kind, department_id,
+                      scheme_type_id, resource_id, granted_by, created_at, revoked_at)
+scheme_types(id, code, name)
+schemes(id, scheme_type_id, department_id, owner_id, status, ...)
+audit_access_events(id, actor_id, target_id, action, before_json, after_json,
+                    request_id, created_at)
+
+Для складних комбінацій permissions+scope краще окрема grants-модель, а не глобальна роль із випадковим змішуванням областей дії. Визначити FK, унікальність активних призначень, індекси user_id/department_id/scheme_type_id і транзакційність змін. Історію revocation не видаляти фізично.
+
+11. БЕЗПЕКА ТА ЕКСПЛУАТАЦІЯ
+
+- Авторизація тільки на сервері є остаточною; приховані кнопки не захищають API.
+- У кожному GET/POST/PATCH/DELETE перевіряти доступ до конкретного ресурсу, а не лише до маршруту.
+- Фільтрувати SQL-запити на рівні доступних departmentId/schemeType; перевіряти IDOR.
+- Не довіряти departmentId, ролям чи permissions, надісланим браузером.
+- Перевіряти дозволи на websocket-події, якщо є спільне редагування.
+- Захищати від CSRF за обраною моделлю сесій, логувати адміністративні операції.
+- Передбачити тестування матриці ролей, відкликання доступу під час відкритої схеми, паралельного редагування ролей та прямого виклику API.
+
+12. ПОЕТАПНИЙ ПЛАН ВПРОВАДЖЕННЯ БЕЗ ПЕРЕПИСУВАННЯ ІНТЕРФЕЙСУ
+
+Етап 1. Інвентаризувати всі існуючі дії canvasController, useCanvasStore, Layers, карток, вкладень, контекстних меню, гарячих клавіш; скласти permission matrix.
+Етап 2. Впровадити access/policy.js, конфігурацію ролей та useAuthStore; почати з mock grants для reader/editor/administrator.
+Етап 3. Додати централізований guard до canvasController та мутацій Zustand; окремо захистити імпорт, історію та пакетні зміни.
+Етап 4. Під'єднати AccessGate до MUI, Layers, Konva і карток; додати режим read-only.
+Етап 5. Реалізувати серверну перевірку на Node.js API для читання/запису кожного ресурсу.
+Етап 6. Створити MUI-адмінку з пошуком за підрозділом, видачею/відкликанням ролей і журналом аудиту.
+Етап 7. Підключити БД, синхронізацію з корпоративним каталогом, scoped grants для типів схем і майбутніх посад.
+Етап 8. Написати автоматизовані unit/integration/e2e тести і перевірити міграцію старих схем.
+
+13. ЩО ПОТРІБНО УТОЧНИТИ ПЕРЕД КОДУВАННЯМ
+
+- Чи окремий Node.js API уже відповідає за всі операції з canvas?
+- Де живуть користувачі та підрозділи: власна БД, LDAP/AD, SSO чи інший каталог?
+- Чи може схема належати кільком підрозділам і чи потрібен спільний доступ?
+- Чи дозволено administrator видавати editor, scheme-type grants і міжпідрозділовий доступ?
+- Чи є окремі правила для секретних вкладень, експорту, друку та архівних схем?
+
+РЕКОМЕНДАЦІЯ: почати з permission matrix і спільного policy engine, інтегрованого у canvasController, а не з масового додавання role-checks у вже готові React-компоненти. Це мінімізує зміни в існуючих Layers і дає основу для посад, нових типів схем та складних scope.

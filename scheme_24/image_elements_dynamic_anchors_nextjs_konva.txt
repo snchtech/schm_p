@@ -1,0 +1,202 @@
+ПАКЕТ РЕКОМЕНДАЦІЙ: ГРАФІЧНІ ЕЛЕМЕНТИ З ДИНАМІЧНИМИ АНКОРНИМИ ТОЧКАМИ
+Next.js + React Konva + Node.js API + Oracle 21c
+Приклади наведено на JavaScript (без TypeScript).
+
+1. ОСНОВНА ІДЕЯ
+
+Додати новий тип вузла imported-graphic. Він є повноцінним node: має власний id, координати, габарити, orientation (0 або 90 градусів, якщо діє загальне правило горизонтального/вертикального розміщення), довільну кількість anchorPoints, конектори edges, інформаційну картку, прив'язку до загального довідника та вкладення.
+
+ВАЖЛИВО: PDF і VSDX не слід передавати безпосередньо в Konva.Image. Konva відображає браузерне растрове зображення або попередньо підготовлений SVG. Оригінал файлу зберігати окремо, а для полотна створювати безпечний preview PNG/WebP/SVG. GIF: для статичної схеми використовувати перший кадр; анімацію — лише за окремої потреби, з явним керуванням оновленням кадрів.
+
+2. ПІДТРИМКА ФОРМАТІВ
+
+JPG/JPEG, PNG: браузерне декодування, перевірка MIME та фактичного вмісту, створення мініатюри; оригінал зберігати.
+GIF: preview першого кадру (або окремий механізм анімації); оригінал зберігати.
+SVG: обов'язкова санітизація на сервері; видалити script, foreignObject, event handlers, зовнішні посилання; бажано конвертувати preview у PNG/WebP для уніфікації та безпеки.
+PDF: вибір сторінки; на сервері або в контрольованому конвертері створити preview обраної сторінки. Оригінал залишити доступним для завантаження/перегляду.
+VSDX: конвертувати на сервері у SVG/PDF, потім у безпечний preview; підтримати вибір сторінки. Врахувати, що складні діаграми Visio можуть втрачати частину оформлення під час конвертації. Конвертацію виконувати в ізольованому процесі, а не в Next.js browser bundle.
+
+У UI показувати стан: uploading -> processing -> ready або failed. Не додавати вузол із неготовим preview, якщо його розміри ще невідомі.
+
+3. МОДЕЛЬ ДАНИХ
+
+Приклад node у state / JSON схеми:
+
+{
+  "id": "node-img-101",
+  "type": "imported-graphic",
+  "x": 250,
+  "y": 180,
+  "width": 320,
+  "height": 210,
+  "orientation": "horizontal",
+  "rotation": 0,
+  "assetId": "asset-9001",
+  "pageIndex": 0,
+  "previewUrl": "/api/assets/asset-9001/preview?page=0",
+  "catalogElementId": null,
+  "anchorPoints": [
+    { "id": "ap-1", "u": 0.125, "v": 0.5, "label": "Вхід", "kind": "input" },
+    { "id": "ap-2", "u": 0.875, "v": 0.5, "label": "Вихід", "kind": "output" }
+  ]
+}
+
+Координати u, v — нормалізовані [0..1] відносно видимого прямокутника зображення (не абсолютні координати полотна). Це дозволяє зберігати анкорні точки після переміщення, масштабування та повороту на 90 градусів. Якщо preview має внутрішні поля або режим contain, прив'язувати анкори до фактично видимої області, а не до зовнішнього контейнера.
+
+Edge повинен посилатися на конкретний анкор, а не на випадкові x/y:
+{
+  "id": "edge-501",
+  "source": { "nodeId": "node-img-101", "anchorId": "ap-2" },
+  "target": { "nodeId": "node-202", "anchorId": "default-left" },
+  "points": []
+}
+
+Якщо у вашій поточній структурі edge є sourceNodeId/targetNodeId, додайте sourceAnchorId/targetAnchorId без втрати існуючих полів.
+
+4. ІНТЕРФЕЙС
+
+Контекстне меню imported-graphic:
+- Додати анкорну точку (режим вибору позиції на зображенні).
+- Показати / приховати анкорні точки.
+- Перейменувати / налаштувати точку.
+- Перемістити точку (тільки у режимі редагування анкорів).
+- Видалити точку (якщо є підключені edges — попередити й запропонувати перепідключити або видалити зв'язки).
+- Замінити файл із збереженням анкорів, якщо координати сумісні; інакше вимагати підтвердження.
+
+У режимі «Додати анкор» показати підказку «Клацніть на зображенні, щоб додати точку». Під час наведення — маркер попереднього перегляду; після кліку — створення точки. У звичайному режимі клік по анкору починає створення конектора. Не змішувати ці два режими.
+
+Зберігати undo/redo для додавання, переміщення, видалення анкорів, заміни файлу та створення edges. У режимі reader заборонити редагування, але залишити перегляд.
+
+5. РОЗРАХУНОК КООРДИНАТ У KONVA
+
+Рекомендується використовувати Group із x/y та rotation і Image у локальних координатах x=0, y=0. Для повороту навколо центра застосувати offsetX=width/2, offsetY=height/2, а x/y групи трактувати як координати центра. Анкори малювати в тій самій Group у локальних координатах: x=u*width, y=v*height.
+
+Для створення точки з кліку треба переводити глобальні координати pointer у локальні координати групи через absoluteTransform.copy().invert().point(pointer). Це коректно враховує zoom, pan і rotation.
+
+6. ПРИКЛАД REACT KONVA (JavaScript)
+
+'use client';
+
+import React, { useEffect, useRef, useState } from 'react';
+import { Group, Image as KonvaImage, Circle } from 'react-konva';
+
+function usePreview(url) {
+  const [image, setImage] = useState(null);
+  useEffect(() => {
+    if (!url) { setImage(null); return; }
+    let cancelled = false;
+    const img = new window.Image();
+    img.crossOrigin = 'anonymous'; // Потрібен коректний CORS, якщо preview на іншому домені.
+    img.onload = () => { if (!cancelled) setImage(img); };
+    img.onerror = () => { if (!cancelled) setImage(null); };
+    img.src = url;
+    return () => { cancelled = true; };
+  }, [url]);
+  return image;
+}
+
+const clamp01 = n => Math.min(1, Math.max(0, n));
+
+export default function ImportedGraphicNode({
+  node, mode, selected, onAddAnchor, onMoveNode, onStartEdge, onSelect
+}) {
+  const groupRef = useRef(null);
+  const preview = usePreview(node.previewUrl);
+  const rotation = node.orientation === 'vertical' ? 90 : 0;
+
+  const addAnchorAtPointer = event => {
+    if (mode !== 'add-anchor' || !groupRef.current) return;
+    const stage = event.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return;
+    const inverse = groupRef.current.getAbsoluteTransform().copy().invert();
+    const local = inverse.point(pointer);
+    if (local.x < 0 || local.x > node.width || local.y < 0 || local.y > node.height) return;
+    onAddAnchor(node.id, { id: crypto.randomUUID(), u: clamp01(local.x / node.width), v: clamp01(local.y / node.height) });
+  };
+
+  return (
+    <Group
+      ref={groupRef}
+      x={node.x}
+      y={node.y}
+      offsetX={node.width / 2}
+      offsetY={node.height / 2}
+      rotation={rotation}
+      draggable={mode === 'select'}
+      onClick={event => {
+        if (mode === 'add-anchor') addAnchorAtPointer(event);
+        else if (mode === 'select') onSelect(node.id);
+      }}
+      onDragEnd={event => onMoveNode(node.id, { x: event.target.x(), y: event.target.y() })}
+    >
+      {preview && <KonvaImage image={preview} x={0} y={0} width={node.width} height={node.height} />}
+      {(selected || mode === 'add-anchor' || mode === 'connect') && node.anchorPoints.map(anchor => (
+        <Circle
+          key={anchor.id}
+          x={anchor.u * node.width}
+          y={anchor.v * node.height}
+          radius={6}
+          fill="#1976d2"
+          stroke="#ffffff"
+          strokeWidth={2}
+          onClick={event => {
+            event.cancelBubble = true;
+            if (mode === 'connect') onStartEdge({ nodeId: node.id, anchorId: anchor.id });
+          }}
+        />
+      ))}
+    </Group>
+  );
+}
+
+Важливо: crypto.randomUUID() викликається лише в браузері у відповідь на клік. Для продуктивності preview кешувати. При виділенні або редагуванні використовувати hit area, якщо PNG/SVG має прозорі ділянки.
+
+7. СИНХРОНІЗАЦІЯ EDGES І BRANCH
+
+Під час переміщення, масштабування, повороту або зміни анкори не записувати нові абсолютні координати в БД. Щоразу обчислювати їх із transform групи. Наприклад, group.getAbsoluteTransform().point({x: u*width, y: v*height}) повертає позицію на Stage; якщо шар edges має іншу трансформацію, перевести координати в його локальну систему.
+
+Edge source/target зберігає nodeId + anchorId. Для ортогональних конекторів перераховувати маршрут після зміни геометрії вузла/анкори. Branch, підключений до edge, зберігає attachedTo; branch, підключений до imported-graphic, зберігає nodeId і anchorId. Не руйнувати чинну модель ЗВТ, де ЗВТ посилається на branch.
+
+8. РЕДАГУВАННЯ АНКОРІВ
+
+У режимі edit-anchors зробити Circle draggable. На onDragMove обчислити локальну позицію, обмежити [0,width] і [0,height], оновити u/v та перемалювати пов'язані edges. У onDragEnd записати зміну в історію undo/redo та зберегти через API. Під час перетягування точки заблокувати drag самої Group, інакше одночасно рухатиметься вузол.
+
+Опціонально: snap до меж зображення, до сітки або до найближчої існуючої точки; напрямок порту (top/right/bottom/left/auto) для акуратної ортогональної маршрутизації. Не нав'язувати прив'язку до меж: користувач має ставити точку будь-де на зображенні.
+
+9. ЗАВАНТАЖЕННЯ ФАЙЛІВ І БЕЗПЕКА
+
+Next.js: MUI Dialog з drag-and-drop або input[type=file], вибором сторінки PDF/VSDX, назвою, preview. Завантаження через POST /api/assets (краще напряму до Node.js API). Обмежити розмір, кількість сторінок і час конвертації; перевіряти фактичний формат (magic bytes), а не лише розширення. Не виконувати макроси/скрипти, не довіряти SVG, конвертувати PDF/VSDX в ізольованому контейнері з лімітами CPU/RAM та без доступу до внутрішньої мережі. Видавати preview через авторизований endpoint або короткоживучі URL. Для великих файлів — черга фонової конвертації.
+
+Зберігати оригінал у файловому/Object Storage, а в Oracle — asset_id, owner, mime_type, original_name, storage_key, preview_key, page_count, width, height, processing_status, hash. Не зберігати base64 у JSON схеми.
+
+10. ORACLE 21c: ОРІЄНТОВНІ ТАБЛИЦІ
+
+GRAPHIC_ASSET: id, original_name, mime_type, storage_key, preview_key, page_count, status, created_by, created_at.
+SCHEME_NODE: id, scheme_id, type, asset_id (nullable), x, y, width, height, orientation, catalog_element_id (nullable), data_json CLOB CHECK (data_json IS JSON).
+NODE_ANCHOR: id, node_id, u NUMBER(10,7), v NUMBER(10,7), label, port_kind, direction, created_at. CHECK (u BETWEEN 0 AND 1), CHECK (v BETWEEN 0 AND 1).
+SCHEME_EDGE: id, scheme_id, source_node_id, source_anchor_id, target_node_id, target_anchor_id, data_json CLOB CHECK (data_json IS JSON).
+
+FK: NODE_ANCHOR.node_id -> SCHEME_NODE.id; SCHEME_EDGE.source_anchor_id/target_anchor_id -> NODE_ANCHOR.id, якщо дефолтні анкори теж матеріалізовані в NODE_ANCHOR. Якщо дефолтні порти віртуальні — використати узгоджену модель endpoint {nodeId, anchorId, anchorType}, валідовану API.
+
+У транзакції перевіряти, що обидва кінці edge належать схемі і що anchor належить зазначеному node. Для видалення анкори з існуючими edges використовувати RESTRICT або явне перепідключення; не робити неочікуваний каскад.
+
+11. ПОСЛІДОВНІСТЬ ВПРОВАДЖЕННЯ
+
+Етап 1: imported-graphic + JPG/PNG/SVG (санітизований) + preview + додавання анкорів вручну.
+Етап 2: створення/переміщення/видалення анкорів, прив'язка edge за nodeId+anchorId, undo/redo, перевірка цілісності.
+Етап 3: PDF/GIF/VSDX через серверну конвертацію, вибір сторінки, статус обробки.
+Етап 4: збереження asset/node/anchor/edge в Oracle 21c, права reader/editor, версіонування та аудит.
+Етап 5: оптимізація: кеш preview, батчинг змін, ортогональна маршрутизація, підтримка заміни файлу.
+
+12. КРИТЕРІЇ ПРИЙМАННЯ
+
+- Можна завантажити JPG, PNG, GIF, SVG, PDF та VSDX; для багатосторінкових форматів вибрати сторінку.
+- На полотні відображається preview як повноцінний node; оригінал доступний окремо.
+- Редактор додає довільну кількість анкорів кліком у потрібних місцях.
+- Конектор приєднується до обраного anchorId та залишається прикріпленим після переміщення, масштабування й повороту вузла на 90°.
+- Видалення зайнятого анкори не залишає edge з неіснуючим endpoint.
+- Схема після перезавантаження відновлює зображення, анкори та конектори.
+- Невалідний або небезпечний файл не потрапляє до Konva як довірений контент.
+
+ПРИМІТКА: цей приклад компонента — стартова інтеграційна заготовка, а не повний готовий редактор. Для production окремо реалізуйте drag анкорів, перерахунок edge та серверну конвертацію.

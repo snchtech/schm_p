@@ -1,0 +1,130 @@
+РЕАЛІЗАЦІЯ ГОРИЗОНТАЛЬНОЇ ТА ВЕРТИКАЛЬНОЇ ОРІЄНТАЦІЇ NODE
+Next.js + React Konva, JavaScript
+
+1. МОДЕЛЬ ДАНИХ
+Для кожного node зберігайте orientation: 'horizontal' | 'vertical'. Для сумісності зі старими схемами значення за замовчуванням — 'horizontal'. Кут повинен обчислюватися з orientation, а не редагуватися довільно: horizontal = 0°, vertical = 90°. Якщо у вас уже є поле rotation, під час завантаження нормалізуйте його до одного з цих значень, а при збереженні зберігайте orientation (за потреби також похідне rotation).
+
+Приклад:
+const node = {
+  id: 'node-1', x: 200, y: 120,
+  width: 160, height: 40,
+  orientation: 'horizontal',
+  // ...інші поля картки та прив'язки до БД
+};
+
+2. ФУНКЦІЇ НОРМАЛІЗАЦІЇ
+export const angleForOrientation = (orientation) =>
+  orientation === 'vertical' ? 90 : 0;
+
+export const normalizeOrientation = (node) => ({
+  ...node,
+  orientation: node.orientation === 'vertical' ? 'vertical' : 'horizontal',
+});
+
+3. РЕКОМЕНДОВАНИЙ ПІДХІД: ПОВОРОТ ГРУПИ
+Якщо node складається з кількох Konva-елементів (прямокутник, підписи, умовні позначення), об'єднайте їх у Group. Поворот застосовуйте до Group, а не окремо до кожної фігури. У прикладі x/y — ЦЕНТР node; локальна геометрія малюється відносно (0,0). Це запобігає небажаному зміщенню при зміні орієнтації.
+
+// components/DiagramNode.js
+'use client';
+import React from 'react';
+import { Group, Rect, Text } from 'react-konva';
+
+export default function DiagramNode({ node, selected, onSelect, onMoveEnd }) {
+  const vertical = node.orientation === 'vertical';
+  return (
+    <Group
+      x={node.x}
+      y={node.y}
+      rotation={vertical ? 90 : 0}
+      draggable
+      onClick={() => onSelect(node.id)}
+      onTap={() => onSelect(node.id)}
+      onDragEnd={(e) => onMoveEnd(node.id, {
+        x: e.target.x(), y: e.target.y(),
+      })}
+    >
+      <Rect
+        x={-node.width / 2}
+        y={-node.height / 2}
+        width={node.width}
+        height={node.height}
+        fill="white"
+        stroke={selected ? '#1976d2' : '#333'}
+        strokeWidth={selected ? 2 : 1}
+      />
+      <Text
+        x={-node.width / 2}
+        y={-node.height / 2}
+        width={node.width}
+        height={node.height}
+        text={node.label || ''}
+        align="center"
+        verticalAlign="middle"
+        fontSize={14}
+      />
+    </Group>
+  );
+}
+
+УВАГА: у цьому варіанті текст також повертається на 90°. Якщо текст має завжди читатися горизонтально, винесіть Text в окрему неповернуту Group на тих самих координатах або задайте для тексту компенсувальний поворот -90° при vertical; розрахуйте його позицію з урахуванням розміру тексту.
+
+4. ПЕРЕМИКАЧ ОРІЄНТАЦІЇ В MUI
+У панелі властивостей обраного node додайте ToggleButtonGroup із двома значеннями. onChange може повертати null, якщо користувач натиснув уже активну кнопку; у цьому разі нічого не змінюйте.
+
+import { ToggleButton, ToggleButtonGroup } from '@mui/material';
+
+<ToggleButtonGroup
+  exclusive
+  size="small"
+  value={selectedNode.orientation || 'horizontal'}
+  onChange={(_, next) => {
+    if (!next) return;
+    setNodes((prev) => prev.map((n) =>
+      n.id === selectedNode.id ? { ...n, orientation: next } : n
+    ));
+  }}
+>
+  <ToggleButton value="horizontal">Горизонтально</ToggleButton>
+  <ToggleButton value="vertical">Вертикально</ToggleButton>
+</ToggleButtonGroup>
+
+Альтернатива: пункт «Повернути на 90°» у контекстному меню, який перемикає horizontal ↔ vertical. Обидва способи повинні викликати ту саму функцію оновлення state.
+
+5. ЗАБОРОНА ДОВІЛЬНОГО ПОВОРОТУ
+Якщо ви використовуєте Konva.Transformer, забороніть вільне обертання: rotateEnabled={false}. Зміна орієнтації повинна виконуватися ТІЛЬКИ через перемикач або команду повороту. Для надійності перед збереженням і після завантаження схеми нормалізуйте orientation; не покладайтеся лише на UI.
+
+<Transformer ref={transformerRef} rotateEnabled={false} />
+
+Якщо у проєкті потрібен саме маркер повороту, залиште rotateEnabled={true}, встановіть rotationSnaps={[0, 90, 180, 270]} та rotationSnapTolerance, але snaps самі по собі НЕ гарантують заборони інших кутів. Для суворого обмеження використовуйте rotation у стані лише 0/90 та примусово нормалізуйте результат transformEnd. Простішим і надійнішим є вимкнення ручного обертання.
+
+6. КООРДИНАТИ КОНЕКТОРІВ / EDGES
+Не обертайте координати edge разом із node автоматично. Натомість перераховуйте точки підключення (ports) залежно від orientation. Якщо у node є локальний порт {x: px, y: py} відносно центру, глобальні координати:
+
+function getPortPosition(node, port) {
+  const angle = node.orientation === 'vertical' ? Math.PI / 2 : 0;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return {
+    x: node.x + port.x * cos - port.y * sin,
+    y: node.y + port.x * sin + port.y * cos,
+  };
+}
+
+Після зміни orientation оновлюйте прив'язані edges та branch за ID node, а не зберігайте незалежні координати точки підключення як єдине джерело істини. Для ортогональних edge після повороту перерахуйте маршрут (тільки горизонтальні/вертикальні сегменти). Врахуйте, що поворот на 90° міняє місцями видимі width/height.
+
+7. СУМІСНІСТЬ З ІСНУЮЧИМИ КООРДИНАТАМИ
+У прикладі node.x/node.y — центр. Якщо у вас зараз x/y — лівий верхній кут, НЕ підставляйте наявні значення без перетворення: центр = { x: x + width/2, y: y + height/2 }. Оберіть одну систему координат для всіх node і використовуйте її в рендері, перетягуванні, портах, виділенні, JSON та БД. Для існуючих складних SVG/Konva-фігур перевірте, чи їхня локальна точка (0,0) відповідає центру; інакше використовуйте offsetX/offsetY або внутрішню Group.
+
+8. ЗБЕРЕЖЕННЯ В JSON ТА ORACLE 21c
+У JSON схеми зберігайте orientation як рядок. Якщо основні атрибути node винесені в окрему таблицю, додайте ORIENTATION VARCHAR2(10) DEFAULT 'horizontal' NOT NULL CHECK (ORIENTATION IN ('horizontal', 'vertical')). Значення з клієнта перевіряйте також у Node.js API. Після зміни орієнтації позначайте схему як змінену, підтримуйте undo/redo та включайте orientation у збереження.
+
+9. МІНІМАЛЬНИЙ ПЛАН ІНТЕГРАЦІЇ
+1) Додати orientation до моделі node та міграцію старих JSON.
+2) Перенести малювання node у Group з координатами відносно центру.
+3) Додати MUI-перемикач та команду контекстного меню.
+4) Вимкнути rotateEnabled у Transformer.
+5) Перераховувати ports, edges і branch після перемикання.
+6) Зберігати orientation у JSON/БД та перевіряти на сервері.
+7) Протестувати перетягування, виділення, зміну розмірів, написи, undo/redo, повторне відкриття схеми й усі чотири сторони підключення.
+
+ПРИМІТКА: якщо node є симетричним колом, його поворот візуально непомітний. Для таких node орієнтація потрібна лише тоді, коли вона впливає на порти, текст або внутрішні символи.

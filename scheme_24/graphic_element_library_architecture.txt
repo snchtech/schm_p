@@ -1,0 +1,209 @@
+АРХІТЕКТУРА БІБЛІОТЕКИ ГРАФІЧНИХ ЕЛЕМЕНТІВ
+Next.js (JavaScript) + Konva + Node.js API + БД
+Версія: 23.09.2026
+
+1. ПРИНЦИП
+
+Розділити три незалежні поняття:
+- каталог: які графічні елементи існують у системі;
+- доступність: які елементи дозволені конкретному підрозділу для конкретного типу схем;
+- персональний набір: які з дозволених елементів користувач увімкнув у своїй палітрі.
+
+Загальна бібліотека є єдиним джерелом визначень елементів. Не копіювати реалізацію Konva-компонентів у підрозділи. Набори підрозділів та користувачів — лише посилання на ID елементів загального каталогу. За потреби дозволити власні елементи підрозділу з owner_department_id, але вони теж реєструються в єдиному каталозі.
+
+2. ПРАВИЛА ВИДИМОСТІ ТА ДОСТУПУ
+
+- reader: може переглядати схему, але не отримує редакторську палітру для вставлення елементів.
+- editor + роль підрозділу department:<ID> + дозвіл редагувати поточний тип схеми: отримує загальні елементи, дозволені для цього типу схеми, та елементи відповідного підрозділу.
+- editor без ролі підрозділу: тільки загальні елементи, якщо політика це дозволяє; за суворою політикою — не відкривати редакторську палітру взагалі. Рекомендовано сувору політику для цього проєкту: вимагати всі три дозволи.
+- administrator керує призначеннями в межах свого підрозділу, але НЕ отримує автоматично право редагувати схеми або використовувати всі елементи.
+- super_administrator керує всіма каталогами і призначеннями; доступ до редактора також має бути явним або оформленим окремою системною політикою.
+- Для користувача з кількома підрозділами обов'язково визначати activeDepartmentId у контексті поточної схеми; не змішувати набори різних підрозділів автоматично.
+- Відображення у UI — не захист: API перевіряє права при отриманні каталогу, вставленні та збереженні елементів.
+
+Формула доступності для поточної схеми:
+canEdit = hasRole('editor') AND hasDepartmentRole(scheme.department_id)
+          AND canEditSchemeType(scheme.type);
+available = canEdit ? (globalElementsForType UNION departmentElementsForType) : [];
+visiblePalette = available FILTER userPreference.visible !== false;
+
+ВАЖЛИВО: загальний елемент не означає доступ до будь-якого типу схем. Для кожного елемента зберігати перелік сумісних типів схем. Загальні елементи доступні лише в межах дозволеного типу схеми та контексту редагування.
+
+3. СТРУКТУРА БД (ОРІЄНТОВНО PostgreSQL)
+
+users(id, ...)
+departments(id, name, ...)
+roles(id, code) -- reader, editor, administrator, super_administrator, scheme_type:equipment:editor тощо
+user_roles(user_id, role_id, department_id NULL, scheme_type_id NULL)
+scheme_types(id, code UNIQUE, name) -- equipment, premises, ...
+schemes(id, scheme_type_id, department_id, data_json JSONB, version, ...)
+
+graphic_elements(
+  id UUID PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('global','department')),
+  owner_department_id UUID NULL REFERENCES departments(id),
+  renderer_key TEXT NOT NULL,
+  config_schema JSONB NOT NULL DEFAULT '{}',
+  default_props JSONB NOT NULL DEFAULT '{}',
+  version INT NOT NULL DEFAULT 1,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  CHECK ((scope='global' AND owner_department_id IS NULL)
+      OR (scope='department' AND owner_department_id IS NOT NULL))
+)
+
+graphic_element_scheme_types(
+  element_id UUID REFERENCES graphic_elements(id),
+  scheme_type_id UUID REFERENCES scheme_types(id),
+  PRIMARY KEY(element_id, scheme_type_id)
+)
+
+department_element_catalog(
+  department_id UUID REFERENCES departments(id),
+  element_id UUID REFERENCES graphic_elements(id),
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  PRIMARY KEY(department_id, element_id)
+)
+
+user_element_preferences(
+  user_id UUID REFERENCES users(id),
+  department_id UUID REFERENCES departments(id),
+  scheme_type_id UUID REFERENCES scheme_types(id),
+  element_id UUID REFERENCES graphic_elements(id),
+  is_visible BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INT,
+  is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY(user_id, department_id, scheme_type_id, element_id)
+)
+
+Опційно: department_element_catalog призначає підрозділу також вибрані загальні елементи. Якщо загальні елементи мають бути доступні ВСІМ, включати їх без цього запису; якщо потрібен контрольований корпоративний набір — вимагати запис у department_element_catalog і для global. Рекомендовано другий варіант: адміністратор підрозділу вибирає з глобальної бібліотеки дозволений набір.
+
+Індекси: graphic_elements(scope, owner_department_id, is_active), graphic_element_scheme_types(scheme_type_id, element_id), department_element_catalog(department_id, is_enabled), user_element_preferences(user_id, department_id, scheme_type_id).
+
+4. РОЗМЕЖУВАННЯ ПРАВ НА БІБЛІОТЕКУ
+
+Рекомендована політика:
+- super_administrator: створює та публікує загальні визначення; керує всіма підрозділами.
+- administrator + department:<ID>: додає/прибирає елементи зі списку дозволених у своєму підрозділі, але не змінює глобальні визначення.
+- editor + department:<ID> + право на тип схеми: користується дозволеними елементами і налаштовує лише власну видимість/порядок/обране.
+- reader: бачить уже розміщені на схемі елементи, навіть якщо їх немає в його палітрі; не може вставляти нові.
+
+Для користувачів з роллю editor, які належать до підрозділу, налаштування персональної палітри дозволяти лише для активного підрозділу та типу схеми. Зміна особистих налаштувань НЕ змінює набір усього підрозділу.
+
+5. ПРИКЛАД ЗАПИТУ ДОСТУПНОЇ ПАЛІТРИ
+
+Параметри :user_id, :department_id, :scheme_type_id.
+Перед SQL сервер перевіряє editor + department role + право редагувати тип схеми + доступ до поточної схеми. Не приймати department_id із клієнта без перевірки.
+
+SELECT e.id, e.code, e.name, e.category, e.renderer_key,
+       e.default_props, e.config_schema,
+       COALESCE(p.is_visible, TRUE) AS is_visible,
+       COALESCE(p.is_favorite, FALSE) AS is_favorite,
+       p.sort_order
+FROM graphic_elements e
+JOIN graphic_element_scheme_types est
+  ON est.element_id = e.id AND est.scheme_type_id = :scheme_type_id
+JOIN department_element_catalog dec
+  ON dec.element_id = e.id
+ AND dec.department_id = :department_id
+ AND dec.is_enabled = TRUE
+LEFT JOIN user_element_preferences p
+  ON p.element_id = e.id
+ AND p.user_id = :user_id
+ AND p.department_id = :department_id
+ AND p.scheme_type_id = :scheme_type_id
+WHERE e.is_active = TRUE
+  AND (e.scope = 'global'
+       OR (e.scope = 'department' AND e.owner_department_id = :department_id))
+ORDER BY COALESCE(p.sort_order, 999999), e.category, e.name;
+
+6. API (Node.js)
+
+GET /api/schemes/:schemeId/palette
+  Сервер визначає тип схеми й підрозділ із БД, перевіряє доступ та повертає allowed elements + user preferences.
+GET /api/admin/departments/:departmentId/elements
+  Для адміністратора підрозділу: усі придатні глобальні елементи + власні елементи, а також позначка is_enabled.
+PUT /api/admin/departments/:departmentId/elements/:elementId
+  Увімкнути/вимкнути елемент для підрозділу після перевірки scope, сумісності та повноважень.
+PATCH /api/me/palette-preferences
+  { departmentId, schemeTypeId, elementId, isVisible, isFavorite, sortOrder }
+  Перевірити належність до підрозділу, editor, право на тип схеми й доступність elementId.
+POST /api/schemes/:schemeId/elements
+  Перевірити всі дозволи повторно, renderer_key за серверним каталогом, schema-validation параметрів.
+
+7. NEXT.JS / KONVA: РЕЄСТР КОМПОНЕНТІВ (JS)
+
+// src/features/editor/elementRegistry.js
+import ValveElement from './elements/equipment/ValveElement';
+import PumpElement from './elements/equipment/PumpElement';
+import WallElement from './elements/premises/WallElement';
+
+export const elementRegistry = {
+  'equipment.valve': ValveElement,
+  'equipment.pump': PumpElement,
+  'premises.wall': WallElement,
+};
+
+// src/features/editor/ElementRenderer.jsx
+import { elementRegistry } from './elementRegistry';
+export default function ElementRenderer({ element, ...props }) {
+  const Component = elementRegistry[element.rendererKey];
+  if (!Component) return null; // у production: placeholder + журнал невідомих ключів
+  return <Component {...props} {...element.props} />;
+}
+
+Від БД отримувати лише renderer_key і конфігурацію. Не виконувати JS-код із БД. Для великої бібліотеки застосувати контрольоване lazy loading компонентів.
+
+8. ПАЛІТРА ТА ВИБІР КОРИСТУВАЧА
+
+У редакторі передбачити вкладки:
+- «Мої елементи»: is_visible=true, згруповані за категоріями;
+- «Бібліотека підрозділу»: увесь дозволений набір, перемикач «Показувати у моїй палітрі»;
+- «Обране»: is_favorite=true;
+- «Керування набором» (лише administrator): додати з глобальної бібліотеки, вилучити з набору підрозділу.
+
+Під час першого входу користувач отримує стандартний набір підрозділу; відсутність рядка user_element_preferences означає is_visible=true. Коли користувач вимикає елемент, створюється/оновлюється персональний запис. За потреби окремо додати department_element_defaults для стандартної видимості нових користувачів.
+
+При зміні активного підрозділу або типу схеми заново завантажувати палітру та очищати попередній кеш. Ключ кешу: userId + departmentId + schemeTypeId + version каталогу. Для React Query / SWR інвалідовувати кеш після зміни ролей, складу бібліотеки або налаштувань.
+
+9. НЕЗАЛЕЖНІСТЬ ІСНУЮЧИХ СХЕМ ВІД ПАЛІТРИ
+
+Приховування елемента в палітрі НЕ видаляє його зі схем. Вилучення з набору підрозділу забороняє нові вставлення, але раніше створені об'єкти залишаються доступними для перегляду. Для редагування старих екземплярів потрібна окрема політика. Зберігати в екземплярі схеми elementDefinitionId, elementDefinitionVersion, objectId, props, geometry, а для сумісності — стабільний rendererKey/snapshot за необхідності. Не видаляти визначення, на які посилаються існуючі схеми; використовувати is_active=false та версіонування.
+
+10. БЕЗПЕКА ТА ЦІЛІСНІСТЬ
+
+- Дозволи на сервері перевіряти при кожному читанні/записі; не покладатися на приховані кнопки.
+- Не довіряти ролям із localStorage або полям JSON, надісланим клієнтом.
+- Кожна операція прив'язана до schemeId, departmentId та schemeTypeId, які сервер перевіряє за БД.
+- Заборонити призначення department-owned елемента чужому підрозділу.
+- Валідувати JSON props за config_schema, контролювати розмір та дозволені renderer_key.
+- Записувати аудит: хто, коли, якому підрозділу видав/забрав елемент і змінив доступ.
+- При зміні ролей інвалідовувати активні сесії/кеш прав або використовувати короткоживучі токени та версію прав.
+- Для критичних систем розглянути PostgreSQL RLS як додатковий бар'єр, не замість API-перевірок.
+
+11. ПЛАН ВПРОВАДЖЕННЯ
+
+Етап 1: схема БД, довідник типів схем, єдиний реєстр Konva-компонентів.
+Етап 2: наповнити загальну бібліотеку і зв'язки з типами схем.
+Етап 3: сторінка адміністратора підрозділу для формування дозволеного набору.
+Етап 4: API доступної палітри з перевіркою комбінації editor + department + scheme-type permission.
+Етап 5: персональний вибір, обране, сортування, збереження в БД.
+Етап 6: перевірка прав під час вставлення і збереження; аудит, тести, кеш.
+
+12. МІНІМАЛЬНІ ТЕСТИ
+
+1) editor + department A + equipment: бачить лише дозволені елементи A для equipment.
+2) editor + department B: не бачить власні елементи A.
+3) editor без department role: палітра недоступна.
+4) reader + department A: бачить схему, не отримує редакторську палітру.
+5) administrator A без editor: може керувати набором A, але не редагувати схеми.
+6) editor A вимкнув елемент: він зникає лише з його палітри, не з палітри інших користувачів.
+7) адміністратор A прибрав елемент: нове вставлення через API заборонене, існуючі екземпляри не видаляються.
+8) element з типом premises не з'являється у схемі equipment.
+9) після відкликання ролі editor старий запит на вставлення відхиляється.
+10) користувач із кількома підрозділами перемикається між ними без витоку елементів.
+
+КЛЮЧОВЕ РІШЕННЯ
+Єдина загальна бібліотека визначень + призначення елементів підрозділам + персональні налаштування палітри. Доступ обчислюється на сервері як перетин ролей editor, department та права на тип поточної схеми. Це дозволяє додавати нові типи схем і графічні елементи без дублювання редактора.

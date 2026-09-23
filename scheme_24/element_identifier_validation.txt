@@ -1,0 +1,182 @@
+ПАКЕТ РЕКОМЕНДАЦІЙ: ПЕРЕВІРКА ПРИВ’ЯЗКИ ЕЛЕМЕНТІВ СХЕМИ ДО ЗАГАЛЬНОГО ДОВІДНИКА
+Проєкт: Next.js (JavaScript) + Konva + Node.js API + Oracle 21c
+
+1. МЕТА
+Додати окрему кнопку «Перевірити прив’язки» на панель редактора. За натисканням перевіряти всі об’єкти схеми, для яких за правилами їх типу обов’язковий ідентифікатор із загального довідника. Об’єкти без такого ідентифікатора підсвічувати на полотні, показувати їх кількість і список із можливістю переходу до інформаційної картки.
+
+2. ЯКІ ЕЛЕМЕНТИ ПЕРЕВІРЯТИ
+- node: за замовчуванням перевіряти, якщо тип об’єкта вимагає прив’язки.
+- edge: перевіряти лише для типів ліній/конекторів, що мають відповідник у загальному довіднику.
+- branch, ЗВТ, підписи, декоративні елементи: налаштувати окремі правила за типом. Не вважати автоматично всі службові графічні об’єкти помилковими.
+- Схеми, які самі є елементами іншої схеми, та приміщення: передбачити окремі правила залежно від типу схеми і типу елемента.
+- Значення 0, порожній рядок, null і undefined трактувати відповідно до формату ідентифікатора. Для числового ID не використовувати просту перевірку !id, якщо 0 допустимий.
+
+3. СТРУКТУРА ДАНИХ У STATE
+Приклад node:
+{
+  id: 'node-101',
+  type: 'equipment',
+  name: 'Насос №1',
+  catalogElementId: null,
+  data: { diameter: 100 },
+  x: 240,
+  y: 120
+}
+
+Приклад edge:
+{
+  id: 'edge-7',
+  type: 'pipeline',
+  source: 'node-101',
+  target: 'node-102',
+  catalogElementId: 5821,
+  points: [240, 120, 400, 120]
+}
+
+catalogElementId — ідентифікатор запису загального довідника; НЕ плутати з локальним id графічного об’єкта. Якщо у вашій поточній моделі поле називається інакше, адаптуйте приклади, не створюючи дубльованого джерела істини.
+
+4. ПРАВИЛА ПЕРЕВІРКИ
+Зберігати централізовану конфігурацію за типом схеми та типом елемента. Не розкидати перевірки по компонентах Konva.
+
+// lib/validation/catalogRules.js
+export const catalogRules = {
+  equipment_scheme: {
+    equipment: true,
+    pipeline: true,
+    branch: false,
+    label: false,
+    instrument: true,
+  },
+  room_scheme: {
+    room: true,
+    doorway: false,
+    label: false,
+  },
+};
+
+export function requiresCatalogId(schemeType, elementType) {
+  return catalogRules[schemeType]?.[elementType] === true;
+}
+
+// lib/validation/validateCatalogLinks.js
+import { requiresCatalogId } from './catalogRules';
+
+export function hasCatalogId(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+export function validateCatalogLinks({ schemeType, nodes = [], edges = [] }) {
+  const all = [
+    ...nodes.map((element) => ({ ...element, elementKind: 'node' })),
+    ...edges.map((element) => ({ ...element, elementKind: 'edge' })),
+  ];
+  const checked = all.filter((el) => requiresCatalogId(schemeType, el.type));
+  const missing = checked
+    .filter((el) => !hasCatalogId(el.catalogElementId))
+    .map(({ id, name, type, elementKind }) => ({ id, name: name || id, type, elementKind }));
+  return { checkedCount: checked.length, missing, missingCount: missing.length };
+}
+
+ВАЖЛИВО: перевірка вище знаходить лише відсутні ID. Вона не підтверджує існування запису в Oracle, його активність чи відповідність типу. Для повної перевірки потрібен окремий API-запит.
+
+5. КНОПКА ТА СТАН У NEXT.JS
+Використовувати React state; результат перевірки не записувати в історію змін схеми, оскільки це тимчасове представлення.
+
+// Фрагмент компонента редактора (JS/JSX, MUI)
+import { useMemo, useState } from 'react';
+import { Button, Alert, List, ListItemButton, ListItemText } from '@mui/material';
+import { validateCatalogLinks } from '@/lib/validation/validateCatalogLinks';
+
+// Усередині компонента, де доступні schemeType, nodes, edges, selectElement, openInfoCard:
+const [validationResult, setValidationResult] = useState(null);
+const [showMissingHighlights, setShowMissingHighlights] = useState(false);
+const missingKeys = useMemo(
+  () => new Set((validationResult?.missing || []).map((item) => `${item.elementKind}:${item.id}`)),
+  [validationResult]
+);
+
+function runCatalogValidation() {
+  const result = validateCatalogLinks({ schemeType, nodes, edges });
+  setValidationResult(result);
+  setShowMissingHighlights(true);
+}
+
+function goToMissing(item) {
+  selectElement(item.id, item.elementKind);
+  // Додатково: центр полотна на елементі через ref Konva Stage.
+  openInfoCard(item.id, item.elementKind);
+}
+
+// У JSX панелі інструментів:
+<Button variant="outlined" onClick={runCatalogValidation}>
+  Перевірити прив’язки
+</Button>
+<Button disabled={!validationResult} onClick={() => setShowMissingHighlights((value) => !value)}>
+  {showMissingHighlights ? 'Приховати підсвічування' : 'Показати підсвічування'}
+</Button>
+{validationResult && (
+  <>
+    <Alert severity={validationResult.missingCount ? 'warning' : 'success'}>
+      Перевірено: {validationResult.checkedCount}. Без ID: {validationResult.missingCount}.
+    </Alert>
+    <List dense>
+      {validationResult.missing.map((item) => (
+        <ListItemButton key={`${item.elementKind}:${item.id}`} onClick={() => goToMissing(item)}>
+          <ListItemText primary={item.name} secondary={`${item.elementKind} / ${item.type}`} />
+        </ListItemButton>
+      ))}
+    </List>
+  </>
+)}
+
+6. ПІДСВІЧУВАННЯ В KONVA
+- node: контрастний помаранчевий/червоний контур, пунктир або додаткове зовнішнє кільце; не змінювати оригінальний колір об’єкта в даних.
+- edge: пунктирна лінія-накладка або тимчасовий колір; для вузьких ліній додати напівпрозорий ширший контур.
+- Для доступності не покладатися лише на колір: додати значок попередження, список помилок та підказку.
+- Підсвічування має бути на окремому шарі або через обчислювані props; не зберігати його в JSON схеми.
+
+// Приклад для Konva.Line, якщо edge уже рендериться з масиву points:
+const invalid = showMissingHighlights && missingKeys.has(`edge:${edge.id}`);
+<Line
+  points={edge.points}
+  stroke={invalid ? '#D97706' : edge.stroke}
+  strokeWidth={invalid ? Math.max(edge.strokeWidth || 2, 4) : (edge.strokeWidth || 2)}
+  dash={invalid ? [9, 5] : (edge.dash || [])}
+/>
+
+// Для Konva.Rect (аналогічно для Circle та складних Group):
+const invalidNode = showMissingHighlights && missingKeys.has(`node:${node.id}`);
+<Rect
+  x={node.x} y={node.y} width={node.width} height={node.height}
+  stroke={invalidNode ? '#D97706' : node.stroke}
+  strokeWidth={invalidNode ? 3 : (node.strokeWidth || 1)}
+  dash={invalidNode ? [7, 4] : (node.dash || [])}
+/>
+
+Для складних вузлів краще малювати окремий контур довкола Group, щоб не змінювати геометрію умовного позначення. Для edge, у яких points задано відносно групи або з трансформацією, використовувати їхню поточну систему координат.
+
+7. ПОВЕДІНКА ПІСЛЯ ВИПРАВЛЕННЯ
+Коли користувач обирає запис із довідника в інформаційній картці, оновити catalogElementId у загальному state. Якщо режим перевірки активний — автоматично перерахувати результат на актуальних nodes/edges або повторно запускати перевірку після збереження картки. Не залишати помилку для вже виправленого об’єкта. При зміні типу схеми також скидати/перераховувати результат. Якщо дані схеми змінилися, не показувати застарілий висновок як актуальний.
+
+8. ПОДАЛЬША ПЕРЕВІРКА ЧЕРЕЗ API ТА ORACLE 21c
+Перший етап: перевірка відсутніх catalogElementId у браузері без звернення до БД.
+Другий етап: POST /api/schemes/:schemeId/validate-catalog-links; сервер перевіряє доступ користувача до схеми, читає її елементи з БД, знаходить відсутні ID, пакетно перевіряє наявні ID у загальному довіднику та повертає статуси missing / not_found / inactive / type_mismatch. Не довіряти тільки JSON із клієнта. Приклад відповіді:
+{
+  "checkedCount": 12,
+  "issues": [
+    { "elementId": "node-101", "elementKind": "node", "code": "missing", "message": "Не вибрано елемент довідника" }
+  ]
+}
+У БД зберігати catalog_element_id окремим полем у таблиці елементів схеми (із FK, якщо довідник у тій самій доступній схемі Oracle); JSON залишити для геометрії та UI-налаштувань. Створити індекс для пошуку за catalog_element_id. Серверна перевірка обов’язкова перед бізнес-операціями, які вимагають повних прив’язок, але не обов’язково блокувати звичайне збереження чернетки.
+
+9. КРИТЕРІЇ ГОТОВНОСТІ
+- Кнопка запускає перевірку без зміни схеми.
+- Підсвічуються лише ті типи, для яких прив’язка обов’язкова.
+- Node і edge обробляються окремо навіть при збігу локальних id.
+- Панель показує кількість і перелік проблем, перехід до картки працює.
+- Після призначення ID попередження зникає; вимкнення підсвічування не видаляє результат.
+- Порожня схема та схема без помилок обробляються коректно.
+- Перевірка не впливає на експорт, історію undo/redo та збережений JSON.
+
+10. ПОРЯДОК ВПРОВАДЖЕННЯ
+Спочатку узгодити назву поля ID з поточною інформаційною карткою, підключити валідатор до фактичних масивів node/edge, додати кнопку й панель результатів, потім оформити підсвічування в існуючих компонентах Konva. Після стабілізації — реалізувати серверну перевірку та правила за типами схем.

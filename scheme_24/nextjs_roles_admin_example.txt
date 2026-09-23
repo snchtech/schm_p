@@ -1,0 +1,295 @@
+ПРИКЛАД СТОРІНКИ АДМІНІСТРУВАННЯ РОЛЕЙ — NEXT.JS + MUI + JAVASCRIPT
+==================================================================
+
+Призначення: демонстраційна сторінка для Next.js App Router (JavaScript, без TypeScript), MUI.
+Підтримує пошук користувачів, обмеження видимості за підрозділом адміністратора,
+призначення/зняття ролей, доступ до типів схем, видалення користувача з рольової
+системи застосунку. Дані поки локальні (mock), інтеграційні точки для API позначені.
+
+Важливо: перевірки в UI — лише для зручності. Реальні права на читання/зміну
+ролей і схем ОБОВ'ЯЗКОВО перевіряються на сервері для кожного запиту.
+
+СТРУКТУРА
+---------
+app/admin/roles/page.js
+components/admin/RolesAdminPage.js
+lib/access/permissions.js
+
+Встановлення: npm install @mui/material @emotion/react @emotion/styled @mui/icons-material
+
+1. lib/access/permissions.js
+----------------------------
+export const ROLES = [
+  { id: 'reader', label: 'Читач', group: 'base' },
+  { id: 'editor', label: 'Редактор', group: 'base' },
+  { id: 'administrator', label: 'Адміністратор підрозділу', group: 'admin' },
+  { id: 'super_administrator', label: 'Суперадміністратор', group: 'admin' },
+  { id: 'scheme_equipment', label: 'Схеми обладнання', group: 'scheme' },
+  { id: 'scheme_rooms', label: 'Схеми приміщень', group: 'scheme' },
+  { id: 'scheme_networks', label: 'Схеми мереж', group: 'scheme' },
+];
+
+export function isSuperAdmin(actor) {
+  return actor?.roles?.includes('super_administrator') ?? false;
+}
+export function isAdmin(actor) {
+  return isSuperAdmin(actor) || (actor?.roles?.includes('administrator') ?? false);
+}
+export function canManageUser(actor, target) {
+  if (!isAdmin(actor) || !target || actor.id === target.id) return false;
+  if (isSuperAdmin(actor)) return true;
+  return actor.departmentId === target.departmentId &&
+    !target.roles.includes('administrator') &&
+    !target.roles.includes('super_administrator');
+}
+export function canAssignRole(actor, roleId) {
+  if (roleId === 'super_administrator' || roleId === 'administrator') {
+    return isSuperAdmin(actor);
+  }
+  return isAdmin(actor);
+}
+
+2. app/admin/roles/page.js
+---------------------------
+import RolesAdminPage from '../../../components/admin/RolesAdminPage';
+
+// Демонстрація. У production: отримати actor із серверної сесії,
+// перевірити доступ на сервері й передати лише дозволені дані.
+export default function Page() {
+  return <RolesAdminPage />;
+}
+
+3. components/admin/RolesAdminPage.js
+-------------------------------------
+'use client';
+
+import { useMemo, useState } from 'react';
+import {
+  Alert, Box, Button, Card, CardContent, Checkbox, Chip, Dialog,
+  DialogActions, DialogContent, DialogContentText, DialogTitle,
+  Divider, FormControlLabel, FormGroup, MenuItem, Select,
+  Snackbar, Stack, TextField, Typography
+} from '@mui/material';
+import { ROLES, isAdmin, isSuperAdmin, canManageUser, canAssignRole }
+  from '../../lib/access/permissions';
+
+const DEPARTMENTS = [
+  { id: 'd1', name: 'Енергетичний підрозділ' },
+  { id: 'd2', name: 'Технічний підрозділ' },
+  { id: 'd3', name: 'Адміністрація' },
+];
+
+const INITIAL_USERS = [
+  { id: 'u1', name: 'Іван Петренко', email: 'ivan@example.com', departmentId: 'd1', roles: ['reader', 'scheme_equipment'] },
+  { id: 'u2', name: 'Олена Коваль', email: 'olena@example.com', departmentId: 'd1', roles: ['reader', 'editor', 'scheme_rooms'] },
+  { id: 'u3', name: 'Марія Бондар', email: 'maria@example.com', departmentId: 'd2', roles: ['reader', 'scheme_networks'] },
+  { id: 'u4', name: 'Андрій Савчук', email: 'andrii@example.com', departmentId: 'd2', roles: ['administrator', 'reader'] },
+];
+
+// Перемкни demoActor на приклад super_administrator для перевірки всіх підрозділів.
+const demoActor = {
+  id: 'admin-current', name: 'Поточний адміністратор',
+  departmentId: 'd1', roles: ['administrator']
+};
+
+export default function RolesAdminPage() {
+  const [actor] = useState(demoActor);
+  const [users, setUsers] = useState(INITIAL_USERS);
+  const [query, setQuery] = useState('');
+  const [departmentFilter, setDepartmentFilter] = useState('all');
+  const [selectedId, setSelectedId] = useState(null);
+  const [draftRoles, setDraftRoles] = useState([]);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [notice, setNotice] = useState('');
+
+  const visibleUsers = useMemo(() => users.filter((user) => {
+    if (!isSuperAdmin(actor) && user.departmentId !== actor.departmentId) return false;
+    if (departmentFilter !== 'all' && user.departmentId !== departmentFilter) return false;
+    const search = `${user.name} ${user.email}`.toLowerCase();
+    return search.includes(query.toLowerCase());
+  }), [users, actor, departmentFilter, query]);
+
+  const selectedUser = users.find((user) => user.id === selectedId);
+  const manageable = selectedUser && canManageUser(actor, selectedUser);
+  const changed = selectedUser &&
+    JSON.stringify([...draftRoles].sort()) !== JSON.stringify([...selectedUser.roles].sort());
+
+  function selectUser(user) {
+    setSelectedId(user.id);
+    setDraftRoles([...user.roles]);
+  }
+
+  function toggleRole(roleId) {
+    if (!manageable || !canAssignRole(actor, roleId)) return;
+    setDraftRoles((current) => current.includes(roleId)
+      ? current.filter((id) => id !== roleId)
+      : [...current, roleId]);
+  }
+
+  function saveRoles() {
+    if (!manageable || !changed) return;
+    // PRODUCTION: await fetch(`/api/admin/users/${selectedId}/roles`, {
+    //   method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    //   body: JSON.stringify({ roles: draftRoles })
+    // });
+    // Сервер повторно перевіряє actor, target, department та кожну роль.
+    setUsers((current) => current.map((user) => user.id === selectedId
+      ? { ...user, roles: [...draftRoles] } : user));
+    setNotice('Ролі збережено (демонстраційно)');
+  }
+
+  function removeFromRoleSystem() {
+    if (!manageable) return;
+    // PRODUCTION: DELETE /api/admin/users/:id/role-membership
+    // Не видаляйте обліковий запис з основного каталогу користувачів.
+    setUsers((current) => current.filter((user) => user.id !== selectedId));
+    setSelectedId(null);
+    setDraftRoles([]);
+    setConfirmDelete(false);
+    setNotice('Користувача вилучено з рольової системи (демонстраційно)');
+  }
+
+  if (!isAdmin(actor)) return <Alert severity="error">Доступ заборонено</Alert>;
+
+  return (
+    <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 1440, mx: 'auto' }}>
+      <Typography variant="h4" fontWeight={700} gutterBottom>
+        Адміністрування доступів
+      </Typography>
+      <Typography color="text.secondary" sx={{ mb: 3 }}>
+        {actor.name} · {isSuperAdmin(actor) ? 'Усі підрозділи' :
+          DEPARTMENTS.find((d) => d.id === actor.departmentId)?.name}
+      </Typography>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '360px 1fr' }, gap: 3 }}>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="h6" gutterBottom>Користувачі</Typography>
+            <TextField fullWidth size="small" label="Пошук за ПІБ або email"
+              value={query} onChange={(e) => setQuery(e.target.value)} sx={{ mb: 2 }} />
+            {isSuperAdmin(actor) && (
+              <Select fullWidth size="small" value={departmentFilter}
+                onChange={(e) => setDepartmentFilter(e.target.value)} sx={{ mb: 2 }}>
+                <MenuItem value="all">Усі підрозділи</MenuItem>
+                {DEPARTMENTS.map((d) => <MenuItem key={d.id} value={d.id}>{d.name}</MenuItem>)}
+              </Select>
+            )}
+            <Stack spacing={1}>
+              {visibleUsers.map((user) => (
+                <Box key={user.id} onClick={() => selectUser(user)}
+                  sx={{ p: 1.5, border: '1px solid', borderColor: selectedId === user.id
+                    ? 'primary.main' : 'divider', borderRadius: 2, cursor: 'pointer',
+                    bgcolor: selectedId === user.id ? 'action.selected' : 'transparent' }}>
+                  <Typography fontWeight={600}>{user.name}</Typography>
+                  <Typography variant="body2" color="text.secondary">{user.email}</Typography>
+                  <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mt: 1 }}>
+                    {user.roles.slice(0, 3).map((role) =>
+                      <Chip key={role} size="small" label={ROLES.find((r) => r.id === role)?.label || role} />)}
+                  </Stack>
+                </Box>
+              ))}
+              {visibleUsers.length === 0 && <Typography color="text.secondary">Нічого не знайдено</Typography>}
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card variant="outlined">
+          <CardContent>
+            {!selectedUser ? (
+              <Typography color="text.secondary">Виберіть користувача для перегляду прав.</Typography>
+            ) : (
+              <Stack spacing={2}>
+                <Box>
+                  <Typography variant="h5">{selectedUser.name}</Typography>
+                  <Typography color="text.secondary">{selectedUser.email}</Typography>
+                  <Typography variant="body2" sx={{ mt: 1 }}>
+                    Підрозділ: {DEPARTMENTS.find((d) => d.id === selectedUser.departmentId)?.name}
+                  </Typography>
+                </Box>
+                {!manageable && <Alert severity="info">Перегляд без права редагування цього користувача.</Alert>}
+                {['base', 'scheme', 'admin'].map((group) => (
+                  <Box key={group}>
+                    <Divider sx={{ mb: 1 }} />
+                    <Typography fontWeight={700} sx={{ mb: 1 }}>
+                      {{ base: 'Базові ролі', scheme: 'Доступ до типів схем',
+                        admin: 'Адміністрування' }[group]}
+                    </Typography>
+                    <FormGroup>
+                      {ROLES.filter((role) => role.group === group).map((role) => (
+                        <FormControlLabel key={role.id}
+                          control={<Checkbox checked={draftRoles.includes(role.id)}
+                            onChange={() => toggleRole(role.id)}
+                            disabled={!manageable || !canAssignRole(actor, role.id)} />}
+                          label={role.label} />
+                      ))}
+                    </FormGroup>
+                  </Box>
+                ))}
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                  <Button variant="contained" disabled={!manageable || !changed} onClick={saveRoles}>
+                    Зберегти ролі
+                  </Button>
+                  <Button variant="outlined" disabled={!changed}
+                    onClick={() => setDraftRoles([...selectedUser.roles])}>
+                    Скасувати зміни
+                  </Button>
+                  <Button color="error" variant="outlined" disabled={!manageable}
+                    onClick={() => setConfirmDelete(true)}>
+                    Вилучити з рольової системи
+                  </Button>
+                </Stack>
+              </Stack>
+            )}
+          </CardContent>
+        </Card>
+      </Box>
+
+      <Dialog open={confirmDelete} onClose={() => setConfirmDelete(false)}>
+        <DialogTitle>Підтвердити вилучення</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Вилучити {selectedUser?.name} із рольової системи застосунку?
+            Обліковий запис в основному каталозі залишиться.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDelete(false)}>Скасувати</Button>
+          <Button color="error" onClick={removeFromRoleSystem}>Вилучити</Button>
+        </DialogActions>
+      </Dialog>
+      <Snackbar open={Boolean(notice)} autoHideDuration={3500}
+        onClose={() => setNotice('')} message={notice} />
+    </Box>
+  );
+}
+
+4. ЩО ПІДКЛЮЧИТИ У PRODUCTION
+-----------------------------
+1) Серверна авторизація сторінки /admin/roles: перевіряти підписану сесію
+   та administrator / super_administrator; заборонити доступ іншим.
+2) GET /api/admin/users?search=&departmentId= — повертати тільки користувачів
+   дозволених підрозділів, з пагінацією. Звичайний administrator не може
+   змінювати departmentId на чужий.
+3) PUT /api/admin/users/:id/roles — у транзакції перевірити actor, target,
+   підрозділ, кожну роль; заборонити підвищення власних привілеїв.
+4) DELETE /api/admin/users/:id/role-membership — видалити членство у
+   рольовій системі, але не глобального користувача. Врахувати останнього
+   super_administrator і пов'язані записи.
+5) Додати аудит: хто, кому, коли і які ролі додав/зняв; журнал переглядає
+   уповноважений адміністратор.
+6) У схемах перевіряти право як перетин дій (reader/editor), типу схеми,
+   підрозділу/об'єкта та за потреби посади. Роль підрозділу краще моделювати
+   окремою прив'язкою scope, а не генерувати безліч назв ролей.
+7) Перевіряти право на сервері для збереження JSON схеми, файлів, експорту,
+   імпорту й усіх мутацій. UI-перевірки в canvasController.js і Layers не
+   замінюють серверних перевірок.
+8) Якщо потрібне призначення ролей користувачам, яких ще немає в системі,
+   додати окремий пошук по загальному каталогу і кнопку «Надати доступ».
+
+ПРИМІТКА ПРО БЕЗПЕКУ ДЕМО
+-------------------------
+У прикладі administrator бачить усіх користувачів свого підрозділу, але не
+може змінювати ролі іншого адміністратора. Лише super_administrator може
+призначати адміністративні ролі. Для production також варто окремо визначити,
+чи може administrator надавати editor та всі типи схем, чи лише делеговані
+йому повноваження; поточний приклад дозволяє всі неадміністративні ролі.

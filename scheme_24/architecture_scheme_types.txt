@@ -1,0 +1,283 @@
+АРХІТЕКТУРА РІЗНИХ ТИПІВ СХЕМ У NEXT.JS + KONVA
+Версія: 1.0 | 23.09.2026 | Приклади: JavaScript, без TypeScript
+
+1. ОСНОВНИЙ ПРИНЦИП
+
+Розділити поняття «схема», «тип схеми», «тип елемента» і «екземпляр елемента».
+Не створювати окремий редактор для обладнання та окремий редактор для приміщень.
+Зробити спільне ядро редактора (масштабування, виділення, переміщення, undo/redo,
+серіалізація, права, збереження), а типи схем підключати як модулі з власними
+каталогами елементів, правилами та інструментами.
+
+Рекомендована структура:
+- scheme: конкретний документ, наприклад «Схема обладнання №17»;
+- schemeType: equipment | premises | ...; стабільний машинний код;
+- elementType: equipment.node | equipment.edge | premises.room | premises.door;
+- element: конкретний об'єкт на полотні з id, type, geometry, properties;
+- plugin: опис типу схеми, доступних елементів, правил, панелей та міграцій.
+
+Не плутати «тип схеми» з роллю доступу. Доступ до equipment і premises
+перевіряється окремо від можливості reader/editor.
+
+2. РЕКОМЕНДОВАНА СТРУКТУРА КАТАЛОГІВ
+
+src/
+  app/
+    schemes/[schemeId]/page.js
+    api/schemes/[schemeId]/route.js
+  features/
+    scheme-editor/
+      components/EditorShell.jsx
+      components/KonvaCanvas.jsx
+      components/ElementRenderer.jsx
+      components/PropertiesPanel.jsx
+      core/editorStore.js
+      core/commands.js
+      core/selection.js
+      core/serialization.js
+      core/validation.js
+      registry/schemeRegistry.js
+      registry/elementRegistry.js
+      hooks/useEditorPermissions.js
+    scheme-types/
+      equipment/
+        index.js
+        elements/EquipmentNode.jsx
+        elements/EquipmentEdge.jsx
+        elements/Branch.jsx
+        elements/Zvt.jsx
+        tools.js
+        rules.js
+        migrations.js
+      premises/
+        index.js
+        elements/Room.jsx
+        elements/Wall.jsx
+        elements/Door.jsx
+        tools.js
+        rules.js
+        migrations.js
+  server/
+    authorization.js
+    schemeRepository.js
+
+3. ФОРМАТ ДОКУМЕНТА (JSON)
+
+{
+  "id": "scheme-001",
+  "schemeType": "equipment",
+  "schemaVersion": 1,
+  "title": "Обладнання цеху",
+  "departmentId": "dept-01",
+  "metadata": { "createdBy": "user-1" },
+  "viewport": { "x": 0, "y": 0, "scale": 1 },
+  "elements": [
+    {
+      "id": "node-1",
+      "type": "equipment.node",
+      "geometry": { "x": 120, "y": 80, "width": 100, "height": 60 },
+      "properties": { "name": "Насос 1", "equipmentId": "asset-123" },
+      "parameters": { "diameter": { "value": 50, "unit": "mm" } },
+      "attachments": []
+    },
+    {
+      "id": "edge-1",
+      "type": "equipment.edge",
+      "geometry": { "points": [120, 110, 300, 110] },
+      "properties": { "name": "Трубопровід" },
+      "relations": { "sourceId": "node-1", "targetId": null }
+    }
+  ]
+}
+
+Для приміщень той самий зовнішній формат, але schemeType="premises" та
+елементи premises.room, premises.wall, premises.door. Поля properties,
+parameters та geometry визначаються схемою валідації конкретного типу.
+Не зберігати React-компоненти, Konva-ноди або функції у JSON.
+
+4. РЕЄСТР ТИПІВ СХЕМ
+
+// src/features/scheme-editor/registry/schemeRegistry.js
+import { equipmentScheme } from '../../scheme-types/equipment';
+import { premisesScheme } from '../../scheme-types/premises';
+
+const schemeRegistry = new Map([
+  [equipmentScheme.id, equipmentScheme],
+  [premisesScheme.id, premisesScheme],
+]);
+
+export function getSchemeDefinition(type) {
+  const definition = schemeRegistry.get(type);
+  if (!definition) throw new Error(`Unsupported scheme type: ${type}`);
+  return definition;
+}
+
+// src/features/scheme-types/equipment/index.js
+import EquipmentNode from './elements/EquipmentNode';
+import EquipmentEdge from './elements/EquipmentEdge';
+import Branch from './elements/Branch';
+import Zvt from './elements/Zvt';
+
+export const equipmentScheme = {
+  id: 'equipment',
+  label: 'Схеми обладнання',
+  version: 1,
+  elements: {
+    'equipment.node': { label: 'Обладнання', component: EquipmentNode },
+    'equipment.edge': { label: 'Зв’язок', component: EquipmentEdge },
+    'equipment.branch': { label: 'Відгалуження', component: Branch },
+    'equipment.zvt': { label: 'ЗВТ', component: Zvt },
+  },
+  palette: ['equipment.node', 'equipment.edge', 'equipment.branch', 'equipment.zvt'],
+};
+
+// src/features/scheme-types/premises/index.js
+import Room from './elements/Room';
+import Wall from './elements/Wall';
+import Door from './elements/Door';
+
+export const premisesScheme = {
+  id: 'premises',
+  label: 'Схеми приміщень',
+  version: 1,
+  elements: {
+    'premises.room': { label: 'Приміщення', component: Room },
+    'premises.wall': { label: 'Стіна', component: Wall },
+    'premises.door': { label: 'Двері', component: Door },
+  },
+  palette: ['premises.room', 'premises.wall', 'premises.door'],
+};
+
+При додаванні третього типу створюється новий модуль і один запис у реєстрі.
+Якщо типів стане багато, реєстр можна завантажувати ліниво через import().
+
+5. УНІВЕРСАЛЬНИЙ РЕНДЕРЕР KONVA
+
+// src/features/scheme-editor/components/ElementRenderer.jsx
+'use client';
+import React from 'react';
+import { getSchemeDefinition } from '../registry/schemeRegistry';
+
+export default function ElementRenderer({ schemeType, element, onChange }) {
+  const definition = getSchemeDefinition(schemeType);
+  const entry = definition.elements[element.type];
+  if (!entry) return null; // у production: повідомлення про невідомий тип
+  const Component = entry.component;
+  return <Component element={element} onChange={onChange} />;
+}
+
+// У KonvaCanvas.jsx, усередині <Layer>:
+// {scheme.elements.map(element => (
+//   <ElementRenderer key={element.id} schemeType={scheme.schemeType}
+//     element={element} onChange={updateElement} />
+// ))}
+
+Важливо: невідомі елементи не видаляти при повторному збереженні; зберігати
+їхній початковий JSON і показувати користувачеві попередження.
+
+6. ПРАВИЛА ЗАЛЕЖНО ВІД ТИПУ
+
+Обладнання:
+- node та edge можуть мати інформаційну картку, параметри і вкладення;
+- branch обов'язково має relations.attachedTo = { type: 'node'|'edge', id };
+- ЗВТ має relations.branchId;
+- видалення branch каскадно видаляє його ЗВТ;
+- видалення ЗВТ скорочує branch; видалення останнього ЗВТ видаляє branch;
+- для edge передбачити перпендикулярне приєднання branch;
+- перевіряти всі посилання на наявні об'єкти перед збереженням.
+
+Приміщення:
+- room: контур, номер, площа, призначення;
+- wall: геометрія стіни, товщина, матеріал;
+- door: прив'язка до wall, ширина, напрям відкривання;
+- для дверей перевіряти наявність батьківської стіни;
+- площу приміщення за потреби розраховувати з геометрії, а не довіряти
+  довільно введеному числу.
+
+Загальні інструменти (selection, drag, zoom, snapping, history) — у core.
+Специфічні (ортогональні лінії, контури кімнат, прив'язка дверей) — у модулях.
+Не переносити специфічні умови в загальний KonvaCanvas через довгі if/else.
+
+7. ЄДИНА ІНФОРМАЦІЙНА КАРТКА
+
+Створити спільний PropertiesPanel, який будує поля за описом елемента.
+Наприклад, equipment.node: name, equipmentId (LOV), diameter;
+premises.room: number, purpose, floor, area.
+Зберігати в state окремо properties (опис), parameters (розширювані параметри),
+relations (посилання на інші об'єкти) та attachments (прикріплені файли).
+Пізніше бібліотеки параметрів element_option / element_option_library і
+позначки element_mark можна під'єднати без зміни базової моделі документа.
+
+8. ПРАВА ДОСТУПУ
+
+Розділити три незалежні перевірки:
+- роль дії: reader, editor, administrator;
+- сфера схеми: scheme.equipment.read/edit, scheme.premises.read/edit;
+- область даних: підрозділ користувача або дозволений перелік підрозділів.
+
+Приклад: користувач з editor + scheme.equipment.edit не отримує автоматично
+право редагувати premises. administrator керує ролями у межах свого
+підрозділу, super_administrator — в усіх дозволених підрозділах.
+
+UI приховує недоступні кнопки, але API ОБОВ'ЯЗКОВО повторно перевіряє
+право на кожне читання/зміну/видалення. Не довіряти schemeType,
+departmentId та userId, переданим клієнтом, без серверної перевірки.
+
+9. МОДЕЛЬ БАЗИ ДАНИХ
+
+scheme_type(id, code UNIQUE, name, active)
+scheme(id, scheme_type_id, department_id, title, schema_version,
+       document_json, created_by, updated_by, updated_at, revision)
+element_type(id, scheme_type_id, code UNIQUE, name, active)
+
+На старті element_type можна тримати тільки у JS-реєстрі, а у БД зберігати
+scheme.document_json. Окремі таблиці елементів варто додавати, коли потрібні
+SQL-пошук, аналітика, зв'язки з реальними активами чи контроль цілісності.
+Для частого пошуку за equipmentId/roomNumber розглянути індексовані колонки
+або окрему проєкцію елементів у БД.
+
+API:
+GET    /api/schemes?type=equipment
+POST   /api/schemes
+GET    /api/schemes/:id
+PATCH  /api/schemes/:id
+DELETE /api/schemes/:id
+GET    /api/scheme-types
+
+При PATCH передавати revision; сервер відхиляє конфліктні зміни (409),
+валідує schemaVersion, тип схеми, типи елементів, зв'язки і права доступу.
+Не дозволяти довільно змінювати schemeType існуючого документа: потрібна
+окрема контрольована операція конвертації.
+
+10. ВЕРСІОНУВАННЯ ТА МІГРАЦІЇ
+
+Кожен документ має schemaVersion. Кожен модуль має migrations:
+1 -> 2, 2 -> 3 тощо. При відкритті старого документа застосувати міграції
+до актуальної версії, показати результат, а збереження виконувати після
+валідації. Перед масовою міграцією робити резервну копію.
+Видалений з каталогу тип елемента не повинен автоматично зникати зі старих схем.
+
+11. ПОЕТАПНЕ ВПРОВАДЖЕННЯ
+
+Етап 1. Винести спільний canvas, state, команди, картку та серіалізацію у core.
+Етап 2. Оформити існуючі node/edge/branch/ЗВТ як модуль equipment.
+Етап 3. Додати premises з room/wall/door, окремою палітрою та правилами.
+Етап 4. Додати schemaVersion, валідацію JSON та перевірку зв'язків.
+Етап 5. Підключити серверні права, підрозділи, API і збереження у БД.
+Етап 6. Додати міграції, автотести, оптимізацію великих схем.
+
+МІНІМАЛЬНІ ТЕСТИ
+- Обладнання не дозволяє додати premises.door і навпаки.
+- Перемикання між схемами не переносить стан виділення/undo між документами.
+- Видалення branch і ЗВТ виконує визначені каскадні правила.
+- Двері без стіни не проходять валідацію.
+- Reader не може змінити схему через API, навіть якщо вручну надішле PATCH.
+- Editor equipment не може змінити premises без окремого дозволу.
+- Старий документ відкривається після міграції без втрати невідомих полів.
+- Конкурентне редагування з застарілим revision повертає 409.
+
+ПІДСУМОК
+Оптимальна основа: один Next.js + Konva редактор, реєстр типів схем,
+ізольовані модулі елементів, універсальний JSON-документ, незалежна система
+прав та версіонування. Це дозволить додавати нові види схем без переписування
+спільного ядра і без змішування логіки обладнання та приміщень.
