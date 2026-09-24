@@ -1,0 +1,291 @@
+ПАТЧ ЗВТ: коректне позиціонування кружечків, подовження branch,
+спільне переміщення з node/edge та перестановка ЗВТ (Next.js + Konva + SVG)
+====================================================================
+
+ВАЖЛИВО ПРО ПОТОЧНИЙ ПАКЕТ
+У попередньому консолідованому TXT є суперечливі фрагменти старої і нової
+реалізацій: зокрема ZvtSymbol ще читає zvt.position і імпортує
+ZvtParameterGraphicMark, хоча нова модель передбачає branchId і обчислювану
+позицію. Не копіюйте всі однойменні блоки разом. Цей патч визначає одне
+джерело геометрії та перелік конкретних замін. Наведені адаптери до вашого
+Zustand-store/форматів node/edge потрібно узгодити з реальними назвами API.
+
+1. ДЖЕРЕЛО ІСТИНИ
+-----------------
+branch = { id, attachedTo:{type:'node'|'edge',id,segmentId?,side?,...},
+           route:{...}, ... }
+zvt = { id, branchId,
+        connection:{ side:'top'|'bottom'|'left'|'right',
+                     stubLength:22, offsetAlongBranch:140 }, ... }
+
+Не зберігати незалежні координати zvt.position як джерело істини. Позиція
+кружечка, stub і кінцева точка branch обчислюються за ОДНІЄЮ функцією.
+Точка tap — це точка дотику короткої лінії ЗВТ до branch, НЕ центр кола.
+При side='top' коротка лінія виходить із ВЕРХУ кружечка, а сам кружечок
+розташований НИЖЧЕ горизонтального branch. side='bottom' — навпаки.
+Для left/right аналогічно, незалежно від напрямку terminal-сегмента.
+
+2. НОВИЙ ФАЙЛ src/lib/zvt/zvtMemberGeometry.js
+----------------------------------------------
+// JavaScript, без TypeScript; чисті функції — спільні для Konva та SVG.
+
+export const sideVectors = {
+  top: { x: 0, y: -1 },
+  bottom: { x: 0, y: 1 },
+  left: { x: -1, y: 0 },
+  right: { x: 1, y: 0 },
+};
+
+const pointAt = (origin, direction, distance) => ({
+  x: origin.x + direction.x * distance,
+  y: origin.y + direction.y * distance,
+});
+
+export function getTerminalAxis(basePoints) {
+  if (!Array.isArray(basePoints) || basePoints.length < 2) {
+    throw new Error('Branch route must contain at least two points');
+  }
+  const start = basePoints.at(-2);
+  const end = basePoints.at(-1);
+  const length = Math.hypot(end.x - start.x, end.y - start.y);
+  if (length < 0.001) throw new Error('Zero-length terminal segment');
+  return {
+    origin: { ...start },
+    direction: { x: (end.x - start.x) / length, y: (end.y - start.y) / length },
+    baseLength: length,
+  };
+}
+
+export function memberGeometry(zvt, axis) {
+  const side = zvt.connection?.side || 'bottom';
+  const outwardFromCircle = sideVectors[side];
+  if (!outwardFromCircle) throw new Error(`Invalid ZVT connection side: ${side}`);
+  const offset = zvt.connection?.offsetAlongBranch ?? axis.baseLength;
+  const radius = zvt.style?.radius ?? 22;
+  // stubLength — відстань від branch tap до ПОВЕРХНІ кола.
+  const stubLength = Math.max(0, zvt.connection?.stubLength ?? 22);
+  const tap = pointAt(axis.origin, axis.direction, offset);
+  const contact = pointAt(tap, {x:-outwardFromCircle.x,y:-outwardFromCircle.y}, stubLength);
+  const center = pointAt(contact, {x:-outwardFromCircle.x,y:-outwardFromCircle.y}, radius);
+  return { tap, contact, center, stub: [tap.x,tap.y,contact.x,contact.y] };
+}
+
+export function membersOf(branchId, zvts) {
+  return zvts.filter(z => z.branchId === branchId)
+    .slice().sort((a,b) =>
+      (a.connection?.offsetAlongBranch ?? 0) - (b.connection?.offsetAlongBranch ?? 0)
+      || String(a.id).localeCompare(String(b.id)));
+}
+
+export function resolveBranchScene(branch, basePoints, allZvts) {
+  const axis = getTerminalAxis(basePoints);
+  const members = membersOf(branch.id, allZvts);
+  const furthest = members.length
+    ? Math.max(...members.map(z => z.connection?.offsetAlongBranch ?? axis.baseLength))
+    : axis.baseLength;
+  const end = pointAt(axis.origin, axis.direction, furthest);
+  const trunk = [...basePoints.slice(0,-1), end];
+  return { branch, axis, trunk,
+    members: members.map(zvt => ({ zvt, ...memberGeometry(zvt, axis) })) };
+}
+
+export function nextMemberOffset(branch, basePoints, allZvts) {
+  const axis = getTerminalAxis(basePoints);
+  const members = membersOf(branch.id, allZvts);
+  if (!members.length) return axis.baseLength;
+  return Math.max(axis.baseLength, ...members.map(z =>
+    z.connection?.offsetAlongBranch ?? axis.baseLength))
+    + Math.max(1, branch.route?.memberSpacing ?? 90);
+}
+
+export function offsetFromPointer(pointer, axis, minimum = 0) {
+  return Math.max(minimum,
+    (pointer.x-axis.origin.x)*axis.direction.x +
+    (pointer.y-axis.origin.y)*axis.direction.y);
+}
+
+3. ЗАМІНА СТВОРЕННЯ ЗВТ У canvasController
+------------------------------------------
+У createZvtFromBranchEditor ОБОВ'ЯЗКОВО:
+  const branch = store.zvtBranches.find(b => b.id === branchId);
+  const basePoints = resolveCurrentBaseRoute(branch, store.nodes, store.edges);
+  const offset = nextMemberOffset(branch, basePoints, store.zvts);
+  const zvt = createZvt({branchId, data,
+    connection:{...connection, offsetAlongBranch:offset}, style, integration});
+  store.addZvt(zvt);
+
+Не присвоювати zvt.position = branch endpoint; не використовувати
+position.x/y для позиціонування після створення. branch не потрібно вручну
+подовжувати: resolveBranchScene() сам дає новий trunk до останнього tap.
+
+4. ЗАМІНА ВІДМАЛЬОВКИ: ZvtBranchLayer + ZvtLayer
+-------------------------------------------------
+Обидва шари мають отримувати той самий scene. В батьківському компоненті:
+  const scene = resolveBranchScene(branch,
+    resolveCurrentBaseRoute(branch,nodes,edges), zvts);
+
+BRANCH LAYER:
+  <Line points={scene.trunk.flatMap(p=>[p.x,p.y])} ... />
+  {scene.members.map(m =>
+    <Line key={m.zvt.id} points={m.stub} listening={false} ... />)}
+
+ZVT LAYER:
+  {scene.members.map(m =>
+    <ZvtSymbol key={m.zvt.id}
+      zvt={{...m.zvt,position:m.center}}
+      ... />)}
+
+ВАЖЛИВО: у ZvtSymbol прибрати будь-яку додаткову внутрішню трансляцію
+центру через side/stubLength: вона вже застосована в memberGeometry.
+Якщо ZvtSymbol повертає <Group x={x} y={y}>, усі його Circle/Line/Text
+мають бути в ЛОКАЛЬНИХ координатах відносно (0,0). Не змішувати Group x/y
+із абсолютними x/y дочірніх елементів. Прибрати старий
+ZvtParameterGraphicMark: параметричні знаки малює branch root renderer.
+
+ПЕРЕВІРКА НА ПРИКЛАДІ: horizontal branch y=100, tap=(200,100), radius=22,
+stubLength=20:
+  side='top'    => contact=(200,120), center=(200,142)
+  side='bottom' => contact=(200,80),  center=(200,58)
+  side='left'   => contact=(220,100),center=(242,100)
+  side='right'  => contact=(180,100),center=(158,100)
+Це перевірка геометрії, а не координати вашої конкретної схеми.
+
+5. ПЕРЕМІЩЕННЯ NODE / EDGE РАЗОМ ІЗ BRANCH І ЗВТ
+-------------------------------------------------
+НАЙНАДІЙНІШИЙ ПІДХІД: не переносити вручну кожен ZVT і кожен stub.
+Вони ВСІ є похідними від branch root і збережених відносних параметрів.
+
+У branch.route зберігати маршрут відносно root:
+  relativeVertices:[{dx,dy},...], relativeTerminal:{dx,dy}
+  (або route з довжинами/напрямками, які вже відносні).
+Не зберігати manualVertices і terminalPoint як абсолютні world x/y,
+якщо очікується, що маршрут переноситься разом із node/edge.
+
+export function pointsFromRelativeRoute(root, route) {
+  const rel = [...(route.relativeVertices || []), route.relativeTerminal];
+  return [root, ...rel.filter(Boolean).map(p=>({x:root.x+p.dx,y:root.y+p.dy}))];
+}
+export function relativeRouteFromPoints(root, points, previousRoute={}) {
+  const toRelative = p => ({dx:p.x-root.x,dy:p.y-root.y});
+  return {...previousRoute,
+    relativeVertices:points.slice(1,-1).map(toRelative),
+    relativeTerminal:toRelative(points.at(-1))};
+}
+
+На node drag:
+  1) оновити node у store;
+  2) resolveBranchRoot(branch, nodes, edges) поверне НОВИЙ root на межі node;
+  3) pointsFromRelativeRoute(newRoot,branch.route) дасть усю перенесену трасу;
+  4) resolveBranchScene(...,zvts) перерахує tap/stub/center;
+  5) НЕ переписувати zvt.offsetAlongBranch і НЕ переносити zvt.position.
+
+На edge drag / зміні сегмента:
+  preferredPoint у WORLD-координатах НЕ повинен бути незмінним як root.
+  Зберігати прив'язку до сегмента через t у [0..1] (частка його довжини):
+  root = segment.start + t*(segment.end-segment.start).
+  Після зміни edge переобчислити root, а відносний route переміститься з ним.
+  Якщо edge змінює ОРІЄНТАЦІЮ, додатково вирішити, чи route має обертатися
+  з локальною системою координат edge; для стандартного перпендикулярного
+  branch — ТАК. Тоді зберігати локальні координати route у базисі tangent/normal
+  edge, а не глобальні dx/dy. Для переміщення без повороту dx/dy достатньо.
+
+УВАГА: якщо node має Konva Group x/y, під час drag треба конвертувати
+локальні координати root у координати Stage/схеми; не додавати зсув двічі.
+У React не мутувати вкладені node/edge/zvt масиви на місці: оновлювати
+іммутабельно, щоб selector Zustand викликав rerender.
+
+6. DRAG І ПЕРЕСТАНОВКА ЗВТ
+---------------------------
+Рекомендований UX: при виборі branch показати малі маркери tap усіх ЗВТ.
+ЗВТ перетягується тільки вздовж terminal axis. Під час drag показувати
+підсвічену вісь та preview-позицію; на dragEnd комітити новий offset.
+Не зберігати e.target.x()/y() як zvt.position: це координати center,
+а offset має обчислюватися із TAP. Корекція для центру:
+  const side = sideVectors[zvt.connection.side];
+  const distance = (zvt.connection.stubLength ?? 22)+(zvt.style.radius ?? 22);
+  const pointerTap = {x:center.x+side.x*distance,
+                      y:center.y+side.y*distance};
+  const offset = offsetFromPointer(pointerTap,scene.axis,0);
+  store.updateZvt(zvt.id,{connection:{...zvt.connection,
+    offsetAlongBranch:offset}});
+
+Konva dragBoundFunc повинен повертати координати центра, похідні від
+pointAt(axis.origin,axis.direction,offset) мінус side*distance.
+Якщо у вашому компоненті є stage scale/rotation, конвертуйте pointer до
+world-координат перед projection. Під час drag уникайте повторного
+перезапису локального Konva Group position некоректним старим state.
+
+ДОДАТКОВИЙ UX ДЛЯ ЗМІНИ МІСЦЯМИ БЕЗ DRAG:
+Контекстне меню ЗВТ: «Перемістити на початок», «Перемістити в кінець»,
+«Поміняти місцями з…»; для клавіатури — Alt+Left/Alt+Right у вибраному
+branch. Для swap просто обміняти offsetAlongBranch двох ЗВТ, не міняти
+branchId, side, stubLength або прив'язку до каталогу.
+
+export function swapZvtOffsets(a,b) {
+  return [
+    {...a,connection:{...a.connection,
+      offsetAlongBranch:b.connection.offsetAlongBranch}},
+    {...b,connection:{...b.connection,
+      offsetAlongBranch:a.connection.offsetAlongBranch}},
+  ];
+}
+
+Відстані між tap мають враховувати радіуси/підписи, щоб символи не
+перекривалися. Мінімальний крок налаштовується (напр. 90 px); при drag
+можна показувати попередження про перетин або виконувати snap до слотів.
+Для «на початок/кінець» краще переставляти елементи по слотах наявних
+відступів: це зберігає довжину branch та відстані між позиціями.
+
+7. SVG: ОДНА ГЕОМЕТРІЯ З KONVA
+------------------------------
+const scene = resolveBranchScene(branch,basePoints,zvts);
+const pts = scene.trunk.map(p=>`${p.x},${p.y}`).join(' ');
+const trunkSvg = `<polyline points="${pts}" fill="none" stroke="black"/>`;
+const stubsSvg = scene.members.map(m =>
+  `<line x1="${m.tap.x}" y1="${m.tap.y}" `+
+  `x2="${m.contact.x}" y2="${m.contact.y}" stroke="black"/>`
+).join('');
+// Передайте m.center у SVG-рендерер кружечка ЗВТ.
+// Не експортуйте selection/drag handles; екранні та SVG координати однакові.
+// Текстові дані у SVG екранувати, якщо вони надходять із полів користувача.
+
+8. ПОРЯДОК ЗМІН У НАЯВНОМУ КОДІ
+--------------------------------
+[ ] Додати zvtMemberGeometry.js і підключити у Canvas та SVG.
+[ ] Прибрати незалежне позиціонування ZVT центром у terminal point.
+[ ] Прибрати старе дублювання побудови stub у ZvtSymbol / ZvtLayer.
+[ ] Замінити createZvtFromBranchEditor на nextMemberOffset.
+[ ] Замінити branch renderer на resolveBranchScene().trunk і members[].stub.
+[ ] Замінити ZVT renderer на members[].center.
+[ ] Зберігати route відносно root; мігрувати старі absolute vertices.
+[ ] Для edge root зберігати segmentId + t, не статичний world preferredPoint.
+[ ] В drag node/edge оновлювати тільки об'єкт, далі перерахунок scene.
+[ ] У drag ZVT перераховувати offset за pointerTap, а не за center.
+[ ] Додати swap/reorder через контекстне меню та drag preview.
+[ ] Залишити delete lifecycle: delete branch => всі ZVT;
+    delete ZVT => скорочення branch; delete last ZVT => delete branch.
+
+9. МІГРАЦІЯ ТА ТЕСТИ
+--------------------
+Для існуючих branch із абсолютними manualVertices/terminalPoint:
+  rootOld = resolveRoot(oldNode/oldEdge);
+  relativeVertices = manualVertices.map(p=>({dx:p.x-rootOld.x,dy:p.y-rootOld.y}));
+  relativeTerminal = {dx:terminalPoint.x-rootOld.x,
+                      dy:terminalPoint.y-rootOld.y};
+Перед міграцією зберегти резервну копію JSON схеми; не запускати
+повторно без version check (напр. route.version=2).
+
+ТЕСТ A: horizontal branch y=100, side top/bottom/left/right;
+  center відповідає формулам розділу 4, stub доходить до краю кола.
+ТЕСТ B: branch + 2 ZVT => другий має більший offset, trunk довший.
+ТЕСТ C: переміщення node на (+100,+50) => усі tap/contact/center/trunk
+  перемістилися на (+100,+50), відносні відстані не змінилися.
+ТЕСТ D: переміщення edge => root лишається на edge, всі ЗВТ рухаються
+  разом із branch, без злиття в один terminal point.
+ТЕСТ E: swap двох ZVT => змінилися лише offset, а не side/stubLength.
+ТЕСТ F: delete крайнього ZVT => branch скоротився до нового крайнього.
+ТЕСТ G: delete останнього ZVT => branch видалено.
+ТЕСТ H: SVG і Canvas використовують ті самі scene координати.
+
+Примітка: цей TXT — окремий інтеграційний патч до попереднього пакета,
+а не твердження, що ваш локальний застосунок уже змінено чи протестовано.

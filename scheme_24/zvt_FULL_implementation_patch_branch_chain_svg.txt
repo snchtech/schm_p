@@ -1,0 +1,729 @@
+ПОВНИЙ ПАКЕТ ДООПРАЦЮВАНЬ ЗВТ
+Next.js (JavaScript) + Konva + Zustand + SVG
+Версія: branch chain geometry v3
+
+ВАЖЛИВО ПРО СТАТУС
+Цей документ містить повні самодостатні реалізації ядра геометрії, моделі,
+операцій додавання/видалення/перестановки, приклад Konva-шару, SVG-експорту,
+Zustand-slice, міграції та автоматичних тестів. Він НЕ є готовим патчем
+безпосередньо до вашого репозиторію: назви/формати node, edge, існуючого
+ZvtSymbol, root-mark renderer, прав доступу та MUI-форм треба зіставити
+з вашим фактичним кодом. Не копіюйте старі однойменні реалізації разом із
+новими: це спричинить подвійне зміщення та конфлікти імпортів.
+
+1. ЧОМУ ПОПЕРЕДНІЙ TXT БУВ НЕДОСТАТНІМ
+Попередній файл містив 291 рядок і переважно інтеграційні фрагменти.
+Не було завершеного store slice, повного спільного resolver для node/edge,
+повноцінного SVG renderer, міграції й виконуваних тестів. Тому вважати
+його повним готовим кодом було б неправильно. Нижче — значно ширший пакет.
+
+2. ПОВЕДІНКА ТА ІНВАРІАНТИ
+branch.attachedTo: обов'язково {type:'node'|'edge', id, side?/segmentId?/t?}.
+zvt.branchId: обов'язково; пряме zvt.attachedTo не використовується.
+route.version=3. Для node route.coordinateMode='translation';
+для edge route.coordinateMode='edge-local'.
+route.vertices — усі точки ПІСЛЯ root у локальних координатах;
+остання з них є БАЗОВОЮ terminal-точкою.
+connection.offsetAlongBranch — відстань від ПОЧАТКУ terminal segment.
+connection.side — сторона КРУЖЕЧКА, з якої виходить stub:
+  top => кружечок нижче tap;
+  bottom => кружечок вище tap;
+  left => кружечок праворуч tap;
+  right => кружечок ліворуч tap.
+stubLength — довжина від branch tap до поверхні кола, а не до центру.
+radius — радіус кола.
+tap, contact, center, trunk обчислюються одним resolver.
+
+3. ТОЧНИЙ ПЕРЕЛІК ЗАМІН У ВАШОМУ КОДІ
+A. src/lib/zvt:
+   - ДОДАТИ branchChain.js (повний код нижче).
+   - ВИДАЛИТИ або припинити виклик старих дубльованих
+     getEffectiveTerminalEnd, buildZvtMemberGeometry, resolveBranchScene,
+     якщо вони повертають zvt.position або центрують ЗВТ на tap.
+   - Зберегти ваші parameter root-mark functions; викликати їх ТІЛЬКИ
+     в branch renderer.
+B. zvtModel:
+   - ВИКОРИСТАТИ createZvt() із branchChain.js.
+   - Не зберігати zvt.position як джерело істини.
+   - Якщо старі записи мають position, ігнорувати його після міграції.
+C. branchModel:
+   - ВИКОРИСТАТИ createBranch() з обов'язковим attachedTo.
+   - На створенні branch від node: side фіксується один раз.
+   - На створенні branch від edge: segmentId+t, а не статичний world point.
+   - route.vertices зберігати локально.
+D. Canvas controller:
+   - createZvtFromBranchEditor викликає addZvtToBranch(branchId, options).
+   - НЕ присвоювати position=branch endpoint.
+   - deleteZvt викликає removeZvt.
+   - deleteZvtBranch викликає removeBranch.
+   - reorder/swap — reorderZvt; ніколи не міняти branchId.
+E. Canvas:
+   - ПІДКЛЮЧИТИ ZvtChainLayer.
+   - ВИДАЛИТИ старий незалежний ZvtLayer із розрахунком координат
+     від zvt.position; НЕ малювати stub удруге всередині ZvtSymbol.
+   - Всі Circle/Line/Text символу — локальні відносно (0,0).
+   - Передати stageRef, updateZvt та існуючий renderSymbol.
+F. Node/edge drag:
+   - Оновлювати canonical nodes/edges іммутабельно.
+   - НЕ оновлювати вручну координати ЗВТ або stub.
+   - useMemo для scenes залежить від nodes/edges/branches/zvts.
+   - Якщо Konva застосовує drag до тимчасового Group, записати його
+     остаточні координати в store під час dragEnd, а для live-follow
+     або оновлювати node/edge під час dragMove, або використовувати
+     спільний тимчасовий drag transform у scene.
+   - Не використовувати двічі world transform і Konva Group transform.
+G. SVG:
+   - ЗАМІНИТИ незалежні обчислення координат на exportBranchSvg.js.
+   - Передати ваш поточний SVG renderer внутрішнього символу як callback.
+   - Root-mark — окремий callback від branch.
+H. MUI форма ЗВТ:
+   - ДОДАТИ/ПЕРЕВІРИТИ connection.side (top/bottom/left/right).
+   - ДОДАТИ stubLength для КОЖНОГО ЗВТ (TextField number min=0).
+   - При редагуванні заповнювати форму з існуючого zvt.connection.
+   - Зберігати connection у createZvt/updateZvt.
+I. Context menu:
+   - На branch: «Додати ЗВТ», «Видалити branch».
+   - На ЗВТ: «Редагувати», «Видалити»,
+     «На початок», «У кінець», «На позицію…».
+   - На node/edge: «Додати branch»; не створювати ЗВТ напряму.
+J. Ролі:
+   - У reader mode приховати/заборонити drag, delete, add, reorder.
+   - Перевіряти право також у controller/API, не лише в кнопці UI.
+K. Збереження:
+   - Перед POST/PUT викликати validateGraph().
+   - Зберігати branch.attachedTo, branch.route, zvt.branchId,
+     zvt.connection; не зберігати runtime center/contact/tap.
+   - Зміни node/edge + branch + ZVT бажано зберігати однією
+     транзакцією на рівні вашого API/БД.
+
+4. ДОДАВАННЯ НА ПРИКЛАДІ
+node center=(100,100), width=40; root right=(120,100);
+base terminal=(220,100).
+ЗВТ 1: side='top', stub=20, radius=22:
+  tap=(220,100), contact=(220,120), center=(220,142).
+ЗВТ 2: side='left', stub=30, radius=22, spacing=90:
+  tap=(310,100), contact=(340,100), center=(362,100).
+При зсуві node (+100,+50) всі root, trunk, tap, contact, center
+зсуваються на (+100,+50), а offsets не змінюються.
+
+5. ПЕРЕСТАНОВКА / UX
+Рекомендовано мати два способи:
+  1) Контекстне меню «На початок» / «У кінець».
+     Виклик reorderZvt(branchId,zvtId,targetIndex).
+     Алгоритм переставляє ID по існуючих offset-слотах.
+     Довжина branch не змінюється, side/stubLength залишаються
+     властивостями конкретного ЗВТ.
+  2) Drag уздовж terminal segment:
+     dragBoundFunc обмежує рух по осі.
+     При dragEnd розрахувати offset ІЗ ЦЕНТРУ через tapFromCenter.
+     Для production UX краще snap до слотів або показувати
+     preview з індикатором порядку.
+     Уникайте накладень, якщо дозволяєте довільні offsets.
+
+6. DELETE LIFECYCLE
+delete branch -> видалити branch + всі дочірні ЗВТ + runtime.
+delete ZVT -> видалити лише ЗВТ; trunk derived до останнього tap.
+delete останнього ZVT -> видалити також branch.
+Порожній branch дозволений тільки ДО додавання першого ЗВТ.
+Перед видаленням branch з дочірніми ЗВТ показати MUI confirm dialog.
+
+7. КРИТИЧНІ ІНТЕГРАЦІЙНІ АДАПТЕРИ
+Node у branchChain.js за замовчуванням:
+  {id,x,y,width,height}, x/y = CENTER у world coordinates.
+Якщо ваш node.x/y — лівий верхній кут або node має rotation,
+адаптуйте resolveRoot() під фактичні anchors / getClientRect().
+Edge:
+  {id,segments:[{id,start:{x,y},end:{x,y}}]}.
+Якщо у вас інший формат edge, змініть лише getEdgeSegment().
+Якщо edge polyline, зберігайте реальний segmentId, не використовуйте
+fallback до першого сегмента при зміні геометрії.
+Для повороту edge route у локальному базисі tangent/normal
+обертається разом із edge; за потреби вибору сторони виходу
+нормаль має зберігати стабільний знак відносно сегмента.
+В SVG використовуйте ті самі координати world/diagram.
+
+8. РЕДАГУВАННЯ BENDS
+Ваші існуючі STEP 12 insertDogLeg/shiftSegmentParallel можна
+залишити як UI geometry, але після кожного редагування викликати
+persistEditedRoute(branch, editedWorldPoints, rootResult).
+Не зберігайте editedWorldPoints напряму у branch.route.manualVertices.
+Не рухайте root: він визначається attachedTo.
+Для edge-local після зміни орієнтації edge точки перебудуються
+в його новому локальному базисі.
+
+9. ПОРЯДОК ІНТЕГРАЦІЇ
+1) Резервна копія схеми JSON і branch/zvt records.
+2) Додати чистий branchChain.js.
+3) Прогнати node --test.
+4) Мігрувати route.version до 3 на тестовій схемі.
+5) Переключити Konva renderer на єдиний scene.
+6) Переключити create/delete/reorder actions.
+7) Переключити node/edge drag на canonical state updates.
+8) Переключити SVG на той самий scene.
+9) Перевірити round-trip save/load та reader permissions.
+10) Видалити старі дубльовані geometry implementations.
+
+10. МЕЖІ ПАКЕТА
+Тут не відтворено повний ваш ZvtSymbol, параметричні root marks
+F/P/L/T/ae/pH та всю MUI-картку, бо їхній актуальний вихідний код
+не наданий. Натомість наведено точні adapter contracts, місця заміни
+та повний новий механізм branch/member geometry. Для 1:1
+автоматичного застосування до репозиторію потрібні ваші фактичні
+ZvtSymbol.jsx, ZvtBranchLayer.jsx, ZvtEditorModal.jsx,
+canvasController.js і shape store.
+
+====================================================================
+АКТУАЛЬНІ ФАЙЛИ ПАКЕТА
+====================================================================
+
+
+======================================================================
+FILE: src/lib/zvt/branchChain.js
+======================================================================
+// src/lib/zvt/branchChain.js
+// Pure JavaScript. Shared by Konva and SVG. Coordinates are diagram/world coordinates.
+export const SIDES = Object.freeze({
+  top:{x:0,y:-1}, bottom:{x:0,y:1}, left:{x:-1,y:0}, right:{x:1,y:0}
+});
+const EPS=1e-7;
+const add=(a,b)=>({x:a.x+b.x,y:a.y+b.y});
+const sub=(a,b)=>({x:a.x-b.x,y:a.y-b.y});
+const mul=(a,n)=>({x:a.x*n,y:a.y*n});
+const dot=(a,b)=>a.x*b.x+a.y*b.y;
+const length=a=>Math.hypot(a.x,a.y);
+const unit=a=>{const n=length(a);if(n<EPS)throw Error("Zero-length segment");return mul(a,1/n)};
+const finite=n=>typeof n==="number"&&Number.isFinite(n);
+const assertPoint=p=>{if(!p||!finite(p.x)||!finite(p.y))throw Error("Invalid point");return p};
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+const uid=()=>globalThis.crypto?.randomUUID?.()??`zvt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+export const pt=(x,y)=>({x,y});
+export const sideVector=side=>{if(!SIDES[side])throw Error(`Unknown connection side ${side}`);return SIDES[side]};
+export const segmentFrame=(a,b)=>{
+  const tangent=unit(sub(b,a));
+  return {tangent,normal:{x:-tangent.y,y:tangent.x}};
+};
+export function getEdgeSegment(edge,segmentId){
+  // ADAPTER: replace edge.points if your project stores coordinates elsewhere.
+  const segments=edge.segments??edge.geometry?.segmentsMeta;
+  const seg=segments?.find(s=>s.id===segmentId)??segments?.[0];
+  if(seg){
+    if(seg.start&&seg.end)return {a:assertPoint(seg.start),b:assertPoint(seg.end)};
+    if([seg.x1,seg.y1,seg.x2,seg.y2].every(finite))
+      return {a:pt(seg.x1,seg.y1),b:pt(seg.x2,seg.y2)};
+  }
+  const points=edge.points??edge.geometry?.points;
+  if(Array.isArray(points)&&points.length>=4)
+    return {a:pt(points[0],points[1]),b:pt(points[2],points[3])};
+  if(edge.start&&edge.end)return {a:assertPoint(edge.start),b:assertPoint(edge.end)};
+  throw Error(`Cannot resolve edge segment: ${edge.id}`);
+}
+export function resolveRoot(branch,nodesById,edgesById){
+  const a=branch.attachedTo;
+  if(!a?.id||!["node","edge"].includes(a.type))throw Error(`branch ${branch.id} missing attachedTo`);
+  if(a.type==="node"){
+    const node=nodesById[a.id];if(!node)throw Error(`Missing node ${a.id}`);
+    // NODE ADAPTER: position is center, width/height are full dimensions.
+    // For custom shapes use node.anchors[side] in WORLD coordinates.
+    const side=a.side??"right";
+    const anchor=node.anchors?.[side];
+    if(anchor)return {point:assertPoint(anchor),frame:{tangent:pt(1,0),normal:pt(0,1)}};
+    const x=node.x??node.position?.x,y=node.y??node.position?.y;
+    if(!finite(x)||!finite(y))throw Error("Node position adapter required");
+    const w=node.width??node.geometry?.width??0,h=node.height??node.geometry?.height??0;
+    const offsets={left:pt(-w/2,0),right:pt(w/2,0),top:pt(0,-h/2),bottom:pt(0,h/2)};
+    if(!offsets[side])throw Error(`Invalid node side ${side}`);
+    const local=a.localOffset??pt(0,0);
+    return {point:add(pt(x,y),add(offsets[side],local)),frame:{tangent:pt(1,0),normal:pt(0,1)}};
+  }
+  const edge=edgesById[a.id];if(!edge)throw Error(`Missing edge ${a.id}`);
+  const {a:p0,b:p1}=getEdgeSegment(edge,a.segmentId);
+  const frame=segmentFrame(p0,p1);
+  const t=clamp(a.t??0.5,0,1);
+  return {point:add(p0,mul(sub(p1,p0),t)),frame};
+}
+export function rootAtEdgePointer(edge,segmentId,pointer){
+  const {a,b}=getEdgeSegment(edge,segmentId);
+  const d=sub(b,a);
+  return clamp(dot(sub(pointer,a),d)/dot(d,d),0,1);
+}
+export function worldToLocal(root,frame,world,mode){
+  const d=sub(world,root);
+  return mode==="edge-local" ? {u:dot(d,frame.tangent),v:dot(d,frame.normal)}
+    : {dx:d.x,dy:d.y};
+}
+export function localToWorld(root,frame,p,mode){
+  return mode==="edge-local"
+    ? add(root,add(mul(frame.tangent,p.u),mul(frame.normal,p.v)))
+    : add(root,pt(p.dx,p.dy));
+}
+export function resolveBaseRoute(branch,rootResult){
+  const route=branch.route;
+  if(route?.version!==3)throw Error(`Migrate branch ${branch.id} route to version 3`);
+  const {point:root,frame}=rootResult;
+  const rel=route.vertices??[];
+  const points=[root,...rel.map(p=>localToWorld(root,frame,p,route.coordinateMode))];
+  if(points.length<2)throw Error(`branch ${branch.id} needs terminal point`);
+  return points;
+}
+export function persistEditedRoute(branch,worldPoints,rootResult){
+  if(worldPoints.length<2)throw Error("Invalid route");
+  const mode=branch.route.coordinateMode;
+  return {...branch,route:{...branch.route,
+    vertices:worldPoints.slice(1).map(p=>worldToLocal(rootResult.point,rootResult.frame,p,mode))}};
+}
+export function createBranch({id=uid(),attachedTo,route,parameter="F"}){
+  if(!attachedTo?.id||!["node","edge"].includes(attachedTo.type))throw Error("attachedTo required");
+  if(!route?.vertices?.length)throw Error("route.vertices required");
+  return {id,kind:"zvtBranch",attachedTo:{...attachedTo},data:{parameter},
+    route:{version:3,coordinateMode:attachedTo.type==="edge"?"edge-local":"translation",
+      memberSpacing:90,...route}};
+}
+export function createZvt({id=uid(),branchId,connection={},data={},style={},integration={}}){
+  if(!branchId)throw Error("branchId required");
+  const side=connection.side??"bottom";sideVector(side);
+  const stubLength=connection.stubLength??22,radius=style.radius??22;
+  if(!finite(stubLength)||stubLength<0||!finite(radius)||radius<=0)throw Error("Invalid ZVT dimensions");
+  return {id,kind:"zvt",branchId,
+    connection:{side,stubLength,offsetAlongBranch:connection.offsetAlongBranch??0},
+    data:{...data},style:{radius,...style},integration:{...integration}};
+}
+export function axisOf(basePoints){
+  const origin=basePoints.at(-2),baseEnd=basePoints.at(-1);
+  const delta=sub(baseEnd,origin),baseLength=length(delta);
+  if(baseLength<EPS)throw Error("Terminal segment must be nonzero");
+  return {origin,direction:mul(delta,1/baseLength),baseLength};
+}
+export const pointOnAxis=(axis,offset)=>add(axis.origin,mul(axis.direction,offset));
+export function membersOf(branchId,zvts){
+  return zvts.filter(z=>z.branchId===branchId).slice().sort((a,b)=>
+    a.connection.offsetAlongBranch-b.connection.offsetAlongBranch||
+    String(a.id).localeCompare(String(b.id)));
+}
+export function memberGeometry(zvt,axis){
+  const side=sideVector(zvt.connection.side);
+  const offset=zvt.connection.offsetAlongBranch;
+  const tap=pointOnAxis(axis,offset);
+  const contact=sub(tap,mul(side,zvt.connection.stubLength));
+  const center=sub(contact,mul(side,zvt.style.radius));
+  return {zvt,tap,contact,center,stub:[tap.x,tap.y,contact.x,contact.y]};
+}
+export function resolveBranchScene(branch,basePoints,zvts){
+  const axis=axisOf(basePoints),members=membersOf(branch.id,zvts);
+  const last=members.at(-1);
+  const terminalOffset=last?last.connection.offsetAlongBranch:axis.baseLength;
+  const trunk=[...basePoints.slice(0,-1),pointOnAxis(axis,terminalOffset)];
+  return {branch,axis,trunk,members:members.map(z=>memberGeometry(z,axis))};
+}
+export function nextOffset(branch,basePoints,zvts){
+  const axis=axisOf(basePoints),members=membersOf(branch.id,zvts);
+  if(!members.length)return axis.baseLength;
+  return Math.max(axis.baseLength,members.at(-1).connection.offsetAlongBranch)
+    +Math.max(1,branch.route.memberSpacing??90);
+}
+export function appendZvt(state,branchId,options,basePoints){
+  const branch=state.zvtBranches.find(b=>b.id===branchId);
+  if(!branch)throw Error("Branch not found");
+  const zvt=createZvt({...options,branchId,connection:{...options.connection,
+    offsetAlongBranch:nextOffset(branch,basePoints,state.zvts)}});
+  return {...state,zvts:[...state.zvts,zvt]};
+}
+export function tapFromCenter(center,zvt){
+  const s=sideVector(zvt.connection.side);
+  return add(center,mul(s,zvt.connection.stubLength+zvt.style.radius));
+}
+export function offsetFromCenter(center,zvt,axis,minOffset=0){
+  const tap=tapFromCenter(center,zvt);
+  return Math.max(minOffset,dot(sub(tap,axis.origin),axis.direction));
+}
+export function centerAtOffset(zvt,axis,offset){
+  return memberGeometry({...zvt,connection:{...zvt.connection,offsetAlongBranch:offset}},axis).center;
+}
+export function reorderZvt(state,branchId,zvtId,targetIndex){
+  const ordered=membersOf(branchId,state.zvts);
+  const source=ordered.findIndex(z=>z.id===zvtId);
+  if(source<0)throw Error("ZVT not in branch");
+  const offsets=ordered.map(z=>z.connection.offsetAlongBranch);
+  const [moved]=ordered.splice(source,1);
+  ordered.splice(clamp(targetIndex,0,ordered.length),0,moved);
+  const map=new Map(ordered.map((z,i)=>[z.id,offsets[i]]));
+  return {...state,zvts:state.zvts.map(z=>map.has(z.id)?
+    {...z,connection:{...z.connection,offsetAlongBranch:map.get(z.id)}}:z)};
+}
+export function moveZvt(state,zvtId,offset){
+  if(!finite(offset))throw Error("Invalid offset");
+  return {...state,zvts:state.zvts.map(z=>z.id===zvtId?
+    {...z,connection:{...z.connection,offsetAlongBranch:offset}}:z)};
+}
+export function deleteZvt(state,zvtId){
+  const target=state.zvts.find(z=>z.id===zvtId);if(!target)return state;
+  const zvts=state.zvts.filter(z=>z.id!==zvtId);
+  const hasRemaining=zvts.some(z=>z.branchId===target.branchId);
+  const zvtBranches=hasRemaining?state.zvtBranches:
+    state.zvtBranches.filter(b=>b.id!==target.branchId);
+  const runtime={...(state.zvtRuntimeById??{})};delete runtime[zvtId];
+  return {...state,zvts,zvtBranches,zvtRuntimeById:runtime};
+}
+export function deleteBranch(state,branchId){
+  const removed=new Set(state.zvts.filter(z=>z.branchId===branchId).map(z=>z.id));
+  const runtime={...(state.zvtRuntimeById??{})};
+  for(const id of removed)delete runtime[id];
+  return {...state,zvtBranches:state.zvtBranches.filter(b=>b.id!==branchId),
+    zvts:state.zvts.filter(z=>!removed.has(z.id)),zvtRuntimeById:runtime};
+}
+export function translateNode(state,nodeId,dx,dy){
+  // Demo adapter. In actual app update your canonical node store instead.
+  return {...state,nodes:state.nodes.map(n=>n.id===nodeId?
+    {...n,x:n.x+dx,y:n.y+dy}:n)};
+}
+export function resolveAllScenes(state){
+  const nodesById=Object.fromEntries((state.nodes??[]).map(n=>[n.id,n]));
+  const edgesById=Object.fromEntries((state.edges??[]).map(e=>[e.id,e]));
+  return state.zvtBranches.map(branch=>{
+    const root=resolveRoot(branch,nodesById,edgesById);
+    const base=resolveBaseRoute(branch,root);
+    return {...resolveBranchScene(branch,base,state.zvts),root};
+  });
+}
+export function validateGraph(state){
+  const branches=new Map(state.zvtBranches.map(b=>[b.id,b]));
+  for(const b of state.zvtBranches){
+    if(!b.attachedTo?.id)throw Error(`branch ${b.id} has no attachedTo`);
+    if(b.route?.version!==3)throw Error(`branch ${b.id} has legacy route`);
+  }
+  for(const z of state.zvts){
+    if(!branches.has(z.branchId))throw Error(`Orphan ZVT ${z.id}`);
+    sideVector(z.connection.side);
+  }
+  return true;
+}
+
+
+
+======================================================================
+FILE: src/store/zvtStoreSlice.js
+======================================================================
+// src/store/zvtStoreSlice.js
+import {
+ appendZvt,deleteZvt,deleteBranch,moveZvt,reorderZvt,
+ resolveAllScenes,resolveBaseRoute,validateGraph
+} from "@/lib/zvt/branchChain";
+
+// Zustand slice factory. Merge into your EXISTING canvas store.
+// Do not create a second independent store for the same graph.
+export const createZvtSlice=(set,get)=>({
+ zvtBranches:[],zvts:[],zvtRuntimeById:{},
+ addZvtToBranch:(branchId,options)=>{
+  set(state=>{
+   const scene=resolveAllScenes(state).find(s=>s.branch.id===branchId);
+   if(!scene)throw Error("Branch not found");
+   // IMPORTANT: use ORIGINAL base route, not extended trunk.
+   const root=scene.root;
+   return appendZvt(state,branchId,options,resolveBaseRoute(scene.branch,root));
+  });
+ },
+ updateZvt:(id,updater)=>set(s=>({...s,zvts:s.zvts.map(z=>z.id===id?updater(z):z)})),
+ moveZvt:(id,offset)=>set(s=>moveZvt(s,id,offset)),
+ reorderZvt:(branchId,id,targetIndex)=>set(s=>reorderZvt(s,branchId,id,targetIndex)),
+ removeZvt:(id)=>set(s=>deleteZvt(s,id)),
+ removeBranch:(id)=>set(s=>deleteBranch(s,id)),
+ validateZvtGraph:()=>validateGraph(get())
+});
+
+
+
+======================================================================
+FILE: src/components/zvt/ZvtChainLayer.jsx
+======================================================================
+// src/components/zvt/ZvtChainLayer.jsx
+"use client";
+import React, {useMemo,useState} from "react";
+import {Group,Line,Circle,Text} from "react-konva";
+import {resolveAllScenes,offsetFromCenter,centerAtOffset,moveZvt} from "@/lib/zvt/branchChain";
+
+// ADAPTER:
+// - nodes,edges,zvtBranches,zvts from your canonical store.
+// - updateZvt(id, updater) must perform immutable Zustand update.
+// - editBranch(id) and editZvt(id) are your existing MUI dialogs.
+// - renderSymbol(member) is your existing complete ZVT symbol content in LOCAL coordinates.
+//   It must NOT draw stub or apply another x/y offset.
+// - onDeleteZvt and onDeleteBranch call canonical cascade actions.
+export default function ZvtChainLayer({
+  nodes,edges,zvtBranches,zvts,
+  updateZvt,renderSymbol,onSelectBranch,onSelectZvt,
+  selectedBranchId,stageRef,readOnly=false,
+  onDeleteZvt,onDeleteBranch
+}){
+  const [draggingId,setDraggingId]=useState(null);
+  const scenes=useMemo(()=>resolveAllScenes({nodes,edges,zvtBranches,zvts}),
+    [nodes,edges,zvtBranches,zvts]);
+  return <Group>
+    {scenes.map(scene=><Group key={scene.branch.id}>
+      <Line
+        points={scene.trunk.flatMap(p=>[p.x,p.y])}
+        stroke={scene.branch.style?.stroke??"black"}
+        strokeWidth={scene.branch.style?.strokeWidth??2}
+        hitStrokeWidth={12}
+        onClick={()=>onSelectBranch?.(scene.branch.id)}
+        onTap={()=>onSelectBranch?.(scene.branch.id)}
+      />
+      {/* Existing parameter root mark should be drawn here from scene.root.point
+          and first branch segment direction, NOT inside ZVT symbol. */}
+      {scene.members.length===0&&
+        <Circle x={scene.trunk.at(-1).x} y={scene.trunk.at(-1).y}
+          radius={4} fill="white" stroke="black" />}
+      {scene.members.map(member=>{
+        const {zvt,center,stub}=member;
+        return <Group key={zvt.id}>
+          <Line points={stub} stroke="black" strokeWidth={2} listening={false}/>
+          <Group
+            x={center.x} y={center.y}
+            draggable={!readOnly}
+            onClick={()=>onSelectZvt?.(zvt.id)}
+            onTap={()=>onSelectZvt?.(zvt.id)}
+            dragBoundFunc={absolutePosition=>{
+              // Konva dragBoundFunc receives ABSOLUTE stage position.
+              // Convert absolute center to world coordinates using the Stage transform.
+              const stage=stageRef?.current;
+              // If stage ref is not configured, avoid a wrong conversion:
+              if(!stage)return absolutePosition;
+              const inverse=stage.getAbsoluteTransform().copy().invert();
+              const worldCenter=inverse.point(absolutePosition);
+              const offset=offsetFromCenter(worldCenter,zvt,scene.axis,0);
+              const constrainedWorld=centerAtOffset(zvt,scene.axis,offset);
+              return stage.getAbsoluteTransform().point(constrainedWorld);
+            }}
+            onDragStart={()=>setDraggingId(zvt.id)}
+            onDragEnd={e=>{
+              // Convert from stage absolute to diagram/world.
+              const stage=e.target.getStage();
+              const inverse=stage.getAbsoluteTransform().copy().invert();
+              const centerWorld=inverse.point(e.target.getAbsolutePosition());
+              const offset=offsetFromCenter(centerWorld,zvt,scene.axis,0);
+              updateZvt(zvt.id,current=>({...current,
+                connection:{...current.connection,offsetAlongBranch:offset}}));
+              setDraggingId(null);
+            }}
+          >
+            {/* All children returned by renderSymbol must be centered around (0,0). */}
+            {renderSymbol ? renderSymbol(member) :
+              <><Circle radius={zvt.style?.radius??22} stroke="black" strokeWidth={2} fill="white"/>
+                <Text x={-18} y={-7} width={36} align="center" fontSize={12}
+                  text={zvt.data?.tag??"ЗВТ"}/></>}
+          </Group>
+          {selectedBranchId===scene.branch.id&&
+            <Circle x={member.tap.x} y={member.tap.y} radius={3}
+              fill="#1976d2" listening={false}/>}
+        </Group>;
+      })}
+    </Group>)}
+  </Group>;
+}
+
+
+// If your Stage contains a separately transformed diagram Group,
+// use that Group's absolute transform instead of Stage's transform.
+// Commit the ZVT offset only on dragEnd; do not store zvt.position.
+
+
+
+======================================================================
+FILE: src/lib/zvt/exportBranchSvg.js
+======================================================================
+// src/lib/zvt/exportBranchSvg.js
+import {resolveAllScenes} from "./branchChain.js";
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({
+ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"
+})[c]);
+const n=v=>Number(v.toFixed(3));
+const line=(a,b,stroke="black",width=2)=>
+ `<line x1="${n(a.x)}" y1="${n(a.y)}" x2="${n(b.x)}" y2="${n(b.y)}" `+
+ `stroke="${esc(stroke)}" stroke-width="${n(width)}"/>`;
+export function renderBranchChainSvg(state,{renderZvtSymbolSvg,renderRootMarkSvg}={}){
+ const scenes=resolveAllScenes(state);
+ return scenes.map(scene=>{
+  const stroke=scene.branch.style?.stroke??"black";
+  const width=scene.branch.style?.strokeWidth??2;
+  const points=scene.trunk.map(p=>`${n(p.x)},${n(p.y)}`).join(" ");
+  const trunk=`<polyline points="${points}" fill="none" stroke="${esc(stroke)}" stroke-width="${n(width)}"/>`;
+  const mark=renderRootMarkSvg?.(scene.branch,scene.root,scene.trunk)??"";
+  const members=scene.members.map(m=>{
+   const stub=line(m.tap,m.contact,stroke,width);
+   // Full symbol renderer is injected from your current ZVT SVG implementation.
+   const symbol=renderZvtSymbolSvg
+     ? renderZvtSymbolSvg(m.zvt,m.center)
+     : `<circle cx="${n(m.center.x)}" cy="${n(m.center.y)}" r="${n(m.zvt.style.radius)}" `+
+       `fill="white" stroke="black"/>`+
+       `<text x="${n(m.center.x)}" y="${n(m.center.y+4)}" font-size="12" text-anchor="middle">`+
+       `${esc(m.zvt.data?.tag??"ЗВТ")}</text>`;
+   return stub+symbol;
+  }).join("");
+  const emptyTerminal=scene.members.length?"":`<circle cx="${n(scene.trunk.at(-1).x)}" `+
+   `cy="${n(scene.trunk.at(-1).y)}" r="4" fill="white" stroke="black"/>`;
+  return trunk+mark+members+emptyTerminal;
+ }).join("");
+}
+// Usage:
+// const body=renderBranchChainSvg(sceneState,{
+//   renderZvtSymbolSvg:(zvt,center)=>renderYourExistingZvtSvg(zvt,center),
+//   renderRootMarkSvg:(branch,root,trunk)=>renderYourExistingBranchRootMarkSvg(branch,root,trunk)
+// });
+// const svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700">${body}</svg>`;
+// Never export selection handles. Escape all user-provided SVG text/attributes.
+
+
+
+======================================================================
+FILE: src/lib/zvt/migrateBranchRoute.js
+======================================================================
+// src/lib/zvt/migrateBranchRoute.js
+// Run ONCE on load after node/edge geometry is available; back up JSON first.
+import {
+ resolveRoot,worldToLocal,getEdgeSegment,rootAtEdgePointer
+} from "./branchChain.js";
+export function migrateBranchRouteV3(branch,nodesById,edgesById){
+ if(branch.route?.version===3)return branch;
+ const a={...branch.attachedTo};
+ if(a.type==="edge"){
+  const edge=edgesById[a.id];
+  if(!edge)throw Error(`Cannot migrate missing edge ${a.id}`);
+  const oldPoint=a.preferredPoint;
+  a.t=oldPoint?rootAtEdgePointer(edge,a.segmentId,oldPoint):(a.t??0.5);
+ }
+ const updated={...branch,attachedTo:a};
+ const root=resolveRoot(updated,nodesById,edgesById);
+ const old=branch.route??{};
+ // Legacy buildBaseBranchRoute may use route.type/lengths rather than terminalPoint.
+ // For those records, call your EXISTING route builder first to produce oldPoints.
+ const oldPoints=old.absolutePoints??
+   (old.terminalPoint?
+     [root.point,...(old.manualVertices??[]),old.terminalPoint]:
+     null);
+ if(!oldPoints||oldPoints.length<2)
+   throw Error(`Cannot migrate ${branch.id}: supply legacy absolutePoints from old route builder`);
+ const mode=a.type==="edge"?"edge-local":"translation";
+ return {...updated,route:{...old,version:3,coordinateMode:mode,
+   vertices:oldPoints.slice(1).map(point=>worldToLocal(root.point,root.frame,point,mode)),
+   memberSpacing:old.memberSpacing??90}};
+}
+export function migrateDiagramV3(document){
+ const nodesById=Object.fromEntries((document.nodes??[]).map(n=>[n.id,n]));
+ const edgesById=Object.fromEntries((document.edges??[]).map(e=>[e.id,e]));
+ return {...document,zvtBranches:(document.zvtBranches??[]).map(b=>
+   migrateBranchRouteV3(b,nodesById,edgesById))};
+}
+
+
+
+======================================================================
+FILE: tests/branchChain.test.mjs
+======================================================================
+// tests/branchChain.test.mjs — node --test
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+ createBranch,createZvt,resolveAllScenes,appendZvt,moveZvt,reorderZvt,
+ deleteZvt,deleteBranch,validateGraph,offsetFromCenter,centerAtOffset,
+ rootAtEdgePointer
+} from "../src/lib/zvt/branchChain.js";
+const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-6,`${a} != ${b}`);
+const node={id:"n1",x:100,y:100,width:40,height:40};
+const branch=createBranch({id:"b1",attachedTo:{type:"node",id:"n1",side:"right"},
+ route:{vertices:[{dx:100,dy:0}],memberSpacing:90}});
+const initial=()=>({nodes:[{...node}],edges:[],zvtBranches:[branch],zvts:[],zvtRuntimeById:{}});
+function add(state,id,side="top",stubLength=20){
+ const base=resolveAllScenes(state)[0].trunk;
+ return appendZvt(state,"b1",{id,connection:{side,stubLength},style:{radius:22}},base);
+}
+test("top/bottom/left/right geometry is relative to circle",()=>{
+ for(const [side,dx,dy] of [["top",0,42],["bottom",0,-42],["left",42,0],["right",-42,0]]){
+  let s=add(initial(),"z1",side);
+  const m=resolveAllScenes(s)[0].members[0];
+  near(m.center.x,m.tap.x+dx);near(m.center.y,m.tap.y+dy);
+  near(Math.hypot(m.tap.x-m.contact.x,m.tap.y-m.contact.y),20);
+ }
+});
+test("append extends branch; moving node moves entire scene without collapse",()=>{
+ let s=add(initial(),"a","top");
+ s=add(s,"b","left");
+ const before=resolveAllScenes(s)[0];
+ near(before.members[1].tap.x-before.members[0].tap.x,90);
+ s={...s,nodes:[{...node,x:200,y:150}]};
+ const after=resolveAllScenes(s)[0];
+ for(let i=0;i<2;i++){
+  for(const key of ["tap","contact","center"]){
+   near(after.members[i][key].x-before.members[i][key].x,100);
+   near(after.members[i][key].y-before.members[i][key].y,50);
+  }
+ }
+ near(after.trunk.at(-1).x-before.trunk.at(-1).x,100);
+ near(after.trunk.at(-1).y-before.trunk.at(-1).y,50);
+});
+test("center drag projection returns original offset",()=>{
+ let s=add(initial(),"a","top");
+ const scene=resolveAllScenes(s)[0],m=scene.members[0];
+ near(offsetFromCenter(m.center,m.zvt,scene.axis),m.zvt.connection.offsetAlongBranch);
+ const center=centerAtOffset(m.zvt,scene.axis,220);
+ near(offsetFromCenter(center,m.zvt,scene.axis),220);
+});
+test("reorder swaps slots but preserves side and stub",()=>{
+ let s=add(initial(),"a","top",20);s=add(s,"b","left",30);
+ const before=resolveAllScenes(s)[0];
+ s=reorderZvt(s,"b1","a",1);
+ const after=resolveAllScenes(s)[0];
+ assert.equal(after.members[0].zvt.id,"b");
+ assert.equal(after.members[1].zvt.id,"a");
+ assert.equal(after.members[1].zvt.connection.side,"top");
+ near(after.trunk.at(-1).x,before.trunk.at(-1).x);
+});
+test("delete last removes branch; delete branch cascades",()=>{
+ let s=add(initial(),"a");s=add(s,"b");
+ s=deleteZvt(s,"b");assert.equal(s.zvtBranches.length,1);
+ near(resolveAllScenes(s)[0].trunk.at(-1).x,220);
+ s=deleteZvt(s,"a");assert.equal(s.zvtBranches.length,0);
+ s=add(initial(),"a");s=add(s,"b");
+ s=deleteBranch(s,"b1");
+ assert.equal(s.zvtBranches.length,0);assert.equal(s.zvts.length,0);
+});
+test("edge t follows translation and rotation in edge-local coordinates",()=>{
+ const e={id:"e",segments:[{id:"s",start:{x:0,y:0},end:{x:100,y:0}}]};
+ const b=createBranch({id:"be",attachedTo:{type:"edge",id:"e",segmentId:"s",t:.25},
+   route:{vertices:[{u:0,v:60}]}});
+ let s={nodes:[],edges:[e],zvtBranches:[b],zvts:[]};
+ let before=resolveAllScenes(s)[0];near(before.trunk.at(-1).x,25);near(before.trunk.at(-1).y,60);
+ s={...s,edges:[{...e,segments:[{id:"s",start:{x:10,y:10},end:{x:10,y:110}}]}]};
+ let after=resolveAllScenes(s)[0];
+ near(after.root.point.x,10);near(after.root.point.y,35);
+ near(after.trunk.at(-1).x,-50);near(after.trunk.at(-1).y,35);
+});
+test("graph validation catches orphan",()=>{
+ let s=add(initial(),"a");
+ assert.equal(validateGraph(s),true);
+ assert.throws(()=>validateGraph({...s,zvts:[{...s.zvts[0],branchId:"missing"}]}));
+});
+
+
+
+ПРИКЛАД ПІДКЛЮЧЕННЯ MUI
+
+<TextField label="Довжина лінії з'єднання (px)" type="number"
+ value={stubLength} inputProps={{min:0,step:1}}
+ onChange={e=>setStubLength(Math.max(0,Number(e.target.value)||0))}/>
+<FormControl><FormLabel>Сторона кружечка</FormLabel>
+<RadioGroup row value={side} onChange={e=>setSide(e.target.value)}>
+ {["top","bottom","left","right"].map(value=>
+  <FormControlLabel key={value} value={value} control={<Radio/>}
+   label={{top:"Зверху",bottom:"Знизу",left:"Зліва",right:"Справа"}[value]}/>)}
+</RadioGroup></FormControl>
+
+// create payload:
+addZvtToBranch(branchId,{data,style,integration,
+ connection:{side,stubLength:Number(stubLength)}});
+
+// edit payload:
+updateZvt(zvtId,old=>({...old,
+ connection:{...old.connection,side,stubLength:Number(stubLength)}}));
+
+// context menu:
+const members=membersOf(zvt.branchId,zvts);
+reorderZvt(zvt.branchId,zvt.id,0); // на початок
+reorderZvt(zvt.branchId,zvt.id,members.length-1); // у кінець
