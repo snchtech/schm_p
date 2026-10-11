@@ -1,0 +1,162 @@
+ВИПРАВЛЕННЯ: ЗВТ НА КІНЦЕВОМУ СЕГМЕНТІ BRANCH ПІСЛЯ ELBOW
+Next.js + Konva, JavaScript. Патч-алгоритм на основі наданих скриншотів.
+
+ДІАГНОЗ
+1. createZvtFromBranchEditor() задає calculatedT=1.0, навіть коли лінія не була подовжена.
+2. repositionZvtsOnBranch() повторно обчислює t за originalLineLength + orderIndex*spacing, але після додавання зламу початок останнього сегмента зміщується. t=0 означає початок НОВОГО сегмента, а не потрібну позицію попереднього ЗВТ.
+3. Дублювання розрахунку в двох методах і змішування primaryLength, terminalPoint та manualVertices робить результат залежним від типу маршруту.
+4. zvt.attachedTo?.id використовується як branchId. На перспективу рекомендовано zvt.branchId як єдине джерело істини, із тимчасовим fallback для старих записів.
+
+ІНВАРІАНТ
+Перший ЗВТ ставиться на кінець branch. Другий продовжує terminal segment на 70 px і стає на новий кінець. Попередній залишається за 70 px перед ним. Кожний наступний — аналогічно. Зміна сторони підключення змінює лише stub і центр кола, НЕ tap уздовж branch. Додавання зламу змінює маршрут, але не має самостійно перераховувати кількість/порядок ЗВТ без явної операції нормалізації.
+
+ФАЙЛ: src/features/scheme/model/utils/zvtTerminalChain.js
+
+export const CHAIN_SPACING = 70;
+const EPS = 1e-6;
+const distance = (a,b) => Math.hypot(b.x-a.x,b.y-a.y);
+const lerp = (a,b,t) => ({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+
+export function terminalSegment(points) {
+  if (!Array.isArray(points) || points.length < 2) throw new Error('Branch route has <2 points');
+  for (let i=points.length-2;i>=0;i--) {
+    const a=points[i], b=points[i+1], length=distance(a,b);
+    if (length>EPS) return {a,b,length,index:i,ux:(b.x-a.x)/length,uy:(b.y-a.y)/length};
+  }
+  throw new Error('Branch terminal segment is degenerate');
+}
+
+export function memberOfBranch(z, branchId) {
+  return z.branchId===branchId || (!z.branchId && z.attachedTo?.id===branchId);
+}
+
+export function sortedBranchMembers(zvts,branchId) {
+  return zvts.filter(z=>memberOfBranch(z,branchId)).sort((a,b)=>
+    (Number(a.connection?.chainOrder ?? a.createdAt ?? 0) - Number(b.connection?.chainOrder ?? b.createdAt ?? 0)) ||
+    String(a.id).localeCompare(String(b.id)));
+}
+
+// Extends the LAST non-zero segment in its true vector direction (not primaryDirection).
+export function extendTerminal(points,delta) {
+  if(delta<0)throw Error('delta must be >=0');
+  const seg=terminalSegment(points);
+  return points.map((p,i)=>i===points.length-1 ?
+    {x:p.x+seg.ux*delta,y:p.y+seg.uy*delta}: {...p});
+}
+
+// Physical slot 0 is exactly at old terminal point, slot 1 is +70, etc.
+// This is used when inserting a new ZVT, NOT on every redraw.
+export function appendTerminalMember({points, existingMembers, spacing=CHAIN_SPACING}) {
+  const nextPoints=existingMembers.length ? extendTerminal(points,spacing) : points.map(p=>({...p}));
+  const seg=terminalSegment(nextPoints);
+  const index=existingMembers.length;
+  return {points:nextPoints, tap:{...seg.b},
+    segmentIndex:seg.index,t:1,chainOrder:index};
+}
+
+// After extending, place previous members by absolute distance from NEW endpoint.
+// This works even when the terminal segment is shorter than 70: for members whose
+// slots fall before segment start, do not clamp to t=0; instead return a clear error
+// or explicitly rebuild/lengthen the terminal segment.
+export function terminalSlots(points,count,spacing=CHAIN_SPACING) {
+  const seg=terminalSegment(points);
+  const required=(count-1)*spacing;
+  if(seg.length+EPS<required) {
+    throw new Error(`Terminal segment too short: ${seg.length.toFixed(1)} < ${required}. Extend route first.`);
+  }
+  return Array.from({length:count},(_,i)=>{
+    const fromEnd=(count-1-i)*spacing;
+    const t=Math.max(0,Math.min(1,1-fromEnd/seg.length));
+    return {segmentIndex:seg.index,t,point:lerp(seg.a,seg.b,t),offsetAlongBranch:seg.length-fromEnd};
+  });
+}
+
+export function assignTerminalSlots(zvts,branchId,points,spacing=CHAIN_SPACING) {
+  const members=sortedBranchMembers(zvts,branchId);
+  const slots=terminalSlots(points,members.length,spacing);
+  const slotsById=new Map(members.map((z,i)=>[z.id,{...slots[i],chainOrder:i}]));
+  return zvts.map(z=>{
+    const slot=slotsById.get(z.id);
+    if(!slot)return z;
+    return {...z,branchId,connection:{...z.connection,
+      chainOrder:slot.chainOrder,offsetAlongBranch:slot.offsetAlongBranch},
+      route:{...z.route,branchTap:{...z.route?.branchTap,
+        mode:'fixed',segmentIndex:slot.segmentIndex,t:slot.t}}};
+  });
+}
+
+// Pure operation: return new branch + all ZVT placements as one result.
+export function prepareAppend({branch,allZvts,points,spacing=CHAIN_SPACING}) {
+  const members=sortedBranchMembers(allZvts,branch.id);
+  const appended=appendTerminalMember({points,existingMembers:members,spacing});
+  const existingUpdated=assignTerminalSlots(allZvts,branch.id,appended.points,spacing);
+  return {appended,existingUpdated};
+}
+
+ІНТЕГРАЦІЯ У canvasController.js
+
+A. ЗАМІНИТИ ручний розрахунок у createZvtFromBranchEditor(), де зараз
+   currentPrimaryLength / terminalPoint / segmentLength / calculatedT / pseudoZvt.
+   1. const pointsBefore = buildEditableBranchPoints(branch,store.nodes||[],store.edges||[])
+   2. const result = prepareAppend({branch,allZvts:store.zvts||[],points:pointsBefore,
+          spacing:branch.route?.memberSpacing ?? 70})
+   3. const pointsAfter = result.appended.points
+   4. Зберегти pointsAfter у ВАШОМУ route builder через існуючий механізм
+      зворотного перетворення точок (НЕ записувати одночасно terminalPoint і
+      primaryLength, якщо builder трактує їх як різні джерела істини).
+   5. const zvt=createZvt({branchId, data, connection:{...connection,
+        chainOrder:result.appended.chainOrder,
+        offsetAlongBranch:terminalSegment(pointsAfter).length},
+        route:{...route,branchId,branchTap:{mode:'fixed',
+          segmentIndex:result.appended.segmentIndex,t:1}},style,integration})
+   6. В ОДНІЙ Zustand setState транзакції оновити zvtBranches і zvts:
+      - branch із новим route;
+      - result.existingUpdated + zvt.
+      Якщо store.addZvt/replaceZvtBranch викликають окремі set(), не робити
+      між ними проміжного перерахунку геометрії.
+   7. Не зберігати position:{x:shiftedX,y:shiftedY} як джерело істини;
+      renderer повинен обчислювати center із tap + side/stub/radius.
+
+B. repositionZvtsOnBranch() НЕ ПОВИННА подовжувати branch після того,
+   як його вже подовжила createZvtFromBranchEditor(). Інакше +70 застосовується
+   двічі або t перераховується від іншої бази. Перетворити функцію на чисту
+   assignTerminalSlots(...) і викликати ТІЛЬКИ після зміни маршруту, коли
+   terminal segment гарантовано має потрібну довжину.
+
+C. ДОДАВАННЯ ЗЛАМУ:
+   - після вставки waypoint викликати buildEditableBranchPoints для нового route;
+   - якщо останній сегмент коротший за (N-1)*70, подовжити його на різницю;
+   - потім assignTerminalSlots() для N ЗВТ;
+   - оновити route + zvts атомарно;
+   - не викликати createZvtFromBranchEditor() при зміні боку підключення.
+
+D. ЗМІНА СТОРОНИ:
+   const updated={...zvt,connection:{...zvt.connection,side:newSide}};
+   // НЕ міняти branchTap.t, segmentIndex, chainOrder, terminalPoint, primaryLength.
+   // Конкретна геометрія stub і центру — у zvtGeometry.js.
+
+E. КРИТИЧНО: ВИПРАВИТИ ДЖЕРЕЛО ПРАВДИ
+   Зараз код використовує одночасно zvt.attachedTo?.id, route.branchId,
+   route.branchTap.t і position. Зробіть branchId + connection.chainOrder
+   джерелом для членства/порядку, branch.route для геометрії, а t —
+   похідною координатою для сумісності з рендерером.
+
+ПЕРЕВІРКИ
+1. Пряма 140 px, 1 ЗВТ: t=1, branch без продовження.
+2. Додати 2-й: branch +70, обидва на останньому сегменті,
+   перший за 70 px від другого, другий t=1.
+3. Elbow вправо-вниз, додати ще один waypoint вправо на 50,
+   додати 2 ЗВТ: другий продовжує ОСТАННІЙ сегмент на 70,
+   перший на 70 перед ним.
+4. Додати ще один waypoint: якщо сегмент замалий, спочатку
+   подовжити; після перерахунку не повинно бути двох t=0/t=1
+   лише через обмеження Math.max/min.
+5. Змінити side top->left: tap, chainOrder і довжина branch незмінні.
+6. Перемістити node або edge: attachedTo зберігається; tap
+   перераховується з branch route, а не з абсолютного zvt.position.
+
+ОБМЕЖЕННЯ
+На скриншотах немає повних buildEditableBranchPoints(), коду редагування
+waypoint та ZvtBranchLayer/ZvtSymbol. Тому цей TXT — перевірюваний алгоритм
+і конкретний план заміни, але не гарантований drop-in патч саме вашого
+репозиторію. Для точної заміни без адаптерів потрібні вихідні JS файли.

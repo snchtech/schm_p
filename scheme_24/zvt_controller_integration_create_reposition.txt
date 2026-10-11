@@ -1,0 +1,206 @@
+ІНТЕГРАЦІЯ zvtTerminalChain.js У canvasController.js
+Next.js + Konva, JavaScript. Додаток до zvt_elbow_terminal_fix.txt.
+
+ЦЕ КОНКРЕТНА ІНСТРУКЦІЯ ЗАМІНИ ДВОХ МЕТОДІВ, АЛЕ НЕ 1:1 DROP-IN:
+на фото видно тільки частини controller, а API запису route.vertices у
+zvtBranchEditableRoute.js не показаний. Тому нижче є один обов'язковий
+адаптер persistTerminalPoints(), який потрібно під'єднати до вашої
+існуючої функції збереження маршруту.
+
+1. ІМПОРТИ на початку canvasController.js:
+
+import {
+  sortedBranchMembers,
+  prepareAppend,
+  assignTerminalSlots,
+  terminalSegment,
+  extendTerminal,
+} from '../utils/zvtTerminalChain';
+
+// ВАЖЛИВО: відкоригуйте відносний шлях ../utils відповідно до фактичного
+// місця src/features/scheme/model/utils/zvtTerminalChain.js.
+// buildEditableBranchPoints уже імпортована у вашому controller.
+
+2. АДАПТЕРИ. Розмістити ПОЗА об'єктом canvasController.
+
+const listOf = (collection) => Array.isArray(collection)
+  ? collection : Object.values(collection ?? {});
+
+const replaceInCollection = (collection, id, value) =>
+  Array.isArray(collection)
+    ? collection.map(item => item.id === id ? value : item)
+    : {...collection, [id]: value};
+
+function persistTerminalPoints(branch, points, store) {
+  // ОБОВ'ЯЗКОВО ЗАМІНІТЬ ТІЛО НА ВАШ ІСНУЮЧИЙ REVERSE ROUTE BUILDER.
+  // Має повернути branch, для якого:
+  // buildEditableBranchPoints(result, store.nodes, store.edges)
+  // дає ті самі points з новим terminal endpoint.
+  // НЕ встановлюйте навмання primaryLength + terminalPoint одночасно.
+  // Для elbow/manualVertices змінюється ОСТАННЯ маршрутна вершина,
+  // а не обов'язково primaryLength.
+  throw new Error('Підключіть persistTerminalPoints() до route builder');
+}
+
+function updateBranchAndZvtsAtomic(store, branch, zvts) {
+  const nextBranches = replaceInCollection(store.zvtBranches, branch.id, branch);
+  // Один setState: рендерер не побачить проміжний branch без нових tap.
+  useCanvasStore.setState({zvtBranches: nextBranches, zvts});
+}
+
+3. ПОВНІСТЮ ЗАМІНІТЬ ТІЛО repositionZvtsOnBranch(branchId).
+Не залишайте старий блок з originalLineLength, requiredSegmentLength,
+primaryLength, terminalPoint, newT та двома окремими setState.
+
+repositionZvtsOnBranch(branchId) {
+  const store = useCanvasStore.getState();
+  const branch = listOf(store.zvtBranches).find(b => b.id === branchId);
+  if (!branch) return;
+
+  const members = sortedBranchMembers(store.zvts ?? [], branchId);
+  if (!members.length) return;
+
+  const spacing = Number(branch.route?.memberSpacing ?? 70);
+  if (!(spacing > 0)) throw new Error('memberSpacing має бути > 0');
+
+  let points = buildEditableBranchPoints(
+    branch, store.nodes ?? [], store.edges ?? []
+  );
+  const seg = terminalSegment(points);
+  const minLength = (members.length - 1) * spacing;
+  if (seg.length < minLength) {
+    points = extendTerminal(points, minLength - seg.length);
+  }
+
+  const updatedBranch = persistTerminalPoints(branch, points, store);
+  const confirmedPoints = buildEditableBranchPoints(
+    updatedBranch, store.nodes ?? [], store.edges ?? []
+  );
+  const updatedZvts = assignTerminalSlots(
+    store.zvts ?? [], branchId, confirmedPoints, spacing
+  );
+  updateBranchAndZvtsAtomic(store, updatedBranch, updatedZvts);
+},
+
+ЩО РОБИТЬ НОВА ФУНКЦІЯ:
+- Не вгадує primaryDirection, а бере останній ненульовий сегмент.
+- Не пересуває перший ЗВТ у t=0 через старий originalLineLength.
+- Якщо після elbow останній сегмент короткий, подовжує його до
+  мінімуму (N-1)*70 і розставляє всі N ЗВТ в кінцевих слотах.
+- Не викликайте цю функцію на кожному render чи dragMove.
+
+4. ЗАМІНА createZvtFromBranchEditor().
+Збережіть сигнатуру, існуючу перевірку прав, обробку data/style,
+створення символу через createZvt, selection/editor closing.
+ВИДАЛІТЬ із тіла старі обчислення currentPrimaryLength,
+updatedRoute.primaryLength += spacing, initialRoot, terminalPoint,
+oldSegmentLength, calculatedT=1, pseudoZvt, shiftedX/Y і блок
+перерахунку t попередніх ЗВТ. ЗАМІСТЬ них:
+
+createZvtFromBranchEditor({branchId, data, connection, style, integration, route}) {
+  const store = useCanvasStore.getState();
+  // Тут збережіть вашу реальну перевірку editor permissions.
+  const branch = listOf(store.zvtBranches).find(b => b.id === branchId);
+  if (!branch) return null;
+
+  const spacing = Number(branch.route?.memberSpacing ?? 70);
+  if (!(spacing > 0)) throw new Error('memberSpacing має бути > 0');
+
+  const pointsBefore = buildEditableBranchPoints(
+    branch, store.nodes ?? [], store.edges ?? []
+  );
+  const prepared = prepareAppend({
+    branch,
+    allZvts: store.zvts ?? [],
+    points: pointsBefore,
+    spacing,
+  });
+
+  // ПЕРШИЙ ЗВТ: pointsAfter = pointsBefore (без подовження).
+  // ДРУГИЙ ТА НАСТУПНІ: останній сегмент +70 px.
+  const pointsAfter = prepared.appended.points;
+  const updatedBranch = persistTerminalPoints(branch, pointsAfter, store);
+  const confirmedPoints = buildEditableBranchPoints(
+    updatedBranch, store.nodes ?? [], store.edges ?? []
+  );
+
+  // Повторно беремо індекс кінцевого сегмента після збереження route.
+  const seg = terminalSegment(confirmedPoints);
+  const newZvt = createZvt({
+    branchId,
+    // Тимчасовий fallback для вашого старого Zvt renderer:
+    attachedTo: {type:'zvtBranch', id:branchId, segmentId:seg.index},
+    data,
+    connection: {
+      ...connection,
+      chainOrder: sortedBranchMembers(store.zvts ?? [], branchId).length,
+      offsetAlongBranch: seg.length,
+    },
+    route: {
+      ...route,
+      branchId,
+      branchTap: {mode:'fixed', segmentIndex:seg.index, t:1},
+    },
+    style,
+    integration,
+  });
+
+  // ВАЖЛИВО: попередні члени перераховуємо з confirmedPoints,
+  // а не зі старих pointsBefore. Новий ЗВТ має останній слот t=1.
+  const existingUpdated = assignTerminalSlots(
+    store.zvts ?? [], branchId, confirmedPoints, spacing
+  );
+  updateBranchAndZvtsAtomic(store, updatedBranch, [...existingUpdated, newZvt]);
+  useCanvasStore.getState().setSelection?.({type:'zvt', id:newZvt.id});
+  useCanvasStore.getState().clearZvtEditor?.();
+  return newZvt;
+},
+
+5. ДЕ ВИКЛИКАТИ repositionZvtsOnBranch()
+
+A. Після ДОДАВАННЯ ЗЛАМУ або редагування останнього сегмента:
+  1) зберегти новий route branch;
+  2) викликати canvasController.repositionZvtsOnBranch(branchId)
+     ОДИН РАЗ після збереження.
+  Важливо: якщо маршрут редагується на dragMove, нормалізуйте на dragEnd.
+
+B. Після ДОДАВАННЯ ЗВТ НЕ ВИКЛИКАТИ repositionZvtsOnBranch():
+   createZvtFromBranchEditor вже розставила всіх членів.
+
+C. Після ЗМІНИ СТОРОНИ ЗВТ НЕ ВИКЛИКАТИ:
+   змінюється лише connection.side/stubLength, не tap/t/branch route.
+
+D. Після ПЕРЕМІЩЕННЯ NODE/EDGE НЕ ВИКЛИКАТИ:
+   branch root + points мають будуватися з актуальної геометрії
+   attachedTo, а ЗВТ — з branchTap на поточному маршруті.
+
+6. ДВА ВАЖЛИВІ НЮАНСИ
+
+- Якщо у вашому editor після додавання waypoint НОВИЙ останній сегмент
+  коротший за 70, assignTerminalSlots() не повинен мовчки обрізати t
+  до нуля. Саме для цього reposition спочатку подовжує останній сегмент.
+- Якщо ви хочете ЗБЕРЕГТИ фізичні позиції ЗВТ при вставці зламу
+  ПОСЕРЕДИНІ branch, а не перенести всі на останній сегмент,
+  потрібна інша модель: абсолютна довжина вздовж усієї полілінії.
+  Цей патч реалізує саме заявлену вами модель terminal member chain.
+
+7. ЯК ПЕРЕВІРИТИ
+
+1) Elbow вправо-вниз -> кінцевий сегмент вправо 50 px.
+2) Додати ЗВТ 1: кінець 50 px, t=1.
+3) Додати ЗВТ 2: кінець 120 px, t першого 50/120=0.4167,
+   t другого=1, відстань 70 px.
+4) Додати новий elbow/waypoint, кінцевий сегмент 40 px:
+   reposition подовжить його до 70 px; обидва ЗВТ займуть
+   початок/кінець цього сегмента (t=0, t=1). ЦЕ КОРЕКТНО
+   ДЛЯ ПОЛІТИКИ «всі члени на останньому сегменті».
+   Якщо t=0 неприйнятне навіть після такого зламу, встановіть
+   minLength = Math.max(spacing, (members.length-1)*spacing)+20.
+5) Змінити side другого ЗВТ: ні route, ні t не змінюються.
+
+8. ПЕРЕД ЗАПУСКОМ
+
+Без реалізації persistTerminalPoints() цей код навмисно зупиниться
+з помилкою. Це захист від тихого пошкодження elbow/manualVertices.
+Надішліть вміст zvtBranchEditableRoute.js або метод, який зберігає
+відредаговані вершини, і можна буде заповнити цей адаптер точно.
