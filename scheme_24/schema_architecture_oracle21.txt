@@ -1,0 +1,305 @@
+АРХІТЕКТУРА БД ДЛЯ АЛЬБОМІВ І ТЕХНОЛОГІЧНИХ СХЕМ
+Next.js + Konva + Oracle Database 21c
+Версія проєкту: 1.0 | 18.10.2026
+
+1. ПРИНЦИП
+============
+Рекомендована модель: JSON Snapshot + Relational Search Projection + Explicit Links.
+- Повний JSON документа є джерелом істини для відображення Konva.
+- Реляційні таблиці зберігають тільки індексовані сутності, атрибути пошуку, зв'язки та права.
+- Проєкції синхронізуються ТІЛЬКИ в одній транзакції публікації версії.
+- Не зберігати стилі, координати всіх вершин, маршрути, повний опис ЗВТ одночасно у десятках SQL-колонок.
+- Ідентифікатори об'єктів UUID залишаються стабільними між версіями; версія визначає їх стан.
+- URL переходу генерувати за ID, не зберігати абсолютні URL як основне джерело.
+
+2. НАЯВНІ ТАБЛИЦІ — ЗБЕРЕГТИ
+===========================
+album(id, name, depart_id, unit_id, description, status_id)
+album_version(id, album_id, version_number, is_stable, date_created, date_updated,
+              creator_id, updator_id, version_comment, date_deleted, is_archived)
+scheme(id, name, album_version_id, description, format, page_number,
+       system, shifr, status_id, template_id)
+scheme_version(id, scheme_id, version_number, is_stable, is_archived,
+               created_at, updated_at, created_by, updated_by, version_comment)
+scheme_templates(id, template_name, description, template_type, created_at)
+dict_unit(id, name, unit_type)
+entry_status(id, name)
+ETLS_USERS / ETLS_ROLES / ETLS_USER_ROLES — існуючий механізм авторизації.
+
+ВАЖЛИВО: scheme.album_version_id прив'язує схему до конкретної версії альбому.
+Якщо схема має існувати незалежно від версії альбому, додати scheme.album_id,
+а склад версії альбому визначати через album_version_scheme(album_version_id, scheme_id,
+position_no). Обрати ОДНУ канонічну модель; рекомендовано другий варіант для
+масштабування та повторного використання схем. Старий FK перенести поетапно.
+
+3. ОСНОВНІ НОВІ ТАБЛИЦІ
+=======================
+SCHEME_DOCUMENT
+  scheme_version_id VARCHAR2(36) PK FK -> scheme_version.id
+  schema_version NUMBER(6) NOT NULL             -- версія формату JSON
+  document_json CLOB NOT NULL                   -- повний snapshot
+  content_sha256 VARCHAR2(64) NOT NULL
+  document_bytes NUMBER(15)
+  created_at TIMESTAMP(6) WITH TIME ZONE
+  CONSTRAINT ck_document_json CHECK (document_json IS JSON)
+
+SCHEME_OBJECT
+  scheme_version_id VARCHAR2(36) NOT NULL FK
+  object_id VARCHAR2(36) NOT NULL                -- UUID з JSON
+  object_type VARCHAR2(40) NOT NULL              -- node, edge, zvt, zvtBranch,
+                                                 -- annotation, notesBlock,
+                                                 -- specificationTable, attachment
+  object_subtype VARCHAR2(80)
+  label VARCHAR2(500)
+  external_object_id VARCHAR2(128)              -- прив'язка до довідника обладнання
+  unit_id VARCHAR2(36) NULL
+  searchable_text VARCHAR2(2000)
+  parent_object_id VARCHAR2(36) NULL
+  is_deleted NUMBER(1) DEFAULT 0 NOT NULL
+  PRIMARY KEY(scheme_version_id, object_id)
+  FK(scheme_version_id,parent_object_id) -> SCHEME_OBJECT(scheme_version_id,object_id)
+  -- parent_object_id тільки для реального ієрархічного вкладення;
+  -- зв'язки графа вести окремо.
+
+SCHEME_OBJECT_LINK
+  link_id VARCHAR2(36) PK
+  scheme_version_id VARCHAR2(36) NOT NULL
+  source_object_id VARCHAR2(36) NOT NULL
+  target_object_id VARCHAR2(36) NOT NULL
+  link_type VARCHAR2(40) NOT NULL               -- CONNECTS, ATTACHED_TO,
+                                                 -- ZVT_ON_BRANCH, ANNOTATES
+  source_anchor VARCHAR2(80)
+  target_anchor VARCHAR2(80)
+  segment_id VARCHAR2(100)
+  FK(scheme_version_id,source_object_id) -> SCHEME_OBJECT(scheme_version_id,object_id)
+  FK(scheme_version_id,target_object_id) -> SCHEME_OBJECT(scheme_version_id,object_id)
+  -- Якщо зв'язок спрямований до ребра, target_object_id посилається на edge.
+
+SCHEME_CROSS_LINK
+  id VARCHAR2(36) PK
+  source_scheme_id VARCHAR2(36) NOT NULL FK -> scheme.id
+  source_object_id VARCHAR2(36) NOT NULL
+  target_scheme_id VARCHAR2(36) NOT NULL FK -> scheme.id
+  target_object_id VARCHAR2(36) NULL
+  link_kind VARCHAR2(40) NOT NULL               -- NAVIGATE, EQUIPMENT_REF,
+                                                 -- CONTINUATION, DEPENDENCY
+  caption VARCHAR2(500)
+  is_active NUMBER(1) DEFAULT 1 NOT NULL
+  created_at TIMESTAMP(6) WITH TIME ZONE
+  -- Для перевірки source_object_id та target_object_id використати
+  -- окремий каталог стабільних ID або перевірку на рівні сервісу.
+  -- При переході версії target object може зникнути: передбачити fallback на схему.
+
+SCHEME_OBJECT_ATTRIBUTE (лише якщо потрібен гнучкий фільтр по параметрах)
+  scheme_version_id VARCHAR2(36) NOT NULL
+  object_id VARCHAR2(36) NOT NULL
+  attribute_code VARCHAR2(100) NOT NULL
+  value_text VARCHAR2(2000)
+  value_number NUMBER
+  value_date TIMESTAMP(6)
+  PRIMARY KEY(scheme_version_id,object_id,attribute_code)
+  FK(scheme_version_id,object_id) -> SCHEME_OBJECT(scheme_version_id,object_id)
+  -- Не перетворювати всі стилі Konva на EAV: тільки бізнес-поля для пошуку.
+
+FILE_ASSET
+  id VARCHAR2(36) PK
+  original_name VARCHAR2(500)
+  mime_type VARCHAR2(150)
+  byte_size NUMBER(15)
+  storage_provider VARCHAR2(30)                  -- filesystem, s3, blob
+  storage_key VARCHAR2(1000) NOT NULL
+  sha256 VARCHAR2(64)
+  created_at TIMESTAMP(6) WITH TIME ZONE
+  created_by VARCHAR2(36)
+  -- Сам файл зберігати в об'єктному сховищі/файловій системі,
+  -- у БД тільки метадані та ключ; контроль доступу через backend.
+
+SCHEME_ASSET_REF
+  scheme_version_id VARCHAR2(36) NOT NULL
+  object_id VARCHAR2(36) NOT NULL
+  asset_id VARCHAR2(36) NOT NULL FK -> FILE_ASSET.id
+  usage_type VARCHAR2(30) NOT NULL              -- attachment, image, underlay
+  PRIMARY KEY(scheme_version_id,object_id,asset_id)
+  FK(scheme_version_id,object_id) -> SCHEME_OBJECT(scheme_version_id,object_id)
+
+SCHEME_OBJECT_IDENTITY (опційно, для довгоживучих зв'язків)
+  scheme_id VARCHAR2(36) NOT NULL FK -> scheme.id
+  object_id VARCHAR2(36) NOT NULL
+  first_version_id VARCHAR2(36) NOT NULL
+  PRIMARY KEY(scheme_id,object_id)
+  -- Дозволяє посилатися на об'єкт незалежно від версії snapshot.
+
+4. ПОВНИЙ JSON SNAPSHOT
+=======================
+Приклад логічної структури (псевдодані, не повний документ):
+{
+  "schemaVersion": 1,
+  "schemeId": "uuid-scheme",
+  "schemeVersionId": "uuid-version",
+  "sheet": {"format":"A3","orientation":"landscape","titleBlock":{}},
+  "sheetSize": {"width":1680,"height":1188,"format":"A3"},
+  "grid": {"visible":true,"size":40,"subDiv":4,"snapEnabled":false},
+  "viewport": {"x":0,"y":0,"scale":1},
+  "nodes": [{"id":"uuid-node","type":"...","position":{"x":100,"y":200},"data":{}}],
+  "edges": [{"id":"uuid-edge","start":{},"end":{},"route":{},"geometry":{}}],
+  "zvtBranches": [{"id":"uuid-branch","attachedTo":{},"route":{},"style":{}}],
+  "zvt": [{"id":"uuid-zvt","branchId":"uuid-branch","data":{},"connection":{},"integration":{}}],
+  "annotations": [],
+  "notesBlocks": [],
+  "notesGeometries": [],
+  "specificationTables": [],
+  "attachments": [{"id":"uuid-attachment","file":{"id":"uuid-file"}}],
+  "settings": {"zvtSettings":{}}
+}
+
+Поля з фотографій зберігати без втрати:
+- node: id, type, position, data, fill, stroke, strokeWidth, розміри;
+- edge: attached anchors, route vertices, pathHandles, segmentsMeta, endcaps;
+- zvtBranch: attachedTo, route, initialRoot, manualVertices, style;
+- zvt: data, functionSigns, recipients, chainOrder, branchTap,
+  integration.catalog, integration.telemetry, signal, style;
+- annotations: attachedTo, position, style, computed offsets (за потреби);
+- notesBlocks, notesGeometries, specificationTables, attachments;
+- sheet, sheetSize, grid, viewport, налаштування редактора.
+
+Рекомендація: viewport (особистий zoom/pan) можна зберігати окремо як
+USER_SCHEME_VIEW(user_id, scheme_id, viewport_json CLOB IS JSON), щоб
+перегляд одного користувача не створював нову версію всієї схеми.
+
+5. ВЕРСІОНУВАННЯ ТА ЗБЕРЕЖЕННЯ
+==============================
+- SCHEME_VERSION — незмінна опублікована ревізія або чернетка з optimistic locking.
+- Додати revision_no NUMBER та state VARCHAR2(20) (DRAFT/PUBLISHED/ARCHIVED).
+- На POST /api/schemes/:id/versions/:versionId/save передавати revision_no.
+- Перевіряти JSON Schema, UUID, типи, зв'язки, розміри, заборонені поля.
+- В одній транзакції: запис snapshot, перебудова/оновлення проєкцій,
+  інкремент revision_no; COMMIT тільки після всіх перевірок.
+- При конфлікті revision_no повертати HTTP 409, а не перезаписувати чужі зміни.
+- Опубліковані версії не редагувати; створювати наступну версію.
+- При дуже великих документах застосувати CLOB із SecureFiles LOB,
+  а не розбиття JSON на рядки за замовчуванням.
+- Розбивати на чанки лише за виміряної потреби (наприклад, надвеликі
+  документи або окрема стратегія object storage), з chunk_index, checksum,
+  content_length та атомарною збіркою.
+
+6. ORACLE 21c — ПРИКЛАД DDL (АДАПТУВАТИ ТИПИ FK ДО НАЯВНОЇ СХЕМИ)
+==================================================================
+CREATE TABLE scheme_document (
+  scheme_version_id VARCHAR2(36) PRIMARY KEY,
+  schema_version NUMBER(6) DEFAULT 1 NOT NULL,
+  document_json CLOB NOT NULL,
+  content_sha256 VARCHAR2(64) NOT NULL,
+  created_at TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT fk_doc_ver FOREIGN KEY (scheme_version_id) REFERENCES scheme_version(id),
+  CONSTRAINT ck_doc_json CHECK (document_json IS JSON)
+) LOB (document_json) STORE AS SECUREFILE (COMPRESS MEDIUM);
+
+CREATE TABLE scheme_object (
+  scheme_version_id VARCHAR2(36) NOT NULL,
+  object_id VARCHAR2(36) NOT NULL,
+  object_type VARCHAR2(40) NOT NULL,
+  object_subtype VARCHAR2(80),
+  label VARCHAR2(500),
+  external_object_id VARCHAR2(128),
+  searchable_text VARCHAR2(2000),
+  parent_object_id VARCHAR2(36),
+  is_deleted NUMBER(1) DEFAULT 0 NOT NULL,
+  CONSTRAINT pk_scheme_object PRIMARY KEY (scheme_version_id,object_id),
+  CONSTRAINT fk_obj_ver FOREIGN KEY (scheme_version_id) REFERENCES scheme_version(id),
+  CONSTRAINT fk_obj_parent FOREIGN KEY (scheme_version_id,parent_object_id)
+    REFERENCES scheme_object(scheme_version_id,object_id),
+  CONSTRAINT ck_obj_deleted CHECK (is_deleted IN (0,1))
+);
+CREATE INDEX ix_obj_external ON scheme_object(external_object_id,object_type);
+CREATE INDEX ix_obj_type ON scheme_object(scheme_version_id,object_type);
+
+CREATE TABLE scheme_object_link (
+  link_id VARCHAR2(36) PRIMARY KEY,
+  scheme_version_id VARCHAR2(36) NOT NULL,
+  source_object_id VARCHAR2(36) NOT NULL,
+  target_object_id VARCHAR2(36) NOT NULL,
+  link_type VARCHAR2(40) NOT NULL,
+  source_anchor VARCHAR2(80),
+  target_anchor VARCHAR2(80),
+  segment_id VARCHAR2(100),
+  CONSTRAINT fk_link_src FOREIGN KEY (scheme_version_id,source_object_id)
+    REFERENCES scheme_object(scheme_version_id,object_id),
+  CONSTRAINT fk_link_dst FOREIGN KEY (scheme_version_id,target_object_id)
+    REFERENCES scheme_object(scheme_version_id,object_id)
+);
+CREATE INDEX ix_link_target ON scheme_object_link(scheme_version_id,target_object_id);
+CREATE INDEX ix_link_source ON scheme_object_link(scheme_version_id,source_object_id);
+
+-- Примітка: DDL приклад не є повною міграцією. Перед запуском перевірити
+-- типи PK scheme_version.id, обмеження, наявність SecureFiles та ліцензування
+-- опцій компресії. Без дозволеної компресії прибрати COMPRESS MEDIUM.
+
+7. ПОШУК І ПЕРЕХОДИ
+===================
+Пошук за кодом обладнання:
+SELECT s.id, s.name, o.object_id, v.id AS version_id
+FROM scheme_object o
+JOIN scheme_version v ON v.id = o.scheme_version_id
+JOIN scheme s ON s.id = v.scheme_id
+WHERE o.external_object_id = :equipment_id
+  AND v.is_stable = 1 AND NVL(v.is_archived,0) = 0;
+
+Для переходу:
+  /albums/{albumId}/schemes/{schemeId}?objectId={objectId}
+Backend перевіряє права на цільовий альбом/схему, знаходить актуальну
+дозволену версію, перевіряє існування objectId, повертає snapshot;
+frontend відкриває схему і центрує Konva на об'єкті.
+Не включати storageKey чи filesystem path до публічних URL.
+
+8. ІНДЕКСИ ТА МАСШТАБУВАННЯ
+===========================
+- Індекс (scheme_id, version_number) UNIQUE на scheme_version.
+- Індекс (album_id, version_number) UNIQUE на album_version.
+- Індекси за external_object_id, unit_id, object_type, target_scheme_id.
+- Пошук за вільним текстом: Oracle Text або окремий пошуковий сервіс;
+  не виконувати масовий LIKE по CLOB.
+- JSON Search Index створювати тільки якщо реально потрібні запити
+  до вкладених полів snapshot; інакше достатньо реляційних проєкцій.
+- Великі версії: snapshot кешувати за (schemeVersionId, content_sha256).
+- Файли дедуплікувати за checksum, але перевіряти права при кожному доступі.
+- Додати аудит: scheme_audit(id,scheme_id,version_id,actor_id,action,at,details_json).
+- Архівація/видалення: soft-delete на бізнес-рівні; retention політика
+  для snapshot і файлів; каскадне фізичне видалення лише керовано.
+
+9. API / NEXT.JS
+================
+GET  /api/schemes/:schemeId                  -- метадані та дозволені версії
+GET  /api/schemes/:schemeId/versions/:id     -- повний JSON
+PUT  /api/schemes/:schemeId/versions/:id     -- збереження чернетки + revision
+POST /api/schemes/:schemeId/versions         -- створення версії
+POST /api/schemes/:schemeId/publish          -- атомарна публікація
+GET  /api/search/schemes?q=...              -- пошук по проєкціях
+GET  /api/objects/:externalId/occurrences   -- де використаний об'єкт
+GET  /api/schemes/:schemeId/links            -- міжсхемні переходи
+GET  /api/assets/:assetId                    -- авторизована видача файла
+
+Сервер є єдиною межею доступу до Oracle. Перевіряти RBAC за підрозділом,
+типом схеми, роллю reader/editor та доступом до альбому на кожному endpoint.
+Не покладатися на фільтрацію тільки у React.
+
+10. ПЛАН ВПРОВАДЖЕННЯ
+=====================
+Етап 1. Узгодити незмінні UUID, типи сутностей, versioning і структуру JSON.
+Етап 2. Створити scheme_document, scheme_object, scheme_object_link,
+        file_asset, scheme_asset_ref та індекси.
+Етап 3. Реалізувати JSON Schema validator + projector (JSON -> SQL).
+Етап 4. Реалізувати транзакційне збереження і optimistic locking.
+Етап 5. Реалізувати пошук та cross-links з переходами до об'єктів.
+Етап 6. Додати RBAC, аудит, моніторинг, міграції JSON Schema.
+Етап 7. Навантажувальні тести на тисячах схем і сотнях тисяч елементів.
+
+КРИТИЧНІ РІШЕННЯ
+================
+1. JSON — повний візуальний стан; SQL — лише пошукові/бізнес-проєкції.
+2. Не допускати незалежного редагування SQL-проєкцій і JSON.
+3. Cross-link повинен використовувати стабільний schemeId/objectId.
+4. При створенні версії схеми objectId не змінюється для того самого об'єкта.
+5. Зберігати цілісний CLOB; чанки — тільки за виміряної необхідності.
+6. Не дублювати фізичні файли всередині JSON; зберігати fileId.
+7. Врахувати, що альбомна версія і версія схеми — різні життєві цикли.
+8. Перш ніж застосовувати DDL, перевірити реальні PK/FK та існуючі дані.

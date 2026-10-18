@@ -1,0 +1,789 @@
+ORACLE 21c + NEXT.JS/KONVA: SQL ТА ІНТЕГРАЦІЯ ІЗ ЧИННИМ API
+Версія 1.0 | Практичні приклади | UTF-8
+
+0. ПЕРЕД ПОЧАТКОМ
+
+Цей документ орієнтований на вже створений DDL з попереднього файлу:
+SCHEME_DOCUMENT, SCHEME_OBJECT, SCHEME_OBJECT_LINK,
+SCHEME_OBJECT_IDENTITY, SCHEME_CROSS_LINK, SCHEME_OBJECT_ATTRIBUTE,
+FILE_ASSET, SCHEME_ASSET_REF, ALBUM_VERSION_SCHEME, USER_SCHEME_VIEW,
+SCHEME_AUDIT.
+
+Існуючі таблиці зі скриншотів: ETLS.ALBUM, ETLS.ALBUM_VERSION,
+ETLS.SCHEME, ETLS.SCHEME_VERSION. На фото код викликає
+OracleDBManager.query(dbName, sql, params), а dbName = req.locals.dbName.
+
+ВАЖЛИВО: попередній DDL містить посилання на SCHEME, SCHEME_VERSION,
+ALBUM_VERSION без префікса ETLS. Припускається, що DDL виконується
+під ETLS (або налаштовано synonyms/права). У прикладах нижче
+використано ETLS.*. Якщо нові таблиці створені в іншій схемі,
+змініть префікси відповідно.
+
+Необхідно перевірити реальні типи колонок і ключів, особливо ID.
+У скриншотах не видно типів, тому VARCHAR2(36) є припущенням.
+
+-- SQL: перевірка наявних колонок
+SELECT owner, table_name, column_name, data_type, data_length, nullable
+FROM all_tab_columns
+WHERE owner = 'ETLS'
+  AND table_name IN ('ALBUM','ALBUM_VERSION','SCHEME','SCHEME_VERSION',
+                     'SCHEME_DOCUMENT','SCHEME_OBJECT')
+ORDER BY table_name, column_id;
+
+ПРИМІТКА: у поточній SCHEME немає окремих DEPART_ID і UNIT_ID.
+Поки відділ/підрозділ можна отримувати через альбом:
+SCHEME -> ALBUM_VERSION -> ALBUM -> (DEPART_ID, UNIT_ID).
+Якщо схема може належати іншому відділу, ніж альбом, додайте
+SCHEME.DEPART_ID і SCHEME.UNIT_ID окремою погодженою міграцією.
+
+РЕКОМЕНДОВАНІ ПРАВИЛА:
+- JSON документа — єдине джерело геометрії, стилів і налаштувань.
+- SCHEME_OBJECT — пошукова проєкція, НЕ друга повна копія JSON.
+- Кожна редакція зберігається за SCHEME_VERSION.ID.
+- Усі INSERT/UPDATE/DELETE одного збереження — ОДНА транзакція.
+- Зберігаємо UUID без перевипуску ID при кожному редагуванні.
+- Зовнішні файли — у сховищі; в БД тільки метадані/посилання.
+- SQL bind-параметри завжди використовувати замість конкатенації.
+
+1. ЯКИЙ JSON ВІДПРАВЛЯТИ З NEXT.JS
+
+Приклад структури тіла запиту (поля можна адаптувати до state):
+
+{
+  "schemeId": "uuid-схеми",
+  "schemeVersionId": "uuid-версії",
+  "expectedRevision": 3,
+  "metadata": {
+    "name": "Схема технологічна",
+    "description": "Опис",
+    "format": "A3",
+    "pageNumber": 1,
+    "system": "ОВ",
+    "shifr": "A-001",
+    "templateId": null
+  },
+  "document": {
+    "schemaVersion": 1,
+    "sheet": { "format": "A3", "orientation": "landscape" },
+    "sheetSize": { "width": 1680, "height": 1188 },
+    "grid": { "visible": true, "size": 40, "subDiv": 4 },
+    "nodes": [], "edges": [], "zvtBranch": [], "zvt": [],
+    "annotations": [], "notesBlocks": [],
+    "specificationTables": [], "attachments": [],
+    "zvtSettings": {}
+  }
+}
+
+Масиви можуть бути великими; сервер перевіряє форму документа,
+розміри, UUID, права доступу і посилання на існуючі об'єкти.
+Не довіряйте значенням unitId/userId, переданим браузером.
+
+2. СТВОРЕННЯ БАЗОВОГО ЗАПИСУ SCHEME
+
+За скриншотами SCHEME має ID, NAME, ALBUM_VERSION_ID,
+DESCRIPTION, FORMAT, PAGE_NUMBER, SYSTEM, SHIFR, STATUS_ID, TEMPLATE_ID.
+
+SQL:
+INSERT INTO ETLS.SCHEME
+ (ID, NAME, ALBUM_VERSION_ID, DESCRIPTION, FORMAT,
+  PAGE_NUMBER, SYSTEM, SHIFR, STATUS_ID, TEMPLATE_ID)
+VALUES
+ (:schemeId, :name, :albumVersionId, :description, :format,
+  :pageNumber, :system, :shifr, :statusId, :templateId);
+
+Створення першої версії (поля згідно зі скриншотом):
+INSERT INTO ETLS.SCHEME_VERSION
+ (ID, SCHEME_ID, VERSION_NUMBER, IS_STABLE, IS_ARCHIVED,
+  CREATED_AT, UPDATED_AT, CREATED_BY, UPDATED_BY, VERSION_COMMENT)
+VALUES
+ (:versionId, :schemeId, 1, 0, 0,
+  SYSTIMESTAMP, SYSTIMESTAMP, :userId, :userId, 'Initial draft');
+
+Якщо CREATED_AT/UPDATED_AT мають тип DATE, SYSTIMESTAMP Oracle
+може привести до DATE із втратою дробових секунд/зони; перевірте DDL.
+
+JS (фрагмент у транзакції, див. розділ 9):
+
+const schemeId = crypto.randomUUID();
+const versionId = crypto.randomUUID();
+await connection.execute(insertSchemeSql, {
+  schemeId, name, albumVersionId, description, format,
+  pageNumber, system, shifr, statusId, templateId
+});
+await connection.execute(insertVersionSql, {
+  versionId, schemeId, userId
+});
+
+ВАЖЛИВО: не створюйте версію окремою транзакцією від схеми.
+
+3. ЗМІНА МЕТАДАНИХ СХЕМИ (БЕЗ ПЕРЕЗАПИСУ JSON)
+
+UPDATE ETLS.SCHEME
+SET NAME = :name,
+    DESCRIPTION = :description,
+    FORMAT = :format,
+    PAGE_NUMBER = :pageNumber,
+    SYSTEM = :system,
+    SHIFR = :shifr,
+    TEMPLATE_ID = :templateId
+WHERE ID = :schemeId;
+
+Далі перевірити rowsAffected === 1.
+STATUS_ID змінюйте окремою авторизованою операцією статусу.
+
+Отримати відділ і підрозділ через альбом:
+SELECT s.ID, s.NAME, s.FORMAT, s.PAGE_NUMBER,
+       a.DEPART_ID, a.UNIT_ID, av.ID AS ALBUM_VERSION_ID
+FROM ETLS.SCHEME s
+JOIN ETLS.ALBUM_VERSION av ON av.ID = s.ALBUM_VERSION_ID
+JOIN ETLS.ALBUM a ON a.ID = av.ALBUM_ID
+WHERE s.ID = :schemeId;
+
+Якщо застосовується ALBUM_VERSION_SCHEME, це альтернативна
+модель членства. Не підтримуйте одночасно два джерела істини.
+
+4. ЗБЕРЕЖЕННЯ ПОВНОГО JSON-ЗНІМКА В CLOB
+
+INSERT (перше збереження версії):
+INSERT INTO ETLS.SCHEME_DOCUMENT
+ (SCHEME_VERSION_ID, SCHEMA_VERSION, DOCUMENT_JSON,
+  CONTENT_SHA256, DOCUMENT_BYTES, REVISION_NO)
+VALUES
+ (:versionId, :schemaVersion, :documentJson,
+  :sha256, :documentBytes, 1);
+
+UPDATE (оптимістичне блокування):
+UPDATE ETLS.SCHEME_DOCUMENT
+SET DOCUMENT_JSON = :documentJson,
+    SCHEMA_VERSION = :schemaVersion,
+    CONTENT_SHA256 = :sha256,
+    DOCUMENT_BYTES = :documentBytes,
+    REVISION_NO = REVISION_NO + 1,
+    UPDATED_AT = SYSTIMESTAMP
+WHERE SCHEME_VERSION_ID = :versionId
+  AND REVISION_NO = :expectedRevision;
+
+Якщо rowsAffected === 0: або версія відсутня, або конфлікт
+редакцій; поверніть HTTP 409 (після окремої перевірки існування).
+Для опублікованої версії оновлення заборонене.
+
+JS: формування CLOB-bind (node-oracledb):
+
+const oracledb = require('oracledb');
+const crypto = require('node:crypto');
+const documentJson = JSON.stringify(document);
+const sha256 = crypto.createHash('sha256')
+  .update(documentJson, 'utf8').digest('hex');
+const documentBytes = Buffer.byteLength(documentJson, 'utf8');
+
+const binds = {
+  versionId,
+  schemaVersion: document.schemaVersion ?? 1,
+  documentJson: { val: documentJson, type: oracledb.CLOB, dir: oracledb.BIND_IN },
+  sha256,
+  documentBytes,
+  expectedRevision
+};
+const result = await connection.execute(updateDocumentSql, binds);
+if (result.rowsAffected !== 1) {
+  const error = new Error('Revision conflict or missing document');
+  error.status = 409;
+  throw error;
+}
+
+Один CLOB для документа — нормальний вибір. Не розбивайте
+на шматки без реальної потреби. Якщо колись знадобиться chunking,
+потрібні окрема таблиця, номер частини, хеш і атомарне складання.
+
+5. ЯК ПЕРЕКЛАСТИ ОБ'ЄКТИ JSON У SCHEME_OBJECT
+
+Рекомендоване відображення:
+JSON nodes[]                -> OBJECT_TYPE = 'node'
+JSON edges[]                -> OBJECT_TYPE = 'edge'
+JSON zvt[]                  -> OBJECT_TYPE = 'zvt'
+JSON zvtBranch[]            -> OBJECT_TYPE = 'zvtBranch'
+JSON annotations[]          -> OBJECT_TYPE = 'annotation'
+JSON notesBlocks[]          -> OBJECT_TYPE = 'notesBlock'
+JSON specificationTables[]  -> OBJECT_TYPE = 'specificationTable'
+JSON attachments[]          -> OBJECT_TYPE = 'attachment'
+
+Поля геометрії, стилів, точок маршруту, recipient, signal,
+параметрів зображення НЕ дублювати в таблиці SCHEME_OBJECT.
+Для швидкого пошуку використовувати LABEL, EXTERNAL_OBJECT_ID,
+SEARCHABLE_TEXT та вибіркові атрибути.
+
+INSERT:
+INSERT INTO ETLS.SCHEME_OBJECT
+ (SCHEME_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE,
+  LABEL, EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT,
+  PARENT_OBJECT_ID, IS_DELETED)
+VALUES
+ (:versionId, :objectId, :objectType, :objectSubtype,
+  :label, :externalObjectId, :unitId, :searchableText,
+  :parentObjectId, 0);
+
+Простий JS-проєктор:
+
+function extractObjects(doc, versionId) {
+  const types = [
+    ['nodes', 'node'], ['edges', 'edge'], ['zvt', 'zvt'],
+    ['zvtBranch', 'zvtBranch'], ['annotations', 'annotation'],
+    ['notesBlocks', 'notesBlock'],
+    ['specificationTables', 'specificationTable'],
+    ['attachments', 'attachment']
+  ];
+  return types.flatMap(([key, objectType]) =>
+    (Array.isArray(doc[key]) ? doc[key] : []).map(item => {
+      if (typeof item.id !== 'string' || !item.id) {
+        throw new Error(`Missing id in ${key}`);
+      }
+      const data = item.data || {};
+      return {
+        versionId,
+        objectId: item.id,
+        objectType,
+        objectSubtype: item.type || item.kind || null,
+        label: String(item.title || item.name || data.name || '').slice(0, 500) || null,
+        externalObjectId: data.externalId || item.integration?.catalog?.equipmentId || null,
+        unitId: null, // визначати на сервері з прав/довідників
+        searchableText: String([
+          item.title, item.name, data.parameter, data.installPlace,
+          data.comment, item.text
+        ].filter(Boolean).join(' ')).slice(0, 2000) || null,
+        parentObjectId: null, // заповнюється окремо за перевіреним parent ID
+        isDeleted: 0
+      };
+    })
+  );
+}
+
+Важливо: JSON на скриншотах іноді має ID типу
+'zvt_1792131569211_n8vtyxxv2' (не UUID). У попередньому DDL
+SCHEME_OBJECT.OBJECT_ID = VARCHAR2(36), а SCHEME_OBJECT_IDENTITY
+теж VARCHAR2(36). Перевірте фактичну максимальну довжину всіх ID:
+за потреби збільште до VARCHAR2(128) У ВСІХ відповідних FK/PK
+до міграції даних, або нормалізуйте ідентифікатори в застосунку.
+Наведений projector припускає, що ID поміщаються у колонки.
+
+6. ЯК ЗБЕРІГАТИ EDGES, ZVT, BRANCH І ЇХНІ ЗВ'ЯЗКИ
+
+Кожен edge, zvt, branch уже є записом SCHEME_OBJECT.
+Додатково створюємо SCHEME_OBJECT_LINK для логічних відносин.
+
+Приклади:
+edge -> node: LINK_TYPE='edge_start' / 'edge_end'
+zvt -> zvtBranch: LINK_TYPE='zvt_on_branch'
+zvtBranch -> node: LINK_TYPE='branch_attached_to_node'
+zvtBranch -> edge: LINK_TYPE='branch_attached_to_edge'
+annotation -> node: LINK_TYPE='annotation_of'
+
+SQL:
+INSERT INTO ETLS.SCHEME_OBJECT_LINK
+ (LINK_ID, SCHEME_VERSION_ID, SOURCE_OBJECT_ID,
+  TARGET_OBJECT_ID, LINK_TYPE, SOURCE_ANCHOR, TARGET_ANCHOR, SEGMENT_ID)
+VALUES
+ (:linkId, :versionId, :sourceObjectId,
+  :targetObjectId, :linkType, :sourceAnchor, :targetAnchor, :segmentId);
+
+JS: зв'язки ZVT -> branch:
+
+function extractZvtLinks(doc, versionId) {
+  return (doc.zvt || []).filter(z => z.branchId).map(z => ({
+    linkId: crypto.randomUUID(), versionId,
+    sourceObjectId: z.id, targetObjectId: z.branchId,
+    linkType: 'zvt_on_branch',
+    sourceAnchor: null, targetAnchor: null,
+    segmentId: z.attachedTo?.segmentId == null
+      ? null : String(z.attachedTo.segmentId)
+  }));
+}
+
+JS: branch -> node/edge:
+
+function extractBranchLinks(doc, versionId) {
+  return (doc.zvtBranch || [])
+    .filter(b => b.attachedTo?.id && ['node', 'edge'].includes(b.attachedTo.type))
+    .map(b => ({
+      linkId: crypto.randomUUID(), versionId,
+      sourceObjectId: b.id,
+      targetObjectId: b.attachedTo.id,
+      linkType: b.attachedTo.type === 'node'
+        ? 'branch_attached_to_node' : 'branch_attached_to_edge',
+      sourceAnchor: null, targetAnchor: b.attachedTo.side || null,
+      segmentId: b.attachedTo.segmentId == null
+        ? null : String(b.attachedTo.segmentId)
+    }));
+}
+
+JS: edge -> nodes:
+
+function extractEdgeLinks(doc, versionId) {
+  return (doc.edges || []).flatMap(edge => {
+    const out = [];
+    for (const endpoint of ['start', 'end']) {
+      const attached = edge[endpoint]?.attached;
+      if (attached?.nodeId) out.push({
+        linkId: crypto.randomUUID(), versionId,
+        sourceObjectId: edge.id,
+        targetObjectId: attached.nodeId,
+        linkType: endpoint === 'start' ? 'edge_start' : 'edge_end',
+        sourceAnchor: endpoint,
+        targetAnchor: attached.anchor || null,
+        segmentId: null
+      });
+    }
+    return out;
+  });
+}
+
+Усі source/target ID повинні існувати в SCHEME_OBJECT тієї
+самої версії. Перевіряйте це до INSERT. Якщо edge прикріплений
+до іншого edge, додайте відповідний тип зв'язку в projector.
+
+7. SPECIFICATION TABLES І ПРИМІТКИ
+
+Повний список columns[], rows[], styles[] залишається в JSON.
+У SCHEME_OBJECT — один запис на кожну таблицю, наприклад:
+OBJECT_TYPE='specificationTable', LABEL='Специфікація обладнання'.
+
+Якщо потрібно шукати позицію/назву в рядках специфікації,
+є два варіанти:
+A. Легкий: зібрати текст рядків у SEARCHABLE_TEXT (макс. 2000 символів).
+B. Масштабований: створити окрему проєкційну таблицю рядків.
+
+-- ДОДАТКОВИЙ DDL (тільки якщо потрібен пошук по рядках):
+CREATE TABLE ETLS.SCHEME_SPEC_ROW (
+  SCHEME_VERSION_ID VARCHAR2(36) NOT NULL,
+  TABLE_OBJECT_ID VARCHAR2(36) NOT NULL,
+  ROW_ID VARCHAR2(128) NOT NULL,
+  POSITION_CODE VARCHAR2(100),
+  DESIGNATION VARCHAR2(500),
+  ITEM_NAME VARCHAR2(1000),
+  QUANTITY NUMBER,
+  NOTE_TEXT VARCHAR2(2000),
+  CONSTRAINT PK_SCH_SPEC_ROW PRIMARY KEY
+    (SCHEME_VERSION_ID, TABLE_OBJECT_ID, ROW_ID),
+  CONSTRAINT FK_SCH_SPEC_ROW_OBJ FOREIGN KEY
+    (SCHEME_VERSION_ID, TABLE_OBJECT_ID)
+    REFERENCES ETLS.SCHEME_OBJECT(SCHEME_VERSION_ID, OBJECT_ID)
+);
+CREATE INDEX ETLS.IX_SCH_SPEC_NAME ON ETLS.SCHEME_SPEC_ROW(ITEM_NAME);
+CREATE INDEX ETLS.IX_SCH_SPEC_DES ON ETLS.SCHEME_SPEC_ROW(DESIGNATION);
+
+УВАГА: якщо OBJECT_ID збільшено до VARCHAR2(128),
+TABLE_OBJECT_ID також має бути VARCHAR2(128).
+
+SQL вставки рядка:
+INSERT INTO ETLS.SCHEME_SPEC_ROW
+ (SCHEME_VERSION_ID, TABLE_OBJECT_ID, ROW_ID,
+  POSITION_CODE, DESIGNATION, ITEM_NAME, QUANTITY, NOTE_TEXT)
+VALUES
+ (:versionId, :tableObjectId, :rowId,
+  :positionCode, :designation, :itemName, :quantity, :noteText);
+
+Примітки/зноски: OBJECT_TYPE='notesBlock'/'annotation',
+LABEL/SEARCHABLE_TEXT містять короткий текст. Геометрія та стилі
+лишаються в JSON. Для довгого повнотекстового пошуку потрібен
+Oracle Text або окрема текстова проєкція.
+
+8. ФАЙЛИ ТА ВКЛАДЕННЯ
+
+Після завантаження файла у filesystem/object storage:
+INSERT INTO ETLS.FILE_ASSET
+ (ID, ORIGINAL_NAME, MIME_TYPE, BYTE_SIZE,
+  STORAGE_PROVIDER, STORAGE_KEY, SHA256, CREATED_BY)
+VALUES
+ (:assetId, :originalName, :mimeType, :byteSize,
+  :storageProvider, :storageKey, :sha256, :userId);
+
+Прив'язка до attachment/node на конкретній версії:
+INSERT INTO ETLS.SCHEME_ASSET_REF
+ (SCHEME_VERSION_ID, OBJECT_ID, ASSET_ID, USAGE_TYPE)
+VALUES (:versionId, :objectId, :assetId, :usageType);
+
+Не зберігайте previewUrl/downloadUrl як постійне джерело істини:
+генеруйте їх у backend після перевірки доступу.
+Не видаляйте файл фізично, доки є активні посилання з версій.
+
+9. НАЙВАЖЛИВІШЕ: ТРАНЗАКЦІЯ В ІСНУЮЧІЙ СИСТЕМІ
+
+Поточний виклик OracleDBManager.query(dbName, sql, params)
+на скриншоті НЕ доводить, що кілька викликів використовують
+ОДНЕ з'єднання. Якщо кожен query бере нове з'єднання з пулу,
+транзакція між ними НЕ гарантується. Потрібен метод
+OracleDBManager.withTransaction(dbName, async (connection) => ...).
+
+Приклад контракту менеджера (адаптувати до наявного pool registry):
+
+async function withTransaction(dbName, callback) {
+  // getPoolForDbName — ваша чинна функція отримання pool;
+  // НЕ створювати новий pool на кожен запит.
+  const pool = getPoolForDbName(dbName);
+  const connection = await pool.getConnection();
+  try {
+    const value = await callback(connection);
+    await connection.commit();
+    return value;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
+Це шаблон інтеграції, а не готова заміна OracleDBManager:
+невідомо, як саме у вас налаштовані pools, autocommit та outBinds.
+
+Для оновлення повного документа + проєкцій у межах однієї транзакції:
+
+const oracledb = require('oracledb');
+const crypto = require('node:crypto');
+
+async function saveSchemeDocument(dbName, payload) {
+  const { schemeId, schemeVersionId: versionId,
+          expectedRevision, document } = payload;
+  const objects = extractObjects(document, versionId);
+  const links = [
+    ...extractZvtLinks(document, versionId),
+    ...extractBranchLinks(document, versionId),
+    ...extractEdgeLinks(document, versionId)
+  ];
+  const knownIds = new Set(objects.map(x => x.objectId));
+  if (knownIds.size !== objects.length) throw new Error('Duplicate object IDs');
+  for (const l of links) {
+    if (!knownIds.has(l.sourceObjectId) || !knownIds.has(l.targetObjectId))
+      throw new Error('Broken object reference');
+  }
+  const json = JSON.stringify(document);
+  const sha256 = crypto.createHash('sha256').update(json).digest('hex');
+
+  return OracleDBManager.withTransaction(dbName, async connection => {
+    // 1. Перевірити, що versionId належить schemeId і це draft.
+    const version = await connection.execute(`
+      SELECT ID, IS_STABLE, IS_ARCHIVED
+      FROM ETLS.SCHEME_VERSION
+      WHERE ID = :versionId AND SCHEME_ID = :schemeId FOR UPDATE
+    `, { versionId, schemeId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+    if (version.rows.length !== 1) throw Object.assign(new Error('Not found'), {status:404});
+    if (Number(version.rows[0].IS_STABLE) === 1 ||
+        Number(version.rows[0].IS_ARCHIVED) === 1)
+      throw Object.assign(new Error('Immutable version'), {status:409});
+
+    // 2. Перевірка optimistic revision та UPDATE CLOB.
+    const update = await connection.execute(`
+      UPDATE ETLS.SCHEME_DOCUMENT
+      SET DOCUMENT_JSON=:documentJson, SCHEMA_VERSION=:schemaVersion,
+          CONTENT_SHA256=:sha256, DOCUMENT_BYTES=:documentBytes,
+          REVISION_NO=REVISION_NO+1, UPDATED_AT=SYSTIMESTAMP
+      WHERE SCHEME_VERSION_ID=:versionId AND REVISION_NO=:expectedRevision
+    `, {
+      versionId, expectedRevision,
+      schemaVersion: document.schemaVersion ?? 1,
+      documentJson: {val:json, type:oracledb.CLOB, dir:oracledb.BIND_IN},
+      sha256, documentBytes:Buffer.byteLength(json, 'utf8')
+    }, {autoCommit:false});
+    if (update.rowsAffected !== 1)
+      throw Object.assign(new Error('Revision conflict'), {status:409});
+
+    // 3. Очистити дочірні проєкції (якщо застосовуються).
+    // SCHEME_SPEC_ROW — лише якщо ви створили додаткову таблицю.
+    // await connection.execute(`DELETE FROM ETLS.SCHEME_SPEC_ROW
+    //   WHERE SCHEME_VERSION_ID=:versionId`, {versionId});
+    await connection.execute(`DELETE FROM ETLS.SCHEME_ASSET_REF
+      WHERE SCHEME_VERSION_ID=:versionId`, {versionId});
+    await connection.execute(`DELETE FROM ETLS.SCHEME_OBJECT_ATTRIBUTE
+      WHERE SCHEME_VERSION_ID=:versionId`, {versionId});
+    await connection.execute(`DELETE FROM ETLS.SCHEME_OBJECT_LINK
+      WHERE SCHEME_VERSION_ID=:versionId`, {versionId});
+    await connection.execute(`DELETE FROM ETLS.SCHEME_OBJECT
+      WHERE SCHEME_VERSION_ID=:versionId`, {versionId});
+
+    // 4. Стабільні ID для міжсхемних посилань.
+    // Спочатку перевірити, що нові objectId не належать іншій схемі,
+    // потім зареєструвати тільки нові. MERGE окремо на кожен ID.
+    for (const obj of objects) {
+      await connection.execute(`
+        MERGE INTO ETLS.SCHEME_OBJECT_IDENTITY d
+        USING (SELECT :schemeId AS SCHEME_ID, :objectId AS OBJECT_ID FROM dual) s
+        ON (d.SCHEME_ID=s.SCHEME_ID AND d.OBJECT_ID=s.OBJECT_ID)
+        WHEN NOT MATCHED THEN INSERT
+          (SCHEME_ID, OBJECT_ID, FIRST_VERSION_ID)
+        VALUES (s.SCHEME_ID, s.OBJECT_ID, :versionId)
+      `, {schemeId, objectId:obj.objectId, versionId});
+    }
+
+    // 5. Проєкція об'єктів. executeMany() ефективніше за N execute().
+    if (objects.length) {
+      await connection.executeMany(`
+        INSERT INTO ETLS.SCHEME_OBJECT
+         (SCHEME_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE,
+          LABEL, EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT,
+          PARENT_OBJECT_ID, IS_DELETED)
+        VALUES
+         (:versionId,:objectId,:objectType,:objectSubtype,
+          :label,:externalObjectId,:unitId,:searchableText,
+          :parentObjectId,:isDeleted)
+      `, objects, {autoCommit:false});
+    }
+
+    // 6. Логічні зв'язки.
+    if (links.length) {
+      await connection.executeMany(`
+        INSERT INTO ETLS.SCHEME_OBJECT_LINK
+         (LINK_ID,SCHEME_VERSION_ID,SOURCE_OBJECT_ID,TARGET_OBJECT_ID,
+          LINK_TYPE,SOURCE_ANCHOR,TARGET_ANCHOR,SEGMENT_ID)
+        VALUES
+         (:linkId,:versionId,:sourceObjectId,:targetObjectId,
+          :linkType,:sourceAnchor,:targetAnchor,:segmentId)
+      `, links, {autoCommit:false});
+    }
+
+    // 7. Далі тут же вставити SCHEME_SPEC_ROW, SCHEME_ASSET_REF,
+    // SCHEME_OBJECT_ATTRIBUTE (якщо застосовуються).
+    // НЕ виконувати commit до завершення всіх вставок.
+    return {schemeId, versionId, revision:expectedRevision+1,
+            objectCount:objects.length, linkCount:links.length};
+  });
+}
+
+ВАЖЛИВІ УТОЧНЕННЯ ДО ПРИКЛАДУ:
+- У ньому передбачено, що SCHEME_DOCUMENT вже існує.
+  При створенні нової версії спершу виконайте INSERT із розділу 4
+  у тій самій транзакції (або зробіть окремий create workflow).
+- Якщо ви використовуєте SCHEME_SPEC_ROW, його DELETE має йти
+  до видалення SCHEME_OBJECT.
+- Для SCHEME_OBJECT із PARENT_OBJECT_ID потрібно врахувати
+  DEFERRABLE FK і коректне видалення/перезапис батьків.
+- Для великих схем MERGE по одному ID замінити пакетним MERGE.
+- Поля createdBy/updatedBy, access policy, unit membership
+  необхідно брати з авторизованого контексту запиту.
+- Не використовувати autoCommit:true у внутрішніх execute().
+- Список attachment references та атрибутів має будуватись
+  і зберігатись у цій же транзакції, якщо це частина snapshot.
+- Рекомендується заборонити зміну SCHEME_DOCUMENT без
+  відповідної синхронізації пошукових проєкцій.
+
+10. EXPRESS CONTROLLER ЗА ВАШИМ ПАТЕРНОМ
+
+async function updateSchemeSnapshot(req, res, next) {
+  const dbName = req.locals.dbName;
+  const {schemeId, schemeVersionId, expectedRevision, document} = req.body;
+  if (!schemeId || !schemeVersionId ||
+      !Number.isInteger(expectedRevision) || !document)
+    return res.status(400).json({error:'Invalid snapshot payload'});
+
+  try {
+    // ВАЖЛИВО: до виклику перевірити auth, доступ до альбому/схеми,
+    // право editor, розмір payload та валідацію JSON за схемою.
+    const result = await saveSchemeDocument(dbName, {
+      schemeId, schemeVersionId, expectedRevision, document
+    });
+    return res.status(200).json({success:true, ...result});
+  } catch (error) {
+    if (error.status === 404 || error.status === 409)
+      return res.status(error.status).json({success:false,error:error.message});
+    return next(error);
+  }
+}
+
+Маршрут:
+router.put('/schemes/:schemeId/versions/:versionId/document',
+  authenticate, authorizeSchemeEditor, validateSnapshot, (req,res,next) => {
+    req.body.schemeId = req.params.schemeId;
+    req.body.schemeVersionId = req.params.versionId;
+    return updateSchemeSnapshot(req,res,next);
+  });
+
+authenticate / authorizeSchemeEditor / validateSnapshot —
+назви вашого middleware, їх потрібно реалізувати або під'єднати.
+Не довіряти schemeId із body, якщо маршрут містить schemeId.
+
+11. ЗАВАНТАЖЕННЯ СХЕМИ У KONVA
+
+SQL:
+SELECT s.ID AS SCHEME_ID, s.NAME, s.DESCRIPTION, s.FORMAT,
+       s.PAGE_NUMBER, s.SYSTEM, s.SHIFR,
+       v.ID AS VERSION_ID, d.REVISION_NO, d.DOCUMENT_JSON
+FROM ETLS.SCHEME s
+JOIN ETLS.SCHEME_VERSION v ON v.SCHEME_ID=s.ID
+JOIN ETLS.SCHEME_DOCUMENT d ON d.SCHEME_VERSION_ID=v.ID
+WHERE s.ID=:schemeId AND v.ID=:versionId;
+
+JS (для CLOB у node-oracledb):
+
+const result = await connection.execute(sql, {schemeId,versionId}, {
+  outFormat:oracledb.OUT_FORMAT_OBJECT,
+  fetchInfo:{DOCUMENT_JSON:{type:oracledb.STRING}}
+});
+if (!result.rows.length) return res.status(404).json({error:'Not found'});
+const row = result.rows[0];
+const document = JSON.parse(row.DOCUMENT_JSON);
+return res.json({
+  schemeId:row.SCHEME_ID,
+  versionId:row.VERSION_ID,
+  revision:row.REVISION_NO,
+  metadata:{name:row.NAME, description:row.DESCRIPTION,
+            format:row.FORMAT, pageNumber:row.PAGE_NUMBER,
+            system:row.SYSTEM, shifr:row.SHIFR},
+  document
+});
+
+Для дуже великих CLOB краще потокове читання LOB.
+fetchInfo у режимі STRING вимагає достатнього обсягу пам'яті.
+
+Next.js client (скорочено):
+
+async function loadScheme(schemeId, versionId) {
+  const response = await fetch(`/api/schemes/${schemeId}/versions/${versionId}`);
+  if (!response.ok) throw new Error('Failed to load scheme');
+  const data = await response.json();
+  setDocument(data.document); // ваша функція відновлення editor state
+  setRevision(data.revision);
+}
+
+12. ПОШУК ЗВТ, EDGES, SPECIFICATION TABLES
+
+Список усіх ЗВТ поточної версії:
+SELECT o.OBJECT_ID, o.LABEL, o.EXTERNAL_OBJECT_ID,
+       o.SEARCHABLE_TEXT
+FROM ETLS.SCHEME_OBJECT o
+WHERE o.SCHEME_VERSION_ID=:versionId
+  AND o.OBJECT_TYPE='zvt' AND o.IS_DELETED=0
+ORDER BY o.LABEL;
+
+ЗВТ з branch і прикріпленим node/edge:
+SELECT z.OBJECT_ID AS ZVT_ID,
+       b.OBJECT_ID AS BRANCH_ID,
+       root.OBJECT_ID AS ROOT_ID,
+       root.OBJECT_TYPE AS ROOT_TYPE
+FROM ETLS.SCHEME_OBJECT z
+LEFT JOIN ETLS.SCHEME_OBJECT_LINK zb
+  ON zb.SCHEME_VERSION_ID=z.SCHEME_VERSION_ID
+ AND zb.SOURCE_OBJECT_ID=z.OBJECT_ID
+ AND zb.LINK_TYPE='zvt_on_branch'
+LEFT JOIN ETLS.SCHEME_OBJECT b
+  ON b.SCHEME_VERSION_ID=zb.SCHEME_VERSION_ID
+ AND b.OBJECT_ID=zb.TARGET_OBJECT_ID
+LEFT JOIN ETLS.SCHEME_OBJECT_LINK br
+  ON br.SCHEME_VERSION_ID=b.SCHEME_VERSION_ID
+ AND br.SOURCE_OBJECT_ID=b.OBJECT_ID
+ AND br.LINK_TYPE IN ('branch_attached_to_node','branch_attached_to_edge')
+LEFT JOIN ETLS.SCHEME_OBJECT root
+  ON root.SCHEME_VERSION_ID=br.SCHEME_VERSION_ID
+ AND root.OBJECT_ID=br.TARGET_OBJECT_ID
+WHERE z.SCHEME_VERSION_ID=:versionId AND z.OBJECT_TYPE='zvt';
+
+Список edges:
+SELECT OBJECT_ID, OBJECT_SUBTYPE, LABEL
+FROM ETLS.SCHEME_OBJECT
+WHERE SCHEME_VERSION_ID=:versionId AND OBJECT_TYPE='edge';
+
+Список специфікацій:
+SELECT OBJECT_ID, LABEL, SEARCHABLE_TEXT
+FROM ETLS.SCHEME_OBJECT
+WHERE SCHEME_VERSION_ID=:versionId
+  AND OBJECT_TYPE='specificationTable';
+
+Пошук обладнання по всіх стабільних версіях:
+SELECT s.ID AS SCHEME_ID, s.NAME AS SCHEME_NAME,
+       v.ID AS VERSION_ID, o.OBJECT_ID, o.LABEL
+FROM ETLS.SCHEME_OBJECT o
+JOIN ETLS.SCHEME_VERSION v ON v.ID=o.SCHEME_VERSION_ID
+JOIN ETLS.SCHEME s ON s.ID=v.SCHEME_ID
+WHERE o.EXTERNAL_OBJECT_ID=:equipmentId
+  AND v.IS_STABLE=1 AND v.IS_ARCHIVED=0;
+
+Якщо кілька IS_STABLE=1 на одну схему, цей запит поверне
+кілька результатів; потрібно окремо визначити canonical published.
+
+13. МІЖСХЕМНІ ПОСИЛАННЯ І URL
+
+SQL:
+INSERT INTO ETLS.SCHEME_CROSS_LINK
+ (ID,SOURCE_SCHEME_ID,SOURCE_OBJECT_ID,TARGET_SCHEME_ID,
+  TARGET_OBJECT_ID,LINK_KIND,CAPTION,IS_ACTIVE)
+VALUES
+ (:id,:sourceSchemeId,:sourceObjectId,:targetSchemeId,
+  :targetObjectId,:linkKind,:caption,1);
+
+SELECT l.ID, l.TARGET_SCHEME_ID, l.TARGET_OBJECT_ID,
+       l.LINK_KIND, l.CAPTION
+FROM ETLS.SCHEME_CROSS_LINK l
+WHERE l.SOURCE_SCHEME_ID=:schemeId
+  AND l.SOURCE_OBJECT_ID=:objectId
+  AND l.IS_ACTIVE=1;
+
+Backend URL:
+function buildSchemeUrl({albumId, schemeId, objectId}) {
+  const base = `/albums/${encodeURIComponent(albumId)}/schemes/${encodeURIComponent(schemeId)}`;
+  return objectId ? `${base}?objectId=${encodeURIComponent(objectId)}` : base;
+}
+
+TARGET_OBJECT_ID може бути NULL (перехід на схему загалом).
+Не використовуйте абсолютний URL як FK. На рівні API
+обов'язково перевіряти права на цільову схему.
+
+14. ВЕРСІОНУВАННЯ ТА КОПІЮВАННЯ
+
+Рекомендація: при створенні нової версії скопіювати JSON CLOB
+та перебудувати SCHEME_OBJECT і SCHEME_OBJECT_LINK з нього.
+Уникати простого INSERT SELECT для зв'язків, якщо у вас
+генеруються нові LINK_ID, потрібна нова проєкція чи змінився формат.
+
+Новий SCHEME_VERSION.ID -> новий SCHEME_DOCUMENT.SCHEME_VERSION_ID.
+SCHEME_OBJECT.OBJECT_ID залишається стабільним для того самого
+логічного об'єкта між версіями.
+
+Публікація: у транзакції перевірити повноту JSON/проєкцій,
+відсутність конфліктів, права; позначити версію стабільною.
+Якщо дозволено тільки одну published version, забезпечити це
+бізнес-логікою + за можливості індексом/обмеженням після
+аналізу поточних даних.
+
+15. ЯК ПІДКЛЮЧИТИ ДО ВАШОГО ПРОЄКТУ ПОЕТАПНО
+
+Етап 1: створити/перевірити таблиці та реальні типи ID.
+Етап 2: додати withTransaction до OracleDBManager.
+Етап 3: API створення SCHEME + SCHEME_VERSION + SCHEME_DOCUMENT.
+Етап 4: API PUT JSON з optimistic locking.
+Етап 5: extractObjects + extractEdgeLinks + extractBranchLinks + extractZvtLinks.
+Етап 6: додати проєкції специфікацій та вкладень.
+Етап 7: GET документа, пошук по SCHEME_OBJECT.
+Етап 8: SCHEME_CROSS_LINK + навігація URL.
+Етап 9: права доступу, аудит, тести, резервне копіювання.
+
+ТЕСТИ, ЯКІ ОБОВ'ЯЗКОВО ПРОЙТИ:
+- одночасне редагування двома користувачами (409);
+- помилка на INSERT links -> відкат JSON і всіх проєкцій;
+- видалення ZVT, branch, edge і пов'язаних записів;
+- відновлення повного стану після перезавантаження;
+- публікація і незмінність старої версії;
+- перехід на об'єкт в іншій схемі;
+- великий JSON > 32 КБ (CLOB bind);
+- файли PDF/SVG/VSDX і перевірка доступу;
+- пошук по unit/department через альбом;
+- відсутні, дубльовані, довгі або невалідні ID.
+
+16. ВІДОКРЕМЛЕННЯ МЕТАДАНИХ ВІД JSON
+
+Формат/назва/номер сторінки в SCHEME — для каталогу та пошуку.
+Sheet settings у JSON — для точного відновлення Konva.
+Коли користувач змінює формат аркуша, оновіть обидва значення
+В ОДНІЙ транзакції, інакше каталог і редактор розійдуться.
+Для стабільних опублікованих версій подумайте про окремий
+snapshot метаданих версії: SCHEME зараз містить mutable metadata,
+і зміна назви/формату змінюватиме вигляд каталогу для старих версій.
+
+17. ОБМЕЖЕННЯ ПРИКЛАДІВ
+
+Це робочі фрагменти SQL/JS для адаптації, а не plug-and-play
+модуль: без вихідного коду OracleDBManager, точного DDL,
+схеми auth і структури editor state неможливо гарантувати
+сумісність без правок. Приклади не виконувалися проти вашої БД.
+
+Додатково: у попередньому DDL тип SCHEME_OBJECT.OBJECT_ID
+обмежений 36 символами. Перед production перевірте всі ID,
+особливо префіксні та згенеровані з timestamp.
+
+КІНЕЦЬ ДОКУМЕНТА.

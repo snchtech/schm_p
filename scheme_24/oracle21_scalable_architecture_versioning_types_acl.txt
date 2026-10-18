@@ -1,0 +1,694 @@
+АРХІТЕКТУРА РОЗШИРЕННЯ СИСТЕМИ СХЕМ, БУДІВЕЛЬ І ГРАФІЧНИХ ОБ'ЄКТІВ
+Oracle Database 21c + Node.js / Next.js + Konva
+Версійність об'єктів, реєстр алгоритмів, типи документів, доступи, масштабування
+Дата: 19.10.2026
+
+======================================================================
+1. КОРОТКИЙ ВИСНОВОК: ЯКУ АРХІТЕКТУРУ ОБРАТИ
+======================================================================
+
+Рекомендована модель: DOCUMENT + DOCUMENT_VERSION + JSON SNAPSHOT +
+OBJECT IDENTITY + OBJECT REVISION + SEARCH PROJECTION + RELATIONSHIP + ACL.
+
+Зберігати слід:
+- один повний JSON-знімок для конкретної версії документа;
+- окремі реляційні метадані документа, його версії та типу;
+- стабільні ідентифікатори об'єктів (не змінюються після редагування);
+- незмінні ревізії об'єктів, якщо потрібно відстежувати історію;
+- компактні пошукові проєкції з JSON, а не дублювати всі стилі;
+- зв'язки між об'єктами та документами;
+- ролі й дозволи на документи / типи / підрозділи;
+- реєстр алгоритмів рендерингу, їхні версії й параметри.
+
+Важливо: не плутати версію документа, ревізію об'єкта і версію алгоритму.
+Це ТРИ незалежні виміри версійності.
+
+Документ може бути технологічною схемою, будівлею, планом поверху,
+планом приміщення або новим типом, який з'явиться через два роки.
+Усі вони мають спільну базову сутність DOCUMENT; специфічні поля
+розширюються таблицями-розширеннями або JSON-атрибутами.
+
+======================================================================
+2. ЧОМУ ПОТОЧНА ГІБРИДНА МОДЕЛЬ ПРАВИЛЬНА
+======================================================================
+
+2.1. JSON — джерело істини для графічного стану
+
+Konva має швидко відновити nodes, edges, annotations, zvt,
+zvtBranch, specificationTables, notesBlocks, attachments,
+viewport, grid, sheet, styles, anchors, vertices, typography тощо.
+У нормалізованій SQL-моделі кожна зміна форми або стилю призвела б
+до десятків JOIN та постійних ALTER TABLE.
+
+Знімок CLOB з перевіркою IS JSON дає можливість еволюції формату.
+Один CLOB достатній для більшості схем; штучно розбивати JSON
+на шматки зазвичай не потрібно. Для великих файлів — окремі assets.
+
+2.2. SQL — джерело істини для пошукового індексу та бізнес-зв'язків
+
+Наприклад, пошук усіх ЗВТ з equipmentId = 'X', усіх схем конкретного
+підрозділу або усіх переходів між документами повинен працювати
+через індексовані таблиці, без читання кожного JSON.
+
+2.3. Стабільні ID і незмінні ревізії
+
+node.id = UUID існує незалежно від його координат, стилю чи назви.
+Його можна змінювати 100 разів і залишити чинними всі посилання.
+
+2.4. Типи документів без копіювання архітектури
+
+Однакові механізми versioning, ACL, auditing, assets і linking
+використовуються для технологічних схем та будівель.
+
+2.5. Компроміси
+
+Гібридна модель складніша в записі: треба атомарно зберігати JSON
+та його реляційні проєкції. Потрібні міграції JSON schemaVersion,
+контроль конкурентного редагування та автоматичні тести узгодженості.
+Це не «безкоштовна» масштабованість, а керована складність.
+
+======================================================================
+3. ВАЖЛИВЕ УТОЧНЕННЯ ДО ВЖЕ СТВОРЕНИХ ТАБЛИЦЬ
+======================================================================
+
+За попереднім DDL уже існують/плануються:
+SCHEME, SCHEME_VERSION, SCHEME_DOCUMENT, SCHEME_OBJECT,
+SCHEME_OBJECT_IDENTITY, SCHEME_OBJECT_LINK, SCHEME_CROSS_LINK,
+SCHEME_OBJECT_ATTRIBUTE, FILE_ASSET, SCHEME_ASSET_REF.
+
+Не потрібно зараз видаляти або перейменовувати ці таблиці.
+Можна еволюційно додати DOC_TYPE, DOC_RESOURCE, OBJECT_REVISION,
+DOC_VERSION_OBJECT та ACL.
+
+SCHEME залишається фізичною таблицею для метаданих, а DOC_RESOURCE
+стає узагальненою сутністю з 1:1 прив'язкою до SCHEME.
+На другому етапі, після міграції, можна перейти до DOCUMENT
+замість SCHEME; робити це одразу не обов'язково.
+
+ПРИМІТКА ЩОДО SQL: наведені CREATE TABLE — ескіз інкрементальної
+міграції. Типи ID нижче умовно VARCHAR2(36). Перед виконанням
+перевірити ETLS.SCHEME.ID, ETLS.SCHEME_VERSION.ID, ETLS_USERS.ID,
+DICT_UNIT.ID та фактичні імена колонок. Не запускати в production
+без тестування міграції, резервної копії і перевірки FK.
+
+======================================================================
+4. ТИПИ ДОКУМЕНТІВ: СХЕМА, БУДІВЛЯ, ПОВЕРХ, ПРИМІЩЕННЯ
+======================================================================
+
+Рекомендована ієрархія:
+
+DOC_TYPE
+  EQUIPMENT_SCHEME
+  TECHNOLOGY_SCHEME
+  BUILDING
+  FLOOR_PLAN
+  ROOM_PLAN
+  ELECTRICAL_SCHEME
+  CUSTOM
+
+DOC_RESOURCE
+  id (стабільний UUID документа)
+  scheme_id (посилання на чинну SCHEME; на першому етапі 1:1)
+  doc_type_code
+  parent_doc_id (наприклад поверх належить будівлі)
+  owner_unit_id
+  title
+  status_code
+
+DOCUMENT_VERSION — на першому етапі наявна SCHEME_VERSION.
+JSON SNAPSHOT — наявна SCHEME_DOCUMENT.
+
+Рекомендована відмінність між двома відношеннями:
+- parent_doc_id = структурне володіння (поверх у будівлі);
+- DOC_RELATION = семантичний зв'язок (схема обладнання в будівлі,
+  схема А пов'язана зі схемою Б, приміщення містить обладнання).
+
+Не кодувати «будівлю» через назву, unit або формат листа.
+Тип — окремий довідник; правила доступу можуть спиратися на нього.
+
+Приклад DDL (адаптувати схему ETLS за потреби):
+
+CREATE TABLE DOC_TYPE (
+  CODE VARCHAR2(40) PRIMARY KEY,
+  TITLE VARCHAR2(150) NOT NULL,
+  JSON_SCHEMA_VERSION NUMBER(6) DEFAULT 1 NOT NULL,
+  IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
+  CONSTRAINT CK_DOC_TYPE_ACTIVE CHECK (IS_ACTIVE IN (0,1))
+);
+
+INSERT INTO DOC_TYPE(CODE,TITLE) VALUES ('EQUIPMENT_SCHEME','Схема обладнання');
+INSERT INTO DOC_TYPE(CODE,TITLE) VALUES ('BUILDING','Будівля');
+INSERT INTO DOC_TYPE(CODE,TITLE) VALUES ('FLOOR_PLAN','План поверху');
+INSERT INTO DOC_TYPE(CODE,TITLE) VALUES ('ROOM_PLAN','План приміщення');
+
+CREATE TABLE DOC_RESOURCE (
+  ID VARCHAR2(36) PRIMARY KEY,
+  SCHEME_ID VARCHAR2(36) NOT NULL UNIQUE,
+  DOC_TYPE_CODE VARCHAR2(40) NOT NULL,
+  PARENT_DOC_ID VARCHAR2(36),
+  OWNER_UNIT_ID VARCHAR2(36),
+  TITLE VARCHAR2(500) NOT NULL,
+  STATUS_CODE VARCHAR2(30) DEFAULT 'DRAFT' NOT NULL,
+  CREATED_AT TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT FK_DOC_RES_SCHEME FOREIGN KEY(SCHEME_ID) REFERENCES SCHEME(ID),
+  CONSTRAINT FK_DOC_RES_TYPE FOREIGN KEY(DOC_TYPE_CODE) REFERENCES DOC_TYPE(CODE),
+  CONSTRAINT FK_DOC_RES_PARENT FOREIGN KEY(PARENT_DOC_ID) REFERENCES DOC_RESOURCE(ID)
+);
+CREATE INDEX IX_DOC_RES_TYPE_UNIT ON DOC_RESOURCE(DOC_TYPE_CODE,OWNER_UNIT_ID);
+CREATE INDEX IX_DOC_RES_PARENT ON DOC_RESOURCE(PARENT_DOC_ID);
+
+Поля title, owner_unit_id у DOC_RESOURCE є узагальненою проєкцією
+існуючих SCHEME.NAME / ALBUM.UNIT_ID. Треба визначити, де саме
+канонічне джерело метаданих, і синхронізувати їх у транзакції.
+Не підтримувати два незалежні джерела істини назавжди.
+
+CREATE TABLE DOC_RELATION (
+  ID VARCHAR2(36) PRIMARY KEY,
+  SOURCE_DOC_ID VARCHAR2(36) NOT NULL,
+  TARGET_DOC_ID VARCHAR2(36) NOT NULL,
+  RELATION_TYPE VARCHAR2(50) NOT NULL,
+  CONSTRAINT FK_DOC_REL_SRC FOREIGN KEY(SOURCE_DOC_ID) REFERENCES DOC_RESOURCE(ID),
+  CONSTRAINT FK_DOC_REL_DST FOREIGN KEY(TARGET_DOC_ID) REFERENCES DOC_RESOURCE(ID)
+);
+CREATE INDEX IX_DOC_REL_DST ON DOC_RELATION(TARGET_DOC_ID,RELATION_TYPE);
+
+Приклади RELATION_TYPE:
+LOCATED_IN, REPRESENTS, CONNECTS_TO, REFERENCES, DEPENDS_ON.
+
+Не використовувати одну parent_doc_id для всіх видів зв'язків:
+один об'єкт може бути фізично в одній будівлі, але бути пов'язаним
+із багатьма схемами.
+
+======================================================================
+5. ВЕРСІЙНІСТЬ NODE / EDGE / ZVT: ДВА РІВНІ
+======================================================================
+
+Рівень A — DOCUMENT VERSION:
+- кожна версія схеми має повний JSON snapshot;
+- SCHEME_OBJECT уже містить SCHEME_VERSION_ID;
+- цього достатньо для відновлення стану об'єкта у версії документа.
+
+Рівень B — OBJECT REVISION (опціонально, але рекомендовано для
+пошуку змін, аудиту, порівняння та повторного використання):
+- кожен логічний об'єкт має стабільний UUID;
+- кожна зміна суттєвого вмісту створює нову immutable revision;
+- незмінений об'єкт повторно використовує попередню revision;
+- версія документа посилається на конкретні ревізії об'єктів.
+
+Приклад:
+  Node N-1 rev1: x=100, label='Насос'
+  Node N-1 rev2: x=200, label='Насос'
+  Edge E-1 rev1: алгоритм ORTHOGONAL_ELBOW v1
+  Edge E-1 rev2: алгоритм ORTHOGONAL_ELBOW v2
+
+  SCHEME_VERSION V1 -> N-1/rev1, E-1/rev1
+  SCHEME_VERSION V2 -> N-1/rev2, E-1/rev1
+  SCHEME_VERSION V3 -> N-1/rev2, E-1/rev2
+
+Якщо змінилася тільки координата, вона теж входить у JSON ревізії,
+якщо потрібно бачити геометричну історію. Для великих схем це
+може створювати багато записів; можна ревізіонувати лише
+збережені коміти, а не кожне перетягування миші.
+
+DDL (використовує попередню SCHEME_OBJECT_IDENTITY):
+
+CREATE TABLE OBJECT_REVISION (
+  SCHEME_ID VARCHAR2(36) NOT NULL,
+  OBJECT_ID VARCHAR2(36) NOT NULL,
+  REVISION_NO NUMBER(12) NOT NULL,
+  OBJECT_TYPE VARCHAR2(40) NOT NULL,
+  OBJECT_JSON CLOB NOT NULL,
+  CONTENT_SHA256 VARCHAR2(64) NOT NULL,
+  CHANGE_REASON VARCHAR2(500),
+  CREATED_AT TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+  CREATED_BY VARCHAR2(36),
+  CONSTRAINT PK_OBJECT_REV PRIMARY KEY(SCHEME_ID,OBJECT_ID,REVISION_NO),
+  CONSTRAINT FK_OBJECT_REV_ID FOREIGN KEY(SCHEME_ID,OBJECT_ID)
+    REFERENCES SCHEME_OBJECT_IDENTITY(SCHEME_ID,OBJECT_ID),
+  CONSTRAINT CK_OBJECT_REV_JSON CHECK(OBJECT_JSON IS JSON STRICT),
+  CONSTRAINT CK_OBJECT_REV_NO CHECK(REVISION_NO >= 1)
+) LOB(OBJECT_JSON) STORE AS SECUREFILE;
+
+CREATE TABLE DOC_VERSION_OBJECT (
+  SCHEME_VERSION_ID VARCHAR2(36) NOT NULL,
+  SCHEME_ID VARCHAR2(36) NOT NULL,
+  OBJECT_ID VARCHAR2(36) NOT NULL,
+  REVISION_NO NUMBER(12) NOT NULL,
+  CONSTRAINT PK_DOC_VER_OBJ PRIMARY KEY(SCHEME_VERSION_ID,OBJECT_ID),
+  CONSTRAINT FK_DVO_VERSION FOREIGN KEY(SCHEME_VERSION_ID)
+    REFERENCES SCHEME_VERSION(ID),
+  CONSTRAINT FK_DVO_REV FOREIGN KEY(SCHEME_ID,OBJECT_ID,REVISION_NO)
+    REFERENCES OBJECT_REVISION(SCHEME_ID,OBJECT_ID,REVISION_NO)
+);
+CREATE INDEX IX_DVO_REV ON DOC_VERSION_OBJECT(SCHEME_ID,OBJECT_ID,REVISION_NO);
+
+ВАЖЛИВО: FK вище не гарантує, що SCHEME_VERSION_ID належить SCHEME_ID.
+Це треба перевіряти в сервісі або додати composite UNIQUE/FK
+до SCHEME_VERSION(SCHEME_ID,ID) після аналізу чинної структури.
+
+Видалення об'єкта: у новій версії документа немає посилання на
+цей об'єкт; історичні ревізії залишаються. Для явного аудиту
+можна додати TOMBSTONE revision. Не робити каскадне видалення
+історії за звичайної дії Delete в редакторі.
+
+Для відображення версії V2: JSON у SCHEME_DOCUMENT — основний шлях.
+DOC_VERSION_OBJECT потрібна для diff, history, auditing і queries,
+а НЕ для складання Konva-документа по одному node при кожному GET.
+
+======================================================================
+6. РЕЄСТР ФУНКЦІЙ ПОБУДОВИ EDGES / NODES
+======================================================================
+
+Так, довідник алгоритмів — правильна ідея. Але у БД НЕ зберігати
+довільний JavaScript і не виконувати його з БД (ризики безпеки,
+непередбачувана зміна поведінки, складність тестування).
+
+Зберігати в БД:
+- FUNCTION_CODE: ORTHOGONAL_ELBOW, STRAIGHT, ZVT_BRANCH_CHAIN;
+- VERSION_NO: 1, 2, 3;
+- HANDLER_KEY: ключ зареєстрованого TypeScript-обробника;
+- PARAMS_SCHEMA_JSON: схема валідації параметрів;
+- ACTIVE / DEPRECATED.
+
+Реальний код:
+  rendererRegistry['ORTHOGONAL_ELBOW@2'] = renderOrthogonalElbowV2
+
+Edge у JSON:
+{
+  "id":"edge-uuid",
+  "kind":"connector",
+  "renderer":{"code":"ORTHOGONAL_ELBOW","version":2},
+  "route":{"vertices":[...],"sourceAnchor":"top"},
+  "style":{"stroke":"#000000","strokeWidth":2}
+}
+
+Рекомендований DDL:
+
+CREATE TABLE RENDER_FUNCTION (
+  CODE VARCHAR2(80) NOT NULL,
+  VERSION_NO NUMBER(8) NOT NULL,
+  HANDLER_KEY VARCHAR2(160) NOT NULL,
+  APPLIES_TO VARCHAR2(40) NOT NULL,
+  PARAMS_SCHEMA_JSON CLOB,
+  IS_DEPRECATED NUMBER(1) DEFAULT 0 NOT NULL,
+  CONSTRAINT PK_RENDER_FUNC PRIMARY KEY(CODE,VERSION_NO),
+  CONSTRAINT CK_RENDER_FUNC_JSON CHECK(PARAMS_SCHEMA_JSON IS JSON STRICT),
+  CONSTRAINT CK_RENDER_FUNC_DEPR CHECK(IS_DEPRECATED IN (0,1))
+) LOB(PARAMS_SCHEMA_JSON) STORE AS SECUREFILE;
+
+INSERT INTO RENDER_FUNCTION
+(CODE,VERSION_NO,HANDLER_KEY,APPLIES_TO)
+VALUES('ORTHOGONAL_ELBOW',1,'renderOrthogonalElbowV1','edge');
+
+INSERT INTO RENDER_FUNCTION
+(CODE,VERSION_NO,HANDLER_KEY,APPLIES_TO)
+VALUES('ZVT_BRANCH_CHAIN',1,'renderZvtBranchChainV1','zvtBranch');
+
+CREATE TABLE OBJECT_RENDER_REF (
+  SCHEME_VERSION_ID VARCHAR2(36) NOT NULL,
+  OBJECT_ID VARCHAR2(36) NOT NULL,
+  FUNCTION_CODE VARCHAR2(80) NOT NULL,
+  FUNCTION_VERSION NUMBER(8) NOT NULL,
+  CONSTRAINT PK_OBJ_RENDER PRIMARY KEY(SCHEME_VERSION_ID,OBJECT_ID),
+  CONSTRAINT FK_OBJ_RENDER_OBJ FOREIGN KEY(SCHEME_VERSION_ID,OBJECT_ID)
+    REFERENCES SCHEME_OBJECT(SCHEME_VERSION_ID,OBJECT_ID),
+  CONSTRAINT FK_OBJ_RENDER_FUNC FOREIGN KEY(FUNCTION_CODE,FUNCTION_VERSION)
+    REFERENCES RENDER_FUNCTION(CODE,VERSION_NO)
+);
+
+Пошук алгоритму edge:
+SELECT r.FUNCTION_CODE, r.FUNCTION_VERSION, f.HANDLER_KEY
+FROM OBJECT_RENDER_REF r
+JOIN RENDER_FUNCTION f ON f.CODE=r.FUNCTION_CODE
+ AND f.VERSION_NO=r.FUNCTION_VERSION
+WHERE r.SCHEME_VERSION_ID=:versionId AND r.OBJECT_ID=:edgeId;
+
+ВАЖЛИВО: у браузері обробник обирається лише з дозволеного
+статичного registry, а не через eval() або Function().
+
+Щоб старі схеми залишалися стабільними:
+- зберігати renderer.code + renderer.version;
+- не змінювати реалізацію старої версії несумісним способом;
+- нову логіку публікувати під новою версією;
+- зберігати вершини маршруту у JSON як fallback;
+- передбачити migration handler v1 -> v2;
+- перевіряти підтримку версії при відкритті документа.
+
+======================================================================
+7. КОРИСТУВАЧІ, РОЛІ, ПІДРОЗДІЛИ ТА ДОСТУП ДО ТИПІВ
+======================================================================
+
+Наявні ETLS_USERS, ETLS_ROLES, ETLS_USER_ROLES можна використати
+для глобальних ролей. Але роль editor сама по собі не означає,
+що можна редагувати всі схеми. Потрібні контекст і scope.
+
+Модель RBAC + ABAC:
+- роль: reader / editor / administrator / super_administrator;
+- scope: GLOBAL / UNIT / DOC_TYPE / DOCUMENT;
+- permission: READ / EDIT / PUBLISH / DELETE / MANAGE_ACCESS;
+- підрозділ: користувач бачить дозволені документи свого unit;
+- ресурс: точковий дозвіл на конкретний документ;
+- тип: наприклад тільки BUILDING або тільки EQUIPMENT_SCHEME.
+
+Рекомендована політика: DEFAULT DENY.
+Користувач без явного/успадкованого дозволу не бачить документ.
+
+Приклад DDL (USER_ID як VARCHAR2(36) — перевірити фактичний тип):
+
+CREATE TABLE DOC_PERMISSION (
+  CODE VARCHAR2(40) PRIMARY KEY
+);
+INSERT INTO DOC_PERMISSION(CODE) VALUES('READ');
+INSERT INTO DOC_PERMISSION(CODE) VALUES('EDIT');
+INSERT INTO DOC_PERMISSION(CODE) VALUES('PUBLISH');
+INSERT INTO DOC_PERMISSION(CODE) VALUES('DELETE');
+INSERT INTO DOC_PERMISSION(CODE) VALUES('MANAGE_ACCESS');
+
+CREATE TABLE DOC_ACL (
+  ID VARCHAR2(36) PRIMARY KEY,
+  PRINCIPAL_TYPE VARCHAR2(20) NOT NULL,
+  PRINCIPAL_ID VARCHAR2(36) NOT NULL,
+  SCOPE_TYPE VARCHAR2(20) NOT NULL,
+  SCOPE_ID VARCHAR2(36),
+  PERMISSION_CODE VARCHAR2(40) NOT NULL,
+  EFFECT VARCHAR2(10) DEFAULT 'ALLOW' NOT NULL,
+  CONSTRAINT FK_DOC_ACL_PERM FOREIGN KEY(PERMISSION_CODE)
+    REFERENCES DOC_PERMISSION(CODE),
+  CONSTRAINT CK_DOC_ACL_PRINC CHECK(PRINCIPAL_TYPE IN('USER','ROLE','UNIT')),
+  CONSTRAINT CK_DOC_ACL_SCOPE CHECK(SCOPE_TYPE IN('GLOBAL','UNIT','DOC_TYPE','DOCUMENT')),
+  CONSTRAINT CK_DOC_ACL_EFFECT CHECK(EFFECT IN('ALLOW','DENY')),
+  CONSTRAINT CK_DOC_ACL_SCOPE_ID CHECK(
+    (SCOPE_TYPE='GLOBAL' AND SCOPE_ID IS NULL) OR
+    (SCOPE_TYPE<>'GLOBAL' AND SCOPE_ID IS NOT NULL))
+);
+CREATE INDEX IX_DOC_ACL_LOOKUP ON DOC_ACL(PRINCIPAL_TYPE,PRINCIPAL_ID,
+  SCOPE_TYPE,SCOPE_ID,PERMISSION_CODE);
+
+ЗАУВАЖЕННЯ: SCOPE_ID для DOC_TYPE має тип VARCHAR2(36), тому
+коди на кшталт EQUIPMENT_SCHEME поміщаються, але довші коди
+можуть не поміститися. Для production краще SCOPE_KEY VARCHAR2(128)
+або окремі таблиці scope з реальними FK.
+
+Наведена ACL — модель правил, а не готовий security engine.
+Потрібні таблиці членства користувачів у підрозділах,
+прив'язки ролей до scope, правила спадкування, порядок DENY/ALLOW,
+перевірка статусів документів та тестування конфліктів прав.
+
+Приклад бізнес-правил:
+- editor у unit U1 має EDIT для EQUIPMENT_SCHEME свого unit;
+- reader у unit U2 має READ лише для BUILDING свого unit;
+- спеціально призначений user може READ конкретну схему іншого unit;
+- super_administrator має глобальний доступ;
+- administrator може управляти лише користувачами дозволених unit.
+
+Не фільтрувати тільки UI: кожен GET/POST/PATCH/DELETE endpoint
+повинен виконувати серверну авторизацію, включно з доступом до
+файлів, прев'ю та пошуку. Для Oracle можна додатково використати
+VPD/RLS, але не замість перевірок у API.
+
+======================================================================
+8. ЗВ'ЯЗКИ МІЖ РІЗНИМИ СУТНОСТЯМИ
+======================================================================
+
+Приклади:
+BUILDING -> FLOOR_PLAN -> ROOM_PLAN (структурна ієрархія)
+ROOM_PLAN -> EQUIPMENT_SCHEME (семантичний зв'язок)
+NODE обладнання на схемі -> NODE обладнання на плані приміщення
+EDGE -> SCHEME (навігаційний перехід)
+ZVT -> каталог обладнання (зовнішній ID)
+
+Для зв'язку node в одній схемі з node в іншій використовувати
+SCHEME_CROSS_LINK (уже передбачена). Для документ-документ
+використовувати DOC_RELATION.
+
+Не записувати URL як єдине джерело зв'язку. Записувати ID:
+sourceSchemeId, sourceObjectId, targetSchemeId, targetObjectId.
+URL будувати в API з route resolver:
+/albums/:albumId/documents/:docId?objectId=:objectId
+
+Це дозволяє змінити структуру маршрутів без переписування БД.
+При переході потрібно повторно перевірити READ для цільового
+документа, інакше буде витік даних через посилання.
+
+Для фізичних об'єктів, які зустрічаються в багатьох документах,
+краще окрема сутність ASSET/EQUIPMENT_ENTITY зі стабільним ID.
+Тоді node — графічне представлення обладнання, а не саме обладнання.
+
+Приклад:
+  EQUIPMENT_ENTITY id='pump-123'
+  Node A в схемі X -> equipmentId='pump-123'
+  Node B в плані Y -> equipmentId='pump-123'
+
+Пошук усіх представлень обладнання здійснюється через equipmentId.
+
+======================================================================
+9. ЩО ЩЕ ВРАХУВАТИ В БАЗІ ДАНИХ
+======================================================================
+
+1) JSON_SCHEMA_VERSION та міграції документів.
+2) optimistic locking (REVISION_NO / ETag, HTTP 409 при конфлікті).
+3) Незмінність опублікованих версій.
+4) Розмежування DRAFT / PUBLISHED / ARCHIVED.
+5) Аудит хто/коли/що змінив, без збереження паролів або токенів.
+6) Стабільні UUID для об'єктів і документів.
+7) Контроль цілісності edge endpoints / attachedTo / branchId.
+8) Перевірка, що всі referenced IDs існують у цій версії.
+9) Повнотекстовий пошук Oracle Text — коли з'явиться потреба.
+10) Індекси для unit, type, externalId, status, links.
+11) Квоти на JSON, кількість nodes/edges і вкладення.
+12) File assets у файловому/object storage, не inline base64 у JSON.
+13) SHA-256 для файлів і знімків, дедуплікація за потреби.
+14) Контроль доступу до файлів через API/signed URLs.
+15) Перевірка MIME і антивірусне сканування вкладень.
+16) Backups, відновлення і тести міграцій.
+17) Асинхронна побудова пошукових індексів лише якщо допустима
+    eventual consistency; для критичних зв'язків — одна транзакція.
+18) Метрики: розмір JSON, час збереження, кількість об'єктів,
+    latency пошуку, час рендеру, частота конфліктів.
+19) Для дуже великих схем — окремий preview/thumbnail і кеш.
+20) Не зберігати viewport користувача у спільному документі,
+    якщо це персональне налаштування.
+21) Схеми різних підрозділів не повинні ділити доступ лише за URL.
+22) Логічне видалення та retention policy для історії.
+23) Довідник типів об'єктів і дозволених renderer-функцій.
+24) Валідація schemaVersion на backend, не тільки у frontend.
+25) Публікація через перевірений workflow і права PUBLISH.
+
+======================================================================
+10. ПРАВИЛЬНА ПОСЛІДОВНІСТЬ ЗБЕРЕЖЕННЯ
+======================================================================
+
+У Node.js service layer:
+
+BEGIN TRANSACTION
+  1. authenticate + authorize EDIT для документа
+  2. SELECT ... FOR UPDATE для поточної draft-версії
+  3. перевірити expectedRevision проти поточної
+  4. validate JSON (schema, ID, cross references, limits)
+  5. визначити об'єкти, що змінилися за canonical hash
+  6. INSERT OBJECT_REVISION тільки для змінених об'єктів
+  7. UPSERT SCHEME_OBJECT_IDENTITY для нових UUID
+  8. REBUILD SCHEME_OBJECT та пошукові проєкції
+  9. INSERT DOC_VERSION_OBJECT (версія -> ревізії)
+ 10. UPDATE SCHEME_DOCUMENT з JSON та REVISION_NO + 1
+ 11. оновити метадані SCHEME/DOC_RESOURCE, якщо потрібно
+ 12. INSERT SCHEME_AUDIT
+COMMIT
+
+Важливо: якщо SCHEME_VERSION_ID представляє незмінний published
+snapshot, не перезаписувати його. Створювати нову версію.
+Для mutable draft можна оновлювати документ і проєкції, але
+попередні редакції документа, якщо потрібні, мають зберігатися
+окремо як commit/history. Поточна SCHEME_DOCUMENT з PK на
+SCHEME_VERSION_ID зберігає лише один поточний snapshot на версію.
+
+Обережно з порядком вставок: спочатку SCHEME_OBJECT_IDENTITY,
+потім OBJECT_REVISION; SCHEME_OBJECT, потім залежні links/attrs.
+Для перевірки foreign keys, що є DEFERRABLE, використовується
+відкладена перевірка до COMMIT.
+
+======================================================================
+11. КОНТРОЛЬ ВЕРСІЙ ТА КОНКУРЕНТНОГО РЕДАГУВАННЯ
+======================================================================
+
+GET /api/documents/:id:
+  -> document JSON + revisionNo + documentType + permissions
+
+PUT /api/documents/:id/draft:
+  body: { expectedRevision: 17, document: {...} }
+
+SQL-патерн:
+UPDATE SCHEME_DOCUMENT
+SET DOCUMENT_JSON=:jsonClob,
+    CONTENT_SHA256=:sha256,
+    REVISION_NO=REVISION_NO+1,
+    UPDATED_AT=SYSTIMESTAMP
+WHERE SCHEME_VERSION_ID=:versionId
+  AND REVISION_NO=:expectedRevision;
+
+Якщо rowsAffected=0 -> HTTP 409 Conflict або 404, залежно від
+результату окремої перевірки існування/доступу.
+Усі записи об'єктів і знімка мають бути в одній транзакції.
+
+Для immutable published версій PUT заборонений.
+
+======================================================================
+12. ЯК РОЗДІЛИТИ КОД У NEXT.JS / NODE.JS
+======================================================================
+
+src/domain/documents/
+  document-types.ts
+  document-validation.ts
+  document-permissions.ts
+  document-versioning.ts
+
+src/domain/geometry/
+  renderer-registry.ts
+  renderers/orthogonal-elbow-v1.ts
+  renderers/orthogonal-elbow-v2.ts
+  renderers/zvt-branch-chain-v1.ts
+
+src/server/repositories/
+  document.repository.ts
+  document-snapshot.repository.ts
+  object-revision.repository.ts
+  object-projection.repository.ts
+  relationship.repository.ts
+  acl.repository.ts
+
+src/server/services/
+  save-document.service.ts
+  publish-document.service.ts
+  resolve-navigation.service.ts
+  search-documents.service.ts
+
+src/server/db/
+  oracle-manager.ts
+  with-transaction.ts
+
+Критично: OracleDBManager.query(dbName,sql,params) не гарантує
+одну транзакцію, якщо кожен виклик бере нове з'єднання.
+Потрібен withTransaction(dbName, async (connection) => {...}),
+де всі execute виконуються на ОДНОМУ connection і COMMIT один.
+
+Псевдокод:
+
+async function saveDraft(dbName, user, payload) {
+  return OracleDBManager.withTransaction(dbName, async (conn) => {
+    await requirePermission(conn,user,payload.documentId,'EDIT');
+    await lockAndCheckRevision(conn,payload.versionId,payload.expectedRevision);
+    const validated = validateDocument(payload.document);
+    await syncObjectIdentities(conn,validated);
+    await insertChangedObjectRevisions(conn,validated);
+    await rebuildSearchProjections(conn,validated);
+    await updateSnapshot(conn,payload.versionId,validated,payload.expectedRevision);
+    await writeAudit(conn,user,payload.documentId);
+    return { success:true };
+  });
+}
+
+Всі bind variables передавати параметрами, не конкатенувати
+SQL з користувацьким текстом. Для CLOB використовувати підтримуваний
+OracleDB driver binding (тип oracledb.CLOB за необхідності).
+
+======================================================================
+13. ПРИКЛАДИ ПОШУКУ
+======================================================================
+
+A. Всі edges певної версії:
+SELECT OBJECT_ID,LABEL,OBJECT_SUBTYPE
+FROM SCHEME_OBJECT
+WHERE SCHEME_VERSION_ID=:versionId
+  AND OBJECT_TYPE='edge' AND IS_DELETED=0;
+
+B. Всі ЗВТ певної версії:
+SELECT OBJECT_ID,LABEL,EXTERNAL_OBJECT_ID
+FROM SCHEME_OBJECT
+WHERE SCHEME_VERSION_ID=:versionId
+  AND OBJECT_TYPE='zvt' AND IS_DELETED=0;
+
+C. Всі документи типу BUILDING певного unit:
+SELECT ID,SCHEME_ID,TITLE
+FROM DOC_RESOURCE
+WHERE DOC_TYPE_CODE='BUILDING'
+  AND OWNER_UNIT_ID=:unitId;
+
+ВАЖЛИВО: усі запити пошуку повинні доповнюватися серверною
+перевіркою READ / дозволених unit. Наведені SQL без ACL-фільтра
+не можна використовувати напряму в публічному API.
+
+D. Історія ревізій node:
+SELECT REVISION_NO,CREATED_AT,CREATED_BY,CHANGE_REASON
+FROM OBJECT_REVISION
+WHERE SCHEME_ID=:schemeId AND OBJECT_ID=:nodeId
+ORDER BY REVISION_NO DESC;
+
+E. Яку ревізію node використовує конкретна версія:
+SELECT REVISION_NO
+FROM DOC_VERSION_OBJECT
+WHERE SCHEME_VERSION_ID=:versionId AND OBJECT_ID=:nodeId;
+
+======================================================================
+14. ПОЕТАПНА МІГРАЦІЯ БЕЗ ПОЛОМКИ ЧИННОГО ПРОЄКТУ
+======================================================================
+
+Етап 0. Інвентаризація чинних таблиць, FK, типів ID, API і JSON.
+Етап 1. Додати DOC_TYPE + DOC_RESOURCE без зміни чинних SCHEME.
+Етап 2. Додати RENDER_FUNCTION + OBJECT_RENDER_REF.
+Етап 3. Ввести стабільні objectId у всіх типах об'єктів.
+Етап 4. Додати OBJECT_REVISION + DOC_VERSION_OBJECT.
+Етап 5. Додати DOC_RELATION і навігацію між типами документів.
+Етап 6. Запровадити DOC_ACL, серверний permission evaluator.
+Етап 7. Ввести publish workflow та незмінні версії.
+Етап 8. Backfill існуючих даних; dual-read на перехідний період.
+Етап 9. Тести сумісності JSON та renderer versions.
+Етап 10. Прибрати застарілі дублікати лише після міграції.
+
+На кожному етапі: перевірити, що старі альбоми відкриваються,
+редагуються, публікуються і зберігають усі зв'язки.
+
+======================================================================
+15. ТЕСТИ, БЕЗ ЯКИХ НЕ ВАРТО ПЕРЕХОДИТИ У PRODUCTION
+======================================================================
+
+- Node N1 rev1/rev2: старий snapshot відкриває стару геометрію.
+- Edge E1 використовує renderer v1 навіть після появи renderer v2.
+- Відсутній renderer: fallback на збережені route.points.
+- Переміщення node змінює лише потрібні ревізії.
+- Видалений node не зникає зі старих версій документа.
+- При падінні запису link транзакція відкатує і JSON, і проєкції.
+- Два редактори одночасно: один отримує 409 Conflict.
+- User U1 не може читати BUILDING unit U2 без дозволу.
+- User не може відкрити файл з недоступного документа за URL.
+- Перехід по cross-link перевіряє READ цільового документа.
+- Зміна type не порушує історію та ACL.
+- Неправильні attachedTo / branchId / endpoints відхиляються.
+- Великий CLOB завантажується без обрізання й зміни Unicode.
+- Backfill старих схем зберігає UUID та альбомні зв'язки.
+
+======================================================================
+16. ПІДСУМКОВА РЕКОМЕНДАЦІЯ
+======================================================================
+
+НЕ робити окремі незалежні таблиці для кожного графічного типу
+з усіма його стилями, координатами і параметрами: це швидко
+перетвориться на складну, крихку схему БД.
+
+НЕ робити тільки CLOB: тоді важко індексувати обладнання, шукати
+ЗВТ, будувати навігацію, управляти доступами і зв'язками.
+
+РОБИТИ:
+- один універсальний документ із типом;
+- версії документа і незмінні ревізії об'єктів;
+- JSON snapshot для Konva;
+- SQL проєкції для пошуку;
+- довідник версій алгоритмів без зберігання executable JS у БД;
+- окремі зв'язки документів та графічних об'єктів;
+- RBAC+ABAC з перевіркою прав у backend;
+- еволюційну міграцію наявних ALBUM / SCHEME.
+
+Це дає розширюваність без переписування основи, зберігає
+історичну відтворюваність і дозволяє масштабувати пошук,
+авторизацію, рендеринг та нові типи документів незалежно.
+
+КІНЕЦЬ ДОКУМЕНТА
