@@ -1,0 +1,293 @@
+ЕТАП 1. ЗБЕРЕЖЕННЯ JSON SNAPSHOT СХЕМИ В ORACLE 21c
+Next.js + Konva -> існуючий Node.js/Express API -> OracleDBManager/oracledb
+
+1. МЕЖІ ЕТАПУ
+На цьому етапі зберігаємо ТІЛЬКИ повний JSON стан DRAFT у DOC_SNAPSHOT.
+DOC_OBJECT, DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE поки НЕ оновлюємо.
+Отже, SQL-пошук за окремими об'єктами після такого збереження ще НЕ синхронізований.
+Перед публікацією STABLE потрібно реалізувати етап 2: атомарну синхронізацію
+реляційних об'єктів із snapshot (або робити це на кожне збереження).
+Не дозволяйте публікувати DRAFT, поки ця синхронізація не реалізована.
+
+2. ЯКІ ТАБЛИЦІ ВИКОРИСТОВУЄМО
+DOC_RESOURCE(ID, ...)             — постійна схема
+DOC_VERSION(ID,DOC_RESOURCE_ID,STATUS_CODE,...) — DRAFT/STABLE/ARCHIVED
+DOC_SNAPSHOT(DOC_VERSION_ID,SNAPSHOT_JSON,SAVE_REVISION,UPDATED_AT,UPDATED_BY)
+
+У пакеті oracle21_versioned_schema_changes.txt таблиця DOC_SNAPSHOT вже визначена:
+CREATE TABLE DOC_SNAPSHOT (
+ DOC_VERSION_ID VARCHAR2(36) PRIMARY KEY,
+ SNAPSHOT_JSON CLOB NOT NULL,
+ SAVE_REVISION NUMBER(12) DEFAULT 0 NOT NULL,
+ UPDATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ UPDATED_BY VARCHAR2(36),
+ CONSTRAINT FK_DOC_SNAPSHOT_VER FOREIGN KEY(DOC_VERSION_ID) REFERENCES DOC_VERSION(ID),
+ CONSTRAINT CK_DOC_SNAPSHOT_JSON CHECK(SNAPSHOT_JSON IS JSON),
+ CONSTRAINT CK_DOC_SNAPSHOT_REV CHECK(SAVE_REVISION >= 0)
+);
+
+Не створювати таблицю вдруге, якщо вона вже існує.
+Перевірка:
+SELECT table_name FROM user_tables WHERE table_name IN ('DOC_RESOURCE','DOC_VERSION','DOC_SNAPSHOT');
+
+3. JSON-КОНТРАКТ (ПРИКЛАД; АДАПТУВАТИ ПІД РЕАЛЬНИЙ STATE)
+{
+  "schemaVersion": 1,
+  "document": {"docResourceId": "<uuid>", "docVersionId": "<uuid>"},
+  "canvas": {"width": 1587, "height": 1123, "scale": 1, "position": {"x": 0, "y": 0}},
+  "elements": {
+    "nodes": [],
+    "edges": [],
+    "zvt": [],
+    "zvtBranches": [],
+    "annotations": [],
+    "images": []
+  },
+  "specification": [],
+  "settings": {}
+}
+
+Це лише обгортка для прикладу. Ваші реальні назви полів у state зі скріншотів
+не можна відтворити достовірно без актуального коду store/reducer.
+НЕ перейменовувати поля у вже існуючих об'єктах. Потрібно мапити фактичні
+масиви state, включно з координатами, прив'язками, anchor, elbow, ZVT тощо.
+Не серіалізувати Konva Stage, React-компоненти, функції, DOM, кеші, selection,
+hover, undo stack, тимчасові refs, circular references, File/Blob.
+Файли зберігати окремо у FILE_ASSET, в JSON — їх ID/посилання.
+JSON.stringify має успішно завершитися; snapshot повинен бути самодостатнім
+для відновлення графічної схеми. Слід перевірити всі залежності та ID.
+
+4. NEXT.JS: ФУНКЦІЯ ФОРМУВАННЯ SNAPSHOT
+// lib/buildSchemeSnapshot.js
+export function buildSchemeSnapshot(state, docResourceId, docVersionId) {
+  return {
+    schemaVersion: 1,
+    document: { docResourceId, docVersionId },
+    canvas: {
+      width: state.canvasWidth,
+      height: state.canvasHeight,
+      scale: state.scale ?? 1,
+      position: state.stagePosition ?? { x: 0, y: 0 }
+    },
+    elements: {
+      nodes: state.nodes ?? [],
+      edges: state.edges ?? [],
+      zvt: state.zvt ?? [],
+      zvtBranches: state.zvtBranches ?? [],
+      annotations: state.annotations ?? [],
+      images: state.images ?? []
+    },
+    specification: state.specification ?? [],
+    settings: state.schemeSettings ?? {}
+  };
+}
+// !!! ІМЕНА ПОЛІВ state.* — ПРИКЛАД, замінити на фактичні поля вашого store.
+// Для Redux/Zustand отримайте plain serializable state; не кладіть у JSON функції.
+
+5. NEXT.JS: КНОПКА ЗБЕРЕГТИ (КЛІЄНТСЬКИЙ КОМПОНЕНТ)
+// Приклад функції, яку можна викликати в onClick або autosave.
+// apiBaseUrl — URL існуючого API; token — чинний токен/сесія.
+export async function saveScheme({ apiBaseUrl, token, state, docResourceId,
+                                   docVersionId, saveRevision }) {
+  const snapshot = buildSchemeSnapshot(state, docResourceId, docVersionId);
+  const response = await fetch(`${apiBaseUrl}/api/documents/${docResourceId}/draft/snapshot`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({ docVersionId, saveRevision, snapshot })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    if (response.status === 409) throw new Error('Конфлікт версій: перечитайте DRAFT');
+    throw new Error(data.error || 'Помилка збереження');
+  }
+  return data; // {success:true,docVersionId,saveRevision,updatedAt}
+}
+
+// Використання в React:
+// const [saveRevision, setSaveRevision] = useState(initialRevision);
+// const [saving, setSaving] = useState(false);
+// async function handleSave() {
+//   if (saving) return;
+//   setSaving(true);
+//   try {
+//     const result = await saveScheme({ apiBaseUrl, token, state,
+//       docResourceId, docVersionId, saveRevision });
+//     setSaveRevision(result.saveRevision);
+//   } catch (e) { alert(e.message); }
+//   finally { setSaving(false); }
+// }
+// <button disabled={saving} onClick={handleSave}>Зберегти</button>
+// Не допускати паралельних save-запитів; для autosave серіалізувати чергу.
+// Не позначати схему як «збережену», якщо state змінився під час запиту.
+
+6. API: SQL ДЛЯ ОНОВЛЕННЯ SNAPSHOT (ORACLE 21c)
+-- Виконувати в одній транзакції з перевіркою DRAFT і прав користувача.
+-- SELECT DOC_RESOURCE FOR UPDATE серіалізує операції над цим документом.
+SELECT ID FROM DOC_RESOURCE WHERE ID = :docId FOR UPDATE;
+
+SELECT ID, STATUS_CODE
+FROM DOC_VERSION
+WHERE ID = :docVersionId AND DOC_RESOURCE_ID = :docId;
+-- Має бути один рядок зі STATUS_CODE='DRAFT'.
+
+-- Для існуючого DOC_SNAPSHOT:
+UPDATE DOC_SNAPSHOT
+SET SNAPSHOT_JSON = :snapshotJson,
+    SAVE_REVISION = SAVE_REVISION + 1,
+    UPDATED_AT = SYSTIMESTAMP,
+    UPDATED_BY = :userId
+WHERE DOC_VERSION_ID = :docVersionId
+  AND SAVE_REVISION = :expectedRevision;
+-- Якщо rowsAffected=0: або snapshot ще немає, або конфлікт.
+-- Початковий snapshot створюється INSERT нижче при створенні DRAFT.
+
+INSERT INTO DOC_SNAPSHOT
+ (DOC_VERSION_ID, SNAPSHOT_JSON, SAVE_REVISION, UPDATED_BY)
+VALUES
+ (:docVersionId, :snapshotJson, 0, :userId);
+-- Цей INSERT — тільки один раз під час створення DRAFT, не після UPDATE.
+-- Початкове SAVE_REVISION=0, наступний PUT з expectedRevision=0 дає 1.
+
+7. API EXPRESS + NODE-ORACLEDB: ПРАЦЮЮЧИЙ ШАБЛОН
+// routes/docSnapshot.js (ES modules; адаптуйте імпорти)
+import express from 'express';
+import oracledb from 'oracledb';
+const router = express.Router();
+
+// ВАЖЛИВО: dbPoolProvider має повертати pool/connection для req.locals.dbName.
+// Підставте ваш OracleDBManager.getConnection(dbName) або pool.getConnection().
+// Не використовуйте OracleDBManager.query(), якщо він автоматично робить commit
+// або відкриває нове з'єднання на кожен виклик: потрібна ОДНА транзакція.
+export function createDocSnapshotRouter({ getConnection, requireAuth, canEditDocument }) {
+  router.put('/api/documents/:docId/draft/snapshot',
+    requireAuth,
+    express.json({ limit: '25mb' }),
+    async (req, res, next) => {
+      let connection;
+      try {
+        const docId = req.params.docId;
+        const { docVersionId, saveRevision, snapshot } = req.body ?? {};
+        const userId = req.user?.id; // тільки із перевіреної сесії, НЕ req.body
+        if (!docId || !docVersionId || !userId ||
+            !Number.isSafeInteger(saveRevision) || saveRevision < 0 ||
+            !snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+          return res.status(400).json({ error: 'Некоректні дані запиту' });
+        }
+        if (snapshot.document?.docResourceId !== docId ||
+            snapshot.document?.docVersionId !== docVersionId) {
+          return res.status(400).json({ error: 'ID snapshot не збігаються' });
+        }
+        if (!(await canEditDocument({ userId, docId, req }))) {
+          return res.status(403).json({ error: 'Немає права EDIT' });
+        }
+        const json = JSON.stringify(snapshot);
+        if (Buffer.byteLength(json, 'utf8') > 20 * 1024 * 1024) {
+          return res.status(413).json({ error: 'Snapshot завеликий' });
+        }
+        connection = await getConnection(req.locals.dbName);
+        await connection.execute(
+          'SELECT ID FROM DOC_RESOURCE WHERE ID=:docId FOR UPDATE',
+          { docId }
+        );
+        const versionResult = await connection.execute(
+          `SELECT STATUS_CODE FROM DOC_VERSION
+           WHERE ID=:docVersionId AND DOC_RESOURCE_ID=:docId`,
+          { docVersionId, docId },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        if (!versionResult.rows.length) {
+          await connection.rollback();
+          return res.status(404).json({ error: 'Версію не знайдено' });
+        }
+        if (versionResult.rows[0].STATUS_CODE !== 'DRAFT') {
+          await connection.rollback();
+          return res.status(409).json({ error: 'Змінювати можна тільки DRAFT' });
+        }
+        const result = await connection.execute(
+          `UPDATE DOC_SNAPSHOT
+              SET SNAPSHOT_JSON=:snapshotJson,
+                  SAVE_REVISION=SAVE_REVISION+1,
+                  UPDATED_AT=SYSTIMESTAMP,
+                  UPDATED_BY=:userId
+            WHERE DOC_VERSION_ID=:docVersionId
+              AND SAVE_REVISION=:expectedRevision
+            RETURNING SAVE_REVISION,
+                      TO_CHAR(UPDATED_AT,'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM')
+              INTO :newRevision, :updatedAt`,
+          {
+            snapshotJson: { val: json, type: oracledb.CLOB },
+            userId, docVersionId, expectedRevision: saveRevision,
+            newRevision: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
+            updatedAt: { dir: oracledb.BIND_OUT, type: oracledb.STRING, maxSize: 64 }
+          },
+          { autoCommit: false }
+        );
+        if (result.rowsAffected !== 1) {
+          await connection.rollback();
+          return res.status(409).json({ error: 'Snapshot змінений іншою сесією або не ініціалізований' });
+        }
+        await connection.commit();
+        return res.json({ success: true, docVersionId,
+          saveRevision: result.outBinds.newRevision[0],
+          updatedAt: result.outBinds.updatedAt[0] });
+      } catch (error) {
+        if (connection) await connection.rollback().catch(() => {});
+        return next(error);
+      } finally {
+        if (connection) await connection.close();
+      }
+    }
+  );
+  return router;
+}
+
+// Підключення (приклад):
+// app.use(createDocSnapshotRouter({
+//   getConnection: (dbName) => OracleDBManager.getConnection(dbName),
+//   requireAuth: yourAuthMiddleware,
+//   canEditDocument: yourDocumentAuthorizationFunction
+// }));
+// ВАЖЛИВО: requireAuth, canEditDocument, getConnection — інтеграційні функції,
+// їх необхідно реалізувати/підставити зі свого проєкту.
+// Додатково перевірити обмеження часу запиту, розмір JSON та schemaVersion.
+
+8. API: ЧИТАННЯ ЗБЕРЕЖЕНОГО JSON
+SELECT s.SNAPSHOT_JSON, s.SAVE_REVISION, s.UPDATED_AT
+FROM DOC_SNAPSHOT s
+JOIN DOC_VERSION v ON v.ID=s.DOC_VERSION_ID
+WHERE v.DOC_RESOURCE_ID=:docId AND v.ID=:docVersionId;
+-- Обов'язково авторизувати читання: STABLE — READ, DRAFT — EDIT/ADMIN.
+-- node-oracledb: CLOB може прийти як Lob; прочитати stream/використати
+-- fetchAsString для CLOB у контрольованому обсязі.
+-- API повинен повернути snapshot і saveRevision.
+
+9. ІНІЦІАЛІЗАЦІЯ НОВОЇ СХЕМИ
+У транзакції створення DOC_RESOURCE + DOC_VERSION(DRAFT) вставити
+DOC_SNAPSHOT з початковим JSON (навіть якщо елементів поки немає),
+SAVE_REVISION=0. Для редагування STABLE створити нову DOC_VERSION(DRAFT)
+і скопіювати DOC_SNAPSHOT зі STABLE через INSERT INTO ... SELECT,
+замінивши document.docVersionId у JSON на новий ID DRAFT.
+Для цього зручно побудувати новий snapshot в API і вставити CLOB bind,
+а не просто копіювати старий JSON з ID STABLE.
+
+10. ТЕСТ-КЕЙСИ
+[ ] Створити DRAFT та початковий DOC_SNAPSHOT (revision 0).
+[ ] Натиснути Зберегти -> revision 1, JSON відтворює схему.
+[ ] Повторно з revision 1 -> revision 2.
+[ ] Запит зі старим revision 1 -> HTTP 409; дані не перезаписані.
+[ ] Спроба зберегти STABLE -> HTTP 409.
+[ ] Чужий документ -> HTTP 403 (або 404 за політикою безпеки).
+[ ] Пошкоджений JSON -> HTTP 400/Oracle constraint; rollback.
+[ ] Відкрити збережений JSON і перевірити координати, edges, ZVT, branch,
+    інформаційні картки, anchors, специфікацію, формат полотна.
+[ ] 5–20 МБ JSON: виміряти latency, memory, DB CLOB throughput.
+[ ] Два одночасні autosave -> один успішний, другий 409.
+
+11. НАСТУПНИЙ КРОК
+Після отримання реального state (store/reducer + приклад payload) адаптувати
+buildSchemeSnapshot до точних назв полів. Далі — пакетна синхронізація
+DOC_OBJECT/LINK/ATTRIBUTE з цим snapshot в ОДНІЙ транзакції.
+Не можна вважати STABLE повністю індексованою, поки другий етап не виконано.

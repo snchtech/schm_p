@@ -1,0 +1,33 @@
+Чудово, тоді реалізуємо збереження JSON Snapshot безпосередньо із Zustand store → Next.js → Node.js API → Oracle 21c.
+
+Для Zustand важливо отримувати стан через `useSchemeStore.getState()`, а не через `Konva.Stage.toJSON()`, оскільки саме Zustand містить усі дані про `nodes`, `edges`, `ZVT`, `branches`, таблиці специфікацій та їхні налаштування.
+
+Приклад:
+
+```
+const state = useSchemeStore.getState();
+
+const snapshot = {
+  schemaVersion: 1,
+  nodes: state.nodes,
+  edges: state.edges,
+  zvt: state.zvt,
+  branches: state.branches,
+  specifications: state.specifications,
+};
+```
+
+Це лише приклад структури. Фактичні назви полів потрібно взяти з твого store.
+
+Надішли файл Zustand store, де описані початковий стан, масиви об'єктів і методи їх оновлення.
+
+На його основі я підготую в одному TXT-файлі готові фрагменти для інтеграції:
+
+- формування повного JSON Snapshot без втрати налаштувань об'єктів;
+- функцію `saveSchemeSnapshot()` із Zustand;
+- виклик твого API endpoint;
+- SQL `MERGE` або `UPDATE` для `DOC_SNAPSHOT`;
+- обробку `CLOB`, транзакцій та `SAVE_REVISION`;
+- завантаження JSON з Oracle назад у Zustand.
+
+Також врахую, що зберігати дозволено лише DRAFT, а STABLE має залишатися незмінною.

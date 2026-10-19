@@ -1,0 +1,322 @@
+ORACLE 21c — ЗМІНИ ДО oracle21_final_batch_schema.txt
+Версія: 2026-10-19
+Призначення: кожна версія документа (DRAFT/STABLE/ARCHIVED) має власні реляційні об'єкти та JSON.
+
+ВАЖЛИВО
+Це інструкція для РЕДАГУВАННЯ початкового CREATE-скрипту ПЕРЕД запуском у порожній схемі Oracle.
+Не запускати наведені CREATE TABLE як ALTER на існуючій БД. Для вже створених таблиць потрібна окрема міграція з переносом даних.
+Усе, що нижче не позначене для заміни, залишити з оригінального файлу.
+
+1. ОСНОВНА МОДЕЛЬ
+DOC_RESOURCE(ID) — постійна схема/будівля/поверх.
+DOC_VERSION(ID, DOC_RESOURCE_ID, VERSION_NUMBER, STATUS_CODE) — конкретна версія.
+DOC_OBJECT(DOC_VERSION_ID, OBJECT_ID) — вузол/ребро/ЗВТ саме цієї версії.
+DOC_OBJECT_LINK(DOC_VERSION_ID, ...) — зв'язки в межах цієї версії.
+DOC_OBJECT_ATTRIBUTE(DOC_VERSION_ID, OBJECT_ID, ...) — картки саме цієї версії.
+DOC_SNAPSHOT(DOC_VERSION_ID) — повний JSON саме цієї версії.
+STABLE: можна читати, не можна змінювати об'єкти/JSON.
+DRAFT: можна редагувати та пакетно зберігати.
+ARCHIVED: незмінна історія з повними об'єктами та JSON.
+OBJECT_ID зберігається між версіями для логічно того самого об'єкта; новий об'єкт отримує новий OBJECT_ID.
+
+2. ЗАМІНИТИ ДОВІДНИК DICT_DOC_STATUS
+У розділі 01 замінити INSERT для статусів на:
+INSERT INTO DICT_DOC_STATUS VALUES ('DRAFT','Чернетка',NULL);
+INSERT INTO DICT_DOC_STATUS VALUES ('STABLE','Чинна стабільна версія',NULL);
+INSERT INTO DICT_DOC_STATUS VALUES ('ARCHIVED','Історична версія',NULL);
+-- За потреби залишити UNDER_REVIEW/APPROVED, але не змішувати їх зі статусом життєвого циклу.
+
+3. ЗАМІНИТИ CREATE TABLE DOC_VERSION ТА ЙОГО ІНДЕКСИ
+CREATE TABLE DOC_VERSION (
+ ID VARCHAR2(36) DEFAULT LOWER(RAWTOHEX(SYS_GUID())) PRIMARY KEY,
+ DOC_RESOURCE_ID VARCHAR2(36) NOT NULL,
+ VERSION_NUMBER NUMBER(6) NOT NULL,
+ STATUS_CODE VARCHAR2(30) DEFAULT 'DRAFT' NOT NULL,
+ VERSION_COMMENT VARCHAR2(500),
+ BASE_VERSION_ID VARCHAR2(36),
+ CREATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ CREATED_BY VARCHAR2(36) NOT NULL,
+ PUBLISHED_AT TIMESTAMP(6) WITH TIME ZONE,
+ PUBLISHED_BY VARCHAR2(36),
+ CONSTRAINT FK_DOC_VER_RESOURCE FOREIGN KEY(DOC_RESOURCE_ID) REFERENCES DOC_RESOURCE(ID),
+ CONSTRAINT FK_DOC_VER_STATUS FOREIGN KEY(STATUS_CODE) REFERENCES DICT_DOC_STATUS(CODE),
+ CONSTRAINT FK_DOC_VER_BASE FOREIGN KEY(BASE_VERSION_ID) REFERENCES DOC_VERSION(ID),
+ CONSTRAINT UQ_DOC_VER_NUMBER UNIQUE(DOC_RESOURCE_ID,VERSION_NUMBER),
+ CONSTRAINT UQ_DOC_VER_ID_RES UNIQUE(ID,DOC_RESOURCE_ID),
+ CONSTRAINT CK_DOC_VER_STATE CHECK(STATUS_CODE IN ('DRAFT','STABLE','ARCHIVED')),
+ CONSTRAINT CK_DOC_VER_BASE_SELF CHECK(BASE_VERSION_ID IS NULL OR BASE_VERSION_ID <> ID)
+);
+CREATE INDEX IX_DOC_VERSION_LOOKUP ON DOC_VERSION(DOC_RESOURCE_ID,STATUS_CODE);
+CREATE UNIQUE INDEX UQ_DOC_ONE_STABLE ON DOC_VERSION(
+ CASE WHEN STATUS_CODE='STABLE' THEN DOC_RESOURCE_ID END
+);
+CREATE UNIQUE INDEX UQ_DOC_ONE_DRAFT ON DOC_VERSION(
+ CASE WHEN STATUS_CODE='DRAFT' THEN DOC_RESOURCE_ID END
+);
+-- IS_STABLE видалено: один канонічний STATUS_CODE без суперечливих прапорців.
+-- FK BASE_VERSION_ID гарантує існування, але не той самий DOC_RESOURCE_ID;
+-- перевіряти відповідність документа в серверній транзакції.
+
+4. ПОВНІСТЮ ЗАМІНИТИ РОЗДІЛ 04: DOC_OBJECT / LINK / ATTRIBUTE
+CREATE TABLE DOC_OBJECT (
+ DOC_VERSION_ID VARCHAR2(36) NOT NULL,
+ OBJECT_ID VARCHAR2(36) NOT NULL,
+ OBJECT_TYPE VARCHAR2(40) NOT NULL,
+ OBJECT_SUBTYPE VARCHAR2(80),
+ LABEL VARCHAR2(500),
+ EXTERNAL_OBJECT_ID VARCHAR2(128),
+ UNIT_ID NUMBER(10),
+ SEARCHABLE_TEXT VARCHAR2(2000),
+ PARENT_OBJECT_ID VARCHAR2(36),
+ IS_DELETED NUMBER(1) DEFAULT 0 NOT NULL,
+ OBJECT_JSON CLOB NOT NULL,
+ EDGE_FUNCTION_ID VARCHAR2(36),
+ UPDATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ CONSTRAINT PK_DOC_OBJECT PRIMARY KEY(DOC_VERSION_ID,OBJECT_ID),
+ CONSTRAINT FK_DOC_OBJECT_VERSION FOREIGN KEY(DOC_VERSION_ID) REFERENCES DOC_VERSION(ID),
+ CONSTRAINT FK_DOC_OBJECT_PARENT FOREIGN KEY(DOC_VERSION_ID,PARENT_OBJECT_ID)
+   REFERENCES DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID) DEFERRABLE INITIALLY DEFERRED,
+ CONSTRAINT FK_DOC_OBJECT_FUNCTION FOREIGN KEY(EDGE_FUNCTION_ID) REFERENCES DICT_EDGE_FUNCTION(ID),
+ CONSTRAINT CK_DOC_OBJECT_DEL CHECK(IS_DELETED IN (0,1)),
+ CONSTRAINT CK_DOC_OBJECT_JSON CHECK(OBJECT_JSON IS JSON),
+ CONSTRAINT CK_DOC_OBJECT_TYPE CHECK(OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE','OTHER')),
+ CONSTRAINT CK_DOC_OBJECT_PARENT_SELF CHECK(PARENT_OBJECT_ID IS NULL OR PARENT_OBJECT_ID <> OBJECT_ID)
+);
+CREATE INDEX IX_DOC_OBJECT_TYPE ON DOC_OBJECT(DOC_VERSION_ID,OBJECT_TYPE,IS_DELETED);
+CREATE INDEX IX_DOC_OBJECT_PARENT ON DOC_OBJECT(DOC_VERSION_ID,PARENT_OBJECT_ID);
+CREATE INDEX IX_DOC_OBJECT_EXT ON DOC_OBJECT(EXTERNAL_OBJECT_ID,OBJECT_TYPE,DOC_VERSION_ID);
+
+CREATE TABLE DOC_OBJECT_LINK (
+ LINK_ID VARCHAR2(36) DEFAULT LOWER(RAWTOHEX(SYS_GUID())) PRIMARY KEY,
+ DOC_VERSION_ID VARCHAR2(36) NOT NULL,
+ SOURCE_OBJECT_ID VARCHAR2(36) NOT NULL,
+ TARGET_OBJECT_ID VARCHAR2(36) NOT NULL,
+ LINK_TYPE VARCHAR2(40) NOT NULL,
+ SOURCE_ANCHOR VARCHAR2(80),
+ TARGET_ANCHOR VARCHAR2(80),
+ SEGMENT_ID VARCHAR2(100),
+ CONSTRAINT FK_DOC_LINK_SRC FOREIGN KEY(DOC_VERSION_ID,SOURCE_OBJECT_ID)
+   REFERENCES DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID) DEFERRABLE INITIALLY DEFERRED,
+ CONSTRAINT FK_DOC_LINK_DST FOREIGN KEY(DOC_VERSION_ID,TARGET_OBJECT_ID)
+   REFERENCES DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID) DEFERRABLE INITIALLY DEFERRED,
+ CONSTRAINT CK_DOC_LINK_SELF CHECK(SOURCE_OBJECT_ID <> TARGET_OBJECT_ID)
+);
+CREATE INDEX IX_DOC_LINK_SRC ON DOC_OBJECT_LINK(DOC_VERSION_ID,SOURCE_OBJECT_ID);
+CREATE INDEX IX_DOC_LINK_DST ON DOC_OBJECT_LINK(DOC_VERSION_ID,TARGET_OBJECT_ID);
+
+CREATE TABLE DOC_OBJECT_ATTRIBUTE (
+ DOC_VERSION_ID VARCHAR2(36) NOT NULL,
+ OBJECT_ID VARCHAR2(36) NOT NULL,
+ ATTRIBUTE_CODE VARCHAR2(100) NOT NULL,
+ VALUE_TEXT VARCHAR2(2000),
+ VALUE_NUMBER NUMBER,
+ VALUE_DATE TIMESTAMP(6),
+ CONSTRAINT PK_DOC_OBJ_ATTR PRIMARY KEY(DOC_VERSION_ID,OBJECT_ID,ATTRIBUTE_CODE),
+ CONSTRAINT FK_DOC_ATTR_OBJ FOREIGN KEY(DOC_VERSION_ID,OBJECT_ID)
+   REFERENCES DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID) ON DELETE CASCADE,
+ CONSTRAINT CK_DOC_ATTR_ONE CHECK(
+   (CASE WHEN VALUE_TEXT IS NOT NULL THEN 1 ELSE 0 END) +
+   (CASE WHEN VALUE_NUMBER IS NOT NULL THEN 1 ELSE 0 END) +
+   (CASE WHEN VALUE_DATE IS NOT NULL THEN 1 ELSE 0 END) <= 1)
+);
+CREATE INDEX IX_DOC_ATTR_TEXT ON DOC_OBJECT_ATTRIBUTE(ATTRIBUTE_CODE,VALUE_TEXT);
+CREATE INDEX IX_DOC_ATTR_NUM ON DOC_OBJECT_ATTRIBUTE(ATTRIBUTE_CODE,VALUE_NUMBER);
+
+5. ПОВНІСТЮ ЗАМІНИТИ РОЗДІЛ 05: ДВА SNAPSHOT-ТАБЛИЦІ -> ОДНА
+ВИДАЛИТИ DOC_SNAPSHOT_CURRENT, DOC_SNAPSHOT_HISTORY і TRG_DOC_SNAPSHOT_HISTORY_IMMUTABLE.
+CREATE TABLE DOC_SNAPSHOT (
+ DOC_VERSION_ID VARCHAR2(36) PRIMARY KEY,
+ SNAPSHOT_JSON CLOB NOT NULL,
+ SAVE_REVISION NUMBER(12) DEFAULT 0 NOT NULL,
+ UPDATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ UPDATED_BY VARCHAR2(36),
+ CONSTRAINT FK_DOC_SNAPSHOT_VER FOREIGN KEY(DOC_VERSION_ID) REFERENCES DOC_VERSION(ID),
+ CONSTRAINT CK_DOC_SNAPSHOT_JSON CHECK(SNAPSHOT_JSON IS JSON),
+ CONSTRAINT CK_DOC_SNAPSHOT_REV CHECK(SAVE_REVISION >= 0)
+);
+-- ВАЖЛИВО: snapshot і реляційні таблиці синхронізуються в одній транзакції.
+
+6. ЗАМІНИТИ DOC_CROSS_LINK У РОЗДІЛІ 06
+-- Посилання між ПОСТІЙНИМИ документами та стабільними OBJECT_ID.
+-- Ця таблиця не закріплює конкретну версію цільового документа:
+-- для читання за замовчуванням резолвити STABLE-версію цілі.
+CREATE TABLE DOC_CROSS_LINK (
+ ID VARCHAR2(36) DEFAULT LOWER(RAWTOHEX(SYS_GUID())) PRIMARY KEY,
+ SOURCE_DOC_ID VARCHAR2(36) NOT NULL,
+ SOURCE_OBJECT_ID VARCHAR2(36) NOT NULL,
+ TARGET_DOC_ID VARCHAR2(36) NOT NULL,
+ TARGET_OBJECT_ID VARCHAR2(36),
+ LINK_KIND VARCHAR2(40) NOT NULL,
+ CAPTION VARCHAR2(500),
+ IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
+ CREATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ CONSTRAINT FK_XLINK_SRC_DOC FOREIGN KEY(SOURCE_DOC_ID) REFERENCES DOC_RESOURCE(ID),
+ CONSTRAINT FK_XLINK_TARGET_DOC FOREIGN KEY(TARGET_DOC_ID) REFERENCES DOC_RESOURCE(ID),
+ CONSTRAINT CK_XLINK_ACTIVE CHECK(IS_ACTIVE IN (0,1))
+);
+CREATE INDEX IX_XLINK_SRC ON DOC_CROSS_LINK(SOURCE_DOC_ID,SOURCE_OBJECT_ID);
+CREATE INDEX IX_XLINK_TARGET ON DOC_CROSS_LINK(TARGET_DOC_ID,TARGET_OBJECT_ID);
+-- FK на об'єкт немає, бо об'єкт живе в різних версіях.
+-- API має перевіряти наявність OBJECT_ID в актуальній версії; при видаленні
+-- об'єкта посилання може стати недійсним. Якщо зв'язки мають бути історичними,
+-- краще окрема версіонована таблиця з SOURCE_DOC_VERSION_ID.
+
+7. ЗАМІНИТИ DOC_ASSET_REF У РОЗДІЛІ 07
+CREATE TABLE DOC_ASSET_REF (
+ DOC_VERSION_ID VARCHAR2(36) NOT NULL,
+ OBJECT_ID VARCHAR2(36) NOT NULL,
+ ASSET_ID VARCHAR2(36) NOT NULL,
+ USAGE_TYPE VARCHAR2(30) NOT NULL,
+ CONSTRAINT PK_DOC_ASSET_REF PRIMARY KEY(DOC_VERSION_ID,OBJECT_ID,ASSET_ID),
+ CONSTRAINT FK_DOC_ASSET_OBJ FOREIGN KEY(DOC_VERSION_ID,OBJECT_ID)
+   REFERENCES DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID) ON DELETE CASCADE,
+ CONSTRAINT FK_DOC_ASSET_FILE FOREIGN KEY(ASSET_ID) REFERENCES FILE_ASSET(ID),
+ CONSTRAINT CK_DOC_ASSET_USE CHECK(USAGE_TYPE IN ('attachment','image','underlay','symbol','other'))
+);
+CREATE INDEX IX_DOC_ASSET_FILE ON DOC_ASSET_REF(ASSET_ID);
+-- FILE_ASSET не дублювати: посилання на той самий файл можуть бути в багатьох версіях.
+
+8. РОЗДІЛ 08 DOC_ACCESS ЗАЛИШИТИ БЕЗ ЗМІН
+-- Права належать DOC_RESOURCE (документу), а не конкретному DRAFT/STABLE.
+-- Окремо перевіряти право EDIT для роботи з DRAFT і READ для STABLE.
+-- Перевірки доступу обов'язково виконувати на сервері для кожного API-запиту.
+
+9. ПРИКЛАД: ПОШУК ОБ'ЄКТА В STABLE
+SELECT d.id AS doc_id, d.title, v.id AS doc_version_id,
+       o.object_id, o.object_type, o.label, o.external_object_id
+FROM DOC_RESOURCE d
+JOIN DOC_VERSION v ON v.doc_resource_id=d.id AND v.status_code='STABLE'
+JOIN DOC_OBJECT o ON o.doc_version_id=v.id
+WHERE o.is_deleted=0 AND o.external_object_id=:external_id;
+-- Додати до WHERE перевірку доступних документів користувача (DOC_ACCESS/UNIT/роль).
+
+10. ПРИКЛАД: КАРТКА ОБ'ЄКТА В STABLE
+SELECT a.attribute_code,a.value_text,a.value_number,a.value_date
+FROM DOC_VERSION v
+JOIN DOC_OBJECT_ATTRIBUTE a ON a.doc_version_id=v.id
+WHERE v.doc_resource_id=:doc_id AND v.status_code='STABLE'
+  AND a.object_id=:object_id;
+
+11. СТВОРЕННЯ DRAFT ІЗ STABLE (ТРАНЗАКЦІЯ В NODE.JS)
+-- Не виконувати SQL нижче окремими autocommit-запитами.
+-- 1) SELECT ID FROM DOC_RESOURCE WHERE ID=:doc_id FOR UPDATE;
+-- 2) перевірити, що немає DRAFT, знайти STABLE та наступний VERSION_NUMBER;
+-- 3) INSERT DOC_VERSION (..., STATUS_CODE, BASE_VERSION_ID, ...) VALUES (...,'DRAFT',:stable_id,...);
+-- 4) копіювати дані STABLE -> DRAFT з тим самим OBJECT_ID:
+INSERT INTO DOC_OBJECT (
+ DOC_VERSION_ID,OBJECT_ID,OBJECT_TYPE,OBJECT_SUBTYPE,LABEL,EXTERNAL_OBJECT_ID,
+ UNIT_ID,SEARCHABLE_TEXT,PARENT_OBJECT_ID,IS_DELETED,OBJECT_JSON,EDGE_FUNCTION_ID
+)
+SELECT :draft_id,OBJECT_ID,OBJECT_TYPE,OBJECT_SUBTYPE,LABEL,EXTERNAL_OBJECT_ID,
+ UNIT_ID,SEARCHABLE_TEXT,PARENT_OBJECT_ID,IS_DELETED,OBJECT_JSON,EDGE_FUNCTION_ID
+FROM DOC_OBJECT WHERE DOC_VERSION_ID=:stable_id;
+
+INSERT INTO DOC_OBJECT_LINK (
+ LINK_ID,DOC_VERSION_ID,SOURCE_OBJECT_ID,TARGET_OBJECT_ID,LINK_TYPE,
+ SOURCE_ANCHOR,TARGET_ANCHOR,SEGMENT_ID
+)
+SELECT LOWER(RAWTOHEX(SYS_GUID())),:draft_id,SOURCE_OBJECT_ID,TARGET_OBJECT_ID,
+ LINK_TYPE,SOURCE_ANCHOR,TARGET_ANCHOR,SEGMENT_ID
+FROM DOC_OBJECT_LINK WHERE DOC_VERSION_ID=:stable_id;
+
+INSERT INTO DOC_OBJECT_ATTRIBUTE (
+ DOC_VERSION_ID,OBJECT_ID,ATTRIBUTE_CODE,VALUE_TEXT,VALUE_NUMBER,VALUE_DATE
+)
+SELECT :draft_id,OBJECT_ID,ATTRIBUTE_CODE,VALUE_TEXT,VALUE_NUMBER,VALUE_DATE
+FROM DOC_OBJECT_ATTRIBUTE WHERE DOC_VERSION_ID=:stable_id;
+
+INSERT INTO DOC_ASSET_REF (DOC_VERSION_ID,OBJECT_ID,ASSET_ID,USAGE_TYPE)
+SELECT :draft_id,OBJECT_ID,ASSET_ID,USAGE_TYPE
+FROM DOC_ASSET_REF WHERE DOC_VERSION_ID=:stable_id;
+
+INSERT INTO DOC_SNAPSHOT (DOC_VERSION_ID,SNAPSHOT_JSON,SAVE_REVISION,UPDATED_BY)
+SELECT :draft_id,SNAPSHOT_JSON,0,:user_id
+FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID=:stable_id;
+-- Перевірити кількості, цілісність і COMMIT; при помилці ROLLBACK.
+-- Для першого документа без STABLE створити порожній DRAFT і валідний snapshot.
+
+12. ПАКЕТНЕ ЗБЕРЕЖЕННЯ DRAFT
+-- В одній транзакції:
+-- A. SELECT DOC_RESOURCE ... FOR UPDATE або блокувати DOC_VERSION.
+-- B. Перевірити STATUS_CODE='DRAFT', права EDIT та SAVE_REVISION.
+-- C. Застосувати пакет INSERT/UPDATE/DELETE для DOC_OBJECT,
+--    DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE, DOC_ASSET_REF.
+--    Видалення зв'язків до видалення об'єктів; DEFERRABLE FK допомагають.
+-- D. Оновити snapshot із перевіркою ревізії:
+UPDATE DOC_SNAPSHOT
+SET SNAPSHOT_JSON=:snapshot_json,
+    SAVE_REVISION=SAVE_REVISION+1,
+    UPDATED_AT=SYSTIMESTAMP,
+    UPDATED_BY=:user_id
+WHERE DOC_VERSION_ID=:draft_id AND SAVE_REVISION=:expected_revision;
+-- E. Перевірити rowsAffected=1, інакше ROLLBACK + HTTP 409.
+-- F. COMMIT лише після успішного оновлення всіх таблиць.
+-- Увага: INSERT/UPDATE/DELETE об'єктів у DRAFT теж потрібно обмежити
+-- перевіркою статусу в єдиному серверному API або PL/SQL-пакеті.
+
+13. ПУБЛІКАЦІЯ DRAFT -> STABLE
+-- Один transaction connection; блокування DOC_RESOURCE FOR UPDATE.
+-- Перевірити статус DRAFT, валідність snapshot, об'єктів, зв'язків, прав користувача.
+-- Якщо STABLE існує:
+UPDATE DOC_VERSION
+SET STATUS_CODE='ARCHIVED'
+WHERE DOC_RESOURCE_ID=:doc_id AND STATUS_CODE='STABLE';
+-- Після цього (той самий transaction):
+UPDATE DOC_VERSION
+SET STATUS_CODE='STABLE', PUBLISHED_AT=SYSTIMESTAMP, PUBLISHED_BY=:user_id
+WHERE ID=:draft_id AND DOC_RESOURCE_ID=:doc_id AND STATUS_CODE='DRAFT';
+-- Перевірити rowsAffected=1. COMMIT, інакше ROLLBACK.
+-- Об'єкти та snapshot НЕ КОПІЮЮТЬСЯ: вже належать DRAFT, яка стала STABLE.
+-- Заборонити подальші зміни цієї версії.
+
+14. ІММУТАБЕЛЬНІСТЬ: НЕ ПОКЛАДАТИСЯ ЛИШЕ НА STATUS_CODE
+-- Права UPDATE/DELETE на таблиці версій/об'єктів бажано забрати
+-- у звичайного DB-користувача API і виконувати запис через PL/SQL-пакет
+-- з контрольованими процедурами save_draft/publish_draft.
+-- Альтернатива: тригери на DOC_OBJECT, DOC_OBJECT_LINK,
+-- DOC_OBJECT_ATTRIBUTE, DOC_ASSET_REF, DOC_SNAPSHOT для заборони DML,
+-- якщо відповідний DOC_VERSION.STATUS_CODE <> 'DRAFT'.
+-- Тригери, що читають DOC_VERSION, потрібно проєктувати та тестувати окремо;
+-- це не заміна серверної перевірки доступу.
+-- Врахувати, що DELETE CASCADE та адміністрування історії теж потребують політики.
+
+15. ВАЖЛИВІ ДОДАТКОВІ ЗАУВАЖЕННЯ
+A. У вихідному пакеті DOC_RESOURCE.ALBUM_VERSION_ID жорстко прив'язує документ
+   до версії альбому. Якщо версії альбому незалежні від версій схем,
+   у наступній ітерації варто зробити DOC_RESOURCE.ALBUM_ID + таблицю
+   ALBUM_VERSION_DOCUMENT(ALBUM_VERSION_ID,DOC_RESOURCE_ID,...).
+   Це окрема міграція; у цьому патчі структуру альбомів не міняємо.
+B. DOC_RELATION зберігає зв'язок постійних документів; якщо самі зв'язки
+   мають відрізнятися між версіями, потрібно додати окрему версіоновану модель.
+C. DICT_EDGE_FUNCTION зберігає VERSION_NO та IMPLEMENTATION_KEY.
+   Історичні схеми повинні відкриватися з сумісною реалізацією функції.
+D. Для великих схем індекси й пакетні executeMany() достатні як стартова
+   архітектура; реальну продуктивність перевірити на тестових 10k+ об'єктів.
+E. Нова DRAFT копіює всі об'єкти один раз; автозбереження не створює DOC_VERSION.
+F. Можна додати DOC_SPECIFICATION_ROW(DOC_VERSION_ID, ROW_ID, ...), якщо
+   специфікація має бути SQL-пошуковою/звітною; якщо це лише вивід з атрибутів,
+   спочатку обчислювати її запитом без дублювання даних.
+G. DOC_CROSS_LINK без версії джерела описує поточні міждокументні зв'язки.
+   Для точної історичної реконструкції його слід версіонувати окремо.
+H. Для нового DRAFT і STABLE діє обмеження максимум по одній версії на документ.
+   Відсутність STABLE допустима лише на початку роботи над документом.
+I. Перевіряти, що JSON snapshot відповідає рядкам DOC_OBJECT/LINK/ATTRIBUTE.
+   Oracle сам по собі цю семантичну тотожність не гарантує.
+
+16. ПЕРЕЛІК ТОЧНИХ ЗМІН В ОРИГІНАЛЬНОМУ ФАЙЛІ
+[ЗАМІНИТИ] DICT_DOC_STATUS INSERT (додати STABLE).
+[ЗАМІНИТИ] DOC_VERSION (прибрати IS_STABLE, додати BASE_VERSION_ID,
+            PUBLISHED_AT/PUBLISHED_BY, індекси на STABLE і DRAFT).
+[ЗАМІНИТИ] DOC_OBJECT (DOC_RESOURCE_ID -> DOC_VERSION_ID).
+[ЗАМІНИТИ] DOC_OBJECT_LINK (DOC_RESOURCE_ID -> DOC_VERSION_ID).
+[ЗАМІНИТИ] DOC_OBJECT_ATTRIBUTE (DOC_RESOURCE_ID -> DOC_VERSION_ID).
+[ВИДАЛИТИ] DOC_SNAPSHOT_CURRENT, DOC_SNAPSHOT_HISTORY, trigger history.
+[ДОДАТИ] DOC_SNAPSHOT(DOC_VERSION_ID,...).
+[ЗАМІНИТИ] DOC_CROSS_LINK (прибрати FK на версіоновані об'єкти).
+[ЗАМІНИТИ] DOC_ASSET_REF (DOC_RESOURCE_ID -> DOC_VERSION_ID).
+[ЗАЛИШИТИ] ALBUM, ALBUM_VERSION, DOC_RESOURCE, DOC_RELATION,
+            DOC_TYPE, DICT_DOC_FORMAT, DICT_EDGE_FUNCTION, FILE_ASSET, DOC_ACCESS.
+[ЗАМІНИТИ] Коментарі та приклади з розділів 09/10: тепер версії
+            містять і snapshot, і всі нормалізовані об'єкти.
+
+КІНЕЦЬ ІНСТРУКЦІЇ.
