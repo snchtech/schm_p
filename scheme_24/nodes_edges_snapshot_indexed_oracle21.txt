@@ -1,0 +1,336 @@
+ORACLE 21c + Zustand + Node.js — ПАКЕТНЕ ЗБЕРЕЖЕННЯ NODES/EDGES У JSON І ІНДЕКСОВАНІ ТАБЛИЦІ
+Версія 2026-10-20. Доповнення до oracle21_versioned_schema_changes.txt.
+
+1. ПРИЗНАЧЕННЯ І СХЕМА
+Усе зберігається ОДНІЄЮ транзакцією для конкретної DOC_VERSION зі STATUS_CODE='DRAFT':
+  DOC_SNAPSHOT — повний JSON документа;
+  DOC_OBJECT — індексовані вузли та ребра, а також (пізніше) ZVT/інші об'єкти;
+  DOC_OBJECT_LINK — тільки ті зв'язки, які реально існують у даних і для яких визначено source/target;
+  DOC_OBJECT_ATTRIBUTE — вибрані атрибути інформаційних карток для пошуку.
+STABLE/ARCHIVED не змінювати. Не створювати нову DOC_VERSION на кожне натискання Save.
+
+ВАЖЛИВО: показані нижче mapping-функції — АДАПТЕРИ до реальних полів твого state. На скріншотах видно назви масивів, але НЕ видно структури конкретного node/edge. Тому sourceId/targetId, label, externalId тощо наведені як ПРИКЛАДИ. Заміни їх після перегляду фактичних об'єктів.
+Припущення: DOC_OBJECT містить OBJECT_JSON CLOB, DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE, LABEL, EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT, PARENT_OBJECT_ID, IS_DELETED, EDGE_FUNCTION_ID, UPDATED_AT. Таблиці відповідають файлу oracle21_versioned_schema_changes.txt.
+
+2. NEXT.JS: ВІДПРАВЛЯЄМО ВЕСЬ SNAPSHOT, НЕ ДВА ОКРЕМІ ЗАПИТИ
+const state = useCanvasStore.getState();
+const snapshot = buildSnapshot(state); // з попереднього прикладу
+const response = await fetch(`/api/documents/${encodeURIComponent(versionId)}/save`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  credentials: 'include',
+  body: JSON.stringify({ snapshot, baseRevision: saveRevision }),
+});
+if (!response.ok) throw new Error(await response.text());
+const { saveRevision: nextRevision } = await response.json();
+// Оновити поточну ревізію в клієнті лише після успішного COMMIT.
+
+3. SERVER: МАПІНГ З JSON ДО ІНДЕКСОВАНИХ КОЛОНОК
+// src/server/schemeIndex.js
+function requiredId(value, name) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 36) {
+    throw new Error(`Невірний ${name}: очікується рядок ID довжиною <=36`);
+  }
+  return value;
+}
+function short(value, max) {
+  if (value == null) return null;
+  const s = String(value);
+  return s.slice(0, max); // для критичних полів краще відхиляти перевищення
+}
+export function mapObjectRows(snapshot, versionId) {
+  const { nodes, edges } = snapshot.elements;
+  if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Error('Очікуються масиви');
+  const rows = [];
+  const seen = new Set();
+  for (const [type, items] of [['NODE', nodes], ['EDGE', edges]]) {
+    for (const obj of items) {
+      const objectId = requiredId(obj.id, `${type}.id`);
+      if (seen.has(objectId)) throw new Error(`Повторений OBJECT_ID: ${objectId}`);
+      seen.add(objectId);
+      // Тут замінити назви полів на фактичні з твого Zustand:
+      rows.push({
+        docVersionId: versionId,
+        objectId,
+        objectType: type,
+        objectSubtype: short(obj.subtype ?? obj.type, 80),
+        label: short(obj.label ?? obj.name, 500),
+        externalObjectId: short(obj.externalObjectId, 128),
+        unitId: Number.isInteger(obj.unitId) ? obj.unitId : null,
+        searchableText: short([obj.label, obj.name, obj.description].filter(Boolean).join(' '), 2000),
+        parentObjectId: null, // встановлювати лише коли parent гарантовано існує у версії
+        edgeFunctionId: null, // якщо є реальний FK до DICT_EDGE_FUNCTION
+        objectJson: JSON.stringify(obj), // повний об'єкт, не лише індексовані поля
+      });
+    }
+  }
+  return rows;
+}
+
+// Не варто створювати DOC_OBJECT_LINK із здогадних полів edge.
+// Після того як визначимо точну структуру edge, можна додати:
+export function mapLinkRows(snapshot, versionId) {
+  const ids = new Set([
+    ...snapshot.elements.nodes.map(n => n.id),
+    ...snapshot.elements.edges.map(e => e.id),
+  ]);
+  const links = [];
+  for (const edge of snapshot.elements.edges) {
+    // УМОВНО: якщо у твоєму edge справді є sourceId/targetId.
+    const source = edge.sourceId;
+    const target = edge.targetId;
+    if (!source || !target) continue; // не вигадувати зв'язки
+    if (!ids.has(source) || !ids.has(target)) throw new Error(`Edge ${edge.id}: невідомі кінці`);
+    if (source === target) throw new Error(`Edge ${edge.id}: self-link заборонений поточним DDL`);
+    links.push({
+      docVersionId: versionId,
+      sourceObjectId: source,
+      targetObjectId: target,
+      linkType: 'CONNECTS_TO',
+      sourceAnchor: short(edge.sourceAnchor, 80),
+      targetAnchor: short(edge.targetAnchor, 80),
+      segmentId: null,
+    });
+  }
+  return links;
+}
+// ЗВЕРНИ УВАГУ: якщо у edge кінці описані через attachedTo/anchors/segments,
+// потрібен інший адаптер. Якщо LINK_ID=edge.id, він глобально унікальний між
+// версіями через PK LINK_ID — ЦЕ ПОМИЛКА для копіювання версій! Використовуй
+// окремий новий UUID для кожного рядка DOC_OBJECT_LINK або зміни PK на
+// (DOC_VERSION_ID, LINK_ID) для стабільного логічного LINK_ID.
+
+4. SQL ДЛЯ ПАКЕТНОГО ПЕРЕЗАПИСУ ІНДЕКСУ В МЕЖАХ ОДНІЄЇ DRAFT
+-- Найпростіший надійний варіант для першого етапу: повна заміна індексованих
+-- даних ЦІЄЇ версії (пізніше можна оптимізувати MERGE/диференційним update).
+-- УВАГА: якщо в DRAFT вже є ZVT, annotations, attributes, assets — не можна
+-- бездумно DELETE всі DOC_OBJECT. Або синхронізуй УСІ типи з повного snapshot,
+-- або тимчасово видаляй лише NODE/EDGE і залежні від них рядки, не зачіпаючи інші.
+-- Для навчального прикладу припускаємо, що в цій DRAFT є ЛИШЕ NODE/EDGE.
+DELETE FROM DOC_ASSET_REF WHERE DOC_VERSION_ID = :versionId;
+DELETE FROM DOC_OBJECT_ATTRIBUTE WHERE DOC_VERSION_ID = :versionId;
+DELETE FROM DOC_OBJECT_LINK WHERE DOC_VERSION_ID = :versionId;
+DELETE FROM DOC_OBJECT WHERE DOC_VERSION_ID = :versionId;
+-- Потім INSERT багатьох DOC_OBJECT та INSERT DOC_OBJECT_LINK.
+-- Snapshot і SAVE_REVISION оновити в цій же транзакції.
+
+INSERT INTO DOC_OBJECT (
+  DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE, LABEL,
+  EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT, PARENT_OBJECT_ID,
+  IS_DELETED, OBJECT_JSON, EDGE_FUNCTION_ID
+) VALUES (
+  :docVersionId, :objectId, :objectType, :objectSubtype, :label,
+  :externalObjectId, :unitId, :searchableText, :parentObjectId,
+  0, :objectJson, :edgeFunctionId
+);
+
+INSERT INTO DOC_OBJECT_LINK (
+  LINK_ID, DOC_VERSION_ID, SOURCE_OBJECT_ID, TARGET_OBJECT_ID,
+  LINK_TYPE, SOURCE_ANCHOR, TARGET_ANCHOR, SEGMENT_ID
+) VALUES (
+  LOWER(RAWTOHEX(SYS_GUID())), :docVersionId, :sourceObjectId, :targetObjectId,
+  :linkType, :sourceAnchor, :targetAnchor, :segmentId
+);
+
+-- Приклад індексованого атрибута (тільки якщо таке поле є у твоєму node):
+INSERT INTO DOC_OBJECT_ATTRIBUTE (
+  DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE, VALUE_TEXT
+) VALUES (:versionId, :objectId, 'EQUIPMENT_CODE', :equipmentCode);
+
+5. NODE.JS / EXPRESS: ЄДИНА ТРАНЗАКЦІЯ
+// Нижче код для node-oracledb Connection; адаптуй отримання з'єднання під
+// свій OracleDBManager. ВАЖЛИВО: послідовні виклики OracleDBManager.query(),
+// які беруть різні connections/автоматично COMMIT, НЕ забезпечують атомарності.
+import oracledb from 'oracledb';
+import { mapObjectRows, mapLinkRows } from './schemeIndex.js';
+
+async function saveDraft(connection, { versionId, userId, snapshot, baseRevision }) {
+  if (snapshot?.schemaVersion !== 1 || !Array.isArray(snapshot?.elements?.nodes)
+      || !Array.isArray(snapshot?.elements?.edges)) throw new Error('Некоректний snapshot');
+  if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) throw new Error('baseRevision обов’язковий');
+  const objectRows = mapObjectRows(snapshot, versionId);
+  const linkRows = mapLinkRows(snapshot, versionId); // лише якщо мапінг підтверджений
+  const json = JSON.stringify(snapshot);
+  if (json.length > 20_000_000) throw new Error('Snapshot перевищує ліміт прикладу');
+  try {
+    // Блокування рядка версії серіалізує паралельні save/publish.
+    const v = await connection.execute(
+      `SELECT STATUS_CODE FROM DOC_VERSION WHERE ID=:id FOR UPDATE`, { id: versionId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    if (v.rows.length !== 1) throw new Error('Версію не знайдено');
+    if (v.rows[0].STATUS_CODE !== 'DRAFT') throw new Error('Дозволено зберігати лише DRAFT');
+    // ОБОВ'ЯЗКОВО перевірити право EDIT користувача на DOC_RESOURCE тут.
+
+    const r = await connection.execute(
+      `SELECT SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID=:id FOR UPDATE`,
+      { id: versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const currentRevision = r.rows.length ? Number(r.rows[0].SAVE_REVISION) : 0;
+    if (currentRevision !== baseRevision) {
+      const err = new Error('Конфлікт ревізій'); err.status = 409; throw err;
+    }
+
+    // ДЕМО: у версії тільки nodes/edges, немає asset refs/інших типів.
+    for (const sql of [
+      'DELETE FROM DOC_ASSET_REF WHERE DOC_VERSION_ID=:id',
+      'DELETE FROM DOC_OBJECT_ATTRIBUTE WHERE DOC_VERSION_ID=:id',
+      'DELETE FROM DOC_OBJECT_LINK WHERE DOC_VERSION_ID=:id',
+      'DELETE FROM DOC_OBJECT WHERE DOC_VERSION_ID=:id',
+    ]) await connection.execute(sql, { id: versionId });
+
+    if (objectRows.length) {
+      await connection.executeMany(`INSERT INTO DOC_OBJECT (
+        DOC_VERSION_ID,OBJECT_ID,OBJECT_TYPE,OBJECT_SUBTYPE,LABEL,EXTERNAL_OBJECT_ID,
+        UNIT_ID,SEARCHABLE_TEXT,PARENT_OBJECT_ID,IS_DELETED,OBJECT_JSON,EDGE_FUNCTION_ID
+      ) VALUES (
+        :docVersionId,:objectId,:objectType,:objectSubtype,:label,:externalObjectId,
+        :unitId,:searchableText,:parentObjectId,0,:objectJson,:edgeFunctionId
+      )`, objectRows, {
+        bindDefs: {
+          docVersionId: { type: oracledb.STRING, maxSize: 36 },
+          objectId: { type: oracledb.STRING, maxSize: 36 },
+          objectType: { type: oracledb.STRING, maxSize: 40 },
+          objectSubtype: { type: oracledb.STRING, maxSize: 80 },
+          label: { type: oracledb.STRING, maxSize: 500 },
+          externalObjectId: { type: oracledb.STRING, maxSize: 128 },
+          unitId: { type: oracledb.NUMBER },
+          searchableText: { type: oracledb.STRING, maxSize: 2000 },
+          parentObjectId: { type: oracledb.STRING, maxSize: 36 },
+          objectJson: { type: oracledb.CLOB },
+          edgeFunctionId: { type: oracledb.STRING, maxSize: 36 },
+        },
+      });
+    }
+    // LINK_ID генерується в Oracle, тому не передаємо його як bind.
+    for (const l of linkRows) {
+      await connection.execute(`INSERT INTO DOC_OBJECT_LINK (
+        LINK_ID,DOC_VERSION_ID,SOURCE_OBJECT_ID,TARGET_OBJECT_ID,LINK_TYPE,
+        SOURCE_ANCHOR,TARGET_ANCHOR,SEGMENT_ID
+      ) VALUES (LOWER(RAWTOHEX(SYS_GUID())),:docVersionId,:sourceObjectId,
+        :targetObjectId,:linkType,:sourceAnchor,:targetAnchor,:segmentId)`, l);
+    }
+
+    if (r.rows.length) {
+      await connection.execute(`UPDATE DOC_SNAPSHOT SET
+        SNAPSHOT_JSON=:json, SAVE_REVISION=SAVE_REVISION+1,
+        UPDATED_AT=SYSTIMESTAMP, UPDATED_BY=:userId
+        WHERE DOC_VERSION_ID=:versionId`,
+        { json: { val: json, type: oracledb.CLOB }, userId, versionId });
+    } else {
+      await connection.execute(`INSERT INTO DOC_SNAPSHOT (
+        DOC_VERSION_ID,SNAPSHOT_JSON,SAVE_REVISION,UPDATED_BY
+      ) VALUES (:versionId,:json,1,:userId)`,
+        { versionId, json: { val: json, type: oracledb.CLOB }, userId });
+    }
+    await connection.commit();
+    return { saveRevision: currentRevision + 1, objectCount: objectRows.length };
+  } catch (e) {
+    await connection.rollback();
+    throw e;
+  }
+}
+
+// Маршрут: автентифікація, перевірка EDIT, ліміт body, отримання connection
+// і close у finally потрібні в реальному API. Не приймати userId від клієнта.
+router.put('/api/documents/:versionId/save', async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection(); // або transaction API твого OracleDBManager
+    const result = await saveDraft(connection, {
+      versionId: req.params.versionId,
+      userId: req.user.id, // тільки з перевіреної сесії
+      snapshot: req.body.snapshot,
+      baseRevision: req.body.baseRevision,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+6. SQL: ЧИТАТИ ІНДЕКСОВАНІ ОБ'ЄКТИ
+-- Усі NODE конкретної версії:
+SELECT OBJECT_ID, OBJECT_SUBTYPE, LABEL, EXTERNAL_OBJECT_ID, UNIT_ID
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID=:versionId AND OBJECT_TYPE='NODE' AND IS_DELETED=0
+ORDER BY OBJECT_ID;
+
+-- Усі EDGE конкретної версії:
+SELECT OBJECT_ID, LABEL, OBJECT_JSON
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID=:versionId AND OBJECT_TYPE='EDGE' AND IS_DELETED=0;
+
+-- Пошук обладнання у чинних STABLE усіх доступних документів:
+SELECT d.ID AS DOC_ID, d.TITLE, v.ID AS VERSION_ID,
+       o.OBJECT_ID, o.LABEL, o.EXTERNAL_OBJECT_ID
+FROM DOC_OBJECT o
+JOIN DOC_VERSION v ON v.ID=o.DOC_VERSION_ID
+JOIN DOC_RESOURCE d ON d.ID=v.DOC_RESOURCE_ID
+WHERE v.STATUS_CODE='STABLE'
+  AND o.OBJECT_TYPE='NODE' AND o.IS_DELETED=0
+  AND o.EXTERNAL_OBJECT_ID=:externalId;
+-- Додати обмеження DOC_ACCESS за поточним користувачем!
+
+-- Знайти всі зв'язки, що мають кінцем вузол (якщо LINK заповнені):
+SELECT l.LINK_ID, l.SOURCE_OBJECT_ID, l.TARGET_OBJECT_ID,
+       src.LABEL AS SOURCE_LABEL, dst.LABEL AS TARGET_LABEL
+FROM DOC_OBJECT_LINK l
+JOIN DOC_OBJECT src ON src.DOC_VERSION_ID=l.DOC_VERSION_ID
+  AND src.OBJECT_ID=l.SOURCE_OBJECT_ID
+JOIN DOC_OBJECT dst ON dst.DOC_VERSION_ID=l.DOC_VERSION_ID
+  AND dst.OBJECT_ID=l.TARGET_OBJECT_ID
+WHERE l.DOC_VERSION_ID=:versionId
+  AND (l.SOURCE_OBJECT_ID=:nodeId OR l.TARGET_OBJECT_ID=:nodeId);
+-- Для пошуку EDGE, що породив LINK, потрібне явне поле EDGE_OBJECT_ID
+-- або зв'язок з edge.id у додатковій таблиці. Не припускай LINK_ID=edge.id.
+
+-- Читання індексованого атрибута:
+SELECT o.OBJECT_ID, o.LABEL, a.ATTRIBUTE_CODE, a.VALUE_TEXT
+FROM DOC_OBJECT o
+JOIN DOC_OBJECT_ATTRIBUTE a
+  ON a.DOC_VERSION_ID=o.DOC_VERSION_ID AND a.OBJECT_ID=o.OBJECT_ID
+WHERE o.DOC_VERSION_ID=:versionId AND a.ATTRIBUTE_CODE='EQUIPMENT_CODE'
+  AND a.VALUE_TEXT=:equipmentCode;
+
+-- Повний JSON окремого об'єкта (для інформаційної картки):
+SELECT OBJECT_JSON FROM DOC_OBJECT
+WHERE DOC_VERSION_ID=:versionId AND OBJECT_ID=:objectId;
+
+-- Відновити ВСЮ схему на Canvas — читати DOC_SNAPSHOT, а не збирати з DOC_OBJECT:
+SELECT SNAPSHOT_JSON,SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID=:versionId;
+
+7. NODE.JS: ЧИТАННЯ CLOB + ПОВЕРНЕННЯ ДАНИХ
+// На connection.execute можна попросити CLOB як STRING; якщо JSON великий,
+// врахувати maxSize/обмеження драйвера та використати LOB stream.
+const r = await connection.execute(
+  `SELECT OBJECT_ID,OBJECT_TYPE,LABEL,OBJECT_JSON FROM DOC_OBJECT
+   WHERE DOC_VERSION_ID=:versionId AND OBJECT_TYPE=:objectType AND IS_DELETED=0`,
+  { versionId, objectType: 'NODE' },
+  { outFormat: oracledb.OUT_FORMAT_OBJECT, fetchInfo: { OBJECT_JSON: { type: oracledb.STRING } } }
+);
+const nodes = r.rows.map(row => ({
+  id: row.OBJECT_ID,
+  label: row.LABEL,
+  data: JSON.parse(row.OBJECT_JSON), // повний вузол із Zustand
+}));
+
+8. ЗАСТЕРЕЖЕННЯ ПЕРЕД ВПРОВАДЖЕННЯМ
+1) Це повний приклад для DRAFT, що містить ТІЛЬКИ NODE/EDGE. Для реальної
+   схеми з ZVT/BRANCH/attachments НЕ ВИКОРИСТОВУЙ тотальний DELETE — він
+   видалить інші об'єкти/зв'язки/вкладення. Реалізуй мапінг усіх типів і
+   атомарну заміну всього набору або точковий upsert/delete по типах.
+2) Усі FK, пов'язані з DOC_OBJECT, мають бути враховані при DELETE.
+3) Потрібно перевірити реальну структуру edge, перш ніж писати LINK.
+4) Розміри і типи колонок — згідно з DDL; особливо OBJECT_ID VARCHAR2(36).
+5) Не допускати збереження STABLE, перевіряти EDIT на сервері.
+6) Snapshot та індексовані таблиці повинні відповідати одному SAVE_REVISION;
+   при помилці жодна частина не повинна бути COMMIT.
+7) Для масштабних схем масовий DELETE/INSERT при кожному Save може бути
+   дорогим. Після перевірки коректності перейти на диференційну синхронізацію
+   за OBJECT_ID + content hash, але в тій самій транзакції.
+8) Для великих CLOB протестувати executeMany з bindDefs {type:oracledb.CLOB}
+   у твоїй версії драйвера; за потреби перейти на окремі execute/LOB streaming.
+9) API повинен мати обмеження payload, перевірку JSON та ролей користувача.

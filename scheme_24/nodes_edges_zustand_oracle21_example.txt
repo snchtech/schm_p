@@ -1,0 +1,225 @@
+ПРИКЛАД: ZUSTAND (ПЛОСКИЙ STORE) -> JSON SNAPSHOT -> ORACLE 21c -> ZUSTAND
+
+0. Вихідні припущення
+- useCanvasStore.js містить nodes: [], edges: [], setNodes, setEdges та інші методи.
+- DOC_VERSION.ID ідентифікує конкретну DRAFT; DOC_SNAPSHOT має PK DOC_VERSION_ID,
+  SNAPSHOT_JSON CLOB, SAVE_REVISION NUMBER, UPDATED_AT, UPDATED_BY.
+- Приклад використовує Express + node-oracledb з доступом до connection/pool.
+- Заміни імпорти, URL, авторизацію, назву пулу і спосіб отримання connection на свої.
+- Не публікуй STABLE до реалізації синхронізації нормалізованих таблиць.
+
+1. SQL (виконати тільки якщо DOC_SNAPSHOT ще немає)
+CREATE TABLE DOC_SNAPSHOT (
+ DOC_VERSION_ID VARCHAR2(36) PRIMARY KEY,
+ SNAPSHOT_JSON CLOB NOT NULL,
+ SAVE_REVISION NUMBER(12) DEFAULT 0 NOT NULL,
+ UPDATED_AT TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+ UPDATED_BY VARCHAR2(36),
+ CONSTRAINT FK_DOC_SNAPSHOT_VER FOREIGN KEY (DOC_VERSION_ID) REFERENCES DOC_VERSION(ID),
+ CONSTRAINT CK_DOC_SNAPSHOT_JSON CHECK (SNAPSHOT_JSON IS JSON),
+ CONSTRAINT CK_DOC_SNAPSHOT_REV CHECK (SAVE_REVISION >= 0)
+);
+
+2. src/lib/schemeSnapshot.js — формування/перевірка JSON
+// Зберігаємо весь вміст кожного node/edge, а не вибрані поля.
+// Для цього прикладу очікуємо звичайні JSON-сумісні об'єкти.
+export function buildSnapshot(store) {
+  const snapshot = {
+    schemaVersion: 1,
+    elements: {
+      nodes: store.nodes ?? [],
+      edges: store.edges ?? [],
+    },
+  };
+  if (!Array.isArray(snapshot.elements.nodes) || !Array.isArray(snapshot.elements.edges)) {
+    throw new Error('nodes та edges повинні бути масивами');
+  }
+  // structuredClone виявляє частину несеріалізованих значень (functions, DOM тощо).
+  // Додатково використовується JSON round-trip для отримання plain JSON.
+  const json = JSON.stringify(snapshot, (key, value) => {
+    if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+      throw new Error(`Не-JSON значення у полі ${key}`);
+    }
+    if (value instanceof Map || value instanceof Set || value instanceof Date ||
+        (typeof Blob !== 'undefined' && value instanceof Blob)) {
+      throw new Error(`Спеціальний тип у полі ${key}: потрібен serializer`);
+    }
+    return value;
+  });
+  if (!json) throw new Error('Не вдалося сформувати JSON');
+  return JSON.parse(json);
+}
+
+export function validateSnapshot(snapshot) {
+  if (snapshot?.schemaVersion !== 1 ||
+      !Array.isArray(snapshot?.elements?.nodes) ||
+      !Array.isArray(snapshot?.elements?.edges)) {
+    throw new Error('Некоректний формат snapshot');
+  }
+  return snapshot;
+}
+
+3. Додати у useCanvasStore.js (всередині create((set, get) => ({ ... })))
+// Показано лише метод. Наявні nodes/edges/setNodes/setEdges не змінювати.
+loadNodesEdgesSnapshot: (snapshot) => {
+  validateSnapshot(snapshot); // імпортувати з lib/schemeSnapshot
+  set({
+    nodes: snapshot.elements.nodes,
+    edges: snapshot.elements.edges,
+    nodeRefs: {}, // тимчасові Konva refs не зберігаються
+    // Скинути також виділення/hover/dragging згідно з фактичними назвами полів.
+  });
+},
+
+4. src/lib/schemeApi.js — Next.js, кнопка «Зберегти»
+import { useCanvasStore } from '@/stores/useCanvasStore';
+import { buildSnapshot } from '@/lib/schemeSnapshot';
+
+export async function saveNodesEdges({ versionId, saveRevision, apiBaseUrl }) {
+  const snapshot = buildSnapshot(useCanvasStore.getState());
+  const response = await fetch(`${apiBaseUrl}/api/documents/${encodeURIComponent(versionId)}/snapshot`, {
+    method: 'PUT',
+    credentials: 'include', // або свій Authorization header
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ snapshot, saveRevision }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result; // { saveRevision: новий номер }
+}
+
+export async function openNodesEdges({ versionId, apiBaseUrl }) {
+  const response = await fetch(`${apiBaseUrl}/api/documents/${encodeURIComponent(versionId)}/snapshot`, {
+    credentials: 'include',
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  useCanvasStore.getState().loadNodesEdgesSnapshot(result.snapshot);
+  return result; // збережи saveRevision для наступного PUT
+}
+
+5. Express API — приклад із реальним Oracle connection (не OracleDBManager.query,
+   бо потрібна одна транзакція і перевірка rowCount). Використай свій pool.
+import express from 'express';
+import oracledb from 'oracledb';
+const router = express.Router();
+
+// getConnection() — твоя функція доступу до існуючого pool.
+// req.user.id — приклад після auth middleware; перед використанням
+// перевірити право читати/редагувати саме цей документ.
+router.put('/api/documents/:versionId/snapshot', async (req, res) => {
+  let conn;
+  try {
+    const { versionId } = req.params;
+    const { snapshot, saveRevision } = req.body;
+    if (!Number.isSafeInteger(saveRevision) || saveRevision < 0 ||
+        snapshot?.schemaVersion !== 1 ||
+        !Array.isArray(snapshot?.elements?.nodes) ||
+        !Array.isArray(snapshot?.elements?.edges)) {
+      return res.status(400).json({ error: 'Некоректний snapshot/revision' });
+    }
+    const snapshotJson = JSON.stringify(snapshot);
+    conn = await getConnection();
+    // Авторизацію виконати перед запитом (не довіряти versionId без перевірки).
+    // Блокуємо версію на час транзакції: серіалізуємо збереження/публікацію.
+    const versions = await conn.execute(
+      `SELECT STATUS_CODE FROM DOC_VERSION WHERE ID = :id FOR UPDATE`,
+      { id: versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    if (!versions.rows.length) return res.status(404).json({ error: 'Версію не знайдено' });
+    if (versions.rows[0].STATUS_CODE !== 'DRAFT') {
+      return res.status(409).json({ error: 'Дозволено зберігати лише DRAFT' });
+    }
+    const updated = await conn.execute(
+      `UPDATE DOC_SNAPSHOT
+          SET SNAPSHOT_JSON = :json,
+              SAVE_REVISION = SAVE_REVISION + 1,
+              UPDATED_AT = SYSTIMESTAMP,
+              UPDATED_BY = :userId
+        WHERE DOC_VERSION_ID = :versionId
+          AND SAVE_REVISION = :saveRevision`,
+      {
+        json: { val: snapshotJson, type: oracledb.CLOB },
+        userId: req.user.id, versionId, saveRevision,
+      }, { autoCommit: false }
+    );
+    if (updated.rowsAffected === 0) {
+      // Для першого збереження відсутнього snapshot дозволяємо лише revision=0.
+      const existing = await conn.execute(
+        `SELECT SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :id`,
+        { id: versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      if (existing.rows.length || saveRevision !== 0) {
+        await conn.rollback();
+        return res.status(409).json({ error: 'Конфлікт версій snapshot' });
+      }
+      await conn.execute(
+        `INSERT INTO DOC_SNAPSHOT
+          (DOC_VERSION_ID, SNAPSHOT_JSON, SAVE_REVISION, UPDATED_BY)
+         VALUES (:versionId, :json, 1, :userId)`,
+        { versionId, json: { val: snapshotJson, type: oracledb.CLOB }, userId: req.user.id },
+        { autoCommit: false }
+      );
+    }
+    const current = await conn.execute(
+      `SELECT SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :id`,
+      { id: versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    await conn.commit();
+    return res.json({ success: true, saveRevision: current.rows[0].SAVE_REVISION });
+  } catch (err) {
+    if (conn) await conn.rollback().catch(() => {});
+    console.error(err);
+    return res.status(500).json({ error: 'Помилка збереження' });
+  } finally {
+    if (conn) await conn.close();
+  }
+});
+
+router.get('/api/documents/:versionId/snapshot', async (req, res) => {
+  let conn;
+  try {
+    // ПЕРЕД SELECT перевірити права читання для req.user.
+    conn = await getConnection();
+    const result = await conn.execute(
+      `SELECT s.SNAPSHOT_JSON, s.SAVE_REVISION, v.STATUS_CODE
+         FROM DOC_SNAPSHOT s JOIN DOC_VERSION v ON v.ID = s.DOC_VERSION_ID
+        WHERE s.DOC_VERSION_ID = :id`,
+      { id: req.params.versionId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT, fetchInfo: { SNAPSHOT_JSON: { type: oracledb.STRING } } }
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Snapshot не знайдено' });
+    const row = result.rows[0];
+    return res.json({
+      snapshot: JSON.parse(row.SNAPSHOT_JSON),
+      saveRevision: row.SAVE_REVISION,
+      status: row.STATUS_CODE,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Помилка читання' });
+  } finally {
+    if (conn) await conn.close();
+  }
+});
+
+6. Як перевірити
+- У редакторі створити 2 nodes і 1 edge, з координатами, points та стилями.
+- Натиснути Save; сервер має повернути saveRevision=1.
+- Виконати SELECT DBMS_LOB.GETLENGTH(SNAPSHOT_JSON), SAVE_REVISION
+  FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :id;
+- Очистити схему в UI, викликати openNodesEdges(), переконатися, що
+  ідентифікатори, координати, стилі й точки ліній повністю відновлені.
+- Повторне Save із застарілим saveRevision повинно повернути 409.
+
+7. ВАЖЛИВІ ОБМЕЖЕННЯ
+- Це навчальний зріз: тільки nodes та edges; інші поля поки НЕ зберігаються.
+- Усі дані всередині nodes/edges повинні бути JSON-сумісні, без File/Blob/Konva refs.
+- Якщо об'єкти мають внутрішні refs, їх треба відокремити від даних.
+- API має застосовувати authentication/authorization, обмеження розміру JSON,
+  схему валідації, перевірку ownership, логування та узгоджене блокування publish.
+- getConnection(), req.user та імпорт useCanvasStore адаптувати до проєкту.
+- При першому збереженні під паралельними запитами можливий ORA-00001;
+  у production трактувати це як 409 після rollback.
+- Якщо поточний DOC_SNAPSHOT уже створено, не запускати CREATE TABLE повторно.
+- Якщо у тебе окремий Next.js frontend і Express API, перевірити CORS/credentials.

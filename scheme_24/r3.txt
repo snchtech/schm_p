@@ -1,0 +1,144 @@
+Тепер уже можна предметно розібрати твій Zustand Store. На двох скріншотах видно, що він містить як дані схеми, так і методи керування ними. Це хороша основа для реалізації JSON Snapshot без переписування редактора.
+
+## 1. Що бачу у твоєму Store
+
+| Поле                             | Призначення              | Зберігати в JSON       |
+| -------------------------------- | ------------------------ | ---------------------- |
+| `nodes`                          | Графічні вузли           | Так                    |
+| `edges`                          | Лінії та з'єднання       | Так                    |
+| `zvts`                           | Засоби вимірювання       | Так                    |
+| `zvtBranches`                    | Відгалуження ЗВТ         | Так                    |
+| `annotations`                    | Написи, примітки         | Так                    |
+| `specificationTables`            | Таблиці специфікацій     | Так                    |
+| `attachments`                    | Прикріплені елементи     | Так, якщо JSON-сумісні |
+| `nodeRefs`                       | Посилання на вузли Konva | Ні                     |
+| `setNodes`, `setEdges`           | Методи зміни стану       | Ні                     |
+| `addZvt`, `addZvtBranch`         | Методи додавання         | Ні                     |
+| `addSpecificationTable`          | Метод додавання таблиці  | Ні                     |
+| `addAnnotation`, `addAttachment` | Методи додавання         | Ні                     |
+
+Зверни увагу на `specificationTables`: у твоєму коді вже передбачена перевірка, чи це масив, чи об'єкт. Для Snapshot краще мати єдиний формат — масив.
+
+Також видно, що `setNodes()` очищає `nodeRefs` для видалених вузлів. Це додатковий аргумент не зберігати `nodeRefs` у JSON.
+
+## 2. Реалізація для твоєї поточної структури
+
+На першому етапі я пропоную не змінювати наявний Store, а створити окремий файл `schemeSnapshot.js`.
+
+```
+
+export function createSchemeSnapshot(state) {
+  const specificationTables = Array.isArray(
+    state.specificationTables
+  )
+    ? state.specificationTables
+    : Object.values(state.specificationTables ?? {});
+
+  const snapshot = {
+    schemaVersion: 1,
+
+    objects: {
+      nodes: state.nodes ?? [],
+      edges: state.edges ?? [],
+      zvts: state.zvts ?? [],
+      zvtBranches: state.zvtBranches ?? [],
+      annotations: state.annotations ?? [],
+      specificationTables,
+      attachments: state.attachments ?? [],
+    },
+  };
+
+  return snapshot;
+}
+
+```
+
+Ця функція збере всі перелічені типи об'єктів разом із їхніми вкладеними властивостями.
+
+Наприклад, якщо `zvtBranches` містить `points`, `attachedTo`, координати, параметри зламів та ідентифікатори ЗВТ, вони збережуться всередині відповідних об'єктів.
+
+Але це ще не остаточний повний Snapshot. Потрібно перевірити решту Store, оскільки на скріншотах видно лише його частину.
+
+## 3. Як я пропоную перевірити весь Store
+
+Виконай у клієнтській частині Next.js:
+
+```
+const state = useEditorStore.getState();
+
+const fields = Object.entries(state)
+  .filter(([key, value]) => typeof value !== "function")
+  .map(([key, value]) => ({
+    key,
+    type: Array.isArray(value)
+      ? "array"
+      : typeof value,
+  }));
+
+console.table(fields);
+```
+
+Це покаже всі поля верхнього рівня, які потенційно можуть входити до Snapshot.
+
+Далі ми перевіримо, чи немає окремих станів для розмірів полотна, підкладок, шарів, властивостей графічних об'єктів, прив'язок, налаштувань редактора та інформаційних карток.
+
+## 4. Важливий момент щодо відновлення
+
+Для твого Store я рекомендую не відновлювати схему через послідовні виклики:
+
+```
+setNodes(snapshot.nodes);
+setEdges(snapshot.edges);
+addZvt(...);
+addZvtBranch(...);
+```
+
+Тому що `addZvt` або `addZvtBranch` можуть запускати додаткову логіку побудови, змінювати геометрію чи створювати нові ідентифікатори.
+
+Натомість потрібно створити один метод:
+
+```
+loadSchemeSnapshot: (snapshot) =>
+  set({
+    nodes: snapshot.objects.nodes,
+    edges: snapshot.objects.edges,
+    zvts: snapshot.objects.zvts,
+    zvtBranches: snapshot.objects.zvtBranches,
+    annotations: snapshot.objects.annotations,
+    specificationTables:
+      snapshot.objects.specificationTables,
+    attachments: snapshot.objects.attachments,
+
+    nodeRefs: {},
+  }),
+```
+
+Це дозволить відновити дані одним оновленням Zustand, без повторного виконання алгоритмів створення об'єктів. Після цього Konva перемалює схему через React-компоненти, підписані на Store.
+
+Перед таким відновленням необхідно перевірити версію та структуру JSON. Інші тимчасові поля редактора також потрібно буде скинути.
+
+## 5. Що ще потрібно перевірити
+
+Є один момент, на який я звернув увагу у твоєму коді.
+
+У `addSpecificationTable` ти використовуєш:
+
+```
+const currentTables = Array.isArray(
+  s.specificationTables
+)
+  ? s.specificationTables
+  : Object.values(s.specificationTables || {});
+```
+
+Це означає, що зараз у Store допускаються два формати зберігання специфікацій. Я рекомендую привести їх до одного формату ще до впровадження Snapshot, щоб після завантаження не виникало розбіжностей.
+
+Також потрібно перевірити структуру `attachments`: якщо там містяться `File`, `Blob`, `HTMLImageElement` або інші несеріалізовані об'єкти, їх не можна просто передати в `JSON.stringify`. У JSON мають залишатися метадані та ідентифікатори файлів, а самі файли потрібно зберігати окремо.
+
+### Наступний крок
+
+Надішли початок файлу Zustand Store — від `create((set, get) => ({` до приблизно перших 100–150 рядків, а також решту оголошень полів стану. Найкраще — сам файл `.js`, якщо є можливість.
+
+Тоді я зможу зробити повну інвентаризацію, розділити поля на ті, що потрібно зберігати, і ті, що не потрібно, та підготувати готові `createSchemeSnapshot()` і `loadSchemeSnapshot()` саме для твого редактора.
+
+Поки що змінювати наявні `setNodes`, `setEdges`, `addZvt` та інші методи не потрібно.
