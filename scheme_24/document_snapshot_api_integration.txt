@@ -1,0 +1,226 @@
+ІНТЕГРАЦІЯ НАЯВНОГО canvasController -> Express API -> Oracle 21c
+===============================================================
+
+ЩО ВЖЕ Є (за скріншотами)
+- canvasController.prepareAndValidateSnapshot() читає useCanvasStore.getState(), нормалізує nodes/edges, викликає buildSnapshot() і validateSnapshot(), повертає cleanSnapshot.
+- handleSave() викликає prepareAndValidateSnapshot(); виклик myCustomApiService.commit() — місце інтеграції.
+- На фронті є fetchData(url, method, params); приклад fetchSchemes(albumId) викликає fetchData('/api/scheme/get-schemes', 'GET', {albumId}).
+- Backend: Express router/controller, req.locals.dbName, OracleDBManager.query(dbName, sql, params).
+
+ВАЖЛИВО: точне DDL DOC_SNAPSHOT та реалізація OracleDBManager.query не показані. Нижче — робочий каркас за умови, що DOC_SNAPSHOT має DOC_VERSION_ID (PK/FK), SNAPSHOT_JSON CLOB, SAVE_REVISION NUMBER. Назви колонок звірити з фактичним DDL. SQL-запис має бути транзакційним, тому query() без гарантії спільного connection НЕ достатньо для багатокрокового save.
+
+1. FRONTEND: api/documentApi.js
+--------------------------------
+// Якщо fetchData вже автоматично формує body, використовуй цей варіант:
+export const saveDocumentSnapshot = (versionId, snapshot, saveRevision) =>
+  fetchData(`/api/documents/${encodeURIComponent(versionId)}/snapshot`,
+            'PUT', { snapshot, saveRevision });
+
+// УВАГА: перевір реалізацію fetchData! Для PUT третій аргумент має
+// потрапити в JSON body, а не в query string. Якщо не підтримує PUT,
+// адаптуй fetchData або зроби fetch() напряму (приклад нижче).
+
+// Альтернатива — прямий fetch, коли потрібен контроль body:
+export async function saveDocumentSnapshotFetch(versionId, snapshot, saveRevision) {
+  const response = await fetch(`/api/documents/${encodeURIComponent(versionId)}/snapshot`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ snapshot, saveRevision }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Помилка збереження');
+  return payload;
+}
+// Якщо API на іншому домені, використай наявний baseURL/proxy;
+// cookie CORS/CSRF мають відповідати поточній авторизації.
+
+2. FRONTEND: canvasController / handleSave
+-----------------------------------------
+// Наявний prepareAndValidateSnapshot() ЗАЛИШАЄТЬСЯ.
+const handleSave = async () => {
+  setIsSaving(true);
+  try {
+    const cleanSnapshot = canvasController.prepareAndValidateSnapshot();
+    // ВАЖЛИВО: buildSnapshot() може повертати об'єкт або JSON-рядок.
+    // Для HTTP передаємо об'єкт, щоб уникнути подвійної серіалізації.
+    const snapshot = typeof cleanSnapshot === 'string'
+      ? JSON.parse(cleanSnapshot)
+      : cleanSnapshot;
+    const result = await saveDocumentSnapshotFetch(docVersionId, snapshot, saveRevision);
+    setSaveRevision(result.saveRevision); // номер наступного optimistic-lock save
+    alert('Схему збережено');
+  } catch (error) {
+    alert(`Помилка збереження: ${error.message}`);
+  } finally {
+    setIsSaving(false);
+  }
+};
+// docVersionId — реальний DOC_VERSION.ID статусу DRAFT, не ALBUM.ID і не DOC_RESOURCE.ID.
+// saveRevision треба отримати при відкритті документа (0 якщо snapshot ще немає).
+
+3. BACKEND: routes/documentRoutes.js
+-----------------------------------
+import express from 'express';
+import { saveSnapshot } from '../controllers/documentController.js';
+const router = express.Router();
+router.put('/:versionId/snapshot', saveSnapshot);
+export default router;
+
+// app.js: middleware автентифікації і dbName повинні бути встановлені ДО router.
+// app.use(express.json({ limit: '15mb' })); // вибери ліміт згідно з розміром схеми
+// app.use('/api/documents', authMiddleware, documentRoutes);
+
+4. BACKEND: controllers/documentController.js
+---------------------------------------------
+import { saveDocumentSnapshot } from '../services/documentSnapshotService.js';
+export async function saveSnapshot(req, res) {
+  try {
+    const { versionId } = req.params;
+    const { snapshot, saveRevision } = req.body ?? {};
+    if (!versionId || !snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return res.status(400).json({ error: 'Некоректний snapshot або versionId' });
+    }
+    if (!Number.isSafeInteger(saveRevision) || saveRevision < 0) {
+      return res.status(400).json({ error: 'Некоректний saveRevision' });
+    }
+    // Перевіряти не тільки наявність полів, а й schemaVersion, nodes/edges,
+    // id, числові координати, максимальні розміри, дублікати ID, небезпечні дані.
+    const result = await saveDocumentSnapshot({
+      dbName: req.locals.dbName,
+      versionId,
+      snapshot,
+      saveRevision,
+      userId: req.user?.id,
+    });
+    return res.status(200).json({ success: true, ...result });
+  } catch (err) {
+    console.error('saveSnapshot:', err);
+    return res.status(err.statusCode || 500).json({
+      error: err.statusCode ? err.message : 'Помилка сервера при збереженні',
+    });
+  }
+}
+
+5. BACKEND: services/documentSnapshotService.js
+-----------------------------------------------
+// ПРИКЛАД на node-oracledb. Інтегруй отримання connection у свій OracleDBManager:
+// наприклад OracleDBManager.getConnection(dbName) — НОВИЙ метод, якщо його ще немає.
+// Не використовуй кілька незалежних OracleDBManager.query() для однієї транзакції.
+import oracledb from 'oracledb';
+import OracleDBManager from '../db/OracleDBManager.js';
+
+function httpError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+export async function saveDocumentSnapshot({ dbName, versionId, snapshot, saveRevision, userId }) {
+  if (!userId) throw httpError(401, 'Потрібна авторизація');
+  if (snapshot.schemaVersion !== 1 || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
+    // Якщо buildSnapshot повертає {elements:{nodes,edges}}, змінити ці перевірки
+    // відповідно до ФАКТИЧНОГО формату, не перепаковуючи дані наосліп.
+    throw httpError(400, 'Некоректна структура snapshot');
+  }
+  const json = JSON.stringify(snapshot);
+  const connection = await OracleDBManager.getConnection(dbName); // адаптувати
+  try {
+    // Серіалізація паралельних save та перевірка, що редагується DRAFT.
+    const version = await connection.execute(
+      `SELECT STATUS_CODE FROM DOC_VERSION WHERE ID = :versionId FOR UPDATE`,
+      { versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+    );
+    if (!version.rows.length) throw httpError(404, 'Версію не знайдено');
+    if (version.rows[0].STATUS_CODE !== 'DRAFT') throw httpError(409, 'Редагувати можна лише DRAFT');
+
+    // Тут обов'язкова перевірка права userId на запис саме цього DOC_VERSION.
+    // НЕ покладайся тільки на authMiddleware: він підтверджує особу, не ACL документа.
+
+    const existing = await connection.execute(
+      `SELECT SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :versionId`,
+      { versionId }, { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false }
+    );
+    const actualRevision = existing.rows.length ? Number(existing.rows[0].SAVE_REVISION) : 0;
+    if (actualRevision !== saveRevision) throw httpError(409, 'Схему вже змінив інший користувач. Перезавантаж дані.');
+    const nextRevision = actualRevision + 1;
+
+    if (existing.rows.length) {
+      await connection.execute(
+        `UPDATE DOC_SNAPSHOT
+            SET SNAPSHOT_JSON = :json, SAVE_REVISION = :nextRevision
+          WHERE DOC_VERSION_ID = :versionId`,
+        { json: { val: json, type: oracledb.CLOB }, nextRevision, versionId },
+        { autoCommit: false }
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO DOC_SNAPSHOT (DOC_VERSION_ID, SNAPSHOT_JSON, SAVE_REVISION)
+         VALUES (:versionId, :json, :nextRevision)`,
+        { versionId, json: { val: json, type: oracledb.CLOB }, nextRevision },
+        { autoCommit: false }
+      );
+    }
+
+    // НАСТУПНИЙ ЕТАП: тут, ДО commit, синхронізувати DOC_OBJECT,
+    // DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE з цього ж snapshot на цьому ж connection.
+    // Не повертати success до COMMIT усіх необхідних операцій.
+    await connection.commit();
+    return { versionId, saveRevision: nextRevision };
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    await connection.close();
+  }
+}
+
+6. ЯК ПЕРЕВІРИТИ ЗАПИС У БД
+-------------------------
+SELECT DOC_VERSION_ID, SAVE_REVISION, DBMS_LOB.GETLENGTH(SNAPSHOT_JSON) AS JSON_BYTES_OR_CHARS
+FROM DOC_SNAPSHOT
+WHERE DOC_VERSION_ID = :versionId;
+
+SELECT JSON_VALUE(SNAPSHOT_JSON, '$.schemaVersion' RETURNING NUMBER) AS SCHEMA_VERSION
+FROM DOC_SNAPSHOT
+WHERE DOC_VERSION_ID = :versionId;
+
+-- Якщо JSON має поля nodes/edges на верхньому рівні:
+SELECT j.node_id
+FROM DOC_SNAPSHOT s,
+     JSON_TABLE(s.SNAPSHOT_JSON, '$.nodes[*]'
+       COLUMNS (node_id VARCHAR2(128) PATH '$.id')) j
+WHERE s.DOC_VERSION_ID = :versionId;
+
+7. ЧИТАННЯ: GET /api/documents/:versionId/snapshot
+-------------------------------------------------
+// SQL:
+// SELECT s.SNAPSHOT_JSON, s.SAVE_REVISION, v.STATUS_CODE
+// FROM DOC_SNAPSHOT s JOIN DOC_VERSION v ON v.ID=s.DOC_VERSION_ID
+// WHERE s.DOC_VERSION_ID=:versionId
+// Перед поверненням перевірити ACL читання. CLOB може повертатися як string
+// або Lob stream — залежить від налаштувань node-oracledb / OracleDBManager.
+// Повернути {snapshot: JSON.parse(clobText), saveRevision, status}.
+// На фронті викликати ОДИН loadSnapshot/setState для відновлення nodes/edges.
+
+8. ПОМИЛКИ, ЯКИХ УНИКАТИ
+-----------------------
+- Не передавати в API весь Zustand Store: тільки cleanSnapshot.
+- Не перетворювати об'єкти на спрощені, якщо вони мають додаткові поля,
+  які потрібні для відновлення. Твій prepareAndValidateSnapshot() наразі
+  ЯВНО створює нові node/edge об'єкти і може втратити невказані поля!
+- Number(value ?? 0) перетворює невалідні дані на NaN; JSON.stringify(NaN) -> null.
+  Потрібна перевірка Number.isFinite, а не тільки Number().
+- У твоєму скріншоті edge.route.vertice (саме так написано) — перевір,
+  чи це реальне ім'я властивості, а не помилка відносно vertices.
+- Не робити INSERT із CLOB як звичайний VARCHAR2 для великих JSON.
+- Не зберігати STABLE/ARCHIVED; тільки DRAFT.
+- Не припускати, що req.locals.dbName автоматично означає право доступу.
+- Для синхронізації індексованих таблиць додати SQL до тієї ж транзакції.
+- Для production додати серверну валідацію, ліміти JSON і контроль ACL.
+
+9. ПЕРЕД ІНТЕГРАЦІЄЮ УТОЧНИ
+--------------------------
+(а) CREATE TABLE DOC_SNAPSHOT (фактичний DDL);
+(б) як саме OracleDBManager.query відкриває/закриває connection;
+(в) реалізацію fetchData для PUT;
+(г) фактичний результат console.log(cleanSnapshot) — об'єкт чи рядок,
+    та структура {nodes,edges} чи {elements:{nodes,edges}}.

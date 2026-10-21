@@ -1,0 +1,476 @@
+Для твоєї поточної реалізації я рекомендую не створювати другий запит із frontend для збереження `nodes` та `edges`.
+
+Ти вже формуєш JSON через `canvasController.prepareAndValidateSnapshot()` і передаєш його на API. Тому правильніше розширити наявний обробник `PUT /api/documents/:versionId/snapshot`, щоб він в одній транзакції записував:
+
+- `DOC_SNAPSHOT` — повний JSON для відновлення Canvas;
+- `DOC_OBJECT` — індексовані `NODE` та `EDGE`;
+- `DOC_OBJECT_ATTRIBUTE` — атрибути для пошуку й інформаційних карток;
+- `DOC_OBJECT_LINK` — зв'язки між об'єктами, якщо вони явно визначені в `edge`.
+
+При цьому в раніше погодженій схемі `DOC_OBJECT` не обов'язково має колонку `OBJECT_JSON`. Тому не будемо припускати, що вона існує: повний JSON залишається в `DOC_SNAPSHOT`, а в індексовані таблиці потрапляють тільки потрібні поля.
+
+Нижче — приклад під твої Express-контролери, `req.locals.dbName` і Zustand.
+
+## 1. Як виглядатиме збереження
+
+\#chatgpt-mermaid-\_r_39f\_{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI","Helvetica","Apple Color Emoji","Arial",sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;fill:rgb(13, 13, 13);}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#chatgpt-mermaid-\_r_39f\_ .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_39f\_ .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_39f\_ .error-icon{fill:rgb(243, 243, 243);}#chatgpt-mermaid-\_r_39f\_ .error-text{fill:rgb(13, 13, 13);stroke:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .edge-thickness-normal{stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .edge-thickness-thick{stroke-width:3.5px;}#chatgpt-mermaid-\_r_39f\_ .edge-pattern-solid{stroke-dasharray:0;}#chatgpt-mermaid-\_r_39f\_ .edge-thickness-invisible{stroke-width:0;fill:none;}#chatgpt-mermaid-\_r_39f\_ .edge-pattern-dashed{stroke-dasharray:3;}#chatgpt-mermaid-\_r_39f\_ .edge-pattern-dotted{stroke-dasharray:2;}#chatgpt-mermaid-\_r_39f\_ .marker{fill:rgb(143, 143, 143);stroke:rgb(143, 143, 143);}#chatgpt-mermaid-\_r_39f\_ .marker.cross{stroke:rgb(143, 143, 143);}#chatgpt-mermaid-\_r_39f\_ svg{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI","Helvetica","Apple Color Emoji","Arial",sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;}#chatgpt-mermaid-\_r_39f\_ p{margin:0;}#chatgpt-mermaid-\_r_39f\_ .label{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI","Helvetica","Apple Color Emoji","Arial",sans-serif,"Segoe UI Emoji","Segoe UI Symbol";color:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .cluster-label text{fill:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .cluster-label span{color:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .cluster-label span p{background-color:transparent;}#chatgpt-mermaid-\_r_39f\_ .label text,#chatgpt-mermaid-\_r_39f\_ span{fill:rgb(13, 13, 13);color:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .node rect,#chatgpt-mermaid-\_r_39f\_ .node circle,#chatgpt-mermaid-\_r_39f\_ .node ellipse,#chatgpt-mermaid-\_r_39f\_ .node polygon,#chatgpt-mermaid-\_r_39f\_ .node path{fill:rgb(222, 234, 251);stroke:rgb(83, 154, 248);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .rough-node .label text,#chatgpt-mermaid-\_r_39f\_ .node .label text,#chatgpt-mermaid-\_r_39f\_ .image-shape .label,#chatgpt-mermaid-\_r_39f\_ .icon-shape .label{text-anchor:middle;}#chatgpt-mermaid-\_r_39f\_ .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .rough-node .label,#chatgpt-mermaid-\_r_39f\_ .node .label,#chatgpt-mermaid-\_r_39f\_ .image-shape .label,#chatgpt-mermaid-\_r_39f\_ .icon-shape .label{text-align:center;}#chatgpt-mermaid-\_r_39f\_ .node.clickable{cursor:pointer;}#chatgpt-mermaid-\_r_39f\_ .root .anchor path{fill:rgb(143, 143, 143)!important;stroke-width:0;stroke:rgb(143, 143, 143);}#chatgpt-mermaid-\_r_39f\_ .arrowheadPath{fill:rgb(143, 143, 143);}#chatgpt-mermaid-\_r_39f\_ .edgePath .path{stroke:rgb(143, 143, 143);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .flowchart-link{stroke:rgb(143, 143, 143);fill:none;}#chatgpt-mermaid-\_r_39f\_ .edgeLabel{background-color:rgb(252, 252, 252);text-align:center;}#chatgpt-mermaid-\_r_39f\_ .edgeLabel p{background-color:rgb(252, 252, 252);}#chatgpt-mermaid-\_r_39f\_ .edgeLabel rect{opacity:0.5;background-color:rgb(252, 252, 252);fill:rgb(252, 252, 252);}#chatgpt-mermaid-\_r_39f\_ .labelBkg{background-color:rgba(252, 252, 252, 0.5);}#chatgpt-mermaid-\_r_39f\_ .cluster rect{fill:rgb(243, 243, 243);stroke:rgba(0, 0, 0, 0.1);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .cluster text{fill:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ .cluster span{color:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI","Helvetica","Apple Color Emoji","Arial",sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:12px;background:rgb(243, 243, 243);border:1px solid rgba(0, 0, 0, 0.1);border-radius:2px;pointer-events:none;z-index:100;}#chatgpt-mermaid-\_r_39f\_ .flowchartTitleText{text-anchor:middle;font-size:18px;fill:rgb(13, 13, 13);}#chatgpt-mermaid-\_r_39f\_ rect.text{fill:none;stroke-width:0;}#chatgpt-mermaid-\_r_39f\_ .icon-shape,#chatgpt-mermaid-\_r_39f\_ .image-shape{background-color:rgb(252, 252, 252);text-align:center;}#chatgpt-mermaid-\_r_39f\_ .icon-shape p,#chatgpt-mermaid-\_r_39f\_ .image-shape p{background-color:rgb(252, 252, 252);padding:2px;}#chatgpt-mermaid-\_r_39f\_ .icon-shape .label rect,#chatgpt-mermaid-\_r_39f\_ .image-shape .label rect{opacity:0.5;background-color:rgb(252, 252, 252);fill:rgb(252, 252, 252);}#chatgpt-mermaid-\_r_39f\_ .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#chatgpt-mermaid-\_r_39f\_ .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#chatgpt-mermaid-\_r_39f\_ .node .neo-node{stroke:rgb(83, 154, 248);}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node rect,#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].cluster rect,#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node polygon{stroke:url(#chatgpt-mermaid-\_r_39f\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].swimlane.cluster rect{filter:none;}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node path{stroke:url(#chatgpt-mermaid-\_r_39f\_-gradient);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node .neo-line path{stroke:rgb(83, 154, 248);filter:none;}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node circle{stroke:url(#chatgpt-mermaid-\_r_39f\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].node circle .state-start{fill:#000000;}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].icon-shape .icon{fill:url(#chatgpt-mermaid-\_r_39f\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_39f\_ [data-look="neo"].icon-shape .icon-neo path{stroke:url(#chatgpt-mermaid-\_r_39f\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_39f\_ .node text{font-size:14px;font-weight:600;letter-spacing:normal;fill:rgb(0, 79, 153);}#chatgpt-mermaid-\_r_39f\_ .edgeLabels text{font-size:13px;font-weight:600;letter-spacing:-0.08px;fill:rgb(0, 79, 153);}#chatgpt-mermaid-\_r_39f\_ .node tspan[font-weight="normal"],#chatgpt-mermaid-\_r_39f\_ .edgeLabels tspan[font-weight="normal"]{font-weight:600;}#chatgpt-mermaid-\_r_39f\_ .edgeLabel .label rect{opacity:1;rx:13px;ry:13px;fill:rgb(245, 250, 255);stroke:rgb(206, 219, 229);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .node rect,#chatgpt-mermaid-\_r_39f\_ .node circle,#chatgpt-mermaid-\_r_39f\_ .node ellipse,#chatgpt-mermaid-\_r_39f\_ .node polygon,#chatgpt-mermaid-\_r_39f\_ .node path{fill:rgb(229, 243, 255);stroke:rgba(0, 0, 0, 0.1);stroke-width:1px;}#chatgpt-mermaid-\_r_39f\_ .node rect{rx:16px;ry:16px;}#chatgpt-mermaid-\_r_39f\_ .node.mermaid-decision .label-container{fill:rgb(245, 250, 255);stroke:rgb(206, 219, 229);stroke-dasharray:2px,2px;}#chatgpt-mermaid-\_r_39f\_ .edgePaths .flowchart-link{stroke:rgb(143, 143, 143);stroke-width:1px;stroke-linecap:round;stroke-linejoin:round;}#chatgpt-mermaid-\_r_39f\_ .marker{fill:rgb(143, 143, 143);stroke:rgb(143, 143, 143);}#chatgpt-mermaid-\_r_39f\_ :root{--mermaid-font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI","Helvetica","Apple Color Emoji","Arial",sans-serif,"Segoe UI Emoji","Segoe UI Symbol";}Кнопка Save на CanvasprepareAndValidateSnapshot()PUT/api/documents/:versionId/snapshotdocumentController.saveSnapshotdocumentSaveServiceОдна транзакція OracleDOC_SNAPSHOTDOC_OBJECT: NODE / EDGEDOC_OBJECT_ATTRIBUTEDOC_OBJECT_LINKCOMMIT
+
+## 2. Frontend — нічого додатково відправляти не потрібно
+
+Якщо твій `buildSnapshot()` повертає таку структуру:
+
+```
+{
+  schemaVersion: 1,
+  nodes: [...],
+  edges: [...]
+}
+```
+
+залишаємо один виклик:
+
+```
+export const saveDocument = async (
+  versionId,
+  saveRevision
+) => {
+  const snapshot =
+    canvasController.prepareAndValidateSnapshot();
+
+  return fetchData(
+    `/api/documents/${versionId}/snapshot`,
+    "PUT",
+    {
+      snapshot,
+      saveRevision
+    }
+  );
+};
+```
+
+У твоєму `fetchData()` потрібно перевірити, що третій аргумент справді передається як JSON-тіло запиту.
+
+Важливо: твоя поточна функція `prepareAndValidateSnapshot()` формує нові об'єкти з вибраними полями. Для атрибутів обладнання необхідно переконатися, що потрібні дані не губляться під час цього перетворення.
+
+## 3. API — маршрут та контролер
+
+У `documentRoutes.js`:
+
+```
+import express from "express";
+import documentController from
+  "../controllers/documentController.js";
+
+const router = express.Router();
+
+router.put(
+  "/:versionId/snapshot",
+  documentController.saveSnapshot
+);
+
+export default router;
+```
+
+У `documentController.js`:
+
+```
+import { saveDocumentData } from
+  "../services/documentSaveService.js";
+
+const saveSnapshot = async (req, res) => {
+  try {
+    const dbName = req.locals.dbName;
+    const { versionId } = req.params;
+    const { snapshot, saveRevision } = req.body;
+
+    const result = await saveDocumentData({
+      dbName,
+      versionId,
+      snapshot,
+      saveRevision,
+      userId: req.user.id
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error(error);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.statusCode
+        ? error.message
+        : "Помилка збереження"
+    });
+  }
+};
+
+export default { saveSnapshot };
+```
+
+Тут використовується твій наявний `req.locals.dbName`. Поле `req.user.id` потрібно адаптувати до твого middleware авторизації.
+
+## 4. Як записати NODE та EDGE в DOC_OBJECT
+
+За нашою попередньою структурою ключем є:
+
+`(DOC_VERSION_ID, OBJECT_ID)`
+
+Використовуємо такі колонки:
+
+```
+INSERT INTO DOC_OBJECT (
+    DOC_VERSION_ID,
+    OBJECT_ID,
+    OBJECT_TYPE,
+    OBJECT_SUBTYPE,
+    LABEL,
+    EXTERNAL_OBJECT_ID,
+    UNIT_ID,
+    SEARCHABLE_TEXT,
+    PARENT_OBJECT_ID,
+    IS_DELETED
+)
+VALUES (
+    :versionId,
+    :objectId,
+    :objectType,
+    :objectSubtype,
+    :label,
+    :externalObjectId,
+    :unitId,
+    :searchableText,
+    :parentObjectId,
+    0
+)
+```
+
+Для першої реалізації можна використовувати повну заміну індексованих NODE та EDGE при кожному Save, а не обчислювати зміни кожного об'єкта.
+
+Це відповідає твоїй моделі пакетного збереження.
+
+Однак видаляти потрібно лише дані поточної DRAFT і лише відповідні типи об'єктів. Порядок видалення має враховувати зовнішні ключі.
+
+## 5. Підготовка даних для Oracle
+
+Створимо `documentIndexMapper.js`.
+
+```
+export function mapObjects(snapshot, versionId) {
+  const nodes = snapshot.nodes ?? [];
+  const edges = snapshot.edges ?? [];
+
+  return [
+    ...nodes.map(node => ({
+      versionId,
+      objectId: node.id,
+      objectType: "NODE",
+      objectSubtype: node.type ?? null,
+      label: node.data?.label ?? node.label ?? null,
+      externalObjectId:
+        node.data?.externalObjectId ?? null,
+      unitId: node.data?.unitId ?? null,
+      searchableText:
+        node.data?.label ?? node.label ?? null,
+      parentObjectId: null
+    })),
+
+    ...edges.map(edge => ({
+      versionId,
+      objectId: edge.id,
+      objectType: "EDGE",
+      objectSubtype: edge.kind ?? null,
+      label: edge.label ?? null,
+      externalObjectId: null,
+      unitId: null,
+      searchableText: edge.label ?? null,
+      parentObjectId: null
+    }))
+  ];
+}
+```
+
+Це приклад мапінгу. Точні шляхи до `externalObjectId`, `unitId`, `label` потрібно встановити за структурою реальних об'єктів.
+
+## 6. Атрибути — DOC_OBJECT_ATTRIBUTE
+
+Наприклад, для вузла обладнання ти хочеш індексувати:
+
+- найменування;
+- тип обладнання;
+- зовнішній ідентифікатор;
+- ширину та висоту;
+- координати X/Y.
+
+Таблиця атрибутів:
+
+| OBJECT_ID | ATTRIBUTE_CODE | VALUE_TEXT       | VALUE_NUMBER |
+| --------- | -------------- | ---------------- | ------------ |
+| node-001  | EQUIPMENT_TYPE | PUMP             |              |
+| node-001  | POS_X          |                  | 150          |
+| node-001  | POS_Y          |                  | 200          |
+| node-001  | WIDTH          |                  | 100          |
+| edge-001  | CONNECTOR_TYPE | orthogonal-elbow |              |
+
+Приклад функції:
+
+```
+export function mapAttributes(snapshot, versionId) {
+  const attributes = [];
+
+  function add(objectId, code, value) {
+    if (value === null || value === undefined) {
+      return;
+    }
+
+    attributes.push({
+      versionId,
+      objectId,
+      attributeCode: code,
+      valueText:
+        typeof value === "string" ? value : null,
+      valueNumber:
+        typeof value === "number" &&
+        Number.isFinite(value)
+          ? value
+          : null,
+      valueDate: null
+    });
+  }
+
+  for (const node of snapshot.nodes ?? []) {
+    add(node.id, "POS_X", node.position?.x);
+    add(node.id, "POS_Y", node.position?.y);
+    add(node.id, "WIDTH", node.data?.width);
+    add(node.id, "HEIGHT", node.data?.height);
+    add(node.id, "EQUIPMENT_TYPE", node.type);
+  }
+
+  for (const edge of snapshot.edges ?? []) {
+    add(edge.id, "CONNECTOR_TYPE", edge.connectorType);
+    add(edge.id, "PATH_TYPE", edge.pathType);
+  }
+
+  return attributes;
+}
+```
+
+SQL:
+
+```
+INSERT INTO DOC_OBJECT_ATTRIBUTE (
+    DOC_VERSION_ID,
+    OBJECT_ID,
+    ATTRIBUTE_CODE,
+    VALUE_TEXT,
+    VALUE_NUMBER,
+    VALUE_DATE
+)
+VALUES (
+    :versionId,
+    :objectId,
+    :attributeCode,
+    :valueText,
+    :valueNumber,
+    :valueDate
+)
+```
+
+Не потрібно записувати абсолютно всі властивості вузла в атрибути. Тільки ті, за якими планується пошук, фільтрація, формування звітів або робота інформаційних карток.
+
+## 7. Збереження через OracleDBManager
+
+У твоєму `OracleDBManager` зараз є:
+
+```
+OracleDBManager.query(dbName, sql, params)
+```
+
+Але для цього сценарію потрібно отримати одне з'єднання, на якому виконуються всі операції.
+
+Нижче приклад сервісу. Він передбачає, що `getConnection(dbName)` повертає `node-oracledb Connection`, а `saveSnapshotRow()` уже реалізує запис JSON і перевірку `SAVE_REVISION`.
+
+```
+import OracleDBManager from
+  "../db/OracleDBManager.js";
+
+import {
+  mapObjects,
+  mapAttributes
+} from "./documentIndexMapper.js";
+
+export async function saveDocumentData({
+  dbName,
+  versionId,
+  snapshot,
+  saveRevision,
+  userId
+}) {
+  const connection =
+    await OracleDBManager.getConnection(dbName);
+
+  try {
+    // Перевірка доступу, DRAFT та блокування версії
+    await assertEditableDraft(
+      connection,
+      versionId,
+      userId
+    );
+
+    const objects = mapObjects(snapshot, versionId);
+    const attributes = mapAttributes(
+      snapshot,
+      versionId
+    );
+
+    validateIndexedData(objects, attributes);
+
+    // Зберігаємо повний JSON
+    const newRevision = await saveSnapshotRow(
+      connection,
+      versionId,
+      snapshot,
+      saveRevision
+    );
+
+    // Спочатку залежні записи
+    await connection.execute(
+      `DELETE FROM DOC_OBJECT_ATTRIBUTE
+       WHERE DOC_VERSION_ID = :versionId
+         AND OBJECT_ID IN (
+           SELECT OBJECT_ID
+           FROM DOC_OBJECT
+           WHERE DOC_VERSION_ID = :versionId
+             AND OBJECT_TYPE IN ('NODE', 'EDGE')
+         )`,
+      { versionId },
+      { autoCommit: false }
+    );
+
+    // Аналогічно видаляємо залежні DOC_OBJECT_LINK,
+    // які стосуються NODE/EDGE.
+
+    await connection.execute(
+      `DELETE FROM DOC_OBJECT
+       WHERE DOC_VERSION_ID = :versionId
+         AND OBJECT_TYPE IN ('NODE', 'EDGE')`,
+      { versionId },
+      { autoCommit: false }
+    );
+
+    if (objects.length) {
+      await connection.executeMany(
+        `INSERT INTO DOC_OBJECT (
+          DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE,
+          OBJECT_SUBTYPE, LABEL, EXTERNAL_OBJECT_ID,
+          UNIT_ID, SEARCHABLE_TEXT, PARENT_OBJECT_ID,
+          IS_DELETED
+        ) VALUES (
+          :versionId, :objectId, :objectType,
+          :objectSubtype, :label, :externalObjectId,
+          :unitId, :searchableText, :parentObjectId, 0
+        )`,
+        objects,
+        { autoCommit: false }
+      );
+    }
+
+    if (attributes.length) {
+      await connection.executeMany(
+        `INSERT INTO DOC_OBJECT_ATTRIBUTE (
+          DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE,
+          VALUE_TEXT, VALUE_NUMBER, VALUE_DATE
+        ) VALUES (
+          :versionId, :objectId, :attributeCode,
+          :valueText, :valueNumber, :valueDate
+        )`,
+        attributes,
+        { autoCommit: false }
+      );
+    }
+
+    // Тут синхронізуємо DOC_OBJECT_LINK
+    // після вставки всіх об'єктів.
+
+    await connection.commit();
+
+    return {
+      success: true,
+      saveRevision: newRevision,
+      indexedObjects: objects.length,
+      indexedAttributes: attributes.length
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+```
+
+Це каркас інтеграції, а не завершений сервіс. Функції `assertEditableDraft`, `saveSnapshotRow` і `validateIndexedData` потрібно підключити до реалізованої логіки. Також необхідно перевірити всі зовнішні ключі перед видаленням об'єктів: інші типи об'єктів можуть посилатися на NODE або EDGE.
+
+Для великих схем варто додати `bindDefs` до `executeMany()` та пакетну обробку.
+
+## 8. Як читати індексовані дані
+
+Наприклад, отримати всі вузли конкретної версії:
+
+```
+SELECT
+    OBJECT_ID,
+    OBJECT_SUBTYPE,
+    LABEL,
+    EXTERNAL_OBJECT_ID,
+    UNIT_ID
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID = :versionId
+  AND OBJECT_TYPE = 'NODE'
+  AND IS_DELETED = 0
+```
+
+Отримати всі атрибути вузла:
+
+```
+SELECT
+    ATTRIBUTE_CODE,
+    VALUE_TEXT,
+    VALUE_NUMBER,
+    VALUE_DATE
+FROM DOC_OBJECT_ATTRIBUTE
+WHERE DOC_VERSION_ID = :versionId
+  AND OBJECT_ID = :objectId
+ORDER BY ATTRIBUTE_CODE
+```
+
+Знайти обладнання за зовнішнім ID у всіх актуальних STABLE:
+
+```
+SELECT
+    d.ID AS DOCUMENT_ID,
+    d.TITLE,
+    o.OBJECT_ID,
+    o.LABEL,
+    o.EXTERNAL_OBJECT_ID
+FROM DOC_OBJECT o
+JOIN DOC_VERSION v
+  ON v.ID = o.DOC_VERSION_ID
+JOIN DOC_RESOURCE d
+  ON d.ID = v.DOC_RESOURCE_ID
+WHERE v.STATUS_CODE = 'STABLE'
+  AND o.OBJECT_TYPE = 'NODE'
+  AND o.IS_DELETED = 0
+  AND o.EXTERNAL_OBJECT_ID = :externalId
+```
+
+## 9. Що робити з DOC_OBJECT_LINK
+
+У твоїх `edges` уже є складні властивості `start.attached`, `end.attached`, `route`, `geometry` та інші.
+
+Тут потрібно окремо визначити, які з них означають логічний зв'язок між двома NODE, а які лише описують геометрію лінії.
+
+Я б не створював записи `DOC_OBJECT_LINK` автоматично з будь-якого `attached`, доки не встановимо точну структуру цих полів.
+
+Найважливіше для наступного кроку: у твоїй системі потрібно зберігати індексовані NODE, EDGE та атрибути синхронно з JSON. Але перед фінальною реалізацією варто уточнити структуру двох реальних об'єктів із Zustand і зовнішні ключі `DOC_OBJECT_LINK`.
+
+Тоді зможемо написати готовий `documentSaveService.js`, який працюватиме з твоїм `OracleDBManager`, без умовних функцій і без ризику видалення пов'язаних об'єктів.

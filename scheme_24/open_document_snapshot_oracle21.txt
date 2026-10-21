@@ -1,0 +1,302 @@
+OPEN DOCUMENT: Oracle 21c -> Express API -> Next.js -> Zustand -> React-Konva
+==========================================================================
+
+МЕТА
+----
+Коли користувач відкриває документ, отримати його DOC_VERSION_ID, перевірити,
+чи існує DOC_SNAPSHOT, прочитати JSON, перевірити формат і одним оновленням
+відновити nodes та edges у useCanvasStore. Надалі додамо zvts, zvtBranches тощо.
+
+ВАЖЛИВІ ПРИПУЩЕННЯ
+------------------
+1. DOC_SNAPSHOT має DOC_VERSION_ID, SNAPSHOT_JSON (CLOB), SAVE_REVISION.
+2. DOC_VERSION має ID, DOC_RESOURCE_ID, STATUS_CODE.
+3. Існуючий buildSnapshot() / validateSnapshot() повертає JSON формату
+   {schemaVersion:1, nodes:[...], edges:[...]}. Якщо фактичний формат
+   {schemaVersion:1, elements:{nodes,edges}}, нижче передбачено обидва.
+4. Назви файлів, import-шляхи, спосіб авторизації та обгортка fetchData
+   адаптуються до наявного проєкту. Нижче немає припущення, що
+   OracleDBManager.query() вміє читати CLOB як рядок.
+5. DOC_VERSION_ID, а не DOC_RESOURCE_ID, є ключем snapshot. Якщо з UI
+   надходить ID документа, спочатку треба знайти версію для відкриття.
+
+ЛАНЦЮЖОК
+--------
+Клік «Відкрити» -> resolve DOC_VERSION_ID -> GET /api/documents/:versionId/snapshot
+-> 200 із snapshot або 404 SNAPSHOT_NOT_FOUND -> Zustand.setState({...})
+-> React-Konva перемальовує nodes / edges.
+
+1. API ROUTE: routes/documentRoutes.js
+--------------------------------------
+import express from 'express';
+import { getDocumentSnapshot } from '../controllers/documentController.js';
+
+const router = express.Router();
+router.get('/:versionId/snapshot', getDocumentSnapshot);
+export default router;
+
+// main/app.js (після middleware, яке встановлює req.locals.dbName і req.user):
+// app.use('/api/documents', authMiddleware, documentRoutes);
+// Якщо dbName визначає окреме middleware, воно має виконатися до router.
+
+2. API CONTROLLER: controllers/documentController.js
+----------------------------------------------------
+import OracleDBManager from '../db/OracleDBManager.js';
+import oracledb from 'oracledb';
+
+const readLob = async (lob) => {
+  if (lob == null) return null;
+  if (typeof lob === 'string') return lob;
+  if (Buffer.isBuffer(lob)) return lob.toString('utf8');
+  if (typeof lob[Symbol.asyncIterator] !== 'function') {
+    throw new Error('Unexpected SNAPSHOT_JSON value type');
+  }
+  let text = '';
+  for await (const chunk of lob) text += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+  return text;
+};
+
+export async function getDocumentSnapshot(req, res) {
+  const { versionId } = req.params;
+  const dbName = req.locals?.dbName;
+  if (!dbName || !versionId || versionId.length > 36) {
+    return res.status(400).json({ code: 'BAD_REQUEST' });
+  }
+  try {
+    // ВАЖЛИВО: перевірити право req.user читати цю версію ДО повернення JSON.
+    // Тут потрібен ваш чинний permission middleware / access service.
+    // Не покладайтеся лише на знання UUID.
+
+    const sql = `
+      SELECT v.ID AS DOC_VERSION_ID,
+             v.DOC_RESOURCE_ID,
+             v.STATUS_CODE,
+             s.SAVE_REVISION,
+             s.SNAPSHOT_JSON
+        FROM DOC_VERSION v
+        LEFT JOIN DOC_SNAPSHOT s ON s.DOC_VERSION_ID = v.ID
+       WHERE v.ID = :versionId
+    `;
+    // Приклад адаптовано до вашого query(dbName, sql, params).
+    // В ідеалі query підтримує options: {fetchInfo: {SNAPSHOT_JSON:{type:oracledb.STRING}}}
+    // Для CLOB більше 1 ГБ STRING не підходить; тоді читайте LOB-потік.
+    const result = await OracleDBManager.query(dbName, sql, { versionId });
+    const row = result.rows?.[0];
+    if (!row) return res.status(404).json({ code: 'VERSION_NOT_FOUND' });
+
+    // Якщо OracleDBManager повертає масиви, налаштуйте OUT_FORMAT_OBJECT;
+    // нижче припускається, що рядки мають іменовані поля.
+    if (row.SNAPSHOT_JSON == null) {
+      return res.status(404).json({
+        code: 'SNAPSHOT_NOT_FOUND',
+        versionId,
+        status: row.STATUS_CODE,
+      });
+    }
+
+    const raw = await readLob(row.SNAPSHOT_JSON);
+    let snapshot;
+    try { snapshot = JSON.parse(raw); }
+    catch { return res.status(500).json({ code: 'INVALID_SNAPSHOT_IN_DB' }); }
+
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return res.status(500).json({ code: 'INVALID_SNAPSHOT_IN_DB' });
+    }
+
+    return res.status(200).json({
+      versionId: row.DOC_VERSION_ID,
+      documentId: row.DOC_RESOURCE_ID,
+      status: row.STATUS_CODE,
+      saveRevision: row.SAVE_REVISION,
+      snapshot,
+    });
+  } catch (error) {
+    console.error('getDocumentSnapshot:', error);
+    return res.status(500).json({ code: 'SNAPSHOT_READ_ERROR' });
+  }
+}
+
+ПРИМІТКА ДО CLOB:
+OracleDBManager.query() має або повертати CLOB як рядок, або забезпечувати,
+що з'єднання не закривається до завершення читання LOB. Якщо query() закриває
+connection до readLob(), потік не працюватиме. Найпростіше для помірних
+snapshot — встановити oracledb.fetchAsString = [oracledb.CLOB] під час
+ініціалізації драйвера (з урахуванням лімітів пам'яті), або зробити метод
+queryWithClobString() із fetchInfo. Не змінюйте глобальне налаштування,
+якщо це може вплинути на інші запити: краще додати fetchInfo в query().
+
+3. ЯКЩО З UI ПРИХОДИТЬ DOC_RESOURCE_ID, А НЕ DOC_VERSION_ID
+-----------------------------------------------------------
+-- Для редактора пріоритет DRAFT, інакше STABLE; ARCHIVED відкривається
+-- тільки при явному виборі історичної версії.
+SELECT ID, STATUS_CODE
+  FROM (
+    SELECT ID, STATUS_CODE
+      FROM DOC_VERSION
+     WHERE DOC_RESOURCE_ID = :documentId
+       AND STATUS_CODE IN ('DRAFT', 'STABLE')
+     ORDER BY CASE STATUS_CODE WHEN 'DRAFT' THEN 0 ELSE 1 END
+  )
+ WHERE ROWNUM = 1;
+
+Цей SELECT реалізуйте окремим GET /api/documents/:documentId/open-version
+із перевіркою прав і поверненням {versionId,status}; або передавайте
+versionId зі списку документів. НЕ змішуйте documentId і versionId.
+
+4. FRONTEND: services/documentApi.js
+------------------------------------
+// Якщо у вас fetchData(path, method, params) вже працює, використайте його.
+// Нижче — самодостатній fetch-приклад; API_BASE_URL — ваша конфігурація.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+
+export async function fetchDocumentSnapshot(versionId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/documents/${encodeURIComponent(versionId)}/snapshot`,
+    { method: 'GET', credentials: 'include', cache: 'no-store' }
+  );
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 404 && data.code === 'SNAPSHOT_NOT_FOUND') {
+    return { exists: false, versionId, status: data.status };
+  }
+  if (!response.ok) {
+    throw new Error(data.code ?? `HTTP_${response.status}`);
+  }
+  return { exists: true, ...data };
+}
+
+5. FRONTEND: lib/restoreSchemeSnapshot.js
+----------------------------------------
+import useCanvasStore from '../store/useCanvasStore'; // адаптуйте export/import
+
+function readNodesEdges(snapshot) {
+  if (!snapshot || snapshot.schemaVersion !== 1) {
+    throw new Error('Непідтримувана версія snapshot');
+  }
+  const container = snapshot.elements ?? snapshot;
+  if (!Array.isArray(container.nodes) || !Array.isArray(container.edges)) {
+    throw new Error('У snapshot відсутні масиви nodes/edges');
+  }
+  const ids = new Set();
+  for (const item of [...container.nodes, ...container.edges]) {
+    if (!item || typeof item.id !== 'string' || !item.id) {
+      throw new Error('Об’єкт без валідного id');
+    }
+    if (ids.has(item.id)) throw new Error(`Повторний id: ${item.id}`);
+    ids.add(item.id);
+  }
+  return { nodes: container.nodes, edges: container.edges };
+}
+
+export function restoreNodesEdges(snapshot) {
+  const { nodes, edges } = readNodesEdges(snapshot);
+  // setState частково оновлює store, не видаляє actions.
+  // На цьому етапі ми навмисно відновлюємо лише nodes та edges.
+  useCanvasStore.setState({
+    nodes: structuredClone(nodes),
+    edges: structuredClone(edges),
+    nodeRefs: {},
+  });
+  return { nodeCount: nodes.length, edgeCount: edges.length };
+}
+
+УВАГА: Якщо вузли використовують Konva refs, після setState компоненти
+повинні створити refs повторно. Якщо nodeRefs зберігає не просто об'єкт,
+адаптуйте очищення до вашої структури. Не викликайте addNode/addEdge,
+щоб не генерувати нові ID або геометрію.
+
+6. FRONTEND: canvasController.js
+--------------------------------
+import { fetchDocumentSnapshot } from '../services/documentApi';
+import { restoreNodesEdges } from '../lib/restoreSchemeSnapshot';
+
+export const canvasController = {
+  // ... існуючі методи, зокрема prepareAndValidateSnapshot
+  async openDocument(versionId) {
+    const result = await fetchDocumentSnapshot(versionId);
+    if (!result.exists) {
+      // Відсутність snapshot не означає, що документа немає.
+      // Для нового документа можна створити порожню сцену після підтвердження
+      // або використати окрему логіку ініціалізації.
+      return { loaded: false, reason: 'SNAPSHOT_NOT_FOUND' };
+    }
+    const counts = restoreNodesEdges(result.snapshot);
+    return {
+      loaded: true,
+      versionId: result.versionId,
+      status: result.status,
+      saveRevision: result.saveRevision,
+      ...counts,
+    };
+  },
+};
+
+7. FRONTEND: виклик із кнопки «Відкрити»
+--------------------------------------
+async function handleOpen(versionId) {
+  setIsLoading(true);
+  try {
+    const result = await canvasController.openDocument(versionId);
+    if (!result.loaded) {
+      alert('Для цієї версії ще немає збереженого JSON.');
+      return;
+    }
+    // Зберігайте versionId/status/saveRevision в стані документа/редактора,
+    // щоб наступний PUT використовував саме цю версію і актуальну ревізію.
+    setCurrentVersionId(result.versionId);
+    setSaveRevision(result.saveRevision);
+    setReadOnly(result.status !== 'DRAFT');
+    console.log('Відновлено:', result.nodeCount, result.edgeCount);
+  } catch (error) {
+    console.error(error);
+    alert(`Не вдалося відкрити документ: ${error.message}`);
+  } finally {
+    setIsLoading(false);
+  }
+}
+
+8. SQL ДЛЯ РУЧНОЇ ПЕРЕВІРКИ
+--------------------------
+SELECT v.ID, v.DOC_RESOURCE_ID, v.STATUS_CODE,
+       CASE WHEN s.DOC_VERSION_ID IS NULL THEN 0 ELSE 1 END AS HAS_SNAPSHOT,
+       s.SAVE_REVISION,
+       DBMS_LOB.GETLENGTH(s.SNAPSHOT_JSON) AS JSON_LENGTH
+  FROM DOC_VERSION v
+  LEFT JOIN DOC_SNAPSHOT s ON s.DOC_VERSION_ID = v.ID
+ WHERE v.ID = :versionId;
+
+SELECT JSON_VALUE(SNAPSHOT_JSON, '$.schemaVersion' RETURNING NUMBER)
+  AS SCHEMA_VERSION
+FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :versionId;
+
+9. ТЕСТОВИЙ СЦЕНАРІЙ
+-------------------
+A. Відкрийте документ, який має DOC_VERSION_ID і snapshot: GET повертає 200.
+B. Переконайтеся, що у відповіді snapshot.nodes/edges (або elements.nodes/edges).
+C. Натисніть «Відкрити» — ті ж IDs/points/position/style на Konva.
+D. Змініть вузол, збережіть, перезавантажте сторінку, відкрийте повторно.
+E. Для документа без snapshot API повертає 404 SNAPSHOT_NOT_FOUND;
+   існуючий canvas не очищається автоматично.
+F. Перевірте read-only для STABLE/ARCHIVED; API PUT теж має це блокувати.
+
+10. ВАЖЛИВІ ОБМЕЖЕННЯ ПОТОЧНОГО ЕТАПУ
+------------------------------------
+- Зараз відновлюємо ТІЛЬКИ nodes/edges. Якщо відкривати інший документ,
+  попередні zvts, zvtBranches, annotations, specificationTables, attachments
+  залишаться у store і можуть показатися на чужій схемі! Перед production
+  треба додати атомарне очищення інших документних полів або повний restore.
+- У вашій prepareAndValidateSnapshot() на фото видно ручне переформування
+  вузлів/ліній. Воно може ВТРАТИТИ невраховані поля. Перед перевіркою
+  точності відтворення зберігайте повні JSON-сумісні об'єкти, а валідацію
+  робіть без руйнівного обрізання.
+- Якщо buildSnapshot() вже повертає STRING, перед PUT потрібно JSON.parse()
+  і перевірити, що API отримує об'єкт, а не подвійно серіалізований JSON.
+- Доступ до документів перевіряється на сервері, не лише у frontend.
+- Для великих CLOB контролюйте ліміти body parser, пам'ять та максимальний
+  розмір відповіді; GET краще не кешувати.
+- Переконайтеся, що при відкритті старішої версії застосунок підтримує
+  schemaVersion; для майбутніх форматів передбачте міграції.
+
+РЕКОМЕНДАЦІЯ ДЛЯ НАСТУПНОГО КРОКУ
+--------------------------------
+Винести всі документні поля useCanvasStore у явний реєстр snapshotFields.
+Тоді openDocument() атомарно замінюватиме всю схему, а не лише nodes/edges.
