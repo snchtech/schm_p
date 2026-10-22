@@ -1,0 +1,370 @@
+ІНТЕГРАЦІЯ: ОДИН SAVE = JSON + NODE/EDGE + АТРИБУТИ, ОДНА ТРАНЗАКЦІЯ
+Next.js / Zustand / Express / Oracle 21c
+
+0. ПЕРЕДУМОВИ
+- У OracleDBManager вже додано withTransaction(dbName, callback) із попереднього патча.
+- У ньому tx.execute() / tx.executeMany() примусово мають autoCommit:false.
+- У застосунку ініціалізований pool для req.locals.dbName.
+- Схема таблиць — з файлу oracle21_versioned_schema_changes.txt:
+  DOC_VERSION(ID, STATUS_CODE), DOC_SNAPSHOT(DOC_VERSION_ID, SNAPSHOT_JSON,
+  SAVE_REVISION, UPDATED_AT, UPDATED_BY), DOC_OBJECT(DOC_VERSION_ID, OBJECT_ID,
+  OBJECT_TYPE, OBJECT_SUBTYPE, LABEL, EXTERNAL_OBJECT_ID, UNIT_ID,
+  SEARCHABLE_TEXT, PARENT_OBJECT_ID, IS_DELETED, OBJECT_JSON, EDGE_FUNCTION_ID),
+  DOC_OBJECT_ATTRIBUTE(DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE,
+  VALUE_TEXT, VALUE_NUMBER, VALUE_DATE), DOC_OBJECT_LINK(...).
+- Фронтенд уже повертає buildSnapshot() у форматі {schemaVersion:1,nodes:[],edges:[]}.
+- Цей приклад індексує ТІЛЬКИ nodes та edges. Інші типи об'єктів не зачіпає.
+- ВАЖЛИВО: перед впровадженням перевірити фактичні DDL і поля реальних nodes/edges.
+
+1. FRONTEND: ЗАЛИШАЄТЬСЯ ОДИН HTTP-ЗАПИТ
+
+// frontend/services/documentApi.js
+export async function saveDocumentSnapshot(versionId, snapshot, saveRevision) {
+  const response = await fetch(
+    `/api/documents/${encodeURIComponent(versionId)}/snapshot`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ snapshot, saveRevision }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || 'Save failed');
+  return data;
+}
+
+// У canvasController / handleSave:
+// const snapshot = canvasController.prepareAndValidateSnapshot();
+// const result = await saveDocumentSnapshot(docVersionId, snapshot, saveRevision);
+// saveRevision = result.saveRevision;  // краще тримати у стані документа
+// ПРИМІТКА: не очищати dirty, якщо Zustand змінився, поки тривав HTTP-запит.
+
+2. BACKEND: ROUTE
+
+// routes/documentRoutes.js
+import { Router } from 'express';
+import { saveSnapshot } from '../controllers/documentController.js';
+const router = Router();
+router.put('/:versionId/snapshot', saveSnapshot);
+export default router;
+
+// app.js (після middleware автентифікації та встановлення req.locals.dbName)
+// app.use('/api/documents', authMiddleware, documentRoutes);
+
+3. BACKEND: CONTROLLER
+
+// controllers/documentController.js
+import { saveDocumentVersion } from '../services/documentSaveService.js';
+
+export async function saveSnapshot(req, res) {
+  try {
+    const result = await saveDocumentVersion({
+      dbName: req.locals.dbName,
+      versionId: req.params.versionId,
+      snapshot: req.body.snapshot,
+      expectedRevision: req.body.saveRevision,
+      userId: req.user?.id, // адаптувати під власну автентифікацію
+    });
+    return res.status(200).json({ success: true, ...result });
+  } catch (e) {
+    console.error('saveSnapshot:', e);
+    return res.status(e.statusCode || 500).json({
+      success: false,
+      message: e.statusCode ? e.message : 'Помилка збереження документа',
+    });
+  }
+}
+
+4. BACKEND: MAPPER ІНДЕКСОВАНИХ ПОЛІВ
+
+// services/documentIndexMapper.js
+// Приклад: точні шляхи до label, externalObjectId, unitId уточнити за реальним state.
+function text(v, max = 500) {
+  if (v == null) return null;
+  const s = String(v);
+  return s.length <= max ? s : s.slice(0, max);
+}
+function finiteNumber(v) {
+  // Не перетворюємо порожній рядок на 0; не записуємо NaN/Infinity.
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+function asId(v) {
+  if (typeof v !== 'string' || !v || v.length > 36)
+    throw Object.assign(new Error('Некоректний OBJECT_ID (очікується рядок <=36)'), { statusCode: 400 });
+  return v;
+}
+export function mapDocumentObjects(snapshot) {
+  const result = [];
+  for (const node of snapshot.nodes) {
+    result.push({
+      objectId: asId(node.id), objectType: 'NODE',
+      objectSubtype: text(node.type, 80),
+      label: text(node.data?.label ?? node.label, 500),
+      externalObjectId: text(node.data?.externalObjectId, 128),
+      unitId: finiteNumber(node.data?.unitId),
+      searchableText: text(node.data?.label ?? node.label, 2000),
+      objectJson: JSON.stringify(node),
+    });
+  }
+  for (const edge of snapshot.edges) {
+    result.push({
+      objectId: asId(edge.id), objectType: 'EDGE',
+      objectSubtype: text(edge.kind ?? edge.pathType, 80),
+      label: text(edge.label, 500),
+      externalObjectId: null, unitId: null,
+      searchableText: text(edge.label, 2000),
+      objectJson: JSON.stringify(edge),
+    });
+  }
+  const ids = new Set();
+  for (const obj of result) {
+    if (ids.has(obj.objectId))
+      throw Object.assign(new Error(`Повторюється OBJECT_ID: ${obj.objectId}`), { statusCode: 400 });
+    ids.add(obj.objectId);
+  }
+  return result;
+}
+
+export function mapDocumentAttributes(snapshot) {
+  const rows = [];
+  function add(objectId, code, raw, kind) {
+    if (raw === null || raw === undefined || raw === '') return;
+    const value = kind === 'number' ? finiteNumber(raw) : text(raw, 2000);
+    if (value === null) return;
+    rows.push({ objectId,
+      attributeCode: code,
+      valueText: kind === 'text' ? value : null,
+      valueNumber: kind === 'number' ? value : null,
+      valueDate: null,
+    });
+  }
+  for (const n of snapshot.nodes) {
+    add(n.id, 'POS_X', n.position?.x, 'number');
+    add(n.id, 'POS_Y', n.position?.y, 'number');
+    add(n.id, 'WIDTH', n.data?.width, 'number');
+    add(n.id, 'HEIGHT', n.data?.height, 'number');
+    add(n.id, 'NODE_TYPE', n.type, 'text');
+  }
+  for (const e of snapshot.edges) {
+    add(e.id, 'CONNECTOR_TYPE', e.connectorType, 'text');
+    add(e.id, 'PATH_TYPE', e.pathType, 'text');
+  }
+  return rows;
+}
+
+5. BACKEND: СЕРВІС З ОДНІЄЮ ТРАНЗАКЦІЄЮ
+
+// services/documentSaveService.js
+import oracledb from 'oracledb';
+import OracleDBManager from '../db/OracleDBManager.js';
+import { mapDocumentObjects, mapDocumentAttributes } from './documentIndexMapper.js';
+
+function httpError(code, message) {
+  return Object.assign(new Error(message), { statusCode: code });
+}
+function validateSnapshot(snapshot) {
+  if (!snapshot || snapshot.schemaVersion !== 1 ||
+      !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
+    throw httpError(400, 'Очікується snapshot {schemaVersion:1,nodes:[],edges:[]}');
+  }
+  // Якщо snapshot формується з неповного state, не можна видавати його за повний
+  // документ. Підключити решту сутностей до buildSnapshot() до production Save.
+}
+
+async function upsertIndexedObject(tx, versionId, obj) {
+  // MERGE: повторне автозбереження не створює дублікати.
+  await tx.execute(`
+    MERGE INTO DOC_OBJECT t
+    USING (SELECT :versionId AS DOC_VERSION_ID, :objectId AS OBJECT_ID FROM dual) s
+    ON (t.DOC_VERSION_ID = s.DOC_VERSION_ID AND t.OBJECT_ID = s.OBJECT_ID)
+    WHEN MATCHED THEN UPDATE SET
+      t.OBJECT_TYPE = :objectType,
+      t.OBJECT_SUBTYPE = :objectSubtype,
+      t.LABEL = :label,
+      t.EXTERNAL_OBJECT_ID = :externalObjectId,
+      t.UNIT_ID = :unitId,
+      t.SEARCHABLE_TEXT = :searchableText,
+      t.IS_DELETED = 0,
+      t.OBJECT_JSON = :objectJson,
+      t.UPDATED_AT = SYSTIMESTAMP
+    WHEN NOT MATCHED THEN INSERT
+      (DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE,
+       LABEL, EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT,
+       IS_DELETED, OBJECT_JSON)
+    VALUES
+      (:versionId, :objectId, :objectType, :objectSubtype,
+       :label, :externalObjectId, :unitId, :searchableText,
+       0, :objectJson)
+  `, {
+    versionId, objectId: obj.objectId,
+    objectType: obj.objectType, objectSubtype: obj.objectSubtype,
+    label: obj.label, externalObjectId: obj.externalObjectId,
+    unitId: obj.unitId, searchableText: obj.searchableText,
+    objectJson: { val: obj.objectJson, type: oracledb.CLOB },
+  });
+}
+
+async function replaceAttributesForObject(tx, versionId, objectId, attrs) {
+  await tx.execute(`DELETE FROM DOC_OBJECT_ATTRIBUTE
+    WHERE DOC_VERSION_ID = :versionId AND OBJECT_ID = :objectId`,
+    { versionId, objectId });
+  if (!attrs.length) return;
+  await tx.executeMany(`INSERT INTO DOC_OBJECT_ATTRIBUTE
+    (DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE, VALUE_TEXT, VALUE_NUMBER, VALUE_DATE)
+    VALUES (:versionId, :objectId, :attributeCode, :valueText, :valueNumber, :valueDate)`,
+    attrs.map(a => ({ versionId, ...a })),
+    { bindDefs: {
+      versionId: { type: oracledb.STRING, maxSize: 36 },
+      objectId: { type: oracledb.STRING, maxSize: 36 },
+      attributeCode: { type: oracledb.STRING, maxSize: 100 },
+      valueText: { type: oracledb.STRING, maxSize: 2000 },
+      valueNumber: { type: oracledb.NUMBER },
+      valueDate: { type: oracledb.DATE },
+    }});
+}
+
+export async function saveDocumentVersion({
+  dbName, versionId, snapshot, expectedRevision, userId,
+}) {
+  validateSnapshot(snapshot);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)
+    throw httpError(400, 'Некоректний saveRevision');
+  if (!userId) throw httpError(401, 'Потрібна автентифікація');
+  // ВАЖЛИВО: реалізувати реальну перевірку EDIT-права на DOC_RESOURCE.
+  // Перевірка автентифікації сама по собі НЕ означає право редагування.
+
+  const objects = mapDocumentObjects(snapshot);
+  const attributes = mapDocumentAttributes(snapshot);
+  const attrsById = new Map();
+  for (const a of attributes) {
+    if (!attrsById.has(a.objectId)) attrsById.set(a.objectId, []);
+    attrsById.get(a.objectId).push(a);
+  }
+  const json = JSON.stringify(snapshot);
+  if (!json) throw httpError(400, 'Snapshot не серіалізується');
+
+  return OracleDBManager.withTransaction(dbName, async tx => {
+    // 1. Блокування версії серіалізує одночасні Save.
+    const vr = await tx.execute(`SELECT STATUS_CODE FROM DOC_VERSION
+      WHERE ID = :versionId FOR UPDATE`, { versionId });
+    if (vr.rows.length !== 1) throw httpError(404, 'Версію не знайдено');
+    if (vr.rows[0].STATUS_CODE !== 'DRAFT')
+      throw httpError(409, 'Змінювати дозволено лише DRAFT');
+
+    // 2. ПЕРЕД наступним SQL перевірити права EDIT користувача на цю версію.
+    // await assertCanEdit(tx, userId, versionId);
+
+    const cur = await tx.execute(`SELECT SAVE_REVISION FROM DOC_SNAPSHOT
+      WHERE DOC_VERSION_ID = :versionId`, { versionId });
+    const revision = cur.rows.length ? Number(cur.rows[0].SAVE_REVISION) : 0;
+    if (revision !== expectedRevision)
+      throw httpError(409, `Конфлікт збереження: поточна ревізія ${revision}`);
+    const newRevision = revision + 1;
+
+    // 3. Оновлюємо один рядок JSON (або INSERT лише першого разу).
+    const jsonBind = { val: json, type: oracledb.CLOB };
+    if (cur.rows.length) {
+      await tx.execute(`UPDATE DOC_SNAPSHOT
+        SET SNAPSHOT_JSON=:json, SAVE_REVISION=:newRevision,
+            UPDATED_AT=SYSTIMESTAMP, UPDATED_BY=:userId
+        WHERE DOC_VERSION_ID=:versionId`,
+        { json: jsonBind, newRevision, userId, versionId });
+    } else {
+      await tx.execute(`INSERT INTO DOC_SNAPSHOT
+        (DOC_VERSION_ID, SNAPSHOT_JSON, SAVE_REVISION, UPDATED_BY)
+        VALUES (:versionId, :json, :newRevision, :userId)`,
+        { versionId, json: jsonBind, newRevision, userId });
+    }
+
+    // 4. MERGE актуальних NODE/EDGE та їхніх атрибутів.
+    for (const obj of objects) {
+      await upsertIndexedObject(tx, versionId, obj);
+      await replaceAttributesForObject(
+        tx, versionId, obj.objectId, attrsById.get(obj.objectId) || []
+      );
+    }
+
+    // 5. Прибираємо NODE/EDGE, яких більше немає в snapshot.
+    // Для безпечного видалення спочатку перевіряємо посилання з інших об'єктів.
+    const existing = await tx.execute(`SELECT OBJECT_ID FROM DOC_OBJECT
+      WHERE DOC_VERSION_ID=:versionId AND OBJECT_TYPE IN ('NODE','EDGE')`,
+      { versionId });
+    const currentIds = new Set(objects.map(o => o.objectId));
+    const staleIds = existing.rows.map(r => r.OBJECT_ID)
+      .filter(id => !currentIds.has(id));
+    for (const objectId of staleIds) {
+      // Якщо на об'єкт посилаються DOC_OBJECT_LINK або PARENT_OBJECT_ID,
+      // не видаляємо мовчки — відкочуємо транзакцію. Надалі додамо повну
+      // синхронізацію DOC_OBJECT_LINK та інших сутностей.
+      const refs = await tx.execute(`SELECT
+        (SELECT COUNT(*) FROM DOC_OBJECT_LINK l
+         WHERE l.DOC_VERSION_ID=:versionId
+           AND (l.SOURCE_OBJECT_ID=:objectId OR l.TARGET_OBJECT_ID=:objectId)) AS LINKS,
+        (SELECT COUNT(*) FROM DOC_OBJECT p
+         WHERE p.DOC_VERSION_ID=:versionId AND p.PARENT_OBJECT_ID=:objectId) AS CHILDREN
+        FROM dual`, { versionId, objectId });
+      if (Number(refs.rows[0].LINKS) || Number(refs.rows[0].CHILDREN))
+        throw httpError(409, `Об'єкт ${objectId} має залежні зв'язки; потрібна їх синхронізація`);
+      await tx.execute(`DELETE FROM DOC_OBJECT_ATTRIBUTE
+        WHERE DOC_VERSION_ID=:versionId AND OBJECT_ID=:objectId`,
+        { versionId, objectId });
+      await tx.execute(`DELETE FROM DOC_OBJECT
+        WHERE DOC_VERSION_ID=:versionId AND OBJECT_ID=:objectId`,
+        { versionId, objectId });
+    }
+
+    // 6. DOC_OBJECT_LINK поки не формуємо автоматично з edge.start.attached:
+    // потрібно погодити точний формат attached та семантику зв'язків.
+    // Якщо зберігаємо весь snapshot, а індексуємо тільки nodes/edges,
+    // інші типи не видаляємо й не перезаписуємо.
+    return { versionId, saveRevision: newRevision,
+      indexedObjects: objects.length, indexedAttributes: attributes.length,
+      deletedObjects: staleIds.length };
+    // withTransaction() виконає COMMIT після успішного callback,
+    // або ROLLBACK при будь-якій помилці.
+  });
+}
+
+6. SQL-ПЕРЕВІРКИ
+
+SELECT DOC_VERSION_ID, SAVE_REVISION, UPDATED_AT
+FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID=:versionId;
+
+SELECT OBJECT_ID, OBJECT_TYPE, LABEL, EXTERNAL_OBJECT_ID
+FROM DOC_OBJECT WHERE DOC_VERSION_ID=:versionId
+  AND OBJECT_TYPE IN ('NODE','EDGE') ORDER BY OBJECT_TYPE,OBJECT_ID;
+
+SELECT a.OBJECT_ID, a.ATTRIBUTE_CODE, a.VALUE_TEXT, a.VALUE_NUMBER
+FROM DOC_OBJECT_ATTRIBUTE a
+WHERE a.DOC_VERSION_ID=:versionId ORDER BY a.OBJECT_ID,a.ATTRIBUTE_CODE;
+
+SELECT COUNT(*) FROM DOC_OBJECT WHERE DOC_VERSION_ID=:versionId;
+
+7. ПЕРЕВІРКА АТОМАРНОСТІ
+- Створити DRAFT без snapshot; saveRevision=0.
+- Натиснути Save: DOC_SNAPSHOT має revision=1; DOC_OBJECT містить рівно актуальні NODE/EDGE.
+- Змінити координату NODE; Save із revision=1: revision=2, NODE не дублюється.
+- Спробувати Save зі старим revision=1: HTTP 409, жодна таблиця не змінюється.
+- Навмисно передати два NODE з однаковим id: HTTP 400, нічого не записується.
+- Спробувати видалити NODE, на який є DOC_OBJECT_LINK: HTTP 409 та ROLLBACK.
+- Перевірити STABLE: HTTP 409, змін немає.
+
+8. ЩО ТРЕБА ДООПРАЦЮВАТИ ПЕРЕД PRODUCTION
+1) Реальна серверна перевірка права EDIT, не лише req.user.
+2) Повний snapshot із усіма сутностями: зараз приклад тільки nodes/edges.
+3) Синхронізація DOC_OBJECT_LINK після узгодження edge.start/end.attached.
+4) Підтримка інших типів: ZVT, BRANCH, ANNOTATION, TABLE, ATTACHMENT.
+5) Валідація типів/довжин полів і розміру запиту; Express json({limit:'...'}) за потреби.
+6) Для дуже великих схем замінити пооб'єктний MERGE на executeMany або staging;
+   при цьому НЕ змінювати транзакційну межу та контракт API.
+7) Уточнити, чи фактична DOC_OBJECT містить OBJECT_JSON NOT NULL;
+   цей приклад відповідає саме погодженому DDL із OBJECT_JSON.
+8) Якщо в Oracle ID зберігаються як GUID із дефісами, перевірити довжину
+   та відповідність зовнішніх ключів (VARCHAR2(36)).
+9) Не логувати повний snapshot і конфіденційні поля в production.

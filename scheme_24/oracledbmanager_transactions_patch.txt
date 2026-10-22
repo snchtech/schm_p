@@ -1,0 +1,231 @@
+ДООПРАЦЮВАННЯ OracleDBManager: транзакції без зміни існуючих методів
+Oracle 21c / node-oracledb / Express
+
+1. ЩО ВИДНО З НАДАНИХ СКРІНШОТІВ
+- OracleDBManager є singleton; має this.pools, this.connections, this.usePool.
+- defaultOptions.autoCommit = true, outFormat = oracledb.OUT_FORMAT_OBJECT.
+- query(), queryMany(), execute() беруть connection самі й у режимі pool повертають його через close().
+- CLOB уже налаштовано для читання як STRING.
+- У non-pool режимі this.connections[dbName] — спільне довгоживуче з'єднання.
+Отже, query() / queryMany() / execute() ЗАЛИШАЄМО БЕЗ ЗМІН. Додаємо новий API для транзакцій.
+
+2. ПАТЧ ДО КЛАСУ OracleDBManager
+Вставити нижченаведені методи ВСЕРЕДИНУ class OracleDBManager, перед закриваючою дужкою класу.
+
+  // Окреме фізичне з'єднання для транзакції; НЕ використовує this.connections[dbName].
+  // Вимога: pool для dbName вже створений методом connect(dbName, true).
+  async getTransactionConnection(dbName) {
+    const pool = this.pools[dbName];
+    if (!pool) {
+      throw new Error(
+        `Transaction requires an initialized pool for database ${dbName}. ` +
+        `Call connect(dbName, true) during startup.`
+      );
+    }
+    return pool.getConnection();
+  }
+
+  // callback(tx) працює на ОДНОМУ з'єднанні.
+  async withTransaction(dbName, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('withTransaction requires a callback');
+    }
+
+    const connection = await this.getTransactionConnection(dbName);
+    let committed = false;
+    try {
+      const tx = Object.freeze({
+        execute: (sql, binds = {}, options = {}) =>
+          connection.execute(sql, binds, {
+            ...this.defaultOptions,
+            ...options,
+            autoCommit: false, // примусово, незалежно від options
+          }),
+        executeMany: (sql, binds, options = {}) =>
+          connection.executeMany(sql, binds, {
+            ...this.defaultOptions,
+            ...options,
+            autoCommit: false,
+          }),
+      });
+
+      const value = await callback(tx);
+      await connection.commit();
+      committed = true;
+      return value;
+    } catch (error) {
+      if (!committed) {
+        try {
+          await connection.rollback();
+        } catch (rollbackError) {
+          console.error('Transaction rollback failed:', rollbackError);
+        }
+      }
+      throw error;
+    } finally {
+      // pool.getConnection() -> close() повертає з'єднання в пул.
+      try {
+        await connection.close();
+      } catch (closeError) {
+        console.error('Transaction connection close failed:', closeError);
+        // Якщо COMMIT пройшов, не повідомляємо клієнту помилку збереження,
+        // інакше він може повторити успішну операцію.
+      }
+    }
+  }
+
+УВАГА: ця реалізація спеціально вимагає пул. Вона НЕ бере спільне
+this.connections[dbName], оскільки одночасні HTTP-запити можуть змішати
+транзакції на одному з'єднанні. Якщо застосунок запускається тільки в
+non-pool режимі, потрібен окремий спосіб видачі ІЗОЛЬОВАНОГО connection
+для кожної транзакції (наприклад oracledb.getConnection із config),
+а не повторне використання this.connections[dbName].
+
+3. ВИКОРИСТАННЯ У СЕРВІСІ ЗБЕРЕЖЕННЯ
+
+import oracledb from 'oracledb';
+import OracleDBManager from '../db/OracleDBManager.js';
+
+export async function saveDraftSnapshot({ dbName, versionId, snapshot, expectedRevision }) {
+  if (!snapshot || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
+    const e = new Error('Snapshot must contain nodes and edges arrays');
+    e.statusCode = 400;
+    throw e;
+  }
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    const e = new Error('Invalid expectedRevision');
+    e.statusCode = 400;
+    throw e;
+  }
+  const json = JSON.stringify(snapshot);
+  if (json === undefined) throw new Error('Snapshot is not serializable');
+
+  return OracleDBManager.withTransaction(dbName, async (tx) => {
+    // Важливо: авторизацію доступу до документа треба перевірити до запису.
+    // FOR UPDATE серіалізує конкурентні Save для цієї DOC_VERSION.
+    const version = await tx.execute(
+      `SELECT STATUS_CODE FROM DOC_VERSION WHERE ID = :id FOR UPDATE`,
+      { id: versionId }
+    );
+    if (version.rows.length !== 1) {
+      const e = new Error('Document version not found'); e.statusCode = 404; throw e;
+    }
+    if (version.rows[0].STATUS_CODE !== 'DRAFT') {
+      const e = new Error('Only DRAFT can be saved'); e.statusCode = 409; throw e;
+    }
+
+    const current = await tx.execute(
+      `SELECT SAVE_REVISION FROM DOC_SNAPSHOT WHERE DOC_VERSION_ID = :id`,
+      { id: versionId }
+    );
+    const revision = current.rows.length ? Number(current.rows[0].SAVE_REVISION) : 0;
+    if (revision !== expectedRevision) {
+      const e = new Error('Save conflict: snapshot was changed'); e.statusCode = 409; throw e;
+    }
+
+    const nextRevision = revision + 1;
+    if (current.rows.length) {
+      await tx.execute(
+        `UPDATE DOC_SNAPSHOT SET SNAPSHOT_JSON = :json,
+          SAVE_REVISION = :nextRevision
+         WHERE DOC_VERSION_ID = :id`,
+        {
+          json: { val: json, type: oracledb.CLOB },
+          nextRevision,
+          id: versionId,
+        }
+      );
+    } else {
+      await tx.execute(
+        `INSERT INTO DOC_SNAPSHOT
+          (DOC_VERSION_ID, SNAPSHOT_JSON, SAVE_REVISION)
+         VALUES (:id, :json, :nextRevision)`,
+        {
+          id: versionId,
+          json: { val: json, type: oracledb.CLOB },
+          nextRevision,
+        }
+      );
+    }
+
+    // ТУТ, НА ЦЬОМУ Ж tx, викликаємо синхронізацію індексованих таблиць.
+    // await syncDocumentObjects(tx, versionId, snapshot);
+    // await syncDocumentAttributes(tx, versionId, snapshot);
+    // await syncDocumentLinks(tx, versionId, snapshot);
+    // Важливо: не викликати OracleDBManager.query() тут!
+
+    return { versionId, saveRevision: nextRevision };
+  });
+}
+
+4. ПРИКЛАД ІНДЕКСОВАНОГО ЗАПИСУ ЧЕРЕЗ ТОЙ САМИЙ tx
+
+async function insertObjects(tx, versionId, objects) {
+  if (objects.length === 0) return;
+  await tx.executeMany(
+    `INSERT INTO DOC_OBJECT
+       (DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, LABEL, IS_DELETED)
+     VALUES (:versionId, :objectId, :objectType, :label, 0)`,
+    objects.map(o => ({
+      versionId,
+      objectId: o.id,
+      objectType: o.objectType,
+      label: o.label ?? null,
+    })),
+    { bindDefs: {
+      versionId: { type: oracledb.STRING, maxSize: 36 },
+      objectId: { type: oracledb.STRING, maxSize: 36 },
+      objectType: { type: oracledb.STRING, maxSize: 20 },
+      label: { type: oracledb.STRING, maxSize: 1000 },
+    } }
+  );
+}
+
+Це тільки приклад INSERT для нових рядків; для повторного Save потрібна
+синхронізація UPDATE/MERGE + DELETE відсутніх з урахуванням FK.
+Не видаляйте всі DOC_OBJECT, поки інші сутності посилаються на них.
+
+5. КОНТРОЛЕР
+
+const saveSnapshot = async (req, res) => {
+  try {
+    const result = await saveDraftSnapshot({
+      dbName: req.locals.dbName,
+      versionId: req.params.versionId,
+      snapshot: req.body.snapshot,
+      expectedRevision: req.body.saveRevision,
+    });
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error('saveSnapshot:', error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.statusCode ? error.message : 'Save failed',
+    });
+  }
+};
+
+6. ПЕРЕВІРКА ТРАНЗАКЦІЙНОСТІ
+- Створити DRAFT і snapshot з revision=0.
+- Зберегти nodes+edges -> revision=1.
+- Викликати з тим самим expectedRevision=0 -> HTTP 409, нічого не змінюється.
+- Усередині callback навмисно throw Error після UPDATE DOC_SNAPSHOT ->
+  перевірити, що snapshot і revision не змінилися.
+- Змінити індексований INSERT так, щоб він порушував constraint ->
+  перевірити, що JSON також відкотився.
+- Одночасно відправити два Save з revision=1 -> один успішний,
+  другий 409 (після очікування FOR UPDATE).
+
+7. ЗАСТЕРЕЖЕННЯ ЩОДО ПОТОЧНОГО DBMANAGER
+- this.defaultOptions.autoCommit=true залишається для старих методів;
+  tx.execute/tx.executeMany завжди встановлюють autoCommit=false.
+- Не передавайте raw connection в інші сервіси, які можуть викликати
+  commit(), rollback(), close() або execute(...,{autoCommit:true}).
+- Не запускайте Promise.all над запитами однієї транзакції: послідовність
+  FK-залежних операцій має бути визначеною.
+- Для безпеки слід перевіряти права доступу до DOC_VERSION до SELECT FOR UPDATE
+  або в межах цього ж tx.
+- Існуючий DOC_SNAPSHOT може мати інші назви колонок/NOT NULL поля:
+  підставити фактичний DDL (наприклад UPDATED_AT, SNAPSHOT_SCHEMA_VERSION).
+- У скріншотах видно дефолтні облікові дані в коді: приберіть hardcoded
+  credentials, використовуйте secrets/env та ротацію, якщо вони справжні.
