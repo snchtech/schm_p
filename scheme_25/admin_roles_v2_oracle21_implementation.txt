@@ -1,0 +1,613 @@
+АЛЬБОМ СХЕМ — ГОТОВИЙ ПАКЕТ АДМІНІСТРУВАННЯ РОЛЕЙ v2
+Next.js App Router + MUI + Express + node-oracledb + Oracle 21c
+JavaScript (без TypeScript). 25.10.2026
+
+ПРИЗНАЧЕННЯ
+Цей пакет замінює попередній admin_roles_implementation_nextjs_konva.txt
+для структури oracle21_access_model_v2.txt. Він НЕ створює таблиці повторно.
+Підтримує пошук за USER_ID/USERNAME, перегляд призначень, grant/revoke,
+GLOBAL/DIVISION/UNIT/ALBUM/SCHEME, фільтр типу схеми, терміни дії,
+адміністратора підрозділу та super_administrator, транзакційний аудит.
+
+УВАГА: НИЖЧЕ НАВЕДЕНО ПРАЦЕЗДАТНУ РЕФЕРЕНСНУ РЕАЛІЗАЦІЮ З АДАПТЕРАМИ.
+Ви МУСИТЕ узгодити таблицю користувачів, імена бізнес-таблиць схем/альбомів,
+реальний auth middleware і пул Oracle. Поки ці адаптери не реалізовані,
+запускати в production не можна. Пакет навмисно не довіряє ролям із браузера.
+
+СТРУКТУРА ФАЙЛІВ
+backend/src/features/access/accessConfig.js
+backend/src/features/access/accessRepository.js
+backend/src/features/access/accessService.js
+backend/src/features/access/accessController.js
+backend/src/features/access/accessRoutes.js
+backend/src/features/access/accessErrors.js
+backend/src/features/access/accessAdapters.js
+frontend/src/app/admin/access/page.js
+frontend/src/features/admin-access/api.js
+frontend/src/features/admin-access/AdminAccessPage.jsx
+
+0. ЗАЛЕЖНОСТІ
+backend: npm i express oracledb
+frontend: npm i @mui/material @mui/icons-material
+
+1. КОНТРАКТ БД (v2)
+ACCESS_ROLE(ID,CODE,TITLE,ACTIVE)
+ACCESS_PERMISSION(ID,CODE,TITLE,ACTIVE)
+ACCESS_ROLE_PERMISSION(ROLE_ID,PERMISSION_ID)
+ACCESS_SCHEME_TYPE(ID,CODE,TITLE,ACTIVE)
+ACCESS_ORG_UNIT(ID,CODE,TITLE,PARENT_ID,ORG_KIND,ACTIVE)
+ACCESS_USER_ORG(USER_ID,ORG_UNIT_ID,MEMBERSHIP_KIND,ACTIVE)
+ACCESS_ASSIGNMENT(ID,USER_ID,ROLE_ID,SCHEME_TYPE_ID,SCOPE_TYPE,SCOPE_ID,
+  ACTIVE,VALID_FROM,VALID_TO,CREATED_AT,CREATED_BY,REVOKED_AT,REVOKED_BY)
+ACCESS_AUDIT(ID,ACTOR_USER_ID,TARGET_USER_ID,ACTION,ASSIGNMENT_ID,
+  ROLE_CODE,DETAILS_JSON,CREATED_AT)
+
+ВАЖЛИВІ ПРАВИЛА
+- NULL SCHEME_TYPE_ID означає ВСІ типи.
+- GLOBAL вимагає SCOPE_ID = NULL.
+- DIVISION/UNIT/ALBUM/SCHEME вимагають SCOPE_ID > 0.
+- Один рядок ACCESS_ASSIGNMENT — неподільний grant; scope різних grants
+  не можна перемішувати.
+- administrator може призначати ТІЛЬКИ reader/editor в межах своєї
+  організаційної області; super_administrator — будь-яку роль.
+- Адміністратор DIVISION не може призначати GLOBAL навіть якщо його
+  користувач має окремий глобальний reader.
+- Не можна відкликати власний super_administrator grant через цей UI.
+- API повторно перевіряє повноваження на кожен запит.
+- Додаткові перевірки прав на самі схеми/JSON залишаються у схемному API.
+
+2. backend/src/features/access/accessErrors.js
+```js
+export class AccessError extends Error {
+  constructor(status, message, code = 'ACCESS_ERROR') {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+export const bad = (message) => new AccessError(400, message, 'VALIDATION');
+export const denied = () => new AccessError(403, 'Недостатньо прав', 'FORBIDDEN');
+export const missing = (message = 'Не знайдено') => new AccessError(404, message, 'NOT_FOUND');
+```
+
+3. backend/src/features/access/accessConfig.js
+```js
+export const SCOPE_TYPES = new Set(['GLOBAL','DIVISION','UNIT','ALBUM','SCHEME']);
+export const EDITABLE_ROLES = new Set(['reader','editor']);
+export const ADMIN_PERMISSION = 'access.assignments.grant';
+export const REVOKE_PERMISSION = 'access.assignments.revoke';
+export const READ_PERMISSION = 'access.assignments.read';
+export const SEARCH_PERMISSION = 'access.users.read';
+export const AUDIT_PERMISSION = 'access.audit.read';
+```
+
+4. backend/src/features/access/accessAdapters.js
+АДАПТУЙТЕ ЦЕЙ ФАЙЛ ПІД СВОЮ БД. ЖОДНИХ USER_ID ІЗ HTTP HEADER!
+```js
+import oracledb from 'oracledb';
+import { bad, missing } from './accessErrors.js';
+
+// Пул створюється вашим bootstrap; замініть на наявний DbManager.getConnection().
+export const getConnection = () => oracledb.getConnection();
+
+// ВАЖЛИВО: APP_USER — приклад. Якщо користувачі в іншій таблиці,
+// змініть лише цей SQL. USERNAME шукати префіксом без wildcard користувача.
+export async function searchUsers(conn, { userId, username }) {
+  const sql = `SELECT USER_ID AS "userId", USERNAME AS "username"
+    FROM APP_USER
+    WHERE (:uid IS NOT NULL AND USER_ID = :uid)
+       OR (:uid IS NULL AND :uname IS NOT NULL
+           AND UPPER(USERNAME) LIKE UPPER(:uname) || '%')
+    ORDER BY USERNAME FETCH FIRST 30 ROWS ONLY`;
+  const result = await conn.execute(sql, { uid: userId ?? null, uname: username ?? null },
+    { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  return result.rows;
+}
+export async function userExists(conn, userId) {
+  const r = await conn.execute('SELECT 1 FROM APP_USER WHERE USER_ID = :id', { id: userId });
+  return r.rows.length > 0;
+}
+
+// Ресурсна належність: ПРИВ'ЯЖІТЬ ДО РЕАЛЬНИХ ТАБЛИЦЬ!
+// Очікуваний результат: { id, divisionId, unitId, schemeTypeId }.
+// Для ALBUM і SCHEME НЕ можна довіряти переданому з фронту divisionId.
+export async function getResourceScope(conn, scopeType, scopeId) {
+  if (scopeType === 'DIVISION' || scopeType === 'UNIT') {
+    const r = await conn.execute(`SELECT ID AS "id", ORG_KIND AS "kind", PARENT_ID AS "parentId"
+      FROM ACCESS_ORG_UNIT WHERE ID=:id AND ACTIVE=1`, { id: scopeId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT });
+    if (!r.rows.length || r.rows[0].kind !== scopeType) throw missing('Організаційна одиниця не знайдена');
+    return { id: scopeId, divisionId: scopeType === 'DIVISION' ? scopeId : r.rows[0].parentId,
+      unitId: scopeType === 'UNIT' ? scopeId : null };
+  }
+  // Замініть наступні 2 гілки реальними SELECT із ваших таблиць.
+  if (scopeType === 'ALBUM' || scopeType === 'SCHEME') {
+    throw bad('Потрібно реалізувати getResourceScope() для ALBUM/SCHEME');
+  }
+  throw bad('Непідтримуваний scope');
+}
+```
+
+5. backend/src/features/access/accessRepository.js
+```js
+import oracledb from 'oracledb';
+const OBJ = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+
+export async function getRoles(conn) {
+  const r = await conn.execute('SELECT ID AS "id", CODE AS "code", TITLE AS "title" FROM ACCESS_ROLE WHERE ACTIVE=1 ORDER BY CODE', {}, OBJ);
+  return r.rows;
+}
+export async function getTypes(conn) {
+  const r = await conn.execute('SELECT ID AS "id", CODE AS "code", TITLE AS "title" FROM ACCESS_SCHEME_TYPE WHERE ACTIVE=1 ORDER BY CODE', {}, OBJ);
+  return r.rows;
+}
+export async function getAssignments(conn, userId) {
+  const r = await conn.execute(`SELECT a.ID AS "id",a.USER_ID AS "userId",
+    r.CODE AS "roleCode",a.ROLE_ID AS "roleId",
+    a.SCHEME_TYPE_ID AS "schemeTypeId", t.CODE AS "schemeTypeCode",
+    a.SCOPE_TYPE AS "scopeType",a.SCOPE_ID AS "scopeId",
+    a.ACTIVE AS "active",a.VALID_FROM AS "validFrom",a.VALID_TO AS "validTo"
+    FROM ACCESS_ASSIGNMENT a JOIN ACCESS_ROLE r ON r.ID=a.ROLE_ID
+    LEFT JOIN ACCESS_SCHEME_TYPE t ON t.ID=a.SCHEME_TYPE_ID
+    WHERE a.USER_ID=:id ORDER BY a.CREATED_AT DESC`, { id: userId }, OBJ);
+  return r.rows;
+}
+export async function getAssignmentForUpdate(conn, id) {
+  const r = await conn.execute(`SELECT a.ID AS "id",a.USER_ID AS "userId",a.ROLE_ID AS "roleId",
+    r.CODE AS "roleCode",a.SCOPE_TYPE AS "scopeType",a.SCOPE_ID AS "scopeId",
+    a.SCHEME_TYPE_ID AS "schemeTypeId",a.ACTIVE AS "active"
+    FROM ACCESS_ASSIGNMENT a JOIN ACCESS_ROLE r ON r.ID=a.ROLE_ID
+    WHERE a.ID=:id FOR UPDATE`, { id }, OBJ);
+  return r.rows[0] || null;
+}
+export async function insertAudit(conn, { actorId, targetId, action, assignmentId, roleCode, details }) {
+  await conn.execute(`INSERT INTO ACCESS_AUDIT
+    (ACTOR_USER_ID,TARGET_USER_ID,ACTION,ASSIGNMENT_ID,ROLE_CODE,DETAILS_JSON)
+    VALUES(:actor,:target,:action,:assignment,:role,:details)`, {
+    actor: actorId, target: targetId, action, assignment: assignmentId,
+    role: roleCode, details: JSON.stringify(details || {})
+  });
+}
+```
+
+ПРИМІТКА: якщо копіюєте код із редактора, перевірте назву колонки
+SCHEME_TYPE_ID у getAssignments: вона має бути звичайним ASCII-рядком.
+
+6. backend/src/features/access/accessService.js
+```js
+import oracledb from 'oracledb';
+import { getConnection, searchUsers, userExists, getResourceScope } from './accessAdapters.js';
+import { getRoles, getTypes, getAssignments, getAssignmentForUpdate, insertAudit } from './accessRepository.js';
+import { bad, denied, missing } from './accessErrors.js';
+import { SCOPE_TYPES, EDITABLE_ROLES } from './accessConfig.js';
+
+const OBJ = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+const positive = (n) => Number.isSafeInteger(Number(n)) && Number(n) > 0;
+const parseId = (n, field) => { if (!positive(n)) throw bad(`Некоректний ${field}`); return Number(n); };
+const parseDate = (s, field) => {
+  if (s == null || s === '') return null;
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) throw bad(`Некоректна дата ${field}`);
+  const d = new Date(`${s}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0,10) !== s) throw bad(`Некоректна дата ${field}`);
+  return d;
+};
+
+async function actorGrants(conn, actorId, permission) {
+  const r = await conn.execute(`SELECT a.SCOPE_TYPE AS "scopeType",a.SCOPE_ID AS "scopeId",
+      r.CODE AS "roleCode",a.SCHEME_TYPE_ID AS "schemeTypeId"
+    FROM ACCESS_ASSIGNMENT a
+    JOIN ACCESS_ROLE r ON r.ID=a.ROLE_ID AND r.ACTIVE=1
+    JOIN ACCESS_ROLE_PERMISSION rp ON rp.ROLE_ID=r.ID
+    JOIN ACCESS_PERMISSION p ON p.ID=rp.PERMISSION_ID AND p.ACTIVE=1
+    WHERE a.USER_ID=:id AND a.ACTIVE=1
+      AND a.VALID_FROM <= SYSTIMESTAMP
+      AND (a.VALID_TO IS NULL OR a.VALID_TO > SYSTIMESTAMP)
+      AND p.CODE=:perm`, { id: actorId, perm: permission }, OBJ);
+  return r.rows;
+}
+async function requireAdmin(conn, actorId, permission) {
+  const grants = await actorGrants(conn, actorId, permission);
+  if (!grants.length) throw denied();
+  return grants;
+}
+async function isWithinDivision(conn, parentDivisionId, target) {
+  if (target.divisionId == null) return false;
+  // Модель v2: UNIT.PARENT_ID безпосередньо вказує на DIVISION.
+  return Number(target.divisionId) === Number(parentDivisionId);
+}
+async function canAdminScope(conn, grants, scopeType, scopeId, schemeTypeId) {
+  for (const g of grants) {
+    // Не використовуємо право reader GLOBAL для розширення admin DIVISION.
+    if (g.schemeTypeId != null && g.schemeTypeId !== schemeTypeId) continue;
+    if (g.scopeType === 'GLOBAL') return true;
+    if (scopeType === 'GLOBAL') continue;
+    const target = await getResourceScope(conn, scopeType, scopeId);
+    if (g.scopeType === 'DIVISION' && await isWithinDivision(conn, g.scopeId, target)) return true;
+    if (g.scopeType === 'UNIT' && scopeType === 'UNIT' && Number(g.scopeId) === Number(scopeId)) return true;
+    if (g.scopeType === scopeType && Number(g.scopeId) === Number(scopeId)) return true;
+  }
+  return false;
+}
+async function assertTargetScope(conn, actorId, permission, scopeType, scopeId, schemeTypeId, roleCode) {
+  const grants = await requireAdmin(conn, actorId, permission);
+  const globalSuper = grants.some(g => g.roleCode === 'super_administrator' && g.scopeType === 'GLOBAL');
+  if (!globalSuper && !EDITABLE_ROLES.has(roleCode)) throw denied();
+  if (!(await canAdminScope(conn, grants, scopeType, scopeId, schemeTypeId))) throw denied();
+  return { globalSuper };
+}
+export async function getCatalog(actorId) {
+  const conn = await getConnection();
+  try { await requireAdmin(conn, actorId, 'access.assignments.read');
+    return { roles: await getRoles(conn), schemeTypes: await getTypes(conn),
+      scopeTypes: [...SCOPE_TYPES] }; }
+  finally { await conn.close(); }
+}
+export async function findUsers(actorId, query) {
+  const conn = await getConnection();
+  try {
+    const grants = await requireAdmin(conn, actorId, 'access.users.read');
+    const userId = query.userId ? parseId(query.userId,'userId') : null;
+    const username = String(query.username || '').trim();
+    if (!userId && (username.length < 2 || username.length > 80)) throw bad('Вкажіть userId або мінімум 2 символи username');
+    const users = await searchUsers(conn, { userId, username: username || null });
+    // Обмеження пошуку користувачів адміністратора підрозділу.
+    const global = grants.some(g => g.scopeType === 'GLOBAL');
+    if (global) return users;
+    const allowedOrgIds = grants.filter(g => ['DIVISION','UNIT'].includes(g.scopeType));
+    const visible = [];
+    for (const u of users) {
+      const memberships = await conn.execute(`SELECT o.ID AS "id",o.ORG_KIND AS "kind",o.PARENT_ID AS "parentId"
+        FROM ACCESS_USER_ORG m JOIN ACCESS_ORG_UNIT o ON o.ID=m.ORG_UNIT_ID
+        WHERE m.USER_ID=:id AND m.ACTIVE=1 AND o.ACTIVE=1`, { id: u.userId }, OBJ);
+      if (memberships.rows.some(m => allowedOrgIds.some(g =>
+        (g.scopeType === 'DIVISION' && (m.id === g.scopeId || m.parentId === g.scopeId)) ||
+        (g.scopeType === 'UNIT' && m.id === g.scopeId)))) visible.push(u);
+    }
+    return visible;
+  } finally { await conn.close(); }
+}
+async function assertUserVisible(conn, actorId, targetId) {
+  const grants = await requireAdmin(conn, actorId, 'access.assignments.read');
+  if (grants.some(g => g.scopeType === 'GLOBAL')) return;
+  const r = await conn.execute(`SELECT o.ID AS "id",o.PARENT_ID AS "parentId"
+    FROM ACCESS_USER_ORG m JOIN ACCESS_ORG_UNIT o ON o.ID=m.ORG_UNIT_ID
+    WHERE m.USER_ID=:id AND m.ACTIVE=1 AND o.ACTIVE=1`, { id: targetId }, OBJ);
+  if (!r.rows.some(m => grants.some(g =>
+    (g.scopeType === 'DIVISION' && (g.scopeId === m.id || g.scopeId === m.parentId)) ||
+    (g.scopeType === 'UNIT' && g.scopeId === m.id)))) throw denied();
+}
+export async function listUserAssignments(actorId, targetId) {
+  const conn = await getConnection();
+  try { await assertUserVisible(conn, actorId, targetId); return await getAssignments(conn, targetId); }
+  finally { await conn.close(); }
+}
+export async function grant(actorId, payload) {
+  const conn = await getConnection();
+  try {
+    const userId = parseId(payload.userId,'userId');
+    const scopeType = String(payload.scopeType || '').toUpperCase();
+    if (!SCOPE_TYPES.has(scopeType)) throw bad('Невідомий scopeType');
+    const scopeId = scopeType === 'GLOBAL' ? null : parseId(payload.scopeId,'scopeId');
+    if (scopeType === 'GLOBAL' && payload.scopeId != null && payload.scopeId !== '') throw bad('GLOBAL не має scopeId');
+    const roleCode = String(payload.roleCode || '');
+    const schemeTypeId = payload.schemeTypeId == null || payload.schemeTypeId === '' ? null : parseId(payload.schemeTypeId,'schemeTypeId');
+    const validFrom = parseDate(payload.validFrom,'validFrom') || new Date();
+    const validTo = parseDate(payload.validTo,'validTo');
+    if (validTo && validTo <= validFrom) throw bad('validTo має бути пізніше validFrom');
+    if (!(await userExists(conn,userId))) throw missing('Користувача не знайдено');
+    await assertUserVisible(conn, actorId, userId);
+    const roleRes = await conn.execute('SELECT ID AS "id" FROM ACCESS_ROLE WHERE CODE=:code AND ACTIVE=1', { code: roleCode }, OBJ);
+    if (!roleRes.rows.length) throw bad('Невідома роль');
+    if (schemeTypeId != null) {
+      const typeRes = await conn.execute('SELECT ID FROM ACCESS_SCHEME_TYPE WHERE ID=:id AND ACTIVE=1', { id: schemeTypeId });
+      if (!typeRes.rows.length) throw bad('Невідомий тип схеми');
+    }
+    await assertTargetScope(conn, actorId, 'access.assignments.grant', scopeType, scopeId, schemeTypeId, roleCode);
+    // UNIQUE INDEX UQ_AA_ACTIVE забороняє дублювання активних призначень.
+    const r = await conn.execute(`INSERT INTO ACCESS_ASSIGNMENT
+      (USER_ID,ROLE_ID,SCHEME_TYPE_ID,SCOPE_TYPE,SCOPE_ID,VALID_FROM,VALID_TO,CREATED_BY)
+      VALUES (:userId,:roleId,:typeId,:scopeType,:scopeId,:validFrom,:validTo,:actorId)
+      RETURNING ID INTO :newId`, {
+      userId, roleId: roleRes.rows[0].id, typeId: schemeTypeId, scopeType, scopeId,
+      validFrom, validTo, actorId,
+      newId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER }
+    }, { autoCommit: false });
+    const assignmentId = r.outBinds.newId[0];
+    await insertAudit(conn, { actorId, targetId: userId, action: 'GRANT', assignmentId,
+      roleCode, details: { scopeType, scopeId, schemeTypeId, validFrom, validTo } });
+    await conn.commit();
+    return { id: assignmentId };
+  } catch (e) {
+    await conn.rollback();
+    if (e.errorNum === 1) throw bad('Таке активне призначення вже існує');
+    throw e;
+  } finally { await conn.close(); }
+}
+export async function revoke(actorId, assignmentId) {
+  const conn = await getConnection();
+  try {
+    const item = await getAssignmentForUpdate(conn, parseId(assignmentId,'assignmentId'));
+    if (!item) throw missing('Призначення не знайдено');
+    if (item.active !== 1) throw bad('Призначення вже відкликано');
+    await assertUserVisible(conn, actorId, item.userId);
+    const { globalSuper } = await assertTargetScope(conn, actorId,
+      'access.assignments.revoke', item.scopeType, item.scopeId, item.schemeTypeId, item.roleCode);
+    if (item.roleCode === 'super_administrator' && item.userId === actorId) throw denied();
+    if (item.roleCode === 'super_administrator' && !globalSuper) throw denied();
+    await conn.execute(`UPDATE ACCESS_ASSIGNMENT SET ACTIVE=0,REVOKED_AT=SYSTIMESTAMP,
+      REVOKED_BY=:actor WHERE ID=:id AND ACTIVE=1`, { actor: actorId, id: item.id });
+    await insertAudit(conn, { actorId, targetId: item.userId, action:'REVOKE',
+      assignmentId:item.id, roleCode:item.roleCode,
+      details:{ scopeType:item.scopeType, scopeId:item.scopeId, schemeTypeId:item.schemeTypeId } });
+    await conn.commit();
+    return { revoked: true };
+  } catch(e) { await conn.rollback(); throw e; }
+  finally { await conn.close(); }
+}
+```
+
+7. backend/src/features/access/accessController.js
+```js
+import * as service from './accessService.js';
+const wrap = (fn) => (req,res,next) => Promise.resolve(fn(req,res)).catch(next);
+const actor = (req) => {
+  // req.auth.userId заповнюється вашим перевіреним auth middleware.
+  const id = Number(req.auth?.userId);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    const e = new Error('Потрібна автентифікація'); e.status=401; throw e;
+  }
+  return id;
+};
+export const catalog = wrap(async (req,res) => res.json(await service.getCatalog(actor(req))));
+export const users = wrap(async (req,res) => res.json(await service.findUsers(actor(req),req.query)));
+export const assignments = wrap(async (req,res) => res.json(await service.listUserAssignments(actor(req),Number(req.params.userId))));
+export const grant = wrap(async (req,res) => res.status(201).json(await service.grant(actor(req),req.body)));
+export const revoke = wrap(async (req,res) => res.json(await service.revoke(actor(req),req.params.id)));
+```
+
+8. backend/src/features/access/accessRoutes.js
+```js
+import { Router } from 'express';
+import * as c from './accessController.js';
+export function createAccessRouter(requireSession) {
+  const router = Router();
+  router.use(requireSession); // ОБОВ'ЯЗКОВО ваш session/JWT middleware
+  router.get('/catalog', c.catalog);
+  router.get('/users', c.users);
+  router.get('/users/:userId/assignments', c.assignments);
+  router.post('/assignments', c.grant);
+  router.delete('/assignments/:id', c.revoke);
+  return router;
+}
+// app.use('/api/admin/access', createAccessRouter(requireSession));
+// Загальний error handler після всіх routes:
+// app.use((err,req,res,next)=>res.status(err.status||500).json({
+//   code:err.code||'INTERNAL',message:err.status?err.message:'Помилка сервера'
+// }));
+```
+
+9. frontend/src/features/admin-access/api.js
+```js
+const BASE = '/api/admin/access';
+async function request(path, options={}) {
+  const response = await fetch(BASE+path, {
+    credentials:'include',
+    headers:{ 'Content-Type':'application/json', ...(options.headers||{}) },
+    cache:'no-store', ...options
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(()=>({}));
+    throw new Error(body.message || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+export const accessApi = {
+  catalog:()=>request('/catalog'),
+  users:({userId,username})=>request('/users?'+new URLSearchParams(
+    userId ? {userId:String(userId)} : {username:String(username||'')})),
+  assignments:(userId)=>request(`/users/${encodeURIComponent(userId)}/assignments`),
+  grant:(payload)=>request('/assignments',{method:'POST',body:JSON.stringify(payload)}),
+  revoke:(id)=>request(`/assignments/${encodeURIComponent(id)}`,{method:'DELETE'})
+};
+```
+
+10. frontend/src/app/admin/access/page.js
+```jsx
+import AdminAccessPage from '@/features/admin-access/AdminAccessPage';
+export default function Page(){ return <AdminAccessPage/>; }
+```
+
+11. frontend/src/features/admin-access/AdminAccessPage.jsx
+```jsx
+'use client';
+import { useEffect, useState } from 'react';
+import {
+  Alert, Box, Button, Card, CardContent, CircularProgress, Divider,
+  FormControl, InputLabel, MenuItem, Select, Stack, Table, TableBody,
+  TableCell, TableHead, TableRow, TextField, Typography
+} from '@mui/material';
+import { accessApi } from './api';
+
+const empty = { roleCode:'reader', schemeTypeId:'', scopeType:'GLOBAL',
+  scopeId:'', validFrom:'', validTo:'' };
+export default function AdminAccessPage(){
+  const [catalog,setCatalog]=useState(null);
+  const [search,setSearch]=useState('');
+  const [users,setUsers]=useState([]);
+  const [selected,setSelected]=useState(null);
+  const [assignments,setAssignments]=useState([]);
+  const [form,setForm]=useState(empty);
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState('');
+  const [success,setSuccess]=useState('');
+  const change=(name)=>(event)=>setForm(p=>({...p,[name]:event.target.value}));
+  useEffect(()=>{ accessApi.catalog().then(setCatalog).catch(e=>setError(e.message)); },[]);
+  async function doSearch(){
+    setBusy(true);setError('');setSelected(null);setAssignments([]);
+    try {
+      const query = /^\d+$/.test(search.trim()) ? {userId:search.trim()} : {username:search.trim()};
+      setUsers(await accessApi.users(query));
+    } catch(e){setError(e.message);} finally {setBusy(false);}
+  }
+  async function choose(user){
+    setSelected(user);setError('');
+    try {setAssignments(await accessApi.assignments(user.userId));}
+    catch(e){setError(e.message);}
+  }
+  async function doGrant(){
+    if(!selected) return;
+    setBusy(true);setError('');setSuccess('');
+    try {
+      await accessApi.grant({ userId:selected.userId, roleCode:form.roleCode,
+        schemeTypeId:form.schemeTypeId === '' ? null : Number(form.schemeTypeId),
+        scopeType:form.scopeType,
+        scopeId:form.scopeType==='GLOBAL' ? null : Number(form.scopeId),
+        validFrom:form.validFrom || null, validTo:form.validTo || null });
+      setAssignments(await accessApi.assignments(selected.userId));
+      setSuccess('Роль призначено');
+    } catch(e){setError(e.message);} finally {setBusy(false);}
+  }
+  async function doRevoke(item){
+    if(!window.confirm(`Відкликати ${item.roleCode} (#${item.id})?`)) return;
+    setBusy(true);setError('');setSuccess('');
+    try {
+      await accessApi.revoke(item.id);
+      setAssignments(await accessApi.assignments(selected.userId));
+      setSuccess('Роль відкликано');
+    } catch(e){setError(e.message);} finally {setBusy(false);}
+  }
+  return <Box sx={{p:3,maxWidth:1200,mx:'auto'}}>
+    <Typography variant="h4" gutterBottom>Адміністрування доступів</Typography>
+    {error && <Alert severity="error" sx={{mb:2}}>{error}</Alert>}
+    {success && <Alert severity="success" sx={{mb:2}}>{success}</Alert>}
+    <Card sx={{mb:2}}><CardContent>
+      <Stack direction={{xs:'column',sm:'row'}} spacing={2}>
+        <TextField fullWidth label="USER_ID або username" value={search}
+          onChange={e=>setSearch(e.target.value)} onKeyDown={e=>e.key==='Enter'&&doSearch()}/>
+        <Button variant="contained" disabled={busy||!search.trim()} onClick={doSearch}>Знайти</Button>
+      </Stack>
+      <Stack sx={{mt:2}} spacing={1}>
+        {users.map(u=><Button key={u.userId} variant={selected?.userId===u.userId?'contained':'outlined'}
+          onClick={()=>choose(u)} sx={{justifyContent:'flex-start'}}>
+          {u.username} (ID {u.userId})
+        </Button>)}
+      </Stack>
+    </CardContent></Card>
+    {selected && <Card><CardContent>
+      <Typography variant="h6">Призначення: {selected.username}</Typography>
+      <Table size="small" sx={{my:2}}><TableHead><TableRow>
+        <TableCell>Роль</TableCell><TableCell>Тип</TableCell><TableCell>Область</TableCell>
+        <TableCell>Діє до</TableCell><TableCell>Стан</TableCell><TableCell/>
+      </TableRow></TableHead><TableBody>
+        {assignments.map(a=><TableRow key={a.id}>
+          <TableCell>{a.roleCode}</TableCell><TableCell>{a.schemeTypeCode||'Усі'}</TableCell>
+          <TableCell>{a.scopeType}{a.scopeId?` #${a.scopeId}`:''}</TableCell>
+          <TableCell>{a.validTo?new Date(a.validTo).toLocaleDateString('uk-UA'):'—'}</TableCell>
+          <TableCell>{a.active===1?'Активна':'Відкликана'}</TableCell>
+          <TableCell><Button color="error" disabled={busy||a.active!==1}
+            onClick={()=>doRevoke(a)}>Відкликати</Button></TableCell>
+        </TableRow>)}
+      </TableBody></Table>
+      <Divider sx={{my:2}}/>
+      <Typography variant="h6" sx={{mb:2}}>Надати роль</Typography>
+      <Stack direction={{xs:'column',md:'row'}} spacing={2} flexWrap="wrap">
+        <FormControl sx={{minWidth:180}}><InputLabel>Роль</InputLabel>
+          <Select label="Роль" value={form.roleCode} onChange={change('roleCode')}>
+            {(catalog?.roles||[]).map(r=><MenuItem key={r.id} value={r.code}>{r.title}</MenuItem>)}
+          </Select></FormControl>
+        <FormControl sx={{minWidth:180}}><InputLabel>Тип схеми</InputLabel>
+          <Select label="Тип схеми" value={form.schemeTypeId} onChange={change('schemeTypeId')}>
+            <MenuItem value="">Усі типи</MenuItem>
+            {(catalog?.schemeTypes||[]).map(t=><MenuItem key={t.id} value={t.id}>{t.title}</MenuItem>)}
+          </Select></FormControl>
+        <FormControl sx={{minWidth:180}}><InputLabel>Область</InputLabel>
+          <Select label="Область" value={form.scopeType} onChange={change('scopeType')}>
+            {(catalog?.scopeTypes||[]).map(t=><MenuItem key={t} value={t}>{t}</MenuItem>)}
+          </Select></FormControl>
+        {form.scopeType!=='GLOBAL' && <TextField label="Scope ID" type="number"
+          value={form.scopeId} onChange={change('scopeId')}/>}
+        <TextField label="Від" type="date" InputLabelProps={{shrink:true}}
+          value={form.validFrom} onChange={change('validFrom')}/>
+        <TextField label="До (не включно)" type="date" InputLabelProps={{shrink:true}}
+          value={form.validTo} onChange={change('validTo')}/>
+        <Button variant="contained" disabled={busy||!catalog||
+          (form.scopeType!=='GLOBAL'&&!form.scopeId)} onClick={doGrant}>
+          {busy?<CircularProgress size={20}/>: 'Зберегти призначення'}
+        </Button>
+      </Stack>
+    </CardContent></Card>}
+  </Box>;
+}
+```
+
+12. ПІДКЛЮЧЕННЯ В ІСНУЮЧИЙ ПРОЄКТ
+A. У Express:
+   import { createAccessRouter } from './features/access/accessRoutes.js';
+   app.use('/api/admin/access', createAccessRouter(requireSession));
+   requireSession повинен перевіряти сесію і встановлювати req.auth.userId.
+B. У Next.js налаштуйте same-origin reverse proxy /api/admin/access -> Express.
+   Для різних доменів API/frontend використайте ваш перевірений auth fetch
+   та CORS/CSRF-політику. Не вимикайте CSRF для cookie-auth mutation routes.
+C. Підключіть getConnection() до DbManager/пулу Oracle.
+D. Замініть APP_USER у searchUsers/userExists на фактичну таблицю користувачів.
+E. Реалізуйте getResourceScope для ALBUM/SCHEME на реальних таблицях.
+F. Перевірте, що схема має однозначний division/unit owner і тип.
+G. Після GRANT/REVOKE оновлюйте access store користувача при наступній
+   авторизованій перевірці; права в API не можна кешувати без інвалідації.
+
+13. ВАЖЛИВІ ЗАУВАЖЕННЯ ДЛЯ PRODUCTION
+- Поточна v2 модель зберігає VALID_FROM/VALID_TO як TIMESTAMP без TZ.
+  Визначте єдину часову зону БД (краще UTC) і однакову семантику дат.
+- Видані майбутні призначення ACTIVE=1, але ще не діють до VALID_FROM.
+  UI має розрізняти активність запису та чинність за датою.
+- Сторінка показує всі призначення видимого користувача. Якщо потрібно
+  приховувати grants інших підрозділів від адміністратора DIVISION,
+  додайте серверну фільтрацію listUserAssignments.
+- Довідник ACCESS_USER_ORG відображає членство, а НЕ право адміністратора.
+  Адмінський grant береться тільки з ACCESS_ASSIGNMENT.
+- Поліморфний SCOPE_ID не має FK на бізнес-ресурс; API мусить перевіряти
+  існування та власність ALBUM/SCHEME в БД.
+- Конкурентні зміни прав: транзакція й унікальний індекс запобігають
+  дублюванню, але для складної делегації потрібні окремі тести гонок.
+- Забороніть адміністратору видавати grants поза власним scope, навіть
+  якщо його власний обліковий запис має GLOBAL reader.
+- У read API застосуйте окремий контроль обсягу інформації та PII.
+- Для критичних систем варто додати CSRF-токен, rate limit, журнал запитів,
+  перевірку останнього super_admin і контроль термінів сесій.
+- Якщо ролі 'administrator' призначено лише DIVISION, він може працювати
+  лише з користувачами-членами цієї DIVISION, а не довільними userId.
+
+14. ПЛАН ТЕСТУВАННЯ
+T01 super_administrator GLOBAL видає reader GLOBAL -> 201
+T02 administrator DIVISION=10 видає editor DIVISION=10 -> 201
+T03 administrator DIVISION=10 видає editor UNIT дочірнього division 10 -> 201
+T04 administrator DIVISION=10 видає editor DIVISION=20 -> 403
+T05 administrator DIVISION=10 видає reader GLOBAL -> 403
+T06 administrator DIVISION=10 видає administrator DIVISION=10 -> 403
+T07 reader GLOBAL не має доступу до admin API -> 403
+T08 пошук userId і prefix username працює з реальним APP_USER
+T09 повторний grant активного запису -> 400 / UQ_AA_ACTIVE
+T10 revoke виконує UPDATE + INSERT ACCESS_AUDIT в одній транзакції
+T11 відсутній session -> 401
+T12 ручна зміна frontend roleCode/scopeId не обходить API
+T13 ALBUM/SCHEME без реалізованого адаптера -> 400 (fail closed)
+T14 reader GLOBAL + editor DIVISION=10 не дозволяє editor DIVISION=20
+T15 validTo у минулому не надає прав
+T16 схема типу equipment не отримує права для premises grant
+
+15. SQL ДЛЯ ДІАГНОСТИКИ
+```sql
+SELECT a.ID, a.USER_ID, r.CODE AS ROLE_CODE,
+       t.CODE AS SCHEME_TYPE, a.SCOPE_TYPE, a.SCOPE_ID,
+       a.ACTIVE, a.VALID_FROM, a.VALID_TO
+FROM ACCESS_ASSIGNMENT a
+JOIN ACCESS_ROLE r ON r.ID=a.ROLE_ID
+LEFT JOIN ACCESS_SCHEME_TYPE t ON t.ID=a.SCHEME_TYPE_ID
+ORDER BY a.USER_ID,a.ID;
+
+SELECT a.ID,a.ACTION,a.ACTOR_USER_ID,a.TARGET_USER_ID,
+       a.ASSIGNMENT_ID,a.ROLE_CODE,a.CREATED_AT
+FROM ACCESS_AUDIT a ORDER BY a.CREATED_AT DESC FETCH FIRST 100 ROWS ONLY;
+```
+
+КІНЕЦЬ ПАКЕТА.
