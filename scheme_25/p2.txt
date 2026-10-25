@@ -1,0 +1,174 @@
+Ні, це абсолютно нормальний підхід для Zustand, і у твоєму випадку я навіть рекомендую поки залишити саме таку структуру.
+
+Те, що `nodes`, `edges`, `zvts`, `zvtBranches`, `annotations`, `specificationTables`, `attachments`, `notes` перебувають на одному рівні централізованого Store, не створює проблем ні для збереження JSON в Oracle 21c, ні для індексації об'єктів у таблицях БД.
+
+Головне — правильно розділити стан редактора, стан документа та функції управління.
+
+## 1. Твоя поточна структура
+
+Приблизно так:
+
+```
+const useCanvasStore = create((set, get) => ({
+  nodes: [],
+  edges: [],
+  zvts: [],
+  zvtBranches: [],
+  annotations: [],
+  specificationTables: [],
+  attachments: [],
+  notes: [],
+
+  nodeRefs: {},
+
+  setNodes: (nodes) => set({ nodes }),
+  setEdges: (edges) => set({ edges }),
+  addZvt: (zvt) => set((s) => ({
+    zvts: [...s.zvts, zvt]
+  })),
+
+  // Інші функції редактора
+}));
+```
+
+Це називається flat state structure — плоска структура стану.
+
+Вона цілком підходить для твого редактора.
+
+## 2. Не потрібно перебудовувати весь Store заради JSON
+
+Я рекомендую залишити Store плоским, але зробити окремий шар серіалізації, який визначатиме, які поля потрібно зберігати в Oracle.
+
+Наприклад:
+
+```
+export function buildDocumentSnapshot() {
+  const state = useCanvasStore.getState();
+
+  return {
+    schemaVersion: 1,
+
+    nodes: state.nodes,
+    edges: state.edges,
+    zvts: state.zvts,
+    zvtBranches: state.zvtBranches,
+    annotations: state.annotations,
+    specificationTables: state.specificationTables,
+    attachments: state.attachments,
+    notes: state.notes
+  };
+}
+```
+
+Тут важливо, що структура JSON не зобов'язана повторювати структуру Zustand Store.
+
+Ти можеш зберігати об'єкти на одному рівні як зараз, а в майбутньому змінити формат JSON, не переписуючи весь редактор.
+
+У твоєму випадку я б поки зберігав масиви на верхньому рівні Snapshot, щоб не порушити вже реалізовані `buildSnapshot()` та `restoreNodesEdges()`.
+
+## 3. Чого не потрібно зберігати
+
+Не рекомендую виконувати:
+
+```
+const snapshot = useCanvasStore.getState();
+
+JSON.stringify(snapshot);
+```
+
+Тому що в Store можуть бути:
+
+- функції `setNodes`, `addZvt` та інші;
+- посилання на Konva-об'єкти;
+- `nodeRefs`;
+- поточний вибраний інструмент;
+- стан відкритих модальних вікон;
+- тимчасові дані перетягування;
+- `isSaving`, `isDirty`.
+
+Це не обов'язково частина документа.
+
+До того ж `JSON.stringify()` не зберігає функції та не гарантує коректної серіалізації складних об'єктів.
+
+Тому Snapshot має формуватися за явним переліком полів.
+
+## 4. Як правильно відновлювати всі об'єкти
+
+Твоя плоска структура навіть спрощує відновлення.
+
+```
+export function restoreDocumentSnapshot(snapshot) {
+  useCanvasStore.setState({
+    nodes: snapshot.nodes ?? [],
+    edges: snapshot.edges ?? [],
+    zvts: snapshot.zvts ?? [],
+    zvtBranches: snapshot.zvtBranches ?? [],
+    annotations: snapshot.annotations ?? [],
+    specificationTables: snapshot.specificationTables ?? [],
+    attachments: snapshot.attachments ?? [],
+    notes: snapshot.notes ?? [],
+
+    nodeRefs: {}
+  });
+}
+```
+
+Це одне атомарне оновлення Zustand.
+
+React-Konva після оновлення Store відтворить усі об'єкти, які підключені до відповідних компонентів.
+
+Але є важливий нюанс: якщо твої компоненти використовують додаткові кеші, локальні стани або Konva refs, їх може знадобитися окремо переініціалізувати.
+
+## 5. Що я б покращив у твоїй архітектурі
+
+Не структуру масивів, а організацію коду.
+
+useCanvasStore.js
+
+Централізований плоский Zustand Store
+
+canvasController.js
+
+Редагування Canvas
+
+documentSerializer.js
+
+Формування Snapshot
+
+documentRestorer.js
+
+Відновлення Store
+
+documentApi.js
+
+Save / Open
+
+Oracle 21c
+
+DOC_SNAPSHOT + DOC_OBJECT + DOC_OBJECT_ATTRIBUTE + DOC_OBJECT_LINK
+
+Тобто Store залишається єдиним джерелом актуального стану Canvas, але логіку збереження, відновлення та індексації ми розносимо по окремих модулях.
+
+## 6. Єдине, на що варто звернути увагу
+
+Для великих схем із тисячами об'єктів плоский Store сам по собі не проблема. Проблеми продуктивності можуть виникнути, якщо компонент підписується на весь Store:
+
+```
+// Не рекомендую для великих Canvas
+const state = useCanvasStore();
+```
+
+Краще підписуватися тільки на потрібні поля:
+
+```
+const nodes = useCanvasStore((s) => s.nodes);
+const edges = useCanvasStore((s) => s.edges);
+```
+
+Тоді зміна `annotations` не змушуватиме компонент, який використовує лише `nodes`, повторно рендеритися через цю зміну.
+
+Мій висновок для твого проєкту: не потрібно зараз переводити всі сутності в `document: { nodes, edges, ... }` або створювати окремий Zustand Store для кожного типу об'єктів.
+
+Залишай `nodes`, `edges`, `zvts`, `zvtBranches`, `annotations`, `specificationTables`, `attachments` і `notes` на одному рівні.
+
+Натомість я рекомендую наступним кроком зробити єдиний реєстр полів документа (`DOCUMENT_STATE_KEYS`), який використовуватиметься одночасно для трьох операцій: формування Snapshot, очищення Canvas та відновлення документа. Це усуне ризик, що ти додаси новий тип об'єкта в Zustand, але забудеш включити його в Save або Open.

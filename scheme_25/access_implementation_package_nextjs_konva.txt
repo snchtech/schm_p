@@ -1,0 +1,659 @@
+ПАКЕТ ПОКРОКОВОГО ВПРОВАДЖЕННЯ ДОСТУПІВ
+Next.js (JavaScript) + React Konva + Zustand + MUI + Node.js API + Oracle 21
+Версія 1.0 | Інтеграційний шаблон
+
+ВАЖЛИВО
+Це готовий набір окремих модулів і прикладів точок інтеграції, а не буквальний patch до невідомого коду вашого canvasController/useCanvasStore. Назви існуючих методів потрібно зіставити зі своїми. Код JavaScript, без TypeScript.
+
+ЗМІСТ
+1. Порядок імплементації
+2. Модель доступу та демонстраційна сесія
+3. Permission engine
+4. Zustand access store + useCan
+5. Контролер: guard для команд
+6. Zustand: захист мутацій, undo/redo та імпорту
+7. Konva: drag, transform, click, контекстне меню
+8. MUI: інструменти та режим редактора
+9. API Node.js: серверний guard
+10. Oracle 21: початкові таблиці
+11. Тестування, міграція та чеклист
+
+============================================================
+1. ПОСЛІДОВНІСТЬ РОБІТ
+============================================================
+КРОК 1. Створити src/features/access/*, запустити engine з mock session.
+КРОК 2. Визначити metadata поточної схеми: id, type, unitId, workshopId, departmentId.
+КРОК 3. Підключити accessStore до сесії; режим editor в URL НЕ надає прав.
+КРОК 4. Огорнути ВСІ публічні команди canvasController через requirePermission.
+КРОК 5. Додати перевірки до Zustand-мутацій, які можуть викликатись в обхід controller.
+КРОК 6. Для Konva drag/transform блокувати gesture до початку; залишити перевірку controller/store.
+КРОК 7. Вимкнути MUI-кнопки та пункти меню, якщо немає дозволу.
+КРОК 8. Встановити серверні middleware на читання/запис, а також на збереження JSON.
+КРОК 9. Перевести mock session на реальну сесію та Oracle assignments.
+КРОК 10. Після цього додати MUI-сторінку адміністратора.
+
+Принцип: UI = UX, controller = перший захисний бар'єр, Zustand = захист стану, API = джерело істини для авторизації.
+
+============================================================
+2. ФАЙЛ src/features/access/permissions.js
+============================================================
+export const P = Object.freeze({
+  SCHEME_VIEW: 'scheme.view',
+  SCHEME_EDIT: 'scheme.edit',
+  SCHEME_SAVE: 'scheme.save',
+  ELEMENT_CREATE: 'element.create',
+  ELEMENT_MOVE: 'element.move',
+  ELEMENT_UPDATE: 'element.update',
+  ELEMENT_DELETE: 'element.delete',
+  ATTACHMENT_VIEW: 'attachment.view',
+  ATTACHMENT_MANAGE: 'attachment.manage',
+  ADMIN_ACCESS: 'access.manage',
+});
+
+export const ROLE_PERMISSIONS = Object.freeze({
+  reader: [P.SCHEME_VIEW, P.ATTACHMENT_VIEW],
+  editor: [
+    P.SCHEME_VIEW, P.SCHEME_EDIT, P.SCHEME_SAVE,
+    P.ELEMENT_CREATE, P.ELEMENT_MOVE, P.ELEMENT_UPDATE,
+    P.ELEMENT_DELETE, P.ATTACHMENT_VIEW, P.ATTACHMENT_MANAGE,
+  ],
+  administrator: [P.ADMIN_ACCESS],
+  super_administrator: ['*'],
+});
+
+// Роль administrator не означає автоматично editor.
+// Для суміщення прав користувачу видаються обидві ролі.
+
+============================================================
+3. ФАЙЛ src/features/access/policy.js
+============================================================
+import { ROLE_PERMISSIONS } from './permissions';
+
+function scopeMatches(scope = {}, resource = {}) {
+  // Відсутність scope означає доступ до всіх ресурсів ЛИШЕ в межах
+  // свідомо виданого глобального grant; у production глобальний grant
+  // повинен видаватися виключно уповноваженим адміністратором.
+  if (scope.schemeId != null && String(scope.schemeId) !== String(resource.schemeId)) return false;
+  if (scope.albumId != null && String(scope.albumId) !== String(resource.albumId)) return false;
+  if (scope.unitId != null && String(scope.unitId) !== String(resource.unitId)) return false;
+  if (scope.workshopId != null && String(scope.workshopId) !== String(resource.workshopId)) return false;
+  if (scope.departmentId != null && String(scope.departmentId) !== String(resource.departmentId)) return false;
+  return true;
+}
+
+export function can(subject, permission, resource) {
+  if (!subject || subject.status !== 'active' || !resource) return false;
+  if (!resource.schemeId && permission !== 'access.manage') return false;
+  const assignments = Array.isArray(subject.assignments) ? subject.assignments : [];
+  return assignments.some((grant) => {
+    if (grant.active === false) return false;
+    const permissions = ROLE_PERMISSIONS[grant.role] || [];
+    if (!permissions.includes('*') && !permissions.includes(permission)) return false;
+    if (Array.isArray(grant.schemeTypes) && grant.schemeTypes.length > 0 &&
+        !grant.schemeTypes.includes(resource.type)) return false;
+    return scopeMatches(grant.scope || {}, resource);
+  });
+}
+
+export function requirePermission(subject, permission, resource) {
+  if (!can(subject, permission, resource)) {
+    const error = new Error(`ACCESS_DENIED: ${permission}`);
+    error.code = 'ACCESS_DENIED';
+    throw error;
+  }
+}
+
+// Застереження: це мінімальна allow-only модель. Для explicit deny,
+// ієрархії підрозділів, делегування ролей, тимчасових прав потрібна
+// окрема політика, узгоджена між frontend та backend.
+
+============================================================
+4. ФАЙЛ src/features/access/useAccessStore.js
+============================================================
+import { create } from 'zustand';
+import { can } from './policy';
+
+export const useAccessStore = create((set, get) => ({
+  subject: null,
+  schemeResource: null,
+  desiredMode: 'viewer',
+  setSession: (subject) => set({ subject }),
+  setSchemeResource: (schemeResource) => set({ schemeResource }),
+  setDesiredMode: (desiredMode) => set({
+    desiredMode: desiredMode === 'editor' ? 'editor' : 'viewer',
+  }),
+  clear: () => set({ subject: null, schemeResource: null, desiredMode: 'viewer' }),
+  can: (permission, resource) => {
+    const state = get();
+    return can(state.subject, permission, resource || state.schemeResource);
+  },
+  getEffectiveMode: () => {
+    const state = get();
+    return state.desiredMode === 'editor' &&
+      can(state.subject, 'scheme.edit', state.schemeResource)
+      ? 'editor' : 'viewer';
+  },
+}));
+
+// Для React-компонентів:
+// src/features/access/useCan.js
+import { useAccessStore } from './useAccessStore';
+import { can } from './policy';
+
+export function useCan(permission, resource = null) {
+  const subject = useAccessStore((s) => s.subject);
+  const current = useAccessStore((s) => s.schemeResource);
+  return can(subject, permission, resource || current);
+}
+
+// Приклад сесії для ЛОКАЛЬНОГО тестування, не використовуйте mock як
+// реальний механізм входу або як джерело прав на сервері:
+export const mockSubject = {
+  id: 'user-1', status: 'active',
+  assignments: [
+    { role: 'reader', scope: { unitId: 'U1' }, schemeTypes: ['equipment'] },
+    { role: 'editor', scope: { workshopId: 'W2' }, schemeTypes: ['equipment'] },
+  ],
+};
+
+============================================================
+5. ФАЙЛ src/features/access/guardCommand.js
+============================================================
+import { useAccessStore } from './useAccessStore';
+import { requirePermission } from './policy';
+
+export function assertCanvasPermission(permission, resource = null) {
+  const { subject, schemeResource } = useAccessStore.getState();
+  requirePermission(subject, permission, resource || schemeResource);
+}
+
+// Зручна обгортка для існуючих методів; async/Promise не потрібні.
+export function guarded(permission, action, getResource) {
+  return (...args) => {
+    const resource = getResource ? getResource(...args) : null;
+    assertCanvasPermission(permission, resource);
+    return action(...args);
+  };
+}
+
+// НЕ ПЕРЕНОСЬТЕ саму перевірку тільки у Konva handlers.
+// Її має виконувати будь-який шлях зміни даних.
+
+============================================================
+6. ІНТЕГРАЦІЯ В canvasController.js
+============================================================
+ПРИКЛАД A: якщо canvasController є об'єктом з методами.
+
+import { guarded } from '@/features/access/guardCommand';
+import { P } from '@/features/access/permissions';
+
+// ДО (умовний наявний код):
+// export const canvasController = {
+//   moveNode: (id, point) => useCanvasStore.getState().moveNode(id, point),
+//   deleteNode: (id) => useCanvasStore.getState().deleteNode(id),
+//   createEdge: (payload) => useCanvasStore.getState().addEdge(payload),
+// };
+
+// ПІСЛЯ: залишаємо старі реалізації, обгортаємо лише entrypoints:
+const rawController = {
+  moveNode: (id, point) => useCanvasStore.getState().moveNode(id, point),
+  deleteNode: (id) => useCanvasStore.getState().deleteNode(id),
+  createEdge: (payload) => useCanvasStore.getState().addEdge(payload),
+};
+
+export const canvasController = {
+  ...rawController,
+  moveNode: guarded(P.ELEMENT_MOVE, rawController.moveNode),
+  deleteNode: guarded(P.ELEMENT_DELETE, rawController.deleteNode),
+  createEdge: guarded(P.ELEMENT_CREATE, rawController.createEdge),
+};
+
+ПРИКЛАД B: якщо canvasController — клас:
+
+// ДО:
+// moveNode(id, point) { this.store.getState().moveNode(id, point); }
+// ПІСЛЯ:
+// moveNode(id, point) {
+//   assertCanvasPermission(P.ELEMENT_MOVE);
+//   return this.store.getState().moveNode(id, point);
+// }
+
+ПРИКЛАД C: якщо є універсальний dispatch(command):
+
+const COMMAND_PERMISSIONS = Object.freeze({
+  NODE_ADD: P.ELEMENT_CREATE,
+  NODE_MOVE: P.ELEMENT_MOVE,
+  NODE_RESIZE: P.ELEMENT_UPDATE,
+  NODE_ROTATE: P.ELEMENT_UPDATE,
+  NODE_DELETE: P.ELEMENT_DELETE,
+  EDGE_ADD: P.ELEMENT_CREATE,
+  EDGE_MOVE_POINT: P.ELEMENT_UPDATE,
+  EDGE_DELETE: P.ELEMENT_DELETE,
+  ZVT_ADD: P.ELEMENT_CREATE,
+  ZVT_MOVE: P.ELEMENT_MOVE,
+  ZVT_DELETE: P.ELEMENT_DELETE,
+  ZVT_BRANCH_ADD: P.ELEMENT_CREATE,
+  ZVT_BRANCH_UPDATE: P.ELEMENT_UPDATE,
+  ZVT_BRANCH_DELETE: P.ELEMENT_DELETE,
+  ANNOTATION_ADD: P.ELEMENT_CREATE,
+  ANNOTATION_UPDATE: P.ELEMENT_UPDATE,
+  ANNOTATION_DELETE: P.ELEMENT_DELETE,
+  SPEC_TABLE_ADD: P.ELEMENT_CREATE,
+  SPEC_TABLE_UPDATE: P.ELEMENT_UPDATE,
+  SPEC_TABLE_DELETE: P.ELEMENT_DELETE,
+  NOTE_UPDATE: P.ELEMENT_UPDATE,
+  ATTACHMENT_ADD: P.ATTACHMENT_MANAGE,
+  ATTACHMENT_DELETE: P.ATTACHMENT_MANAGE,
+  SCHEME_SAVE: P.SCHEME_SAVE,
+  IMPORT_SCHEME: P.SCHEME_EDIT,
+  PASTE: P.ELEMENT_CREATE,
+  UNDO: P.SCHEME_EDIT,
+  REDO: P.SCHEME_EDIT,
+});
+
+// Інтегрувати в існуючий dispatch:
+// dispatch(command, payload) {
+//   const permission = COMMAND_PERMISSIONS[command];
+//   if (!permission) throw new Error(`UNREGISTERED_COMMAND: ${command}`);
+//   assertCanvasPermission(permission);
+//   return existingDispatch(command, payload);
+// }
+
+ВАЖЛИВО: НЕ використовуйте `if (!permission) return existingDispatch(...)`.
+Невідомі команди, що змінюють документ, мають бути заблоковані (fail closed).
+
+Таблиця відповідностей у проєкті:
+- node/edge: add, move, resize, rotate, edit, delete;
+- ZVT/ZVTBranch: add, reposition, extend, bend, delete;
+- annotations/specificationTable/notes: add, edit, delete;
+- attachments: add, delete, replace;
+- canvas: paste, cut, duplicate, undo, redo, import, clear, save;
+- читання: openCard, select, pan, zoom, search, inspect, viewAttachments.
+
+Для дій читання достатньо P.SCHEME_VIEW; не блокуйте pan/zoom/selection
+лише тому, що користувач reader. Редагування картки = ELEMENT_UPDATE,
+перегляд картки = SCHEME_VIEW.
+
+============================================================
+7. ZUSTAND: ЗАХИСТ ВІД ОБХОДУ КОНТРОЛЕРА
+============================================================
+Приклад патерна для існуючого useCanvasStore.js:
+
+import { create } from 'zustand';
+import { assertCanvasPermission } from '@/features/access/guardCommand';
+import { P } from '@/features/access/permissions';
+
+// ВАЖЛИВО: це зразок окремого store, а не вимога переписати ваш store.
+export const useCanvasStore = create((set, get) => ({
+  nodes: [], edges: [],
+  addNode: (node) => {
+    assertCanvasPermission(P.ELEMENT_CREATE);
+    set((s) => ({ nodes: [...s.nodes, node] }));
+  },
+  moveNode: (id, point) => {
+    assertCanvasPermission(P.ELEMENT_MOVE);
+    set((s) => ({ nodes: s.nodes.map((n) =>
+      n.id === id ? { ...n, x: point.x, y: point.y } : n
+    ) }));
+  },
+  deleteNode: (id) => {
+    assertCanvasPermission(P.ELEMENT_DELETE);
+    set((s) => ({ nodes: s.nodes.filter((n) => n.id !== id) }));
+  },
+}));
+
+У ВАШОМУ store краще вставити assertCanvasPermission() у початок
+КОЖНОЇ публічної мутації, не змінюючи існуючу реалізацію.
+
+ПРИКЛАД:
+// updateZvtBranch: (branchId, patch) => {
+//   assertCanvasPermission(P.ELEMENT_UPDATE);
+//   set((state) => ({ ...наявна логіка... }));
+// },
+
+Не дозволяйте пряме setState(...) із React-компонентів для запису
+nodes/edges/zvt/branches. Пошукати по проєкту:
+- useCanvasStore.setState(
+- setNodes( / setEdges( / setZvt(
+- store.getState().
+- applyHistory / undo / redo / restoreSnapshot
+- importScheme / loadFromClipboard / paste
+
+Виняток: гідратація схеми із СЕРВЕРА. Для неї створіть окремий
+внутрішній метод `hydrateFromServer(snapshot)`, який викликається
+лише у довіреному шляху завантаження, а не в UI-командах.
+
+Undo/redo: перед застосуванням snapshot перевіряти SCHEME_EDIT.
+Збереження: перед POST/PUT перевіряти SCHEME_SAVE.
+Навіть за цих перевірок клієнтський store не є security boundary:
+користувач може змінити JS у браузері, тому API має перевіряти все.
+
+============================================================
+8. REACT KONVA: ПЕРЕВІРКИ ЖЕСТІВ
+============================================================
+Приклад node:
+
+import { useCan } from '@/features/access/useCan';
+import { P } from '@/features/access/permissions';
+
+function CanvasNode({ node, canvasController }) {
+  const canMove = useCan(P.ELEMENT_MOVE);
+  const canEdit = useCan(P.ELEMENT_UPDATE);
+  return (
+    <Group
+      x={node.x}
+      y={node.y}
+      draggable={canMove}
+      onDragStart={(e) => {
+        if (!canMove) { e.target.stopDrag(); return; }
+      }}
+      onDragEnd={(e) => {
+        if (!canMove) {
+          e.target.position({ x: node.x, y: node.y });
+          return;
+        }
+        try {
+          canvasController.moveNode(node.id, e.target.position());
+        } catch (err) {
+          e.target.position({ x: node.x, y: node.y });
+          e.target.getLayer()?.batchDraw();
+        }
+      }}
+      onDblClick={() => openInformationCard(node.id, { readOnly: !canEdit })}
+    >
+      {/* Існуюча графіка вузла */}
+    </Group>
+  );
+}
+
+Примітка: Group та openInformationCard — ваші існуючі компоненти/методи;
+Group треба імпортувати з react-konva.
+
+Для Transformer:
+// const canTransform = useCan(P.ELEMENT_UPDATE);
+// <Transformer enabledAnchors={canTransform ? anchors : []}
+//              rotateEnabled={canTransform} />
+// onTransformEnd: canvasController.resizeNode(...)
+
+Для ребра (edge) з ручками точок:
+// <Circle draggable={canUpdate} onDragEnd={...controller.moveEdgePoint(...)} />
+
+Для ZVT branch:
+// handle bend-point: draggable={canUpdate}
+// onDragEnd -> canvasController.updateZvtBranch(...)
+// додавання ZVT -> canvasController.createZvt(...)
+
+Для контекстного меню:
+// Показувати "Видалити" тільки при useCan(P.ELEMENT_DELETE).
+// Але onClick однаково має викликати guarded controller.
+
+onClick/select, pan, zoom, пошук та перегляд картки не повинні
+вимагати editor, якщо користувач має scheme.view.
+
+ЗАСТЕРЕЖЕННЯ: якщо права змінилися ПІД ЧАС drag, controller/store
+відхилять commit. Поверніть Konva-позицію до стану з store.
+
+============================================================
+9. MUI: КНОПКИ, МЕНЮ, РЕЖИМ
+============================================================
+import Button from '@mui/material/Button';
+import { useCan } from '@/features/access/useCan';
+import { useAccessStore } from '@/features/access/useAccessStore';
+import { P } from '@/features/access/permissions';
+
+export function DeleteButton({ onDelete }) {
+  const allowed = useCan(P.ELEMENT_DELETE);
+  return <Button color="error" disabled={!allowed} onClick={onDelete}>Видалити</Button>;
+}
+
+export function ModeSwitcher() {
+  const canEdit = useCan(P.SCHEME_EDIT);
+  const desiredMode = useAccessStore((s) => s.desiredMode);
+  const setDesiredMode = useAccessStore((s) => s.setDesiredMode);
+  return (
+    <Button
+      disabled={!canEdit}
+      variant={desiredMode === 'editor' ? 'contained' : 'outlined'}
+      onClick={() => setDesiredMode(desiredMode === 'editor' ? 'viewer' : 'editor')}
+    >
+      {desiredMode === 'editor' && canEdit ? 'Режим редактора' : 'Режим перегляду'}
+    </Button>
+  );
+}
+
+Під час відкриття URL `?mode=editor`:
+// const requestedMode = searchParams.get('mode');
+// useAccessStore.getState().setDesiredMode(requestedMode);
+// const actualMode = useAccessStore.getState().getEffectiveMode();
+
+Важливо: перемикач режиму не видає права. Якщо користувач має editor,
+але сам увімкнув viewer, можна блокувати редагування і в UI. Для цього
+у компоненті перевіряти `canEdit && actualMode === 'editor'`.
+При цьому API має перевіряти реальні права, а не UI-режим.
+
+============================================================
+10. NODE.JS API: ПЕРЕВІРКА НА СЕРВЕРІ
+============================================================
+Наведено Express-подібний API. Потрібна адаптація до ваших route names,
+сесії, dbmanager і структури таблиць.
+
+// server/middleware/authorizeScheme.js
+const { can } = require('../access/policy.cjs');
+
+function authorizeScheme(permission) {
+  return async (req, res, next) => {
+    try {
+      // req.user встановлює перевірений authentication middleware.
+      // НІКОЛИ не приймайте userId/roles із req.body як доказ прав.
+      if (!req.user?.id) return res.status(401).json({ error: 'UNAUTHENTICATED' });
+      const schemeId = req.params.schemeId;
+      const resource = await req.services.schemeRepository.getAccessMetadata(schemeId);
+      if (!resource) return res.status(404).json({ error: 'NOT_FOUND' });
+      const subject = await req.services.accessRepository.getSubject(req.user.id);
+      if (!can(subject, permission, resource)) return res.status(403).json({ error: 'FORBIDDEN' });
+      req.schemeResource = resource;
+      return next();
+    } catch (error) { return next(error); }
+  };
+}
+module.exports = { authorizeScheme };
+
+// server/routes/schemes.js
+const express = require('express');
+const { authorizeScheme } = require('../middleware/authorizeScheme');
+const router = express.Router();
+router.get('/:schemeId', authorizeScheme('scheme.view'), async (req, res, next) => {
+  try {
+    const data = await req.services.schemeRepository.getFull(req.params.schemeId);
+    res.json(data);
+  } catch (error) { next(error); }
+});
+router.put('/:schemeId', authorizeScheme('scheme.save'), async (req, res, next) => {
+  try {
+    // Додатково: validate payload, перевірити version/ETag,
+    // обмежити розмір JSON і допустимі типи об'єктів.
+    const result = await req.services.schemeRepository.saveTransaction({
+      schemeId: req.params.schemeId,
+      payload: req.body,
+      actorId: req.user.id,
+      expectedVersion: req.body.version,
+    });
+    res.json(result);
+  } catch (error) { next(error); }
+});
+module.exports = router;
+
+УВАГА: server/access/policy.cjs має реалізувати ТУ САМУ політику,
+що й frontend/policy.js. Не варто механічно require() ES-модуль без
+налаштованого транспілятора. Можна винести чистий engine в shared package
+з відповідною збіркою або підтримувати тести на однакових fixtures.
+
+ПЕРЕВІРЯТИ ОКРЕМО:
+- GET scheme, list/search schemes, cards, attachments, download, export;
+- POST/PUT/PATCH/DELETE nodes, edges, ZVT, branches, notes, annotations;
+- POST/PUT scheme JSON та batch sync;
+- адміністративні endpoint-и (з урахуванням scope адміністратора).
+
+Якщо API приймає ВЕСЬ JSON схеми, SCHEME_SAVE дозволяє повний запис
+лише в межах відповідного ресурсу. Якщо у майбутньому з'являться
+часткові права на типи елементів, потрібен server-side diff/валідація
+змін або окремі endpoint-и з точнішими permissions.
+
+Захист від IDOR: metadata ресурсу брати з БД за schemeId, а не з
+payload клієнта. При перенесенні схеми між підрозділами перевіряти
+право як на вихідний, так і на цільовий scope.
+
+DB транзакція: схема JSON + nodes/edges/ZVT/branches/attachments/
+інші нормалізовані сутності мають записуватися атомарно через ваш
+існуючий dbmanager з одним connection/transaction context.
+
+============================================================
+11. ORACLE 21: ПОЧАТКОВІ ТАБЛИЦІ
+============================================================
+-- Мінімальна схема. У реальному проєкті APP_USER та організаційні
+-- довідники можуть вже існувати: повторно їх не створюйте.
+
+CREATE TABLE ACCESS_ROLE (
+  ID NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  CODE VARCHAR2(64) NOT NULL UNIQUE,
+  TITLE VARCHAR2(200) NOT NULL
+);
+
+CREATE TABLE ACCESS_PERMISSION (
+  ID NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  CODE VARCHAR2(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE ACCESS_ROLE_PERMISSION (
+  ROLE_ID NUMBER NOT NULL REFERENCES ACCESS_ROLE(ID),
+  PERMISSION_ID NUMBER NOT NULL REFERENCES ACCESS_PERMISSION(ID),
+  CONSTRAINT PK_ACCESS_ROLE_PERMISSION PRIMARY KEY (ROLE_ID, PERMISSION_ID)
+);
+
+CREATE TABLE ACCESS_ASSIGNMENT (
+  ID NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  USER_ID NUMBER NOT NULL,
+  ROLE_ID NUMBER NOT NULL REFERENCES ACCESS_ROLE(ID),
+  SCHEME_TYPE VARCHAR2(64),
+  UNIT_ID NUMBER,
+  WORKSHOP_ID NUMBER,
+  DEPARTMENT_ID NUMBER,
+  ALBUM_ID NUMBER,
+  SCHEME_ID NUMBER,
+  ACTIVE NUMBER(1) DEFAULT 1 NOT NULL CHECK (ACTIVE IN (0,1)),
+  CREATED_AT TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+  CREATED_BY NUMBER
+);
+CREATE INDEX IX_ACCESS_ASSIGNMENT_USER ON ACCESS_ASSIGNMENT(USER_ID, ACTIVE);
+CREATE INDEX IX_ACCESS_ASSIGNMENT_SCOPE ON ACCESS_ASSIGNMENT(SCHEME_ID, UNIT_ID, WORKSHOP_ID, DEPARTMENT_ID);
+
+-- Уточнити FK до існуючих таблиць користувачів/схем/підрозділів.
+-- NULL у scope означає wildcard лише для адміністративно затверджених
+-- assignments; глобальні права не можна видавати за замовчуванням.
+-- Для множини scheme types можна використовувати окрему таблицю
+-- ACCESS_ASSIGNMENT_SCHEME_TYPE (ASSIGNMENT_ID, SCHEME_TYPE).
+-- Для журналювання додати ACCESS_AUDIT із actor, target, action,
+-- timestamp, before/after (за правилами безпеки даних).
+
+============================================================
+12. ЯК ЗРОБИТИ ЦЕ БЕЗ МАСОВОГО РЕФАКТОРИНГУ
+============================================================
+ПРОХІД 1 — безпечне читання:
+- Додати accessStore, policy, can().
+- Завантажувати subject з авторизованого API та scheme metadata.
+- Reader бачить схему, картки, пошук, attachments.
+- Залишити всі старі методи controller без змін.
+
+ПРОХІД 2 — заблокувати основні команди:
+- moveNode, moveEdgePoint, deleteNode, deleteEdge, addNode, addEdge.
+- Додати assertCanvasPermission у controller і в store.
+- Відключити draggable/Transformer для reader.
+- Перевірити hotkeys Delete, Ctrl+V, Ctrl+Z, Ctrl+Y.
+
+ПРОХІД 3 — спеціальні сутності:
+- ZVT, ZVTBranch, annotation, specificationTable, attachment, notes.
+- Кожну мутацію зіставити з COMMAND_PERMISSIONS.
+- Перевірити каскадне видалення ZVT при видаленні branch:
+  одна команда ELEMENT_DELETE захищає всю атомарну операцію.
+
+ПРОХІД 4 — сервер:
+- Усі GET та POST/PUT/PATCH/DELETE захистити на API.
+- Заборонити зміни через прямий HTTP-запит без прав.
+- Реалізувати транзакційне збереження і optimistic locking.
+
+ПРОХІД 5 — адміністративний UI:
+- Додати /admin/access на MUI.
+- Шукати користувача; призначати кілька grants із різними scopes.
+- Адміністратор змінює лише користувачів/області у своєму scope.
+- Перевірка делегування ролей ОБОВ'ЯЗКОВО на API.
+
+============================================================
+13. МАТРИЦЯ ПЕРЕВІРОК
+============================================================
+СЦЕНАРІЙ                                      READER   EDITOR
+Відкрити дозволену схему                       ТАК      ТАК
+Панорамування/масштабування                    ТАК      ТАК
+Пошук і перегляд картки                        ТАК      ТАК
+Перегляд прикріплених файлів                   ТАК      ТАК
+Переміщення node / ZVT                         НІ       ТАК
+Зміна elbow / edge points                      НІ       ТАК
+Видалення node/edge/branch                     НІ       ТАК
+Додавання annotation/specificationTable        НІ       ТАК
+Редагування інформаційної картки               НІ       ТАК
+Імпорт/вставка/undo/redo                       НІ       ТАК
+Збереження JSON                                НІ       ТАК
+Адміністрування доступів                       НІ       НІ*
+* Лише окремий administrator / super_administrator grant.
+
+ОБОВ'ЯЗКОВІ НЕГАТИВНІ ТЕСТИ:
+1. Reader відкриває ?mode=editor -> actualMode viewer.
+2. Reader викликає controller.deleteNode напряму -> ACCESS_DENIED.
+3. Reader викликає store.deleteNode напряму -> ACCESS_DENIED.
+4. Reader тисне Delete / Ctrl+V / Ctrl+Z -> документ не змінюється.
+5. Reader намагається PUT /schemes/:id -> HTTP 403.
+6. Editor W2 редагує схему W1 -> HTTP 403 та блокування UI.
+7. Editor W2 читає схему U1 (reader grant) -> HTTP 200, edit 403.
+8. Неавторизований користувач -> 401.
+9. Схема не існує -> 404.
+10. Роль змінено на сервері -> наступна операція враховує нові права.
+11. Дві одночасні зміни -> version conflict 409.
+12. Помилка в транзакції -> JSON та таблиці не розходяться.
+13. Невідома мутаційна команда -> UNREGISTERED_COMMAND.
+14. Перегляд вкладень reader дозволений, видалення заборонене.
+15. Каскадне видалення branch+ZVT не обходить перевірку.
+
+============================================================
+14. ПІДСУМОК: ЩО САМЕ ЗМІНЮВАТИ У ВАШИХ ФАЙЛАХ
+============================================================
+canvasController.js:
+  + import assertCanvasPermission / guarded
+  + COMMAND_PERMISSIONS
+  + перевірка перед кожною мутаційною командою
+  = поточні алгоритми переміщення/геометрії залишаються
+
+useCanvasStore.js:
+  + assertCanvasPermission перед кожним публічним mutator
+  + окремий внутрішній шлях server hydration
+  = поточна структура nodes/edges/zvt/zvtBranch/... залишається
+
+Konva components:
+  + draggable={canMove}
+  + Transformer доступний лише editor
+  + onDragEnd -> controller; rollback на відмову
+  = поточна графіка не переписується
+
+MUI toolbar/context menus:
+  + disabled/hidden для команд без permission
+  + editor/viewer switch із effective mode
+  = читач може select, zoom, pan, переглядати картки
+
+Node.js API:
+  + authenticate + authorizeScheme middleware
+  + metadata ресурсу з Oracle
+  + транзакційне збереження
+  = жодне клієнтське обмеження не вважається захистом API
+
+Важлива межа готовності: наведені модулі policy, store, guard і зразки
+контролера можна переносити в проєкт як основу. Але повністю автоматичний
+copy-paste без адаптації неможливий без реальних файлів canvasController,
+useCanvasStore, route handlers, схеми БД та auth middleware.

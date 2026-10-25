@@ -1,0 +1,255 @@
+DOCKER ENGINE У WSL2 БЕЗ DOCKER DESKTOP
+Покрокова інструкція для Windows + Ubuntu 24.04 + Node.js/Express + Next.js/Konva + Oracle 21
+
+1. ЩО САМЕ ПОТРІБНО
+WSL2 — платформа для Linux, а не сам Linux-дистрибутив. Для цього сценарію встановіть Ubuntu всередині WSL2. Окрема інсталяція Ubuntu замість Windows або подвійне завантаження не потрібні. Docker Desktop не встановлюємо.
+Архітектура: Windows -> WSL2 Ubuntu -> Docker Engine + Compose plugin -> два контейнери (api і web) -> зовнішня Oracle 21.
+
+2. ПЕРЕВІРКА WINDOWS (PowerShell від адміністратора)
+wsl --version
+wsl --status
+wsl --list --verbose
+Якщо WSL ще немає:
+wsl --install -d Ubuntu-24.04
+Перезавантажте ПК, якщо Windows цього вимагає. Під час першого запуску Ubuntu створіть Linux-користувача й пароль.
+Якщо Ubuntu вже встановлена, повторно встановлювати її не треба. Перевірте VERSION=2 у wsl -l -v; за потреби:
+wsl --set-version Ubuntu-24.04 2
+Назву дистрибутива підставте точно таку, як у wsl -l -v.
+
+3. УВІМКНЕННЯ SYSTEMD У UBUNTU (термінал Ubuntu)
+Перевірка:
+ps -p 1 -o comm=
+Якщо бачите systemd, пропустіть зміну. Інакше:
+sudo nano /etc/wsl.conf
+Додайте (не видаляючи наявних налаштувань):
+[boot]
+systemd=true
+Збережіть Ctrl+O, Enter, Ctrl+X.
+У PowerShell:
+wsl --shutdown
+Відкрийте Ubuntu повторно і перевірте ps -p 1 -o comm=.
+
+4. ВСТАНОВЛЕННЯ DOCKER ENGINE В UBUNTU (НЕ DOCKER DESKTOP)
+Виконуйте в терміналі Ubuntu:
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF_DOCKER
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF_DOCKER
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo systemctl status docker --no-pager
+Перевірка:
+sudo docker run --rm hello-world
+sudo docker compose version
+
+5. ЗАПУСК DOCKER БЕЗ SUDO
+sudo usermod -aG docker "$USER"
+Вийдіть із термінала Ubuntu і відкрийте його знову; якщо група не застосувалася, виконайте newgrp docker.
+docker run --rm hello-world
+docker info
+УВАГА: членство в групі docker фактично надає root-рівень доступу до хоста Linux. Не додавайте недовірених користувачів.
+
+6. ДЕ ЗБЕРІГАТИ ПРОЄКТ
+Рекомендовано файлову систему Linux, а не /mnt/c, для швидкості файлових операцій і hot reload:
+mkdir -p ~/projects/album-schemes/{api,web}
+cd ~/projects/album-schemes
+Перенесіть наявні репозиторії у відповідні каталоги (git clone або копіювання). Відкривайте проєкт через VS Code Remote - WSL, якщо використовуєте VS Code.
+
+7. ВЕРСІЇ NODE.JS / NEXT.JS / KONVA
+У Dockerfile нижче використовується Node 22 (LTS-гілка). Зафіксуйте конкретний перевірений patch-реліз у реальному проєкті, наприклад через ARG NODE_VERSION і однакове значення в обох образах; для відтворюваності production можна фіксувати digest образу.
+Next.js, react, react-dom, react-konva, konva, zustand, @mui/material, @emotion/react, @emotion/styled встановлюються у web/package.json, а express, oracledb тощо — в api/package.json. Не встановлюйте їх глобально в Ubuntu.
+Перевірка версій у кожному репозиторії:
+cat package.json
+npm ls next react react-dom konva react-konva
+npm ls express oracledb
+Важливо: не виконуйте npm install next@latest у наявному проєкті без перевірки сумісності React, Next.js і react-konva. Зберігайте package-lock.json у git та використовуйте npm ci під час збірки.
+
+8. ФАЙЛ api/Dockerfile
+Створіть файл ~/projects/album-schemes/api/Dockerfile:
+FROM node:22-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+EXPOSE 4000
+CMD ["npm", "start"]
+
+Перевірте, що api/package.json має робочий scripts.start (наприклад node src/server.js), а сервер слухає 0.0.0.0:4000. Якщо стартовий файл інший — змініть scripts.start. Для Oracle node-oracledb Thin mode зазвичай не потребує Oracle Instant Client; Thick mode потребує додаткової конфігурації.
+
+9. ФАЙЛ web/Dockerfile
+Створіть файл ~/projects/album-schemes/web/Dockerfile:
+FROM node:22-bookworm-slim AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+FROM node:22-bookworm-slim AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+FROM node:22-bookworm-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/next.config.* ./
+EXPOSE 3000
+CMD ["npm", "run", "start", "--", "-H", "0.0.0.0"]
+
+Примітка: COPY public і next.config.* вимагає наявності відповідних шляхів. Якщо їх немає, створіть web/public та відповідний next.config.js/mjs або адаптуйте COPY. Для production оптимізуйте образ через output: 'standalone' після перевірки конфігурації Next.js. У клієнтських Konva-компонентах, що використовують window/canvas, забезпечте client boundary ('use client') та за потреби динамічний імпорт без SSR.
+
+10. .dockerignore (СТВОРІТЬ ОКРЕМО В api І web)
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+npm-debug.log*
+coverage
+.DS_Store
+
+11. ФАЙЛ compose.yaml У КОРЕНІ
+name: album-schemes
+services:
+  api:
+    build:
+      context: ./api
+    env_file:
+      - ./api/.env
+    ports:
+      - "127.0.0.1:4000:4000"
+    restart: unless-stopped
+    networks:
+      - appnet
+  web:
+    build:
+      context: ./web
+    env_file:
+      - ./web/.env
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - appnet
+networks:
+  appnet:
+    driver: bridge
+
+Значення 127.0.0.1 прив'язує порти до loopback хоста Docker у WSL. На сучасному WSL Windows зазвичай відкриє http://localhost:3000 та http://localhost:4000. Якщо не відкриває — перевірте WSL networking/localhost forwarding. depends_on задає порядок запуску, але не гарантує готовність API; за потреби додайте healthcheck.
+
+12. НАЛАШТУВАННЯ .env
+api/.env (приклад, замініть значення):
+PORT=4000
+DB_USER=your_user
+DB_PASSWORD=your_password
+DB_CONNECT_STRING=host.docker.internal:1521/ORCLPDB1
+
+УВАГА: host.docker.internal не гарантований у Docker Engine під WSL, на відміну від Docker Desktop. Для зовнішнього Oracle-сервера використовуйте його реальну DNS-назву/IP, доступну з контейнера, наприклад db.example.internal:1521/ORCLPDB1. Якщо Oracle працює у Windows на цьому ПК, потрібна окрема перевірка доступності Windows-host з WSL та контейнера (адреса хоста, firewall, listener). Не копіюйте наведений DB_CONNECT_STRING без перевірки.
+
+web/.env (приклад):
+NEXT_PUBLIC_API_URL=http://localhost:4000
+
+ВАЖЛИВО: NEXT_PUBLIC_* у Next.js часто вбудовуються під час npm run build. Тому значення треба передати на етапі build (ARG/ENV у Dockerfile) або реалізувати server-side proxy/runtime config. Для початкової локальної перевірки простіше використовувати відносні URL /api через Next.js rewrites, але це потребує налаштування next.config.js і коректного API prefix. Якщо ваш frontend уже викликає конкретний URL, адаптуйте конфігурацію під наявний код. localhost у браузері означає Windows/ваш ПК, а localhost усередині контейнера означає сам контейнер. Для server-to-server викликів використовуйте http://api:4000.
+
+13. ПЕРША ЗБІРКА І ЗАПУСК
+cd ~/projects/album-schemes
+docker compose config
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs -f --tail=100
+У браузері Windows відкрийте http://localhost:3000. API: http://localhost:4000 (або ваш реальний endpoint /health). Ctrl+C зупиняє перегляд логів, але не контейнери.
+
+14. КОМАНДИ НА КОЖЕН ДЕНЬ
+docker compose up -d                 # запуск
+docker compose down                  # зупинка/видалення контейнерів і мережі (без видалення томів за замовчуванням)
+docker compose restart               # перезапуск без перебудови
+docker compose up -d --build         # перебудова після змін
+docker compose logs -f api           # логи API
+docker compose logs -f web           # логи Next.js
+docker compose exec api node -v      # версія Node в API
+docker compose exec web npm ls next  # версія Next.js
+Не виконуйте docker compose down -v, якщо є важливі дані у Docker volumes.
+
+15. РЕЖИМ РОЗРОБКИ (ОКРЕМА КОНФІГУРАЦІЯ)
+Production Dockerfile вище не налаштований на hot reload. Для розробки створіть compose.dev.yaml:
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./api:/app
+      - api_node_modules:/app/node_modules
+    command: npm run dev
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    command: npm run dev -- --hostname 0.0.0.0
+volumes:
+  api_node_modules:
+  web_node_modules:
+
+Створіть у кожному каталозі Dockerfile.dev:
+FROM node:22-bookworm-slim
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+EXPOSE 3000 4000
+
+В api/package.json потрібен scripts.dev (наприклад nodemon src/server.js), а nodemon — у devDependencies. У web/package.json потрібен scripts.dev = next dev. Після першого запуску перевірте, що томи node_modules заповнені залежностями. Якщо раніше створені порожні/застарілі томи, перевстановіть залежності в контейнері або цілеспрямовано перестворіть лише ці томи (не видаляйте інші дані).
+Запуск:
+docker compose -f compose.yaml -f compose.dev.yaml up -d --build
+Зупинка:
+docker compose -f compose.yaml -f compose.dev.yaml down
+Якщо file watching не спрацьовує, переконайтеся, що проєкт лежить у ~/projects, а не /mnt/c; за потреби увімкніть polling у відповідному dev tooling.
+
+16. ПОШИРЕНІ ПРОБЛЕМИ
+- Cannot connect to Docker daemon: перевірте sudo systemctl status docker і systemd.
+- permission denied /var/run/docker.sock: перевірте groups і перезапустіть сесію Ubuntu.
+- npm ci помилка: перевірте package-lock.json, синхронність package.json і версію Node.
+- Next.js не відкривається: перевірте docker compose logs web, binding 0.0.0.0 та порт 3000.
+- API не бачить Oracle: перевірте DNS, TCP 1521, Oracle listener, service name, firewall/VPN; із контейнера використовуйте адресу, доступну саме з нього.
+- CORS: браузерні запити між localhost:3000 і localhost:4000 — різні origins; налаштуйте CORS в Express або використовуйте reverse proxy.
+- Після зміни .env з NEXT_PUBLIC_* потрібно повторно зібрати frontend із правильним build-time значенням.
+- Збої після оновлення WSL: wsl --shutdown у PowerShell, потім знову Ubuntu.
+
+17. БЕЗПЕКА ТА ПОДАЛЬШЕ РОЗГОРТАННЯ
+Не додавайте .env до git. Для production використовуйте окремі секрети, обмеження портів, HTTPS reverse proxy, non-root користувачів у контейнерах, healthcheck і pinning версій. Docker Engine у WSL — локальне середовище; для Linux-сервера встановлюйте Docker Engine на самому сервері, без WSL. Konva працює у браузері, окремий контейнер для Konva не потрібен.
+
+18. ПЕРЕВІРКА ГОТОВНОСТІ
+[ ] wsl -l -v показує Ubuntu VERSION 2
+[ ] ps -p 1 -o comm= показує systemd
+[ ] docker run --rm hello-world працює без sudo
+[ ] docker compose version працює
+[ ] api і web мають package.json + package-lock.json
+[ ] docker compose config без помилок
+[ ] docker compose ps показує обидва сервіси
+[ ] frontend відкривається у Windows
+[ ] API відповідає на запит
+[ ] API успішно підключається до Oracle 21
+
+Це універсальний стартовий пакет. Для точного підключення до наявного застосунку треба звірити структуру каталогів, scripts у package.json, поточні версії залежностей, маршрути API, конфігурацію Oracle і Next.js.

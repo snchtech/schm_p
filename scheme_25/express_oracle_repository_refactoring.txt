@@ -1,0 +1,373 @@
+ПАКЕТ РЕФАКТОРИНГУ NODE.JS + EXPRESS + ORACLE 21
+Route → Controller → Service → Repository → OracleDBManager
+JavaScript (ES modules), без TypeScript
+
+1. ЩО Є У НАДАНИХ ФАЙЛАХ
+c13.txt — приклад AlbumController.createAlbum із двома INSERT: ALBUM і SCHEME_VERSION, RETURNING INTO; SQL безпосередньо у контролері.
+l1.txt — приклад Express API з departmentController і schemeController, SQL у контролерах; db/oracle.js повертає result.rows та закриває connection після кожного execute.
+r2.txt — приклад JWT авторизації, CommonJS, oracleService із SQL для перевірки ролей.
+Це приклади коду, а не повні актуальні файли застосунку. Назви таблиць і колонок нижче базуються на цих прикладах. Перед інтеграцією звірити їх із реальною схемою Oracle та поточним OracleDBManager.
+
+2. РЕКОМЕНДОВАНА СТРУКТУРА
+src/
+  modules/
+    albums/
+      album.routes.js
+      album.controller.js
+      album.service.js
+      album.repository.js
+    schemes/
+      scheme.routes.js
+      scheme.controller.js
+      scheme.service.js
+      scheme.repository.js
+    departments/
+      department.routes.js
+      department.controller.js
+      department.service.js
+      department.repository.js
+  db/
+    oracle-manager.js
+  middleware/
+    async-handler.js
+    error-handler.js
+  errors/
+    app-error.js
+  app.js
+
+Модулі групуються за бізнес-сутністю, як у NestJS, але це звичайний Express. Не потрібні decorators, DI-контейнер або Nest CLI.
+
+3. КОНТРАКТ ДОСТУПУ ДО БД
+Наведено самодостатній приклад. Якщо ваш OracleDBManager уже має query(dbName, sql, binds) та withTransaction, залиште його публічні методи, але додайте можливість виконувати декілька запитів через ОДНЕ connection і commit/rollback ОДИН раз.
+
+Файл: src/db/oracle-manager.js
+
+import oracledb from 'oracledb';
+
+oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
+
+class OracleDBManager {
+  constructor() {
+    this.poolAliases = new Map();
+  }
+
+  async initPool(dbName, config) {
+    if (this.poolAliases.has(dbName)) return;
+    const poolAlias = `app_${dbName}`;
+    await oracledb.createPool({ ...config, poolAlias });
+    this.poolAliases.set(dbName, poolAlias);
+  }
+
+  async getConnection(dbName) {
+    const alias = this.poolAliases.get(dbName);
+    if (!alias) throw new Error(`Oracle pool not initialized: ${dbName}`);
+    return oracledb.getConnection(alias);
+  }
+
+  async query(dbName, sql, binds = {}, options = {}) {
+    const connection = await this.getConnection(dbName);
+    try {
+      // Для одиночних записів потрібен commit; для SELECT він не потрібний.
+      // Транзакційні операції виконуються через withTransaction().
+      return await connection.execute(sql, binds, {
+        outFormat: oracledb.OUT_FORMAT_OBJECT,
+        autoCommit: false,
+        ...options,
+      });
+    } finally {
+      // Важливо: незакомічені DML будуть відкотені при поверненні connection у pool.
+      await connection.close();
+    }
+  }
+
+  async withTransaction(dbName, callback) {
+    const connection = await this.getConnection(dbName);
+    const tx = {
+      execute: (sql, binds = {}, options = {}) => connection.execute(sql, binds, {
+        outFormat: oracledb.OUT_FORMAT_OBJECT,
+        autoCommit: false,
+        ...options,
+        autoCommit: false,
+      }),
+    };
+    try {
+      const result = await callback(tx);
+      await connection.commit();
+      return result;
+    } catch (error) {
+      try { await connection.rollback(); }
+      catch (rollbackError) { console.error('Rollback failed:', rollbackError); }
+      throw error;
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async closePools() {
+    for (const alias of this.poolAliases.values()) {
+      await oracledb.getPool(alias).close(10);
+    }
+    this.poolAliases.clear();
+  }
+}
+
+export default new OracleDBManager();
+
+ВАЖЛИВО: query() вище за замовчуванням призначений для SELECT. Для окремого INSERT/UPDATE/DELETE викликайте query(..., { autoCommit: true }) або використовуйте withTransaction(). Не змінюйте поведінку існуючого query() непомітно для старих контролерів. Якщо у вашому DBManager query() уже комітить DML, збережіть це для сумісності й додайте окремий transaction API. Приклади нижче використовують withTransaction для записів.
+
+4. ПОМИЛКИ
+Файл: src/errors/app-error.js
+
+export class AppError extends Error {
+  constructor(message, statusCode = 500) {
+    super(message);
+    this.name = 'AppError';
+    this.statusCode = statusCode;
+  }
+}
+
+Файл: src/middleware/async-handler.js
+
+export const asyncHandler = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
+
+Файл: src/middleware/error-handler.js
+
+import { AppError } from '../errors/app-error.js';
+
+export function errorHandler(error, req, res, next) {
+  console.error(error);
+  const status = error instanceof AppError ? error.statusCode : 500;
+  res.status(status).json({
+    success: false,
+    message: status === 500 ? 'Internal server error' : error.message,
+  });
+}
+
+5. ALBUM REPOSITORY — ТІЛЬКИ SQL
+Файл: src/modules/albums/album.repository.js
+
+import oracledb from 'oracledb';
+
+class AlbumRepository {
+  async insertAlbum(tx, data) {
+    const sql = `
+      INSERT INTO ALBUM (name, depart_id, unit_id, description, status_id)
+      VALUES (:name, :depart_id, :unit_id, :description, :status_id)
+      RETURNING id INTO :new_id
+    `;
+    const result = await tx.execute(sql, {
+      name: data.name,
+      depart_id: data.depart_id,
+      unit_id: data.unit_id,
+      description: data.description ?? null,
+      status_id: 1,
+      new_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
+    });
+    return result.outBinds.new_id[0];
+  }
+
+  async insertInitialVersion(tx, albumId, creatorId) {
+    // У наданому прикладі SCHEME_VERSION містить album_id.
+    // Перевірте реальну назву таблиці та FK у вашій БД.
+    const sql = `
+      INSERT INTO SCHEME_VERSION
+        (album_id, version_number, is_stable, is_archived,
+         created_at, updated_at, created_by, updated_by, status_id)
+      VALUES
+        (:album_id, 1, 1, 0, SYSDATE, SYSDATE, :creator_id, NULL, 1)
+      RETURNING id INTO :new_id
+    `;
+    const result = await tx.execute(sql, {
+      album_id: albumId,
+      creator_id: creatorId,
+      new_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
+    });
+    return result.outBinds.new_id[0];
+  }
+}
+
+export default new AlbumRepository();
+
+6. ALBUM SERVICE — БІЗНЕС-ЛОГІКА І ТРАНЗАКЦІЯ
+Файл: src/modules/albums/album.service.js
+
+import OracleDBManager from '../../db/oracle-manager.js';
+import AlbumRepository from './album.repository.js';
+import { AppError } from '../../errors/app-error.js';
+
+class AlbumService {
+  async createAlbum(dbName, payload, currentUser) {
+    const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+    if (!name) throw new AppError('Назва альбому обов’язкова', 400);
+    if (!Number.isInteger(Number(payload.depart_id))) {
+      throw new AppError('Некоректний depart_id', 400);
+    }
+    if (!Number.isInteger(Number(payload.unit_id))) {
+      throw new AppError('Некоректний unit_id', 400);
+    }
+    if (!currentUser?.id) throw new AppError('Необхідна авторизація', 401);
+
+    // TODO: серверна перевірка ролі та доступу до підрозділу перед записом.
+    // creator_id НЕ довіряти з req.body.
+    return OracleDBManager.withTransaction(dbName, async (tx) => {
+      const albumId = await AlbumRepository.insertAlbum(tx, {
+        name,
+        depart_id: Number(payload.depart_id),
+        unit_id: Number(payload.unit_id),
+        description: payload.description,
+      });
+      const versionId = await AlbumRepository.insertInitialVersion(tx, albumId, currentUser.id);
+      return { album_id: albumId, album_version_id: versionId };
+    });
+  }
+}
+
+export default new AlbumService();
+
+7. ALBUM CONTROLLER — ТІЛЬКИ HTTP
+Файл: src/modules/albums/album.controller.js
+
+import AlbumService from './album.service.js';
+
+class AlbumController {
+  async createAlbum(req, res) {
+    const dbName = req.locals?.dbName; // збережено контракт із наданого прикладу
+    const result = await AlbumService.createAlbum(dbName, req.body, req.user);
+    res.status(201).json({ success: true, ...result });
+  }
+}
+
+export default new AlbumController();
+
+8. ALBUM ROUTE
+Файл: src/modules/albums/album.routes.js
+
+import { Router } from 'express';
+import AlbumController from './album.controller.js';
+import { asyncHandler } from '../../middleware/async-handler.js';
+
+const router = Router();
+// TODO: підставити ваші наявні middleware автентифікації, авторизації та dbName.
+router.post('/create-album', asyncHandler(AlbumController.createAlbum.bind(AlbumController)));
+export default router;
+
+9. ПРИКЛАД READ-ONLY REPOSITORY
+Файл: src/modules/departments/department.repository.js
+
+import OracleDBManager from '../../db/oracle-manager.js';
+
+class DepartmentRepository {
+  async findAll(dbName) {
+    const result = await OracleDBManager.query(
+      dbName,
+      'SELECT id, short_name, name FROM department ORDER BY name',
+    );
+    return result.rows;
+  }
+}
+
+export default new DepartmentRepository();
+
+Файл: src/modules/departments/department.service.js
+
+import DepartmentRepository from './department.repository.js';
+
+class DepartmentService {
+  async list(dbName) {
+    return DepartmentRepository.findAll(dbName);
+  }
+}
+
+export default new DepartmentService();
+
+Файл: src/modules/departments/department.controller.js
+
+import DepartmentService from './department.service.js';
+
+class DepartmentController {
+  async list(req, res) {
+    const rows = await DepartmentService.list(req.locals?.dbName);
+    res.json(rows);
+  }
+}
+
+export default new DepartmentController();
+
+Файл: src/modules/departments/department.routes.js
+
+import { Router } from 'express';
+import DepartmentController from './department.controller.js';
+import { asyncHandler } from '../../middleware/async-handler.js';
+
+const router = Router();
+router.get('/', asyncHandler(DepartmentController.list.bind(DepartmentController)));
+export default router;
+
+10. ПІДКЛЮЧЕННЯ В EXPRESS
+У вашому app.js / server.js, після middleware автентифікації та визначення dbName:
+
+import albumRoutes from './modules/albums/album.routes.js';
+import departmentRoutes from './modules/departments/department.routes.js';
+import { errorHandler } from './middleware/error-handler.js';
+
+app.use('/api/albums', albumRoutes);
+app.use('/api/departments', departmentRoutes);
+app.use(errorHandler); // ОСТАННІМ, після routes
+
+Перед app.listen потрібно ініціалізувати pool для кожного дозволеного dbName:
+await OracleDBManager.initPool('main', {
+  user: process.env.ORACLE_USER,
+  password: process.env.ORACLE_PASSWORD,
+  connectString: process.env.ORACLE_CONNECTION_STRING,
+});
+
+Якщо у вас вже є централізоване налаштування пулів, не створюйте їх повторно. dbName має визначатися сервером за перевіреним контекстом, а не довільним значенням від клієнта.
+
+11. ЩО РОБИТИ З AUTH (r2.txt)
+Залишити auth.routes.js, auth.controller.js, auth.service.js, auth.repository.js.
+- Controller: req.body, req.user, HTTP status.
+- Service: перевірка credentials, політики доступу, видача JWT.
+- Repository: запити до таблиць користувачів і ролей застосунку.
+- Middleware: перевірка підпису JWT, expiration, завантаження/перевірка актуальних прав.
+- JWT secret тільки з process.env, не hardcode.
+- Не використовувати DBA_ROLE_PRIVS як основну систему ролей reader/editor/administrator: це Oracle database privileges, а не прикладні RBAC-ролі.
+- Не використовувати пароль користувача як Oracle connection credentials, якщо ваша фактична архітектура не передбачає окремих Oracle-акаунтів для всіх користувачів.
+- Не змішувати require/module.exports та import/export в одному ESM-модулі без явної сумісності. Для наведеного пакета обрано ESM.
+
+12. ВАЖЛИВІ ВИПРАВЛЕННЯ В ПОРІВНЯННІ З НАДАНИМИ ПРИКЛАДАМИ
+- У l1.txt executeQuery() повертає result.rows: це не дозволяє отримати outBinds після INSERT ... RETURNING. Repository має отримувати повний execute result.
+- У l1.txt INSERT виконується без autoCommit, а connection одразу закривається: запис може бути відкотений. У новій архітектурі всі пов’язані INSERT виконуються в одній транзакції.
+- У c13.txt ALBUM і SCHEME_VERSION створювалися двома окремими query: якщо другий INSERT падає, можливий частковий запис, залежно від реалізації менеджера. withTransaction усуває це.
+- У c13.txt creator_id надходить із req.body. Безпечніше брати ідентифікатор із перевіреної сервером сесії/JWT.
+- У r2.txt секрет JWT жорстко прописаний, а SQL перевіряє DBA_ROLE_PRIVS. Для прикладної RBAC потрібні власні таблиці ролей і серверні перевірки.
+- У прикладі service є TODO для RBAC: до production це обов’язково реалізувати, інакше endpoint створення альбому не захищений авторизацією.
+
+13. АЛГОРИТМ ПОЕТАПНОЇ МІГРАЦІЇ
+Крок 1. Зафіксувати поточні URL, методи, request/response та тести.
+Крок 2. Перевірити OracleDBManager: чи query повертає повний result, чи autoCommit використовується, чи є transaction callback.
+Крок 3. Додати withTransaction, не змінюючи старі виклики query.
+Крок 4. Створити modules/albums і перенести SQL із AlbumController до AlbumRepository.
+Крок 5. Перенести логіку створення альбому + версії до AlbumService в ОДНІЙ транзакції.
+Крок 6. Залишити у controller тільки HTTP-обробку, у routes — middleware і виклик controller.
+Крок 7. Перевірити rollback: навмисно зламати другий INSERT і переконатися, що ALBUM не з’явився.
+Крок 8. Перенести прості SELECT (departments, units), потім schemes, nodes, edges, ZVT та інші сутності.
+Крок 9. Перенести auth/RBAC у власний модуль, перевірити права для читання й редагування незалежно від mode в URL.
+Крок 10. Після міграції видалити SQL із controllers та перевірити, що всі існуючі API-контракти збережено.
+
+14. ТЕСТ-КЕЙСИ
+[ ] GET /api/departments повертає той самий JSON, що раніше.
+[ ] POST /api/albums/create-album створює альбом та початкову версію.
+[ ] При помилці другого INSERT обидва записи відсутні.
+[ ] Після успішного INSERT обидва записи зберігаються.
+[ ] Без токена або з недостатніми правами — 401/403 (після підключення middleware).
+[ ] Не можна встановити creator_id іншого користувача через body.
+[ ] SQL-параметри передаються через bind variables, не конкатенацією.
+[ ] Старі endpoints, що ще не мігровані, продовжують працювати.
+[ ] Перевірено сумісність назв таблиць, ID типів, nullability і схеми Oracle.
+
+15. РЕКОМЕНДАЦІЯ ДЛЯ ВАШОГО ПРОЄКТУ «АЛЬБОМ СХЕМ»
+Розділяти модулі albums, schemes, scheme-objects, attachments, zvt, access. Для збереження схеми JSON + nodes/edges/annotations/attachments використовуйте один service-метод з однією транзакцією, а SQL по сутностях — у відповідних repositories. Не робіть окремий commit у кожному repository. Repository може приймати tx для участі у спільній транзакції. Так можна підтримувати Zustand-дані на одному рівні, не прив’язуючи структуру API до структури frontend store.
+
+КІНЕЦЬ ПАКЕТА

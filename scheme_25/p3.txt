@@ -1,0 +1,235 @@
+У твоєму випадку `mode` в URL варто залишити, але змінити його призначення.
+
+Зараз він, імовірно, визначає, чи користувач може редагувати схему. Натомість він повинен визначати лише режим, у якому користувач хоче відкрити схему.
+
+Тобто потрібно розділити дві речі:
+
+- Права користувача (`permissions`) — що йому дозволено робити.
+- Режим відкриття (`mode`) — що він хоче робити зараз.
+
+Наприклад, користувач із роллю `editor` може відкрити ту саму схему і для перегляду, і для редагування.
+
+## 1. Як це працюватиме
+
+| Роль            | Натиснув «Переглянути»     | Натиснув «Редагувати»      |
+| --------------- | -------------------------- | -------------------------- |
+| `reader`        | Режим перегляду            | Заборонено                 |
+| `editor`        | Режим перегляду            | Режим редагування          |
+| `administrator` | За наявності `scheme.view` | За наявності `scheme.edit` |
+
+Припустимо, маршрут схеми має вигляд `/schemes/125`.
+
+Кнопка Переглянути відкриває:
+
+```
+/schemes/125?mode=view
+```
+
+Кнопка Редагувати відкриває:
+
+```
+/schemes/125?mode=editor
+```
+
+Але якщо користувач `reader` вручну змінить URL на `?mode=editor`, система все одно залишить його в режимі перегляду.
+
+## 2. Кнопки на сторінці альбому
+
+У компоненті списку схем:
+
+```
+import { useRouter } from "next/navigation";
+import { Button, Stack } from "@mui/material";
+import { useCan } from "@/features/auth/useCan";
+
+export default function SchemeActions({ scheme }) {
+  const router = useRouter();
+
+  const canView = useCan("scheme.view", scheme);
+  const canEdit = useCan("scheme.edit", scheme);
+
+  return (
+    <Stack direction="row" spacing={1}>
+      {canView && (
+        <Button
+          variant="outlined"
+          onClick={() =>
+            router.push(`/schemes/${scheme.id}?mode=view`)
+          }
+        >
+          Переглянути
+        </Button>
+      )}
+
+      {canEdit && (
+        <Button
+          variant="contained"
+          onClick={() =>
+            router.push(`/schemes/${scheme.id}?mode=editor`)
+          }
+        >
+          Редагувати
+        </Button>
+      )}
+    </Stack>
+  );
+}
+```
+
+Тут `useCan` — умовний інтерфейс до системи дозволів із попереднього пакета. Його потрібно узгодити з фактичною реалізацією твого `useAccessStore`.
+
+## 3. Визначення фактичного режиму в редакторі
+
+На сторінці схеми необхідно обчислити `effectiveMode` — фактичний режим, який враховує і URL, і права користувача.
+
+```
+"use client";
+
+import { useSearchParams } from "next/navigation";
+import { useCan } from "@/features/auth/useCan";
+
+export default function SchemePage({ scheme }) {
+  const searchParams = useSearchParams();
+
+  const requestedMode = searchParams.get("mode");
+
+  const canView = useCan("scheme.view", scheme);
+  const canEdit = useCan("scheme.edit", scheme);
+
+  const effectiveMode =
+    requestedMode === "editor" && canEdit
+      ? "editor"
+      : "view";
+
+  if (!canView && !canEdit) {
+    return <div>Немає доступу до схеми</div>;
+  }
+
+  return (
+    <SchemeCanvas
+      scheme={scheme}
+      mode={effectiveMode}
+    />
+  );
+}
+```
+
+Зверни увагу: роль `editor` не означає, що схема завжди повинна відкриватися для редагування.
+
+Якщо він натиснув «Переглянути», `effectiveMode` буде `view`, навіть якщо `canEdit === true`.
+
+## 4. Як передати режим у Konva та canvasController
+
+Я рекомендую тримати режим інтерфейсу окремо від прав користувача.
+
+Наприклад, у Zustand:
+
+```
+import { create } from "zustand";
+
+export const useEditorModeStore = create((set) => ({
+  mode: "view",
+
+  setMode: (mode) => {
+    set({
+      mode: mode === "editor" ? "editor" : "view",
+    });
+  },
+}));
+```
+
+У `canvasController` зробити єдину перевірку можливості змін:
+
+```
+const canMutateScheme = (permission, resource) => {
+  const { mode } = useEditorModeStore.getState();
+
+  if (mode !== "editor") {
+    return false;
+  }
+
+  return accessService.can(permission, resource);
+};
+```
+
+Далі використовувати її в методах:
+
+```
+function deleteNode(nodeId) {
+  if (!canMutateScheme("node.delete", currentScheme)) {
+    return;
+  }
+
+  // Існуюча логіка видалення
+}
+
+function moveNode(nodeId, position) {
+  if (!canMutateScheme("node.move", currentScheme)) {
+    return;
+  }
+
+  // Існуюча логіка переміщення
+}
+```
+
+`accessService.can` тут позначає твій централізований механізм перевірки дозволів.
+
+Важливо також блокувати зміни безпосередньо у Zustand actions та перевіряти права на Node.js API. Інакше перевірку в контролері можна буде обійти.
+
+## 5. Що зробити в Konva
+
+У режимі `view` користувач може переглядати схему, масштабувати її, переміщувати полотно, шукати об'єкти, відкривати інформаційні картки та вкладення.
+
+Але він не повинен переміщувати чи редагувати елементи.
+
+Наприклад:
+
+```
+const isEditorMode = effectiveMode === "editor";
+
+<Rect
+  x={node.x}
+  y={node.y}
+  width={node.width}
+  height={node.height}
+  draggable={isEditorMode && canMoveNode}
+  onDragEnd={(event) => {
+    if (!isEditorMode || !canMoveNode) {
+      event.target.position({
+        x: node.x,
+        y: node.y,
+      });
+      return;
+    }
+
+    canvasController.moveNode(node.id, {
+      x: event.target.x(),
+      y: event.target.y(),
+    });
+  }}
+/>
+```
+
+Для інших елементів — `edges`, `zvt`, `zvtBranch`, `annotations`, `attachments`, `specificationTable` — принцип аналогічний.
+
+## 6. Що я рекомендую саме для твого проєкту
+
+Залишити `?mode=view` та `?mode=editor`
+
+Це зручний спосіб відкривати схему з різних кнопок сторінки альбому.
+
+Додати `effectiveMode`
+
+Він визначатиметься за запитаним режимом і реальними правами користувача.
+
+Використовувати `canEditNow`
+
+Єдина умова для всіх операцій редагування: `mode === "editor"` та наявність відповідного дозволу.
+
+Не дублювати логіку редактора
+
+Один Konva canvas повинен працювати в обох режимах. Відрізнятимуться тільки доступні дії та інструменти.
+
+Ще один важливий момент: перемикання з перегляду в редагування можна зробити прямо в шапці редактора. Якщо користувач має `scheme.edit`, він натискає «Перейти до редагування», після чого змінюється `mode` в URL і перераховується `effectiveMode`. Якщо прав немає — кнопка недоступна.
+
+Таким чином ти отримаєш два незалежні механізми: роль визначає максимальні можливості користувача, а режим визначає, які з них активні в поточному сеансі роботи зі схемою.

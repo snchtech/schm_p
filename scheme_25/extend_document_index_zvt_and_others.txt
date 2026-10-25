@@ -1,0 +1,317 @@
+РОЗШИРЕННЯ ЗБЕРЕЖЕННЯ СХЕМИ: ZVT, ZVT_BRANCH, ANNOTATION,
+SPECIFICATION_TABLE, ATTACHMENT, NOTE
+Next.js / Zustand -> Express API -> Oracle 21c
+
+ВАЖЛИВО
+Це інтеграційний шаблон, а не дослівний патч до невідомих файлів.
+Він спирається на раніше погоджені таблиці DOC_SNAPSHOT, DOC_OBJECT,
+DOC_OBJECT_ATTRIBUTE, DOC_OBJECT_LINK, FILE_ASSET, DOC_ASSET_REF.
+Точні поля об'єктів ZVT, branch, annotation, specificationTable,
+attachment, notes потрібно зіставити з вашим фактичним Zustand.
+
+1. ПРИНЦИП
+- Клієнт передає ОДИН повний Snapshot, а не окремі запити для кожного типу.
+- Snapshot є джерелом істини для відтворення Canvas.
+- DOC_OBJECT та атрибути — пошукова/індексована проєкція Snapshot.
+- Один DOC_VERSION_ID = один актуальний Snapshot; автозбереження оновлює
+  той самий запис. Не створюємо нову DOC_VERSION при кожному Save.
+- Усі операції — одна транзакція withTransaction().
+- STABLE/ARCHIVED не редагуємо; тільки DRAFT.
+
+2. ЯК МОДЕЛЮВАТИ ЗВ'ЯЗОК ZVT -> ZVT_BRANCH
+Рекомендація: обидва об'єкти зберігати як окремі DOC_OBJECT:
+  OBJECT_TYPE = 'ZVT' і OBJECT_TYPE = 'ZVT_BRANCH'.
+У DOC_OBJECT_LINK записати:
+  SOURCE_OBJECT_ID = zvt.id
+  TARGET_OBJECT_ID = zvt.branchId
+  LINK_TYPE = 'MOUNTED_ON_BRANCH'
+Це дозволяє шукати ЗВТ за відгалуженням, перевіряти цілісність,
+і видаляти залежні зв'язки при видаленні branch.
+
+Якщо правило «ЗВТ не існує без branch» є обов'язковим, то одного FK
+у DOC_OBJECT_LINK недостатньо: FK перевіряє наявність цілі, але не
+гарантує, що КОЖЕН ZVT має link. Тому:
+  (а) перевіряти правило в API перед COMMIT;
+  (б) додатково можна в DOC_OBJECT.PARENT_OBJECT_ID зберігати branchId
+      для ZVT (самопосилальний FK у межах DOC_VERSION_ID);
+  (в) за потреби пізніше зробити окрему спеціалізовану таблицю
+      DOC_ZVT_BINDING з PK(DOC_VERSION_ID, ZVT_ID), FK на обидва об'єкти.
+У прикладі нижче застосовано (а)+(б)+DOC_OBJECT_LINK. Унікальність
+одного parent для ZVT задає поле PARENT_OBJECT_ID. Для branch, що
+підключений до EDGE/NODE, можна також використовувати DOC_OBJECT_LINK.
+
+3. FRONTEND: ЗБЕРЕЖЕННЯ ВСІХ МАСИВІВ У SNAPSHOT
+Ваша prepareAndValidateSnapshot() зараз вручну вибирає поля nodes/edges.
+Щоб не втратити властивості ZVT та інших типів, зберігайте повний
+JSON-серіалізовний вміст кожного масиву; функції, refs, Konva instances,
+File/Blob, Map/Set і циклічні посилання у Snapshot не допускаються.
+
+// canvasSnapshot.js (приклад; адаптувати до фактичного buildSnapshot)
+import useCanvasStore from '../stores/useCanvasStore.js';
+
+const serializable = (value) => {
+  // structuredClone НЕ перетворює DOM/Konva/File на JSON-структуру.
+  // JSON.stringify тут навмисно виявляє циклічні посилання як помилку.
+  const result = JSON.stringify(value);
+  if (result === undefined) throw new Error('Неможливо серіалізувати Snapshot');
+  return JSON.parse(result);
+};
+
+export function prepareAndValidateSnapshot() {
+  const s = useCanvasStore.getState();
+  const payload = {
+    schemaVersion: 2,
+    nodes: s.nodes ?? [],
+    edges: s.edges ?? [],
+    zvts: s.zvts ?? [],
+    zvtBranches: s.zvtBranches ?? [],
+    annotations: s.annotations ?? [],
+    specificationTables: Array.isArray(s.specificationTables)
+      ? s.specificationTables
+      : Object.values(s.specificationTables ?? {}),
+    attachments: s.attachments ?? [],
+    notes: s.notes ?? [],
+  };
+  const snapshot = serializable(payload);
+  validateDocumentSnapshot(snapshot);
+  return snapshot;
+}
+
+function validateDocumentSnapshot(s) {
+  const types = ['nodes','edges','zvts','zvtBranches','annotations',
+    'specificationTables','attachments','notes'];
+  const ids = new Set();
+  for (const type of types) {
+    if (!Array.isArray(s[type])) throw new Error(`${type} не є масивом`);
+    for (const item of s[type]) {
+      if (typeof item.id !== 'string' || !item.id.trim())
+        throw new Error(`${type}: порожній id`);
+      if (ids.has(item.id)) throw new Error(`Повторний OBJECT_ID: ${item.id}`);
+      ids.add(item.id);
+    }
+  }
+  const branches = new Set(s.zvtBranches.map(x => x.id));
+  for (const zvt of s.zvts) {
+    // Змініть шлях zvt.branchId відповідно до реального Store!
+    if (!zvt.branchId || !branches.has(zvt.branchId))
+      throw new Error(`ZVT ${zvt.id} не має існуючого branchId`);
+  }
+  // Не записуйте в Snapshot байти File/Blob: attachment містить лише assetId.
+}
+
+// Виклик існуючого API не змінюється:
+// PUT /api/documents/:versionId/snapshot
+// body: { snapshot: prepareAndValidateSnapshot(), saveRevision }
+
+4. API: УНІВЕРСАЛЬНИЙ МАПЕР DOC_OBJECT
+// services/documentIndexMapper.js
+const SPEC = [
+  ['nodes', 'NODE'],
+  ['edges', 'EDGE'],
+  ['zvts', 'ZVT'],
+  ['zvtBranches', 'ZVT_BRANCH'],
+  ['annotations', 'ANNOTATION'],
+  ['specificationTables', 'SPECIFICATION_TABLE'],
+  ['attachments', 'ATTACHMENT'],
+  ['notes', 'NOTE'],
+];
+
+const text = (v) => v == null ? null : String(v);
+const number = (v) => typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+export function mapDocumentObjects(snapshot, versionId) {
+  return SPEC.flatMap(([key, objectType]) => (snapshot[key] ?? []).map(x => ({
+    versionId,
+    objectId: x.id,
+    objectType,
+    objectSubtype: text(x.type ?? x.kind ?? null),
+    label: text(x.label ?? x.title ?? x.name ?? x.data?.label ?? null),
+    externalObjectId: text(x.externalObjectId ?? x.data?.externalObjectId ?? null),
+    unitId: text(x.unitId ?? x.data?.unitId ?? null),
+    searchableText: text(x.searchableText ?? x.label ?? x.title ?? x.name ?? null),
+    parentObjectId: objectType === 'ZVT' ? text(x.branchId) : null,
+  })));
+}
+
+export function mapDocumentAttributes(snapshot, versionId) {
+  const out = [];
+  const add = (id, code, value) => {
+    if (value == null || value === '') return;
+    const isNum = typeof value === 'number' && Number.isFinite(value);
+    if (!isNum && typeof value !== 'string' && typeof value !== 'boolean') return;
+    out.push({ versionId, objectId: id, attributeCode: code,
+      valueText: isNum ? null : String(value), valueNumber: isNum ? value : null,
+      valueDate: null });
+  };
+  for (const x of snapshot.nodes ?? []) {
+    add(x.id, 'POS_X', number(x.position?.x));
+    add(x.id, 'POS_Y', number(x.position?.y));
+    add(x.id, 'WIDTH', number(x.data?.width));
+    add(x.id, 'HEIGHT', number(x.data?.height));
+  }
+  for (const x of snapshot.edges ?? []) {
+    add(x.id, 'CONNECTOR_TYPE', x.connectorType);
+    add(x.id, 'PATH_TYPE', x.pathType);
+  }
+  for (const x of snapshot.zvts ?? []) {
+    add(x.id, 'ZVT_KIND', x.kind ?? x.type);
+    add(x.id, 'BRANCH_ID', x.branchId);
+  }
+  for (const x of snapshot.zvtBranches ?? []) {
+    add(x.id, 'BRANCH_KIND', x.kind ?? x.type);
+  }
+  for (const x of snapshot.annotations ?? []) {
+    add(x.id, 'ANNOTATION_TEXT', x.text ?? x.content);
+  }
+  for (const x of snapshot.specificationTables ?? []) {
+    add(x.id, 'TABLE_TITLE', x.title ?? x.name);
+  }
+  for (const x of snapshot.attachments ?? []) {
+    add(x.id, 'ASSET_ID', x.assetId);
+    add(x.id, 'FILE_NAME', x.fileName ?? x.originalName);
+  }
+  for (const x of snapshot.notes ?? []) {
+    add(x.id, 'NOTE_TEXT', x.text ?? x.content);
+  }
+  // При потребі довгі тексти краще тримати лише у Snapshot або CLOB-полі,
+  // а не у VALUE_TEXT, якщо VARCHAR2 має обмеження довжини.
+  return out;
+}
+
+export function mapDocumentLinks(snapshot, versionId) {
+  const links = [];
+  for (const zvt of snapshot.zvts ?? []) {
+    links.push({
+      linkId: `ZVT_BRANCH:${zvt.id}`, // детермінований ID; перевірте довжину LINK_ID
+      versionId, sourceObjectId: zvt.id, targetObjectId: zvt.branchId,
+      linkType: 'MOUNTED_ON_BRANCH', sourceAnchor: null,
+      targetAnchor: null, segmentId: null,
+    });
+  }
+  // ВАЖЛИВО: EDGE endpoints і branch->node/edge не додаємо навмання.
+  // Для них потрібна точна структура attachedTo/start.attached/end.attached.
+  return links;
+}
+
+5. SQL: ПОТРІБНІ ПОЛЯ/ОБМЕЖЕННЯ
+Перевірте, що DOC_OBJECT.OBJECT_TYPE дозволяє:
+'NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','SPECIFICATION_TABLE',
+'ATTACHMENT','NOTE'. Якщо CHECK обмежує значення — оновіть constraint
+після перевірки фактичної назви:
+
+-- ПРИКЛАД НОВОГО CHECK (не запускати без видалення старого CHECK):
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPES_V2 CHECK (
+ OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION',
+                 'SPECIFICATION_TABLE','ATTACHMENT','NOTE')
+);
+
+-- Якщо FK для PARENT_OBJECT_ID ще немає:
+-- ALTER TABLE DOC_OBJECT ADD CONSTRAINT FK_DOC_OBJECT_PARENT
+-- FOREIGN KEY (DOC_VERSION_ID, PARENT_OBJECT_ID)
+-- REFERENCES DOC_OBJECT(DOC_VERSION_ID, OBJECT_ID);
+-- Не додавайте повторно, якщо FK вже існує.
+
+-- Рекомендовано: індекс для пошуку дітей branch
+CREATE INDEX IX_DOC_OBJECT_PARENT ON DOC_OBJECT
+ (DOC_VERSION_ID, PARENT_OBJECT_ID);
+-- Створюйте лише якщо еквівалентного індексу ще немає.
+
+6. ТРАНЗАКЦІЙНА СИНХРОНІЗАЦІЯ: ЯК ДОПОВНИТИ documentSaveService
+Критично: DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE і DOC_ASSET_REF
+посилаються на DOC_OBJECT. Тому порядок синхронізації важливий.
+
+// services/documentSaveService.js (псевдопатч, адаптувати до свого коду)
+import {
+  mapDocumentObjects, mapDocumentAttributes, mapDocumentLinks
+} from './documentIndexMapper.js';
+
+async function saveDraft(dbName, versionId, snapshot, expectedRevision) {
+  return OracleDBManager.withTransaction(dbName, async (tx) => {
+    // 1) Перевірити право користувача і SELECT DOC_VERSION FOR UPDATE.
+    // 2) Перевірити STATUS_CODE='DRAFT' і optimistic SAVE_REVISION.
+    // 3) UPDATE/INSERT DOC_SNAPSHOT (той самий DOC_VERSION_ID).
+    //    Реалізовану раніше saveSnapshotRow() залишаємо.
+    const nextRevision = await saveSnapshotRow(tx, versionId,
+      snapshot, expectedRevision);
+
+    const objects = mapDocumentObjects(snapshot, versionId);
+    const attributes = mapDocumentAttributes(snapshot, versionId);
+    const links = mapDocumentLinks(snapshot, versionId);
+
+    // 4) Перед видаленням старих об'єктів видалити залежні
+    //    DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE, DOC_ASSET_REF для цієї
+    //    версії або синхронізувати їх точково.
+    //    НЕ видаляйте посилання сторонніх типів без перевірки.
+    // 5) UPSERT/MERGE DOC_OBJECT (усі 8 типів, без дублікатів).
+    // 6) DELETE лише об'єкти, відсутні в поточному Snapshot;
+    //    врахувати FK, зовнішні посилання, та незавершену індексацію.
+    // 7) INSERT/MERGE DOC_OBJECT_ATTRIBUTE.
+    // 8) INSERT/MERGE DOC_OBJECT_LINK.
+    // 9) DOC_ASSET_REF для attachment.assetId, якщо файл уже завантажений.
+    // 10) Після успішного callback withTransaction зробить COMMIT.
+    return { success: true, saveRevision: nextRevision,
+      objectCount: objects.length, attributeCount: attributes.length,
+      linkCount: links.length };
+  });
+}
+
+7. SQL ДЛЯ DOC_OBJECT_LINK (ZVT -> BRANCH)
+INSERT INTO DOC_OBJECT_LINK (
+ LINK_ID, DOC_VERSION_ID, SOURCE_OBJECT_ID, TARGET_OBJECT_ID,
+ LINK_TYPE, SOURCE_ANCHOR, TARGET_ANCHOR, SEGMENT_ID
+) VALUES (
+ :linkId, :versionId, :sourceObjectId, :targetObjectId,
+ :linkType, :sourceAnchor, :targetAnchor, :segmentId
+);
+
+-- Перевірити всі ЗВТ поточної версії без branch або з невірним типом parent:
+SELECT z.OBJECT_ID AS ZVT_ID, z.PARENT_OBJECT_ID AS BRANCH_ID
+FROM DOC_OBJECT z
+LEFT JOIN DOC_OBJECT b
+ ON b.DOC_VERSION_ID = z.DOC_VERSION_ID
+ AND b.OBJECT_ID = z.PARENT_OBJECT_ID
+ AND b.OBJECT_TYPE = 'ZVT_BRANCH'
+WHERE z.DOC_VERSION_ID = :versionId
+ AND z.OBJECT_TYPE = 'ZVT'
+ AND b.OBJECT_ID IS NULL;
+-- Якщо повернуто хоч один рядок — не виконувати COMMIT.
+
+-- Знайти всі ЗВТ на конкретному branch:
+SELECT z.OBJECT_ID, z.LABEL, z.OBJECT_SUBTYPE
+FROM DOC_OBJECT z
+WHERE z.DOC_VERSION_ID = :versionId
+ AND z.OBJECT_TYPE = 'ZVT'
+ AND z.PARENT_OBJECT_ID = :branchId;
+
+-- Відновлення Canvas: як і раніше, з DOC_SNAPSHOT,
+-- а не зі складання DOC_OBJECT назад у графічний JSON.
+
+8. ATTACHMENT: ФАЙЛИ НЕ ЗАПИСУВАТИ В SNAPSHOT
+- Бінарні файли зберігати окремо (FILE_ASSET / файлове сховище).
+- У Snapshot зберігати attachment.id, assetId, позицію, метадані,
+  налаштування відображення.
+- У DOC_OBJECT зберігати тип ATTACHMENT, а в DOC_ASSET_REF — посилання
+  на FILE_ASSET. Уникати повторного завантаження файлу при autosave.
+- Видалення attachment із Canvas не обов'язково фізично видаляє FILE_ASSET:
+  файл може використовуватися іншими версіями документа.
+- Для NOTE/ANNOTATION довгі тексти можуть бути лише в JSON, а в індексі
+  короткий пошуковий фрагмент або окреме CLOB-поле після зміни схеми.
+
+9. ОБОВ'ЯЗКОВІ ПЕРЕВІРКИ ПЕРЕД ПРОДАКШЕНОМ
+[ ] Фактичні імена полів у Zustand (zvt.branchId, attachment.assetId тощо).
+[ ] Чи всі типи мають стабільний ID; ID унікальні в межах версії.
+[ ] Чи не обрізається JSON функцією prepareAndValidateSnapshot().
+[ ] Усі таблиці та CHECK/FK відповідають реальному DDL.
+[ ] Права доступу, DRAFT, блокування версії, SAVE_REVISION.
+[ ] Реалізована справжня синхронізація видалених об'єктів/зв'язків.
+[ ] Зв'язок ZVT->BRANCH перевіряється до COMMIT.
+[ ] Файли не серіалізуються як File/Blob у Snapshot.
+[ ] Усі SQL в одній withTransaction(), autoCommit:false.
+[ ] Відкриття документа з Snapshot відновлює всі 8 масивів атомарно;
+    якщо Snapshot немає — очищує їх усі.
+
+10. ПРИМІТКА ПРО ОБМЕЖЕННЯ ПРИКЛАДУ
+У розділі 6 наведено точки інтеграції, а не повну реалізацію MERGE,
+DELETE та DOC_ASSET_REF: їх потрібно адаптувати до вже створеного
+сервісу і реальних DDL, щоб не порушити FK та не видалити дані інших
+об'єктів. Не замінюйте цим фрагментом працюючий saveService цілком.

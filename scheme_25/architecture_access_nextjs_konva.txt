@@ -1,0 +1,121 @@
+АРХІТЕКТУРА ДОСТУПІВ — АЛЬБОМ СХЕМ
+Next.js + Konva + Zustand + Node.js API + Oracle 21
+JavaScript, без TypeScript
+
+1. РІШЕННЯ
+Впровадити RBAC (ролі та permissions) + ABAC (умови) + scope (область дії).
+Не створювати окремі ролі на кожну комбінацію цеху, посади та типу схеми.
+Кожне призначення ролі зберігає власні scope та schemeTypes. Не можна об'єднувати всі permissions окремо від усіх scope: це призведе до підвищення привілеїв.
+За замовчуванням — deny. Порожній або неповний контекст ресурсу — deny.
+
+2. МОДЕЛЬ
+Subject: id, active, memberships, assignments.
+Assignment: roleId, scope: {kind:'global'|'unit'|'workshop'|'department'|'album'|'scheme', id}, schemeTypes: ['equipment'], optional conditions.
+Role: code + permissions.
+Resource: id, type, schemeType, unitId, workshopId, departmentId, albumId, schemeId, ownerId, status.
+Довірені атрибути користувача та ресурсу сервер отримує з БД, а не з клієнтського JSON.
+
+Permissions: app.access, album.list, album.view, album.create, album.update, album.delete, scheme.list, scheme.view, scheme.create, scheme.update, scheme.delete, scheme.export, scheme.save, element.card.view, element.card.edit, drawing.node.create/update/delete, drawing.edge.create/update/delete, drawing.zvt.create/update/delete, drawing.branch.create/update/delete, drawing.annotation.create/update/delete, drawing.specification.update, drawing.object.move, attachment.view/add/delete, notes.view/edit, admin.users.view, admin.roles.assign/revoke.
+
+reader: app.access, album.list/view, scheme.list/view, element.card.view, attachment.view, notes.view (за політикою), scheme.export (якщо дозволено).
+editor: права reader + відповідні create/update/delete та save, але лише у власному scope.
+administrator: управління користувачами та призначеннями в делегованому scope; НЕ обов'язково editor.
+super_administrator: ширше адміністрування за окремими політиками, з аудитом.
+Посада — атрибут або окремий policy grant; цех/unit — scope або атрибут, а не окрема роль.
+
+3. ПРИКЛАД
+Користувач має editor в unit U1 для equipment, reader в workshop W2 для premises.
+Він редагує equipment U1, переглядає premises W2, але не редагує premises W2.
+Всі умови повинні збігатися в межах ОДНОГО assignment/grant.
+
+4. ФАЙЛИ
+src/features/auth/model/permissions.js
+src/features/auth/model/roleCatalog.js
+src/features/auth/model/accessPolicy.js
+src/features/auth/model/useAuthStore.js
+src/features/auth/ui/AccessGate.jsx
+src/features/auth/lib/useCan.js
+src/shared/lib/access/commandPermissions.js
+src/features/scheme/model/canvasController.js (існуючий)
+src/features/scheme/model/useCanvasStore.js (існуючий)
+API: middleware/authenticate.js, services/authorizationService.js, repositories/accessRepository.js
+
+5. ПРИКЛАД ЧИСТОЇ POLICY-ФУНКЦІЇ (JS)
+// src/features/auth/model/accessPolicy.js
+export function can(subject, permission, resource, rolePermissions) {
+  if (!subject?.active || !resource?.type || !Array.isArray(subject.assignments)) return false;
+  return subject.assignments.some(a => {
+    if (!(rolePermissions[a.roleId] || []).includes(permission)) return false;
+    if (a.schemeTypes?.length && !a.schemeTypes.includes(resource.schemeType)) return false;
+    const s = a.scope;
+    if (!s) return false;
+    switch (s.kind) {
+      case 'global': return true;
+      case 'unit': return !!resource.unitId && s.id === resource.unitId;
+      case 'workshop': return !!resource.workshopId && s.id === resource.workshopId;
+      case 'department': return !!resource.departmentId && s.id === resource.departmentId;
+      case 'album': return !!resource.albumId && s.id === resource.albumId;
+      case 'scheme': return !!resource.schemeId && s.id === resource.schemeId;
+      default: return false;
+    }
+  });
+}
+// Це демонстраційне ядро: production має також перевіряти статус,
+// спадкування, чинність призначень, explicit deny (якщо додасте),
+// membership, класифікацію ресурсу та правила адміністративного делегування.
+
+6. КОНТРОЛЕР І ZUSTAND
+Не переписувати всі Konva nodes/edges/ZVT/branches/annotations.
+Створити одну таблицю команд: addNode->drawing.node.create, moveNode->drawing.object.move, addZvt->drawing.zvt.create, addBranch->drawing.branch.create, deleteAttachment->attachment.delete, editCard->element.card.edit, saveScheme->scheme.save.
+Всі наявні публічні mutating methods маршрутизувати через executeGuardedCommand(permission, resource, callback).
+Контекст активної схеми брати з актуального state, не кешувати контекст попередньої схеми.
+UI state (selection, pan, zoom, opened card) залишити доступним reader.
+Document state (nodes, edges, zvt, zvtBranches, annotation, specificationTable, attachments, notes) змінювати лише через перевірені команди.
+Врахувати keyboard shortcuts, drag-and-drop, context menu, undo/redo, import, copy/paste, bulk operations, autosave.
+Прямий useCanvasStore.setState не є безпековою межею — API все одно перевіряє всі записи.
+
+7. РЕЖИМ URL
+?mode=editor може бути лише UX-побажанням.
+const canEdit = useCan('scheme.update', currentScheme);
+const actualMode = requestedMode === 'editor' && canEdit ? 'editor' : 'viewer';
+Сервер при GET перевіряє scheme.view, при PUT/POST/PATCH — відповідний permission на конкретну схему.
+Якщо користувач втратив доступ, інтерфейс переходить у viewer, незбережені операції блокуються, API повертає 403.
+
+8. NODE.JS API — СПРАВЖНЯ МЕЖА БЕЗПЕКИ
+На кожен запит: authenticate -> завантажити користувача та grants -> завантажити ресурс з Oracle -> authorize -> виконати дію.
+Не довіряти ролям, unitId, schemeType або departmentId із браузера.
+GET /api/schemes фільтрує записи за доступними ресурсами; GET /api/schemes/:id перевіряє scheme.view.
+PUT /api/schemes/:id перевіряє scheme.save та scheme.update, незалежно від того, чи користувач надіслав цілий JSON чи окремі об'єкти.
+Якщо потрібні різні права на типи змін, сервер порівнює попередній/новий документ і перевіряє кожну змінену категорію; альтернативно — API команд із конкретними діями.
+Зберігати JSON і реляційні сутності в одній транзакції Oracle; перевірку доступу виконувати до запису, а для критичних операцій врахувати конкурентні зміни/версію документа.
+GET вкладень і download URL також захищати. Захистити від IDOR, CSRF (для cookie sessions), витоку даних через кеш і export.
+
+9. ORACLE 21 — МІНІМАЛЬНА МОДЕЛЬ
+APP_USER(id, external_identity_id, status)
+ORG_UNIT(id, parent_id, type, code, name) — за потреби ієрархія unit/workshop/department
+APP_MEMBERSHIP(user_id, status, version)
+ACCESS_ROLE(id, code, name)
+ACCESS_PERMISSION(id, code)
+ACCESS_ROLE_PERMISSION(role_id, permission_id)
+ACCESS_ASSIGNMENT(id, user_id, role_id, scope_type, scope_id, scheme_type_id, starts_at, expires_at, granted_by, revoked_at)
+ACCESS_AUDIT(id, actor_id, target_id, action, before_json, after_json, created_at)
+SCHEME(..., scheme_type_id, org_unit_id, album_id, owner_id, version)
+Додати FK, індекси, перевірки допустимих scope та унікальність активних призначень на рівні бізнес-логіки/БД.
+При складній ієрархії оргструктури потрібна перевірена таблиця ancestors або рекурсивний запит; не вважати, що збіг назви цеху означає право на дочірні unit.
+
+10. ПЛАН ВПРОВАДЖЕННЯ БЕЗ ВЕЛИКОГО РЕФАКТОРИНГУ
+Крок 1: інвентаризація всіх mutating actions та API endpoints; скласти матрицю permission.
+Крок 2: чиста policy-функція, ролі та mock assignments, unit-тести.
+Крок 3: useAuthStore + useCan + AccessGate, без зміни моделі canvas.
+Крок 4: централізовані guards у canvasController та wrappers для мутацій Zustand.
+Крок 5: viewer/editor mode, Konva draggable/Transformer/anchors лише за дозволом; pan/zoom для reader.
+Крок 6: server-side authorization в Node.js API — до відкриття системи користувачам.
+Крок 7: таблиці Oracle і repository; mock замінити на БД.
+Крок 8: окрема MUI-сторінка /admin/access із пошуком, видачею scoped ролей, переглядом ефективних прав, аудитом.
+Крок 9: інтеграційні тести: підміна URL, прямий PUT, чужий schemeId, зміна ролі під час роботи, імпорт, undo/redo, вкладення, експорт.
+
+11. КРИТИЧНІ УТОЧНЕННЯ
+Потрібно визначити: спосіб автентифікації (SSO/LDAP/власна сесія), реальну ієрархію цех/unit/department, чи схема належить кільком unit, чи є класифікація вкладень, хто може делегувати editor і кому.
+
+ВИСНОВОК
+Оптимальний шлях для наявного коду: одна policy-функція + одна таблиця відповідності команд permissions + guards на контролері та Node.js API. Konva-компоненти та Zustand-модель схеми залишаються переважно без змін. Безпека забезпечується сервером, не URL і не frontend store.
