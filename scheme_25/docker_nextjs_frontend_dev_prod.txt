@@ -1,0 +1,327 @@
+DOCKER ДЛЯ FRONTEND NEXT.JS + KONVA: DEVELOPMENT ТА PRODUCTION
+==========================================================
+Проєкт: Next.js (JavaScript), React Konva, Zustand, MUI.
+Середовище: Windows + WSL2 Ubuntu + Docker Engine + Docker Compose plugin (БЕЗ Docker Desktop).
+Мета: окремі збірки dev/prod, Hot Reload у dev, мінімальні runtime-залежності у prod.
+
+1. ПРИНЦИП
+-----------
+Використовуємо один multi-stage Dockerfile з target dev та runner.
+Dev: npm ci (усі залежності), next dev, bind mount коду, окремий volume для node_modules.
+Prod: npm ci, next build, standalone output; у фінальний образ копіюємо тільки
+standalone server + static + public, а не всі node_modules з етапу збірки.
+Увага: standalone включає необхідні серверні файли й простежені runtime-залежності;
+це не означає, що у фінальному образі зовсім немає node_modules.
+Konva та React Konva — переважно клієнтські залежності, що потрапляють у JS-бандли.
+
+2. ПЕРЕВІРИТИ ВЕРСІЇ В ІСНУЮЧОМУ ПРОЄКТІ
+---------------------------------------
+cd ~/projects/album-frontend
+cat package.json
+node -p "require('./package.json').dependencies.next"
+cat package-lock.json >/dev/null
+
+Вибери Node LTS, сумісну з твоєю реальною версією Next.js. У прикладі Node 22.
+НЕ змінюй версію Next.js автоматично лише заради Docker.
+Для відтворюваності закріпи версії в package.json/package-lock.json,
+зафіксуй Docker base image на конкретному patch/digest у реальному deployment.
+
+Приклад важливих scripts у package.json (додай/узгодь з існуючими):
+"scripts": {
+  "dev": "next dev -H 0.0.0.0",
+  "build": "next build",
+  "start": "next start -H 0.0.0.0",
+  "lint": "eslint ."
+}
+
+Важливо: next, react, react-dom, konva, react-konva, zustand, @mui/material,
+@emotion/react, @emotion/styled — зазвичай у dependencies, не devDependencies.
+ESLint, тестові інструменти — у devDependencies.
+Якщо в Next.js є TypeScript/інші build-інструменти, вони потрібні на етапі build,
+але не обов'язково у фінальному образі.
+
+3. СТРУКТУРА ФАЙЛІВ
+-------------------
+album-frontend/
+  app/ або src/app/
+  components/
+  public/
+  package.json
+  package-lock.json
+  next.config.js (або next.config.mjs)
+  Dockerfile
+  .dockerignore
+  compose.yaml
+  compose.dev.yaml
+  compose.prod.yaml
+  .env.development.local  # локально, не комітити
+  .env.production.local   # локально, не комітити
+
+4. next.config.js
+-----------------
+Якщо next.config.js вже є — ДОДАЙ output, не видаляй інші налаштування:
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone',
+};
+module.exports = nextConfig;
+
+Для next.config.mjs:
+const nextConfig = { output: 'standalone' };
+export default nextConfig;
+
+У монорепозиторії з файлами за межами frontend може знадобитися
+outputFileTracingRoot. Для звичайного окремого frontend — зазвичай ні.
+
+5. Dockerfile (ПОВНИЙ ПРИКЛАД)
+-----------------------------
+# syntax=docker/dockerfile:1
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-bookworm-slim AS base
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+
+FROM base AS deps
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM deps AS dev
+ENV NODE_ENV=development
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+FROM deps AS builder
+COPY . .
+ENV NODE_ENV=production
+# NEXT_PUBLIC_* змінні, якщо використовуються у браузері, задавати НА BUILD.
+RUN npm run build
+
+FROM node:${NODE_VERSION}-bookworm-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+RUN groupadd --system --gid 1001 nodejs && \
+    useradd --system --uid 1001 --gid nodejs nextjs
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+USER nextjs
+EXPOSE 3000
+CMD ["node", "server.js"]
+
+ПРИМІТКА: Якщо public/ відсутній, створи порожню директорію або прибери
+відповідний COPY. Якщо проєкт потребує native packages (наприклад canvas),
+перевір сумісність базового образу та системні бібліотеки. Debian slim
+обраний як консервативний варіант.
+
+6. .dockerignore
+----------------
+node_modules
+.next
+.git
+.gitignore
+Dockerfile*
+compose*.yaml
+npm-debug.log*
+.env*
+!.env.example
+coverage
+*.md
+
+НЕ включай секрети в build context. .env.production.local має бути виключений.
+
+7. compose.yaml (СПІЛЬНА ОСНОВА)
+--------------------------------
+services:
+  frontend:
+    image: album-frontend:${APP_TAG:-local}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+
+8. compose.dev.yaml
+-------------------
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      args:
+        NODE_VERSION: "22"
+    environment:
+      NODE_ENV: development
+      WATCHPACK_POLLING: "true"  # за потреби, якщо HMR не бачить змін
+      # Для запитів із БРАУЗЕРА URL API має бути доступний браузеру.
+      NEXT_PUBLIC_API_URL: "http://localhost:4000"
+    volumes:
+      - .:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next_cache:/app/.next
+    restart: "no"
+
+volumes:
+  frontend_node_modules:
+  frontend_next_cache:
+
+ВАЖЛИВО: bind mount перекриває файли /app в образі, тому volume для
+node_modules потрібен. Після зміни package-lock.json перебудуй образ,
+а якщо volume містить старі модулі — синхронізуй npm ci всередині контейнера
+або пересоздай тільки volume залежностей (обережно з docker compose down -v).
+Код краще тримати у файловій системі WSL (~/projects), не в /mnt/c,
+для швидкості і надійного відстеження змін.
+
+9. compose.prod.yaml
+--------------------
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NODE_VERSION: "22"
+    environment:
+      NODE_ENV: production
+      # Серверні змінні (НЕ NEXT_PUBLIC_) передаються при запуску.
+      INTERNAL_API_URL: "http://host.docker.internal:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+УВАГА: INTERNAL_API_URL — лише приклад. Якщо API в іншому Compose-проєкті,
+краще зробити спільну Docker network і звертатись за DNS-іменем сервісу.
+Якщо API працює на окремому сервері, використовуй його реальний URL.
+Не використовуй localhost усередині контейнера для звернення до іншого контейнера.
+
+10. NEXT_PUBLIC_* ТА API
+-----------------------
+NEXT_PUBLIC_API_URL підставляється у браузерний код ПІД ЧАС next build.
+Тому для production його треба передавати у builder, а не тільки environment
+контейнера runner. Найкраще — зробити запити браузера через /api на одному
+домені та налаштувати reverse proxy або Next.js Route Handlers до backend.
+Тоді не доведеться збирати окремий образ на кожний URL API.
+
+Якщо все-таки потрібна змінна у браузерному JS:
+У Dockerfile у builder перед RUN npm run build:
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+У compose.prod.yaml у frontend.build додай:
+      args:
+        NODE_VERSION: "22"
+        NEXT_PUBLIC_API_URL: "https://api.example.com"
+
+Не клади секрети у NEXT_PUBLIC_*: вони стають доступними клієнту.
+Docker build args теж не підходять для секретів.
+
+11. КОМАНДИ У WSL UBUNTU
+------------------------
+Перевір Docker Engine:
+docker version
+docker compose version
+
+Development:
+cd ~/projects/album-frontend
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml config
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml up --build -d
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml logs -f frontend
+
+Відкрити у Windows: http://localhost:3000
+Зупинити dev:
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml down
+
+Production локально: щоб не конфліктував порт із dev, використай 3001:
+FRONTEND_PORT=3001 docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml config
+FRONTEND_PORT=3001 docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml up --build -d
+FRONTEND_PORT=3001 docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml logs -f frontend
+
+Відкрити: http://localhost:3001
+Зупинити prod:
+FRONTEND_PORT=3001 docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml down
+
+12. КОЛИ ЗМІНИЛИСЯ БІБЛІОТЕКИ
+-----------------------------
+Зміни package.json та package-lock.json через npm install/npm uninstall.
+Після зміни залежностей у dev:
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml build frontend
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml run --rm --no-deps frontend npm ci
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml up -d frontend
+
+Команда run --rm використовує налаштований volume /app/node_modules і оновить його.
+Перевір:
+docker compose -p album-front-dev -f compose.yaml -f compose.dev.yaml exec frontend npm ls --depth=0
+
+13. ЯК ПЕРЕВІРИТИ PRODUCTION ОБРАЗ
+----------------------------------
+docker images | grep album-frontend
+docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml exec frontend node -v
+docker compose -p album-front-prod -f compose.yaml -f compose.prod.yaml exec frontend sh -c 'ls -lah /app'
+
+У runner НЕ має бути всього дерева залежностей із deps: лише те, що
+Next.js file tracing поклав у standalone. Це економить місце, але
+перевір роботу dynamic imports, читання файлів, шрифтів та інших runtime assets.
+
+14. KONVA ТА SSR
+---------------
+Konva залежить від браузерних можливостей. Компоненти редактора схем мають
+виконуватись на клієнті. Для App Router додавай 'use client' у компонент.
+Якщо бібліотека викликає помилки SSR/build, завантажуй редактор динамічно
+з ssr:false з клієнтського компонента. Не вимикай SSR для всього сайту.
+
+Приклад клієнтського wrapper:
+'use client';
+import dynamic from 'next/dynamic';
+const SchemeEditor = dynamic(() => import('./SchemeEditor'), { ssr: false });
+export default function EditorPageClient() {
+  return <SchemeEditor />;
+}
+
+15. ПОМИЛКИ ТА ДІАГНОСТИКА
+--------------------------
+- HMR не працює: перенеси проєкт у ~/projects у WSL; за потреби WATCHPACK_POLLING.
+- EADDRINUSE: dev і prod повинні використовувати різні FRONTEND_PORT.
+- npm ci падає: потрібен актуальний package-lock.json, сумісний із package.json.
+- 404 для _next/static: перевір COPY .next/static і standalone.
+- API недоступне: localhost у браузері і localhost у контейнері — різні контексти.
+- Build не бачить NEXT_PUBLIC_API_URL: задавай змінну на етапі builder.
+- npm install у запущеному контейнері не гарантує відтворюваність:
+  оновлюй package-lock.json у вихідному проєкті й перебудовуй образ.
+- Не запускай production із bind mount коду; використовуй immutable image.
+- Для deployment на сервер: додай HTTPS/reverse proxy, healthcheck,
+  секрети через захищені runtime механізми, обмеження ресурсів, логування.
+
+16. РЕКОМЕНДОВАНА СХЕМА ДЛЯ ТВОГО ПРОЄКТУ
+-----------------------------------------
+WSL2 Ubuntu -> Docker Engine
+  album-api-dev   : Node.js + Express, nodemon (порт 4000)
+  album-front-dev : Next.js + Konva, next dev (порт 3000)
+  album-api-prod  : Node.js + Express, production (окремий порт)
+  album-front-prod: Next.js standalone (порт 3001 для локального тесту)
+  Oracle 21       : зовнішня БД
+
+Коли frontend і API об'єднаєш в один Compose, їх можна буде адресувати
+за service name (наприклад http://api:4000) усередині Docker network.
+Для клієнтського браузера використовуй публічний URL або same-origin /api.
+
+17. ПОРЯДОК ВПРОВАДЖЕННЯ
+-----------------------
+1) Перевір package.json, lockfile та поточний next.config.
+2) Додай output: 'standalone'.
+3) Створи Dockerfile і .dockerignore.
+4) Створи compose.yaml, compose.dev.yaml, compose.prod.yaml.
+5) Запусти dev і перевір редагування Konva зі збереженням HMR.
+6) Запусти prod на порту 3001 та перевір редактор, API-запити, шрифти й assets.
+7) Підключи до існуючого Docker API через спільну мережу / proxy.
+8) Зафіксуй Node version, залежності й підготуй CI/CD.
+
+ПРИМІТКА: Це універсальний приклад, а не патч твоїх поточних файлів.
+Якщо надаси package.json, next.config та структуру папок frontend,
+можна адаптувати конфігурації без припущень.

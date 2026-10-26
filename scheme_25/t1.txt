@@ -1,0 +1,70 @@
+Так, це стандартний і рекомендований підхід для Docker-проєктів. Для твого Node.js + Express API доцільно мати два режими роботи: `development` та `production`, використовуючи один Dockerfile із різними етапами збірки (multi-stage build).
+
+Я підготував детальну інструкцію з готовими конфігураціями.
+
+Docker API — Development & Production
+
+TXT · 263 рядки · 19 розділів
+
+Завантажити інструкцію TXT
+
+## Як це працюватиме
+
+Один проєкт Node.js + Express
+
+Спільний код, package.json та Dockerfile
+
+Development
+
+Для розробки
+
+Усі бібліотеки, включно з devDependencies
+
+Nodemon і автоматичне оновлення коду
+
+Монтування файлів проєкту
+
+Production
+
+Для експлуатації
+
+Тільки runtime-залежності
+
+Без Nodemon та Hot Reload
+
+Окремий компактний образ
+
+## Найважливіше — бібліотеки node_modules
+
+У `package.json` потрібно правильно розділити залежності:
+
+- `dependencies` — Express, OracleDB та інші бібліотеки, необхідні для роботи API.
+- `devDependencies` — Nodemon, ESLint, Jest та інструменти, потрібні лише під час розробки.
+
+Для production використовується:
+
+```
+npm ci --omit=dev
+```
+
+Це встановить лише production-залежності та необхідні їм транзитивні пакети.
+
+## Запуск двох режимів
+
+Development:
+
+```
+docker compose -f compose.yaml -f compose.dev.yaml up --build -d
+```
+
+Production:
+
+```
+docker compose -f compose.yaml -f compose.prod.yaml up --build -d
+```
+
+Обидва режими працюватимуть через Docker Engine у WSL2 Ubuntu без Docker Desktop.
+
+У TXT також є готові `Dockerfile`, `compose.yaml`, `compose.dev.yaml`, `compose.prod.yaml`, налаштування Oracle 21, змінних середовища, томів для `node_modules` і покрокова перевірка.
+
+Для твого проєкту я рекомендую саме цю структуру, а згодом додати Next.js + Konva як окремий сервіс до Docker Compose. Це дозволить локально розробляти обидві частини системи, а для production створювати незалежні оптимізовані образи API та frontend.

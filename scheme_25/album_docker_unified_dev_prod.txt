@@ -1,0 +1,174 @@
+ALBUM PROJECT — СПІЛЬНИЙ ЗАПУСК FRONTEND + BACKEND У DOCKER
+Docker Engine у WSL2, без Docker Desktop
+
+1. СТРУКТУРА
+album-project/
+  backend/                 # Node.js + Express; власний Dockerfile з targets development, production
+  frontend/                # Next.js + Konva; власний Dockerfile з targets development, production
+  compose.yaml
+  compose.dev.yaml
+  compose.prod.yaml
+  .env.dev
+  .env.prod
+  .gitignore
+
+Передумова: обидва Dockerfile вже мають stages 'development' і 'production'. Якщо вони названі інакше, виправте target у файлах Compose. У backend команда npm run dev повинна запускати сервер з відстеженням змін, npm start — production; у frontend npm run dev і standalone server.js для production.
+
+2. compose.yaml (спільна база)
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: ${APP_ENV:-development}
+      PORT: 4000
+    networks:
+      - album-net
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: ${APP_ENV:-development}
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      - api
+    networks:
+      - album-net
+
+networks:
+  album-net:
+
+3. compose.dev.yaml
+services:
+  api:
+    build:
+      target: development
+    command: npm run dev
+    ports:
+      - "${API_PORT:-4000}:4000"
+    env_file:
+      - ./backend/.env.development
+    volumes:
+      - ./backend:/app
+      - api_node_modules:/app/node_modules
+
+  web:
+    build:
+      target: development
+    command: npm run dev -- --hostname 0.0.0.0
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    env_file:
+      - ./frontend/.env.development
+    volumes:
+      - ./frontend:/app
+      - web_node_modules:/app/node_modules
+      - web_next:/app/.next
+
+volumes:
+  api_node_modules:
+  web_node_modules:
+  web_next:
+
+4. compose.prod.yaml
+services:
+  api:
+    build:
+      target: production
+    ports:
+      - "${API_PORT:-4001}:4000"
+    env_file:
+      - ./backend/.env.production
+    restart: unless-stopped
+
+  web:
+    build:
+      target: production
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Specify NEXT_PUBLIC_API_URL}
+    ports:
+      - "${WEB_PORT:-3001}:3000"
+    restart: unless-stopped
+
+5. .env.dev (для підстановки змінних Compose)
+APP_ENV=development
+API_PORT=4000
+WEB_PORT=3000
+NEXT_PUBLIC_API_URL=http://localhost:4000
+
+6. .env.prod
+APP_ENV=production
+API_PORT=4001
+WEB_PORT=3001
+NEXT_PUBLIC_API_URL=http://localhost:4001
+
+УВАГА: NEXT_PUBLIC_* вбудовуються в браузерну збірку під час next build. Dockerfile frontend у build stage має містити:
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN npm run build
+
+Для frontend dev URL можна задати у frontend/.env.development як NEXT_PUBLIC_API_URL=http://localhost:4000. Для production публічний URL API має бути доступний із браузера користувача, а не лише із контейнера. На реальному сервері краще використовувати HTTPS-домени та reverse proxy. Якщо frontend робить серверні запити до API всередині мережі Compose, адреса буде http://api:4000; у браузері ця адреса НЕ працює.
+
+7. ЗАПУСК
+Із каталогу album-project у WSL Ubuntu:
+
+Development:
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml up -d --build
+
+Production:
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml up -d --build
+
+Обидва середовища можна запустити одночасно (за умови різних портів та ізольованих ресурсів).
+
+8. ПЕРЕВІРКА
+
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml ps
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml ps
+
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml logs -f
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml logs -f
+
+9. ЗУПИНКА
+
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml down
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml down
+
+Не додавайте -v до down без потреби: це видалить іменовані volumes.
+
+10. ОДНА КОРОТКА КОМАНДА ДЛЯ КОЖНОГО РЕЖИМУ
+Створіть файл scripts/run-dev.sh:
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml up -d --build
+
+Створіть scripts/run-prod.sh аналогічно:
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml up -d --build
+
+chmod +x scripts/run-dev.sh scripts/run-prod.sh
+./scripts/run-dev.sh
+./scripts/run-prod.sh
+
+11. ПЕРЕВІРКА КОНФІГУРАЦІЇ ПЕРЕД ЗАПУСКОМ
+
+docker compose -p album-dev --env-file .env.dev -f compose.yaml -f compose.dev.yaml config
+docker compose -p album-prod --env-file .env.prod -f compose.yaml -f compose.prod.yaml config
+
+12. ВАЖЛИВІ ПРАКТИЧНІ НЮАНСИ
+- Не копіюйте локальні node_modules у Docker image: додайте node_modules, .next, .git, .env* до .dockerignore (але не приховуйте потрібні файли для build).
+- У dev volume /app/node_modules може лишитися зі старими залежностями: після зміни package-lock.json іноді потрібно оновити volume або перевстановити пакети всередині контейнера.
+- Для production не монтуйте вихідний код і node_modules із хоста.
+- Зберігайте секрети Oracle та токени в окремих env-файлах або менеджері секретів; додайте їх до .gitignore; не передавайте секрети через NEXT_PUBLIC_* чи Docker ARG.
+- Не використовуйте NODE_ENV=production у dev.
+- depends_on керує порядком запуску, але не гарантує готовність API; за потреби додайте healthcheck.
+- Якщо ваш API слухає інший порт або Dockerfile використовує інший WORKDIR, адаптуйте конфігурацію.
+- Oracle Database 21 може залишатися поза Docker; в контейнері використовуйте мережеву адресу сервера БД, не localhost, якщо БД не всередині цього контейнера.
+- Для production у Next.js використовуйте output: 'standalone', а в Dockerfile копіюйте standalone, static і public до runtime stage.
+- Усі команди виконуються через Docker Engine у WSL2, Docker Desktop не потрібен.

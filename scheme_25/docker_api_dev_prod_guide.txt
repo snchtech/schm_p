@@ -1,0 +1,263 @@
+DOCKER ДЛЯ NODE.JS + EXPRESS API: DEVELOPMENT І PRODUCTION
+Практична інструкція для Windows + WSL2 + Ubuntu + Docker Engine (без Docker Desktop)
+Дата: 26.10.2026
+
+1. ЧИ ТАК РОБЛЯТЬ?
+Так. Це типовий підхід: один репозиторій, один багатостадійний Dockerfile, різні цілі збірки (development/production), окремі Compose-конфігурації. У development код монтується з хоста і перезапускається при змінах; production збирається у незмінний образ, містить лише runtime-залежності й не монтує вихідний код.
+
+2. ПЕРЕДУМОВИ
+У WSL2 Ubuntu встановлені Docker Engine і Docker Compose plugin. Команди виконуйте в терміналі Ubuntu.
+Перевірка:
+  docker version
+  docker compose version
+  docker info
+Якщо Docker daemon не запущений: sudo systemctl start docker (за умови ввімкненого systemd у WSL).
+Зберігайте репозиторій у файловій системі Linux, наприклад ~/projects/album-api, а не /mnt/c/...: файлові операції й відстеження змін зазвичай швидші.
+
+3. ПРИКЛАД СТРУКТУРИ
+album-api/
+  src/
+    app.js
+    server.js
+    routes/
+    controllers/
+    services/
+    repositories/
+  package.json
+  package-lock.json
+  Dockerfile
+  .dockerignore
+  compose.yaml
+  compose.dev.yaml
+  compose.prod.yaml
+  .env.dev
+  .env.prod          # не комітити, лише на сервері
+  .gitignore
+
+4. ПОДІЛ ЗАЛЕЖНОСТЕЙ
+У dependencies — усе, що потрібне під час виконання API (наприклад express, cors, helmet, dotenv, oracledb, zod).
+У devDependencies — лише інструменти розробки (наприклад nodemon, eslint, prettier, jest).
+Команди в корені репозиторію:
+  npm install express cors helmet dotenv oracledb
+  npm install -D nodemon eslint
+  npm pkg set scripts.start="node src/server.js"
+  npm pkg set scripts.dev="nodemon --legacy-watch src/server.js"
+Параметр --legacy-watch може бути потрібен для файлового монтування у WSL; спочатку спробуйте звичайний nodemon без нього, якщо працює.
+ВАЖЛИВО: package-lock.json має існувати й бути закомічений. npm ci встановлює залежності точно за lockfile, не переписуючи його.
+
+5. ПРИКЛАД src/server.js
+  const app = require('./app');
+  const port = Number(process.env.PORT || 3001);
+  app.listen(port, '0.0.0.0', () => console.log(`API listening on ${port}`));
+
+ПРИКЛАД src/app.js
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  module.exports = app;
+
+Якщо ваш код уже має власні точки входу, не переписуйте їх: підставте свій шлях у scripts.start/scripts.dev.
+
+6. Dockerfile (ОДИН ДЛЯ ОБОХ РЕЖИМІВ)
+Використано приклад Node 24 LTS. Вкажіть підтримувану вашим проєктом конкретну версію образу; у реальному CI бажано закріпити digest (sha256). Версія Node має відповідати engines у package.json.
+
+----- Dockerfile -----
+# syntax=docker/dockerfile:1
+ARG NODE_IMAGE=node:24-bookworm-slim
+
+FROM ${NODE_IMAGE} AS development
+WORKDIR /app
+ENV NODE_ENV=development
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+EXPOSE 3001
+CMD ["npm", "run", "dev"]
+
+FROM ${NODE_IMAGE} AS production-deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+FROM ${NODE_IMAGE} AS production
+ENV NODE_ENV=production
+WORKDIR /app
+# Копіюємо лише runtime-залежності та потрібні файли застосунку
+COPY --from=production-deps /app/node_modules ./node_modules
+COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node src ./src
+USER node
+EXPOSE 3001
+CMD ["node", "src/server.js"]
+----- кінець Dockerfile -----
+
+Примітки:
+- Для вашого API може бути потрібна папка config, migrations, views, public, certificates або інші runtime-файли: додайте явні COPY, але не копіюйте .env чи секрети.
+- Якщо у проєкті є build-крок (TypeScript, transpilation, Prisma generate тощо), потрібна окрема build-stage і копіювання зібраного результату. Наведений приклад — для звичайного JavaScript/Express.
+- Для node-oracledb зазвичай достатньо Thin mode (без Oracle Instant Client). Якщо використовуєте Thick mode, потрібно додати Oracle Client і системні бібліотеки до runtime-образу та перевірити сумісність.
+- Debian slim зазвичай простіший для нативних Node-модулів, ніж Alpine.
+
+7. .dockerignore
+----- .dockerignore -----
+node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+npm-debug.log*
+coverage
+.nyc_output
+.vscode
+.idea
+Dockerfile*
+compose*.yaml
+README.md
+----- кінець .dockerignore -----
+
+8. ОСНОВНИЙ compose.yaml
+----- compose.yaml -----
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    environment:
+      PORT: "3001"
+    networks:
+      - backend
+networks:
+  backend:
+----- кінець compose.yaml -----
+
+9. DEV OVERRIDE: compose.dev.yaml
+----- compose.dev.yaml -----
+services:
+  api:
+    build:
+      target: development
+    env_file:
+      - .env.dev
+    environment:
+      NODE_ENV: development
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./:/app
+      - api_node_modules:/app/node_modules
+    command: npm run dev
+volumes:
+  api_node_modules:
+----- кінець compose.dev.yaml -----
+
+Чому окремий том /app/node_modules? Bind mount ./:/app перекриває вміст /app з образу; окремий том дозволяє тримати встановлені всередині Linux-контейнера залежності, не використовуючи node_modules з Windows/WSL-хоста.
+Після зміни package-lock.json перебудуйте образ і оновіть том залежностей (див. розділ 13).
+
+10. PROD OVERRIDE: compose.prod.yaml
+----- compose.prod.yaml -----
+services:
+  api:
+    build:
+      target: production
+    env_file:
+      - .env.prod
+    environment:
+      NODE_ENV: production
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:3001:3001"
+----- кінець compose.prod.yaml -----
+
+Порт прив'язаний до localhost для локального тестування або reverse proxy на тому ж сервері. Якщо API має бути доступний ззовні, налаштуйте reverse proxy, TLS, firewall; не відкривайте API бездумно в інтернет.
+Якщо застосунок пише файли, логи чи кеш у робочу директорію, read_only може вимагати окремих volumes/tmpfs; краще писати логи у stdout/stderr.
+
+11. ENV-ФАЙЛИ
+.env.dev:
+  DB_CONNECT_STRING=host.docker.internal:1521/SERVICE_NAME
+  DB_USER=example_user
+  DB_PASSWORD=example_password
+
+.env.prod:
+  DB_CONNECT_STRING=db-host.example:1521/SERVICE_NAME
+  DB_USER=example_user
+  DB_PASSWORD=example_password
+
+Це тільки шаблон. Замініть параметри реальними. У Linux Docker Engine host.docker.internal не завжди існує автоматично. Якщо Oracle працює на Windows-хості, для dev додайте до api в compose.dev.yaml:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+і перевірте, що Oracle слухає доступну з контейнера адресу, а Windows Firewall дозволяє потрібне підключення. Якщо Oracle на окремому сервері, використовуйте його DNS/IP без host.docker.internal.
+Ніколи не комітьте .env.dev/.env.prod з паролями. Для production секрети краще передавати через менеджер секретів або файлові secrets; env_file зручний для початку, але не захищає значення від адміністраторів Docker.
+У .gitignore додайте .env, .env.*, !.env.example.
+
+12. ЗАПУСК DEVELOPMENT
+З кореня проєкту:
+  docker compose -f compose.yaml -f compose.dev.yaml up --build -d
+  docker compose -f compose.yaml -f compose.dev.yaml logs -f api
+  curl http://localhost:3001/health
+Відкрийте проєкт у VS Code через WSL; зміни в src мають перезапускати nodemon.
+Зупинка:
+  docker compose -f compose.yaml -f compose.dev.yaml down
+
+13. ЗМІНИ ЗАЛЕЖНОСТЕЙ У DEV
+Після npm install / npm uninstall зміняться package.json і package-lock.json. Перезберіть образ:
+  docker compose -f compose.yaml -f compose.dev.yaml build api
+  docker compose -f compose.yaml -f compose.dev.yaml up -d --force-recreate
+Увага: наявний named volume api_node_modules може містити старі залежності. Для повного оновлення, якщо там немає важливих даних:
+  docker compose -f compose.yaml -f compose.dev.yaml down -v
+  docker compose -f compose.yaml -f compose.dev.yaml up --build -d
+Команда down -v видаляє ВСІ томи цього Compose-проєкту. Не використовуйте її, якщо згодом додасте том із даними БД чи файлами користувачів. Альтернатива — npm ci всередині dev-контейнера:
+  docker compose -f compose.yaml -f compose.dev.yaml exec api npm ci
+
+14. ЗАПУСК PRODUCTION ЛОКАЛЬНО
+  docker compose -f compose.yaml -f compose.prod.yaml up --build -d
+  docker compose -f compose.yaml -f compose.prod.yaml logs -f api
+  curl http://localhost:3001/health
+  docker compose -f compose.yaml -f compose.prod.yaml exec api node -p "process.env.NODE_ENV"
+  docker compose -f compose.yaml -f compose.prod.yaml exec api npm ls --omit=dev --depth=0
+  docker compose -f compose.yaml -f compose.prod.yaml down
+Не запускайте dev і prod одночасно з однаковим Compose project name та портом. Якщо потрібно паралельно, задайте різні -p та різні порти у конфігурації.
+
+15. ЯК САМЕ У PRODUCTION ВСТАНОВЛЮЮТЬСЯ ЛИШЕ ПОТРІБНІ БІБЛІОТЕКИ
+npm ci --omit=dev встановлює тільки dependencies та їх транзитивні залежності, а devDependencies не встановлюються на диск. Це НЕ tree-shaking: якщо пакет є в dependencies, він потрапить до образу, навіть якщо код його фактично не використовує.
+Перевірте:
+  npm ls --omit=dev --depth=0
+  npm explain назва-пакета
+  npm prune --omit=dev   # опціонально для вже встановленого локального дерева
+Регулярно видаляйте зайві пакети: npm uninstall назва-пакета.
+Якщо runtime-пакет помилково у devDependencies — production впаде: перемістіть його у dependencies командою npm install назва-пакета --save-prod.
+Для Express API зазвичай не потрібна окрема webpack-збірка. Зменшення образу забезпечують multi-stage, .dockerignore, slim base, відсутність devDependencies, відсутність вихідних секретів.
+
+16. ВЕРСІЇ NODE
+Приклад package.json:
+  "engines": { "node": ">=24 <25" }
+Для повторюваних збірок замініть node:24-bookworm-slim на перевірений точний тег або digest; відстежуйте security updates. Версії npm і Node у dev/prod бажано узгодити.
+Перевірка:
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm api node -v
+
+17. РЕАЛЬНИЙ PRODUCTION DEPLOY
+Для реального сервера краще збирати образ один раз у CI, тестувати, публікувати в registry та запускати сервер за фіксованим тегом/digest. На сервері замість build використовуйте image: registry.example.com/album-api:VERSION. Не монтуйте вихідний код і node_modules у production. Впровадьте healthcheck, централізовані логи, обмеження ресурсів, reverse proxy + HTTPS, резервні копії, регулярні оновлення базових образів.
+
+18. ТИПОВІ ПОМИЛКИ
+- Cannot find module: потрібна бібліотека в devDependencies або відсутній runtime COPY.
+- EACCES: контейнер працює від node, перевірте власника файлів/каталогів.
+- Oracle timeout: DNS, мережа, firewall, Oracle listener, service name, Thick/Thin mode.
+- Код не оновлюється: перевірте volume, nodemon і шлях до проєкту у WSL.
+- Dev працює, prod ні: перевірте env, залежності, чутливість Linux до регістру назв файлів і runtime-файли.
+- Після зміни package-lock.json старі модулі: оновіть том dev-залежностей.
+
+19. РЕКОМЕНДОВАНИЙ ПОРЯДОК ДЛЯ ВАШОГО API
+1) Перевірити package.json, package-lock.json, точку входу й імпорти.
+2) Визначити runtime dependencies і devDependencies.
+3) Створити Dockerfile, .dockerignore і три Compose-файли.
+4) Перевірити dev, Hot Reload, доступ до Oracle.
+5) Перевірити prod, відсутність devDependencies, роботу API та доступ до Oracle.
+6) Тільки потім налаштувати Next.js окремим сервісом у Compose.
+
+КІНЕЦЬ ІНСТРУКЦІЇ
