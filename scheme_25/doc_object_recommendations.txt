@@ -1,0 +1,75 @@
+РЕКОМЕНДАЦІЇ ЩОДО DOC_OBJECT ТА DOC_OBJECT_ATTRIBUTE
+Проєкт: Next.js + Konva + Node.js + Oracle 21c
+
+1. ЩО ВЖЕ Є
+За скриншотами DOC_OBJECT містить OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE, LABEL, EXTERNAL_OBJECT_ID, UNIT_ID, SEARCHABLE_TEXT, PARENT_OBJECT_ID, IS_DELETED, OBJECT_JSON, EDGE_FUNCTION_ID, UPDATED_AT.
+DOC_OBJECT_ATTRIBUTE містить DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE, VALUE_TEXT, VALUE_NUMBER, VALUE_DATE.
+Приклади: NODE_TYPE=monitorCrossIcon, CONNECTOR_TYPE=orthogonal-elbow, START/END_CONNECTED_TO_NODE_ID, START/END_ANCHOR.
+Уточнення: на скриншоті DOC_OBJECT не видно DOC_VERSION_ID. Перевірити, чи версійність забезпечена окремим ключем/зв'язком. Не додавати дублюючий стовпець без перевірки DDL.
+
+2. ПРАКТИЧНІ СЦЕНАРІЇ
+А. Пошук EXTERNAL_OBJECT_ID: знайти всі схеми, де використане обладнання; перейти до об'єкта на canvas.
+Б. Контроль якості: знайти NODE без EXTERNAL_OBJECT_ID, некоректні посилання EDGE на NODE, осиротілі елементи.
+В. Інформаційна картка: параметри diameter, pressure, inventory_number; зберігати лише значущі бізнес-атрибути.
+Г. Звіти: кількість об'єктів за UNIT_ID, типами, схемами, версіями.
+Д. Навігація: перехід між схемою обладнання, будівлею, приміщенням; для цього краще окрема таблиця зв'язків DOC_OBJECT_LINK.
+Е. Аналіз мережі: обхід EDGE між NODE; якщо це буде частий сценарій, винести START_OBJECT_ID/END_OBJECT_ID в окремі індексовані колонки або таблицю DOC_EDGE_ENDPOINT. Не дублювати без потреби.
+
+3. ЩО ДОДАТИ МІНІМАЛЬНО
+Не рекомендую негайно додавати багато колонок. Спочатку перевірити:
+- чи можна однозначно визначити DOC_ID та DOC_VERSION_ID для кожного об'єкта;
+- чи є зовнішній ID унікальним лише в межах джерела. Якщо джерел кілька, додати EXTERNAL_SOURCE_CODE (або довідник джерел), інакше можливі колізії;
+- чи потрібна прив'язка до ROOM/BUILDING: краще загальний TARGET_DOC_ID/TARGET_OBJECT_ID через таблицю DOC_OBJECT_LINK, а не десятки nullable колонок;
+- чи є OBJECT_SUBTYPE стабільним кодом з бібліотеки. Якщо так, передбачити GRAPHIC_ELEMENT_ID або стабільний LIBRARY_CODE, щоб перейменування компонента React не ламало дані;
+- чи потрібно зберігати походження змін: CREATED_AT, CREATED_BY, UPDATED_BY — якщо їх немає в іншому аудиті.
+
+4. МОДЕЛЬ АТРИБУТІВ
+Поточний EAV (ATTRIBUTE_CODE + VALUE_TEXT/NUMBER/DATE) придатний для рідкісних бізнес-параметрів. Запровадити довідник ATTRIBUTE_DEFINITION: CODE, DATA_TYPE, UNIT_OF_MEASURE, APPLIES_TO, IS_SEARCHABLE, IS_REQUIRED. Валідація: для одного значення має бути заповнена рівно одна типізована VALUE_ колонка. Для повторюваних атрибутів — окремий порядковий номер або окрема предметна таблиця.
+Важливо: NODE_TYPE і CONNECTOR_TYPE можуть лишатися в JSON, якщо вже є OBJECT_SUBTYPE і немає окремого пошуку за ними. Не дублювати без реальної причини.
+
+5. ВЕРСІЙНІСТЬ ТА ТРАНЗАКЦІЇ
+Snapshot JSON і індексовані об'єкти повинні відповідати одній версії. Збереження — одна транзакція: запис snapshot, синхронізація DOC_OBJECT, DOC_OBJECT_ATTRIBUTE, перевірки зв'язків, COMMIT. При помилці ROLLBACK.
+Якщо DOC_OBJECT зберігає лише поточний стан, історичні атрибути не можна змішувати з поточними. Обрати одну модель: (а) об'єкти на кожну DOC_VERSION_ID; (б) поточна проєкція + історичні snapshot. Для stable/draft чітко визначити, яка версія індексується для пошуку користувачів.
+
+6. ПРАВА ДОСТУПУ
+UNIT_ID у DOC_OBJECT — ознака належності, а не повноцінна авторизація. API перевіряє права на DOC_ID, тип схеми, підрозділ та режим stable/draft. Не покладатися на фільтрацію лише в Next.js.
+
+7. ПРИКЛАДИ ЗАПИТІВ (адаптувати до реальних ключів DOC_VERSION / DOC)
+-- Пошук об'єктів за зовнішнім ID:
+SELECT o.OBJECT_ID, o.OBJECT_TYPE, o.LABEL, o.UNIT_ID
+FROM DOC_OBJECT o
+WHERE o.EXTERNAL_OBJECT_ID = :external_id
+  AND o.IS_DELETED = 0;
+
+-- Перевірка вузлів без зовнішньої прив'язки:
+SELECT o.OBJECT_ID, o.LABEL, o.UNIT_ID
+FROM DOC_OBJECT o
+WHERE o.OBJECT_TYPE = 'NODE'
+  AND o.EXTERNAL_OBJECT_ID IS NULL
+  AND o.IS_DELETED = 0;
+
+-- Пошук числового параметра (переконатися, що код узгоджено з довідником):
+SELECT a.OBJECT_ID, a.VALUE_NUMBER
+FROM DOC_OBJECT_ATTRIBUTE a
+WHERE a.ATTRIBUTE_CODE = 'DIAMETER'
+  AND a.VALUE_NUMBER >= :min_diameter;
+
+8. ІНДЕКСИ
+Розглянути індекси DOC_OBJECT(EXTERNAL_OBJECT_ID), DOC_OBJECT(UNIT_ID, OBJECT_TYPE), DOC_OBJECT_ATTRIBUTE(ATTRIBUTE_CODE, VALUE_NUMBER), DOC_OBJECT_ATTRIBUTE(OBJECT_ID, ATTRIBUTE_CODE). Порядок колонок і потребу визначити за реальними WHERE/JOIN та планами виконання. Для версійної моделі включити DOC_VERSION_ID в ключі та індекси відповідно до фактичної схеми.
+
+9. ЩО НЕ РОБИТИ ЗАРАЗ
+- Не розкладати весь Konva JSON на сотні EAV-рядків.
+- Не дублювати START_ANCHOR, NODE_TYPE, CONNECTOR_TYPE одночасно в багатьох місцях без визначеного джерела істини.
+- Не зберігати окремі мікропереміщення як версії.
+- Не робити універсальну таблицю для всіх предметних зв'язків: складні зв'язки ZVT→BRANCH, вкладення та міжсхемні посилання можуть потребувати спеціалізованих таблиць.
+
+10. ПОРЯДОК ВПРОВАДЖЕННЯ
+1) Перевірити DDL, ключі та версійність.
+2) Узгодити, що індексується з JSON і де джерело істини.
+3) Додати перевірку зовнішніх ID та цілісності EDGE.
+4) Запровадити довідник параметрів, якщо з'являються бізнес-параметри.
+5) Додати міжсхемні зв'язки, коли буде перший практичний сценарій.
+6) Лише після цього оптимізувати індекси за навантаженням.
+
+ВИСНОВОК
+Поточна пара DOC_OBJECT + DOC_OBJECT_ATTRIBUTE — достатня база для першого етапу. Найважливіше зараз не кількість колонок, а узгодженість версій, стабільні ідентифікатори, зовнішні прив'язки та правила індексації.

@@ -1,0 +1,63 @@
+Так, рекомендую прибрати з `DOC_OBJECT_ATTRIBUTE` поля `START_CONNECTED_TO_NODE_ID`, `END_CONNECTED_TO_NODE_ID` та інші атрибути, які описують зв'язки між об'єктами. Але лише після перенесення цих даних до `DOC_OBJECT_LINK` і перевірки роботи API.
+
+### Що саме переносити
+
+| Поточний ATTRIBUTE_CODE      | Що робити                                              |
+| ---------------------------- | ------------------------------------------------------ |
+| `START_CONNECTED_TO_NODE_ID` | Перенести до `DOC_OBJECT_LINK`                         |
+| `END_CONNECTED_TO_NODE_ID`   | Перенести до `DOC_OBJECT_LINK`                         |
+| `START_CONNECTION_TYPE`      | Не зберігати окремо, якщо тип визначається зв'язком    |
+| `END_CONNECTION_TYPE`        | Аналогічно                                             |
+| `START_ANCHOR`               | Перенести до `DOC_OBJECT_LINK`                         |
+| `END_ANCHOR`                 | Перенести до `DOC_OBJECT_LINK`                         |
+| `CONNECTOR_TYPE`             | Залишити в `DOC_OBJECT_ATTRIBUTE` або `OBJECT_SUBTYPE` |
+| `NODE_TYPE`                  | Залишити в `DOC_OBJECT_ATTRIBUTE` або `OBJECT_SUBTYPE` |
+
+У твоєму SQL уже передбачені `SOURCE_ANCHOR`, `TARGET_ANCHOR` і `LINK_TYPE`, тому дублювати їх в атрибутах немає потреби.&#x20;
+
+oracle21_versioned_schema_changes.txt
+
+
+
+### Як я рекомендую зберігати EDGE
+
+Наприклад, конектор `edge-001` з'єднує `node-001` і `node-002`.
+
+У `DOC_OBJECT` залишаються три об'єкти:
+
+- `node-001` — NODE
+- `node-002` — NODE
+- `edge-001` — EDGE
+
+У `DOC_OBJECT_LINK` створюються два записи:
+
+| SOURCE_OBJECT_ID | TARGET_OBJECT_ID | LINK_TYPE  | TARGET_ANCHOR |
+| ---------------- | ---------------- | ---------- | ------------- |
+| edge-001         | node-001         | EDGE_START | right         |
+| edge-001         | node-002         | EDGE_END   | left          |
+
+Тобто `EDGE` залишається повноцінним графічним об'єктом, а таблиця зв'язків визначає, до чого приєднані його кінці.
+
+### Що робити з іншими зв'язками
+
+За таким самим принципом рекомендую переносити:
+
+- `ZVT_BRANCH_ID` → зв'язок `ZVT_BRANCH`.
+- `BRANCH_ATTACHED_TO` → зв'язок `BRANCH_ATTACHED_TO`.
+- Прив'язки до інших графічних об'єктів → відповідний `LINK_TYPE`.
+
+Водночас `EXTERNAL_OBJECT_ID`, який посилається на обладнання із загальної БД, я б залишив у `DOC_OBJECT`. Це не графічний зв'язок, а бізнес-ідентифікатор для пошуку.
+
+Важливе уточнення: у поточній структурі `DOC_OBJECT_LINK` обидва кінці зв'язку повинні бути об'єктами однієї версії документа. Для зв'язків між різними схемами використовуй `DOC_CROSS_LINK`, а не `DOC_OBJECT_LINK`.
+
+### Як правильно виконати перехід
+
+1. Додати збереження зв'язків у `DOC_OBJECT_LINK`.
+2. Перенести туди вже збережені `START_CONNECTED_TO_NODE_ID`, `END_CONNECTED_TO_NODE_ID` та анкори.
+3. Перевірити, що всі зв'язки коректно відновлюються під час відкриття схеми.
+4. Змінити Node.js API так, щоб він більше не записував ці атрибути.
+5. Після перевірки видалити застарілі записи з `DOC_OBJECT_ATTRIBUTE`.
+
+Я б також залишив геометрію конектора (точки зламу, координати, алгоритм маршрутизації) в `OBJECT_JSON`, а в `DOC_OBJECT_LINK` — лише структурні зв'язки й анкори.
+
+Таким чином матимеш чіткий поділ: `DOC_OBJECT` — що це за об'єкт, `DOC_OBJECT_ATTRIBUTE` — які його характеристики, `DOC_OBJECT_LINK` — із чим він пов'язаний.
