@@ -1,0 +1,94 @@
+Так. Якщо ти створив власний `server.js` для HTTPS, його потрібно явно вказати як файл запуску. Next.js автоматично його не використовуватиме.
+
+У твоєму випадку все залежить від режиму Docker.
+
+### 1. Development
+
+Якщо твій файл називається `server.js` і лежить у корені frontend:
+
+```
+frontend/
+├── app/
+├── components/
+├── public/
+├── server.js
+├── next.config.mjs
+├── package.json
+└── Dockerfile
+```
+
+Можеш прописати його в `package.json`:
+
+```
+{
+  "scripts": {
+    "dev": "node server.js",
+    "build": "next build",
+    "start": "node server.js"
+  }
+}
+```
+
+Тоді Docker запускатиме:
+
+```
+CMD ["npm", "run", "dev"]
+```
+
+Але для твого Development я рекомендую простіший варіант із вбудованим HTTPS Next.js:
+
+```
+{
+  "scripts": {
+    "dev": "next dev --experimental-https",
+    "build": "next build",
+    "start": "next start"
+  }
+}
+```
+
+Тут власний `server.js` не потрібен.
+
+### 2. Production із `output: 'standalone'`
+
+Тут є важлива відмінність.
+
+Після виконання:
+
+```
+npm run build
+```
+
+Next.js автоматично генерує:
+
+```
+.next/standalone/server.js
+```
+
+Це інший файл, не той `server.js`, який ти створив вручну.
+
+Якщо хочеш використовувати HTTPS без Nginx, рекомендую:
+
+- Залишити згенерований Next.js `server.js` без змін.
+- Створити окремий `https-server.cjs` для HTTPS.
+- У Dockerfile запускати саме `https-server.cjs`, який передаватиме запити до Next.js Standalone.
+
+Наприклад:
+
+```
+CMD ["node", "https-server.cjs"]
+```
+
+Але для цього в контейнері мають одночасно запускатися HTTPS-сервер і внутрішній Next.js-сервер. Один лише `CMD` не запустить їх обидва.
+
+### 3. Чи потрібно прописувати `server.js` у `next.config.mjs`?
+
+Ні. Next.js не має налаштування на кшталт:
+
+```
+server: './server.js'
+```
+
+Файл запуску визначається через `package.json`, команду Docker `CMD` або `command` у Docker Compose.
+
+Для твого проєкту: оскільки ти вже використовуєш Docker Development/Production та Next.js Standalone, найкраще залишити стандартний запуск Next.js, а HTTPS реалізувати окремим Node.js-сервером. Це дозволить не порушувати production-збірку.

@@ -1,0 +1,195 @@
+NEXT.JS + DOCKER + HTTPS БЕЗ NGINX
+================================
+Для WSL2 Ubuntu, Docker Engine, Next.js + Konva.
+
+РЕКОМЕНДОВАНИЙ ПІДХІД
+---------------------
+Development: Next.js dev HTTPS (локальний сертифікат).
+Production: Next.js standalone слухає лише 127.0.0.1:3000 всередині контейнера, а окремий Node HTTPS proxy слухає 0.0.0.0:3443. Це зберігає standalone і не потребує nginx.
+
+ВАЖЛИВО: HTTPS тут налаштовується для frontend. Якщо браузер напряму звертається до Express API або WebSocket, вони також повинні використовувати HTTPS/WSS або бути доступними через той самий HTTPS proxy. Сертифікати не вбудовуйте в образ і не комітьте в git.
+
+1. next.config.mjs
+------------------
+const nextConfig = {
+  output: 'standalone',
+};
+export default nextConfig;
+
+2. Створіть frontend/https-server.cjs
+------------------------------------
+// Мінімальний HTTPS reverse proxy на вбудованих модулях Node.js.
+// Підтримує звичайні HTTP запити; для WebSocket потрібне окреме upgrade-проксіювання.
+const https = require('node:https');
+const http = require('node:http');
+const fs = require('node:fs');
+
+const PORT = Number(process.env.HTTPS_PORT || 3443);
+const TARGET_HOST = '127.0.0.1';
+const TARGET_PORT = 3000;
+const server = https.createServer({
+  key: fs.readFileSync(process.env.TLS_KEY || '/run/certs/server.key'),
+  cert: fs.readFileSync(process.env.TLS_CERT || '/run/certs/server.crt'),
+}, (req, res) => {
+  const proxy = http.request({
+    hostname: TARGET_HOST,
+    port: TARGET_PORT,
+    method: req.method,
+    path: req.url,
+    headers: { ...req.headers, host: req.headers.host,
+      'x-forwarded-proto': 'https',
+      'x-forwarded-host': req.headers.host,
+      'x-forwarded-for': req.socket.remoteAddress || '' },
+  }, upstream => {
+    res.writeHead(upstream.statusCode || 502, upstream.headers);
+    upstream.pipe(res);
+  });
+  proxy.on('error', error => {
+    console.error('Proxy error:', error);
+    if (!res.headersSent) res.writeHead(502);
+    res.end('Bad Gateway');
+  });
+  req.pipe(proxy);
+});
+server.listen(PORT, '0.0.0.0', () => console.log(`HTTPS on :${PORT}`));
+
+Примітка: цей мінімальний proxy придатний для звичайних HTTP-запитів, але не для WebSocket upgrade, який використовується, наприклад, HMR у dev. У development використовуйте вбудований Next HTTPS, а для production з WebSocket краще взяти бібліотеку http-proxy з обробником upgrade або винести API/WSS на окремий HTTPS endpoint.
+
+3. frontend/start-production.cjs
+--------------------------------
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const next = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+  env: { ...process.env, HOSTNAME: '127.0.0.1', PORT: '3000' },
+  stdio: 'inherit',
+});
+const tls = spawn(process.execPath, [path.join(__dirname, 'https-server.cjs')], {
+  env: process.env,
+  stdio: 'inherit',
+});
+function shutdown(signal) {
+  next.kill(signal);
+  tls.kill(signal);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+for (const child of [next, tls]) {
+  child.on('exit', (code) => {
+    console.error('Child exited:', code);
+    shutdown('SIGTERM');
+    process.exit(code || 1);
+  });
+}
+
+4. frontend/Dockerfile (приклад для npm)
+---------------------------------------
+FROM node:22-bookworm-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM node:22-bookworm-slim AS development
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NODE_ENV=development
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+FROM node:22-bookworm-slim AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NODE_ENV=production
+RUN npm run build
+
+FROM node:22-bookworm-slim AS production
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY https-server.cjs start-production.cjs ./
+EXPOSE 3443
+CMD ["node", "start-production.cjs"]
+
+Якщо public/ відсутня, створіть порожню папку. Перевірте точну версію Node, яка підтримується вашою версією Next.js, і зафіксуйте її. У standalone копіюються лише необхідні runtime-залежності, визначені Next.js file tracing.
+
+5. Development HTTPS без nginx
+------------------------------
+У frontend/package.json додайте окремий script:
+"dev:https": "next dev --hostname 0.0.0.0 --port 3000 --experimental-https --experimental-https-key /run/certs/server.key --experimental-https-cert /run/certs/server.crt"
+
+Параметри experimental-https залежать від версії Next.js: перевірте `npx next dev --help`. Для локального сертифіката рекомендується mkcert, щоб браузер довіряв локальному CA. Самопідписаний сертифікат без довіри викликатиме попередження браузера.
+
+6. compose.dev.yaml (фрагмент)
+------------------------------
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: development
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+      - ./certs:/run/certs:ro
+    command: npm run dev:https
+volumes:
+  frontend_node_modules:
+
+7. compose.prod.yaml (фрагмент)
+-------------------------------
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: production
+    ports:
+      - "3443:3443"
+    volumes:
+      - ./certs:/run/certs:ro
+    environment:
+      HTTPS_PORT: "3443"
+      TLS_KEY: /run/certs/server.key
+      TLS_CERT: /run/certs/server.crt
+
+Якщо використовуєте спільний compose.yaml, врахуйте, що поля ports/volumes можуть ОБ'ЄДНУВАТИСЯ під час накладання файлів. Не залишайте випадково production HTTP-порт відкритим. Перевіряйте `docker compose -f compose.yaml -f compose.prod.yaml config`.
+
+8. Створення локального тестового сертифіката
+---------------------------------------------
+mkdir -p certs
+openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+  -keyout certs/server.key -out certs/server.crt \
+  -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+chmod 600 certs/server.key
+
+Це тільки тестовий сертифікат. Для production використовуйте довірений сертифікат з відповідним доменом. У .gitignore додайте certs/; у .dockerignore теж виключіть certs/.
+
+9. Запуск
+---------
+# development
+ docker compose -p etls-dev -f compose.yaml -f compose.dev.yaml up -d --build
+# production
+ docker compose -p etls-prod -f compose.yaml -f compose.prod.yaml up -d --build
+# перевірка
+ docker compose -p etls-prod -f compose.yaml -f compose.prod.yaml logs -f frontend
+ curl -vk https://localhost:3443
+
+10. Помилка зі скриншота: network ... not found
+----------------------------------------------
+Вона виникає на етапі створення мережі, а не через SSL чи Next build.
+ docker compose -p etls-dev -f compose.yaml -f compose.dev.yaml down --remove-orphans
+ docker ps -a
+ docker network ls
+ docker compose -p etls-dev -f compose.yaml -f compose.dev.yaml up -d --build
+
+Не виконуйте docker system prune --volumes: це може видалити потрібні дані. Якщо проблема залишиться, покажіть compose-файли та docker inspect проблемного контейнера.
+
+11. Production зауваження
+-------------------------
+* Custom server у Next.js не поєднується зі standalone як стандартний сервер. Тому тут НЕ підміняємо standalone/server.js, а запускаємо HTTPS proxy окремим процесом.
+* Один контейнер із двома процесами — допустимий для локального тесту, але складніший у супроводі. Для стабільної експлуатації краще окремий TLS proxy-контейнер (не обов'язково Nginx; можна Caddy) або Node HTTPS gateway.
+* Для твоїх WebSocket socket.on('update') необхідно налаштувати WSS окремо. Поточний мінімальний HTTPS proxy не проксуює upgrade-запити.
+* Не розміщуйте production приватні ключі у Dockerfile або образі. Використовуйте read-only mounts / secrets.

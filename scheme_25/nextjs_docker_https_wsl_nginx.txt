@@ -1,0 +1,213 @@
+HTTPS для Next.js + Express у Docker Engine / WSL2 (без Docker Desktop)
+====================================================================
+
+1. ДІАГНОСТИКА ПОМИЛКИ ЗІ СКРИНШОТА
+
+Образи etls-api-dev і etls-web-dev зібрано. Помилка:
+  failed to set up container networking: network <id> not found
+Це помилка стану Docker-мережі при створенні контейнера, а не помилка SSL або Next.js build.
+
+У каталозі проєкту виконайте:
+  docker compose ps -a
+  docker network ls
+  docker compose down --remove-orphans
+  docker compose up -d --build
+  docker compose ps
+  docker compose logs --tail=100 web api
+
+Якщо залишилась помилка stale network, перегляньте ВСІ контейнери:
+  docker ps -a
+  docker network ls
+  docker inspect nextjs_frontend_dev --format '{{json .NetworkSettings.Networks}}' 2>/dev/null || true
+
+Якщо nextjs_frontend_dev є зламаним контейнером вашого проєкту, видаліть тільки його:
+  docker rm -f nextjs_frontend_dev
+Після цього повторіть docker compose up -d --build.
+Не використовуйте бездумно docker system prune --volumes або docker network prune:
+це може зачепити інші проєкти/дані. Не задавайте container_name у compose,
+щоб не створювати конфліктів між dev/prod.
+
+2. РЕКОМЕНДОВАНА АРХІТЕКТУРА
+
+Браузер --HTTPS--> Nginx :3443 --HTTP--> Next.js :3000
+                                \--HTTP--> API :4000 (через /api/ за потреби)
+TLS закінчується на Nginx. Власний HTTPS server.js для Next.js не потрібен.
+У production на сервері Nginx може працювати на :443 із реальним DNS/сертифікатом.
+
+3. NEXT.JS
+
+next.config.mjs:
+  const nextConfig = { output: 'standalone' };
+  export default nextConfig;
+
+У production запускайте generated .next/standalone/server.js, а не
+власний server.js. У dev використовуйте npm run dev (next dev -H 0.0.0.0).
+Власний custom server і standalone output не слід комбінувати як один
+спосіб збірки: generated standalone server не включає ваш custom server.
+
+Приклад Dockerfile для frontend (Node 22 як ПРИКЛАД, звірте з engines та
+встановленою версією Next.js; закріпіть точний patch/tag або digest):
+
+  FROM node:22-bookworm-slim AS deps
+  WORKDIR /app
+  COPY package*.json ./
+  RUN npm ci
+
+  FROM deps AS development
+  WORKDIR /app
+  COPY . .
+  EXPOSE 3000
+  CMD ["npm", "run", "dev", "--", "-H", "0.0.0.0"]
+
+  FROM deps AS builder
+  WORKDIR /app
+  COPY . .
+  ENV NEXT_TELEMETRY_DISABLED=1
+  RUN npm run build
+
+  FROM node:22-bookworm-slim AS production
+  WORKDIR /app
+  ENV NODE_ENV=production
+  ENV PORT=3000
+  ENV HOSTNAME=0.0.0.0
+  COPY --from=builder /app/public ./public
+  COPY --from=builder /app/.next/standalone ./
+  COPY --from=builder /app/.next/static ./.next/static
+  USER node
+  EXPOSE 3000
+  CMD ["node", "server.js"]
+
+Примітки: папка public має існувати (створіть порожню, якщо її немає).
+Для node:22-bookworm-slim UID користувача node доступний. Для Next.js із
+нативними залежностями може знадобитися додатковий системний пакет.
+Встановлюйте залежності з package-lock.json; не копіюйте локальні node_modules.
+
+4. ЛОКАЛЬНИЙ HTTPS: СЕРТИФІКАТ
+
+Для тесту можна створити самопідписаний сертифікат:
+  mkdir -p docker/nginx/certs
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout docker/nginx/certs/localhost.key \
+    -out docker/nginx/certs/localhost.crt \
+    -subj '/CN=localhost' \
+    -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+
+Браузер попереджатиме про недовірений сертифікат. Для локальної розробки
+краще mkcert із локальним довіреним CA (довіру потрібно налаштувати у Windows).
+НІКОЛИ не комітьте приватні ключі до Git.
+
+5. NGINX
+
+Створіть docker/nginx/default.conf:
+
+  server {
+      listen 443 ssl;
+      server_name localhost;
+      ssl_certificate /etc/nginx/certs/localhost.crt;
+      ssl_certificate_key /etc/nginx/certs/localhost.key;
+
+      location / {
+          proxy_pass http://web:3000;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_read_timeout 3600s;
+      }
+
+      # УВАГА: додавайте /api/ proxy тільки якщо це узгоджено
+      # з маршрутами Express та Next.js (щоб не перехопити Next API routes).
+      # location /api/ {
+      #     proxy_pass http://api:4000;
+      #     proxy_set_header Host $host;
+      #     proxy_set_header X-Forwarded-Proto https;
+      # }
+  }
+
+6. ПРИКЛАД ОКРЕМОГО COMPOSE ДЛЯ ЛОКАЛЬНОГО DEV
+
+Створіть compose.https.dev.yaml у корені, де frontend/ та backend/:
+
+  services:
+    web:
+      build:
+        context: ./frontend
+        target: development
+      environment:
+        NODE_ENV: development
+      volumes:
+        - ./frontend:/app
+        - web_node_modules:/app/node_modules
+      expose:
+        - "3000"
+      restart: unless-stopped
+
+    api:
+      build:
+        context: ./backend
+        target: development
+      expose:
+        - "4000"
+      restart: unless-stopped
+      # Налаштуйте command, env_file і volumes відповідно до API Dockerfile.
+
+    nginx:
+      image: nginx:stable-alpine
+      depends_on:
+        - web
+        - api
+      ports:
+        - "3443:443"
+      volumes:
+        - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+        - ./docker/nginx/certs:/etc/nginx/certs:ro
+      restart: unless-stopped
+
+  volumes:
+    web_node_modules:
+
+Це САМОСТІЙНИЙ приклад; якщо у вас уже є compose.yaml + compose.dev.yaml,
+перенесіть тільки сервіс nginx до наявного compose та використайте назви
+сервісів web/api саме з вашої конфігурації. Не дублюйте існуючі сервіси.
+
+Запуск цього прикладу:
+  docker compose -p etls-https-dev -f compose.https.dev.yaml up -d --build
+  docker compose -p etls-https-dev -f compose.https.dev.yaml ps
+  docker compose -p etls-https-dev -f compose.https.dev.yaml logs -f nginx web
+
+Відкрити: https://localhost:3443
+
+7. PRODUCTION
+
+У production змініть web.build.target на production, приберіть bind mount
+коду та node_modules, використовуйте належний сертифікат для DNS (наприклад,
+Let's Encrypt), секрети зберігайте поза образом, а назовні відкривайте
+переважно тільки Nginx :443. Якщо на Linux-сервері Nginx вже працює
+на хості, можна залишити TLS саме там і проксувати на Docker-сервіси,
+не запускаючи другий Nginx у контейнері.
+
+Для dev/prod одночасно задайте різні Compose project names, host ports,
+volumes і конфігурації. Не використовуйте фіксований container_name.
+
+8. ПЕРЕВІРКИ
+
+  docker compose config
+  docker compose ps -a
+  docker compose logs --tail=100 web nginx
+  docker exec -it <nginx_container> nginx -t
+  curl -kI https://localhost:3443
+
+Якщо браузер показує SSL warning — це очікувано для самопідписаного cert.
+Якщо 502 Bad Gateway — перевірте web logs, назву сервісу і порт 3000.
+Якщо є ERR_CONNECTION_REFUSED — перевірте ports, стан nginx і WSL networking.
+
+9. ВАЖЛИВО ДЛЯ NEXT_PUBLIC_ ТА API
+
+NEXT_PUBLIC_* значення, використані у клієнтському коді, зазвичай
+вбудовуються під час next build. Для різних production середовищ задавайте
+їх до build. У браузері запити до HTTP API з HTTPS сторінки можуть
+блокуватися як mixed content; використовуйте HTTPS API або Nginx proxy.
+Якщо API доступний на окремому домені, налаштуйте CORS, cookies і TLS.
