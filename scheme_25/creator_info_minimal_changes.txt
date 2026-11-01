@@ -1,0 +1,165 @@
+МІНІМАЛЬНІ ЗМІНИ creator_info ДЛЯ TASKTRACKER.V_TASKS_FULL_2
+Oracle Database 21 / Oracle APEX
+
+ВАЖЛИВО: рішення підготовлене за скриншотами, не за повним SQL View. Тому наведено точкові зміни, а не гарантовано готовий повний CREATE VIEW. Збережіть резервну копію View перед редагуванням.
+
+МЕТА
+1. Немає SIGNATUREHISTORY для прав першого етапу (stages_id=2): показати тільки автора та дату створення.
+2. Є відмітки: показати останню фактичну відмітку серед УСІХ SIGNATURERIGHTS першого етапу.
+3. Якщо останній підписант = автор: у блоці «Видано» тільки дата (без повторного ПІБ).
+4. Якщо останній підписант інший: «Видано», його ПІБ, історичні посада/підрозділ та дата.
+
+КРОК 1. МІНІМАЛЬНО ЗМІНИТИ creator_sign
+
+Зараз у creator_sign є:
+
+ROW_NUMBER() OVER (
+    PARTITION BY h.signright_id
+    ORDER BY h.sdate DESC, h.id DESC
+) AS rn
+
+Замість нього поставити:
+
+ROW_NUMBER() OVER (
+    PARTITION BY sr.task_id
+    ORDER BY h.sdate DESC NULLS LAST, h.id DESC
+) AS rn
+
+Для цього у FROM creator_sign потрібно додати JOIN до SIGNATURERIGHTS:
+
+FROM TaskTracker.SIGNATUREHISTORY h
+JOIN TaskTracker.SIGNATURERIGHTS sr
+    ON sr.id = h.signright_id
+   AND sr.stages_id = 2
+JOIN KBS.personal us
+    ON us.tab_no = h.signer_by
+   AND us.priznak IS NULL
+
+Інші наявні LEFT JOIN (snapshot, посада, підрозділ) залишити БЕЗ змін.
+
+УВАГА: INNER JOIN до KBS.personal уже є в оригіналі. Він відсікає історичні відмітки, якщо користувача немає в актуальному довіднику. Якщо це можливо у ваших даних, краще окремо розглянути LEFT JOIN. Не змінюйте це в межах мінімального патча без перевірки.
+
+КРОК 2. ЗМІНИТИ ПРИЄДНАННЯ creator_sign У creator_info
+
+Зараз:
+
+LEFT JOIN creator_sign cs
+    ON cs.signright_id = sr.id
+   AND cs.rn = 1
+
+Замінити на:
+
+LEFT JOIN creator_sign cs
+    ON cs.signright_id = sr.id
+   AND cs.rn = 1
+
+Текст JOIN НЕ ЗМІНЮЄТЬСЯ. Після кроку 1 значення rn=1 існує тільки в ОДНОГО запису історії для всього task_id (а не для кожного signright_id).
+
+КРОК 3. У creator_info ЗМІНИТИ ВИБІР HTML ДЛЯ ЗАВДАННЯ
+
+Зараз:
+
+MAX(creator_info_html) KEEP (
+    DENSE_RANK FIRST ORDER BY stages_id, sort_order, sr_id
+) AS creator_info_html
+
+Замінити на:
+
+MAX(creator_info_html) KEEP (
+    DENSE_RANK FIRST
+    ORDER BY
+        CASE WHEN has_last_signature = 1 THEN 0 ELSE 1 END,
+        stages_id,
+        sort_order,
+        sr_id
+) AS creator_info_html
+
+А всередині вкладеного SELECT creator_info (там, де зараз вибираються sr.task_id, sr.stages_id, sr.sort_order, sr.id AS sr_id), ДОДАТИ:
+
+CASE WHEN cs.signright_id IS NOT NULL THEN 1 ELSE 0 END
+    AS has_last_signature,
+
+Тобто, якщо для завдання є хоча б одна відмітка, пріоритет отримує рядок SIGNATURERIGHTS, до якого приєдналася остання відмітка. Якщо відміток немає, залишиться старий порядок.
+
+КРОК 4. У БЛОЦІ «ВИДАНО» ЗАМІНИТИ ЛОГІКУ ПЕРЕВІРКИ
+
+На скриншоті є умова:
+
+WHEN cs.signer_date IS NOT NULL
+ AND cs.signer_by = sr.user_tabno THEN
+
+ПРОБЛЕМА: sr.user_tabno — це табельний номер поточного учасника SIGNATURERIGHTS, а не обов'язково автор завдання. Через це останній підписант майже завжди дорівнюватиме sr.user_tabno у власному записі, навіть якщо він керівник.
+
+Треба порівнювати cs.signer_by з табельним номером АВТОРА завдання.
+
+Приклад (замініть <AUTHOR_TABNO_EXPRESSION> на реальний вираз, що повертає табельний номер автора з основної таблиці завдань):
+
+CASE
+    WHEN cs.signer_date IS NULL THEN
+        NULL
+
+    WHEN cs.signer_by = <AUTHOR_TABNO_EXPRESSION> THEN
+        '<br /><span class="signer_info">' ||
+        '<span class="exctr-ttl">Видано:</span> ' ||
+        TO_CHAR(cs.signer_date, 'DD.MM.YYYY HH24:MI') ||
+        '</span>'
+
+    ELSE
+        '<br /><span class="signer_info">' ||
+        '<span class="exctr-ttl">Видано:</span><br />' ||
+        cs.signer_familia || ' ' ||
+        SUBSTR(cs.signer_imya, 1, 1) || '. ' ||
+        SUBSTR(cs.signer_otchestvo, 1, 1) || '. ' ||
+        NVL(cs.signer_dolznost, '') || ' ' ||
+        NVL(cs.signer_tseh_short, '') || ' ' ||
+        TO_CHAR(cs.signer_date, 'DD.MM.YYYY HH24:MI') ||
+        '</span>'
+END
+
+Цей CASE замінює тільки частину HTML, яка формує «Видано». Наявний HTML блоку «Створено» залишити. Якщо є спеціальні гілки для рольового підпису (sr.user_tabno IS NULL), зберегти їх там, де вони потрібні для відображення автора, але не використовувати їх для вибору фактичного підписанта.
+
+КРИТИЧНО: для справді мінімального патча можна НЕ переписувати весь CASE, а зробити такі локальні заміни:
+- у гілці «Видано» замінити порівняння cs.signer_by = sr.user_tabno на порівняння з реальним автором;
+- прибрати будь-яке виведення «Видано» лише на підставі sr.user_tabno, якщо cs.signer_date IS NULL;
+- залишити існуючі фрагменти HTML для ПІБ, історичної посади та дати.
+
+ВАЖЛИВІ ПЕРЕВІРКИ
+1. h.sdate має бути датою/часом, за якою визначається остання фактична відмітка. Якщо правильною є h.signer_date, замініть ORDER BY h.sdate на ORDER BY h.signer_date.
+2. Переконайтесь, що SIGNATUREHISTORY містить тільки фактичні відмітки або додайте відповідний фільтр статусу; інакше може обиратися технічний запис.
+3. Перевірте, що h.signer_date IS NOT NULL для завершених відміток. За потреби додайте цю умову у creator_sign (до обчислення ROW_NUMBER).
+4. Якщо кілька рядків мають однаковий час, h.id DESC визначає останній запис.
+5. Якщо SIGNATUREHISTORY містить скасовані підписи, їх слід виключити за реальним полем статусу.
+6. Залиште групування GROUP BY task_id, але після зміни KEEP перевірте, що для кожного завдання виходить один рядок.
+
+ПЕРЕВІРОЧНИЙ SQL: ЯКА ВІДМІТКА НАСПРАВДІ ОСТАННЯ
+
+SELECT *
+FROM (
+    SELECT
+        sr.task_id,
+        sr.id AS signright_id,
+        sr.user_tabno,
+        h.id AS history_id,
+        h.signer_by,
+        h.signer_date,
+        h.sdate,
+        ROW_NUMBER() OVER (
+            PARTITION BY sr.task_id
+            ORDER BY h.sdate DESC NULLS LAST, h.id DESC
+        ) AS rn
+    FROM TaskTracker.SIGNATURERIGHTS sr
+    JOIN TaskTracker.SIGNATUREHISTORY h
+      ON h.signright_id = sr.id
+    WHERE sr.stages_id = 2
+      AND h.signer_date IS NOT NULL
+      -- AND sr.task_id = :P_TASK_ID
+)
+WHERE rn = 1;
+
+ПІДСУМОК МІНІМАЛЬНИХ ЗМІН
+- creator_sign: PARTITION BY sr.task_id замість h.signright_id; JOIN до SIGNATURERIGHTS.
+- creator_info (внутрішній SELECT): додати has_last_signature.
+- creator_info (зовнішній SELECT): пріоритет у KEEP для has_last_signature=1.
+- HTML «Видано»: порівняти signer_by з АВТОРОМ, не з sr.user_tabno; без історії не виводити «Видано».
+
+ПРИМІТКА: за скриншотами неможливо достовірно визначити колонку автора та весь CASE для створення. Тому не підставляйте вигадану колонку: для повністю готового компільованого патча потрібен текст CREATE VIEW або хоча б повний CTE creator_info та JOIN до таблиці завдань.
