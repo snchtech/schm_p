@@ -1,0 +1,67 @@
+АРХІТЕККТУРА SPECIFICATION_TABLE / TABLE_ROW — ORACLE 21c
+Next.js + Konva + Node.js Express, JavaScript
+
+1. РІШЕННЯ
+Залишити таблицю специфікації та її рядки окремими DOC_OBJECT. Для рядка PARENT_OBJECT_ID = OBJECT_ID таблиці. Структуру колонок зберігати в OBJECT_JSON таблиці; значення комірок — в OBJECT_JSON рядка. Не створювати окремий DOC_OBJECT для кожної комірки.
+
+2. ВАЖЛИВА ПЕРЕВІРКА DDL
+В останньому versioned_schema_changes DOC_OBJECT.OBJECT_TYPE обмежений CHECK списком NODE, EDGE, ZVT, ZVT_BRANCH, ANNOTATION, IMAGE, SHAPE, OTHER. SPECIFICATION_TABLE і TABLE_ROW у списку відсутні. Якщо constraint уже створено, потрібно змінити його через міграцію (попередньо перевіривши фактичне ім'я):
+ALTER TABLE DOC_OBJECT DROP CONSTRAINT CK_DOC_OBJECT_TYPE;
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPE CHECK (OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE','OTHER','SPECIFICATION_TABLE','TABLE_ROW'));
+Не виконувати без перевірки фактичного DDL та даних. Якщо використовується OTHER + OBJECT_SUBTYPE, змінювати CHECK необов'язково, але явні типи зручніші.
+
+3. ПРИКЛАД OBJECT_JSON ТАБЛИЦІ
+{
+ "id":"table-001", "name":"Специфікація обладнання",
+ "columns":[
+  {"id":"position","title":"Поз.","type":"text","width":60},
+  {"id":"equipment","title":"Найменування","type":"text","width":220},
+  {"id":"quantity","title":"Кількість","type":"number","width":80}
+ ],
+ "x":100,"y":100,"rowHeight":28
+}
+
+4. ПРИКЛАД OBJECT_JSON РЯДКА
+{
+ "id":"row-001", "order":1,
+ "cells":{"position":"1","equipment":"Насос Н-101","quantity":2}
+}
+Стабільні id колонок, а не їх назви, дозволяють перейменовувати заголовки. order визначає порядок рядків. Якщо таблиця переміщується на полотні, координати тримати на рівні таблиці, а не дублювати в рядках.
+
+5. МІНІМАЛЬНІ SQL-ЗАПИТИ
+-- Отримати рядки таблиці в межах однієї версії:
+SELECT OBJECT_ID, PARENT_OBJECT_ID, OBJECT_JSON
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID = :version_id
+  AND PARENT_OBJECT_ID = :table_id
+  AND OBJECT_TYPE = 'TABLE_ROW'
+  AND IS_DELETED = 0
+ORDER BY JSON_VALUE(OBJECT_JSON, '$.order' RETURNING NUMBER NULL ON ERROR), OBJECT_ID;
+
+-- Якщо потрібно шукати кількість у JSON:
+SELECT OBJECT_ID,
+       JSON_VALUE(OBJECT_JSON, '$.cells.quantity' RETURNING NUMBER NULL ON ERROR) AS QUANTITY
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID = :version_id
+  AND OBJECT_TYPE = 'TABLE_ROW'
+  AND IS_DELETED = 0;
+
+6. КОЛИ ПОТРІБНА ОКРЕМА ТАБЛИЦЯ ДЛЯ КОМІРОК
+Лише коли потрібно часто фільтрувати/агрегувати довільні колонки в Oracle APEX, будувати звіти між документами або накладати SQL-обмеження на значення. Тоді створити пошукову проєкцію DOC_SPEC_CELL(DOC_VERSION_ID, ROW_OBJECT_ID, COLUMN_ID, VALUE_TEXT, VALUE_NUMBER, VALUE_DATE) з FK на DOC_OBJECT(DOC_VERSION_ID,OBJECT_ID). Це похідні дані, які пакетно синхронізуються разом із snapshot. Для невеликої кількості заздалегідь відомих колонок достатньо JSON_VALUE та функціональних індексів після аналізу запитів.
+
+7. ЗВ'ЯЗКИ З ОБЛАДНАННЯМ
+Якщо рядок специфікації посилається на NODE, можна створити DOC_OBJECT_LINK: SOURCE_OBJECT_ID=row-001, TARGET_OBJECT_ID=node-001, LINK_TYPE='SPEC_ROW_OBJECT'. Якщо потрібен лише зовнішній equipment ID, можна записати його у JSON рядка, а для частого SQL-пошуку — додати окрему проєкцію. Не плутати належність рядка до таблиці (PARENT_OBJECT_ID) зі зв'язком рядка з обладнанням (DOC_OBJECT_LINK).
+
+8. ПАКЕТНЕ ЗБЕРЕЖЕННЯ
+В одній Oracle-транзакції перевірити права EDIT, статус DRAFT та SAVE_REVISION; зберегти SPECIFICATION_TABLE, потім TABLE_ROW (або використати DEFERRABLE FK), оновити зв'язки й атрибути, зберегти DOC_SNAPSHOT, збільшити SAVE_REVISION, COMMIT. При помилці ROLLBACK. STABLE не змінювати. Під час видалення таблиці видалити або логічно позначити її рядки й залежні зв'язки; FK сам по собі не реалізує каскад для PARENT_OBJECT_ID.
+
+9. ВАЛІДАЦІЯ В API
+- TABLE_ROW.parentObjectId посилається на SPECIFICATION_TABLE тієї ж версії;
+- id колонок унікальні; cells містить лише дозволені id;
+- типи cells відповідають типам колонок;
+- order є числом; стабільні OBJECT_ID не змінюються при сортуванні;
+- одна й та сама версія snapshot та індексованих даних;
+- не довіряти JSON з браузера без серверної валідації.
+
+10. РЕКОМЕНДАЦІЯ
+Зараз: DOC_OBJECT (table + rows), PARENT_OBJECT_ID, OBJECT_JSON. Не переносити всі комірки в DOC_OBJECT_ATTRIBUTE. Якщо звітність стане важливою — додати DOC_SPEC_CELL як похідну індексовану таблицю без зміни основної моделі.

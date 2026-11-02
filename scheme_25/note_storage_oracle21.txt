@@ -1,0 +1,67 @@
+ЗБЕРІГАННЯ НОТАТОК У DOC_OBJECT — ORACLE 21c / NEXT.JS + KONVA
+
+1. РЕКОМЕНДАЦІЯ
+Зберігати кожен графічний блок нотаток як DOC_OBJECT, а його вміст і геометрію — в OBJECT_JSON. Не створювати DOC_NOTE без конкретної потреби у незалежному життєвому циклі нотаток.
+
+2. ПОЛЯ
+DOC_VERSION_ID — версія документа (за останньою версійною моделлю).
+OBJECT_ID — постійний UUID блоку.
+OBJECT_TYPE — NOTE (потрібно дозволити у CK_DOC_OBJECT_TYPE).
+OBJECT_SUBTYPE — TEXT_BLOCK (опціонально).
+LABEL — короткий заголовок, необов'язково.
+SEARCHABLE_TEXT — текст для SQL-пошуку, до 2000 символів у поточній структурі.
+PARENT_OBJECT_ID — NULL для незалежного блоку; ID батьківського об'єкта лише якщо це справжня ієрархія.
+OBJECT_JSON — повний JSON блоку.
+
+3. JSON: ОДИН БЛОК, ОДИН ТЕКСТ
+{
+  "id": "note-block-001",
+  "type": "note",
+  "text": "Перевірити насос перед запуском",
+  "x": 150,
+  "y": 250,
+  "width": 320,
+  "height": 120,
+  "style": { "fontSize": 14, "color": "#222222" }
+}
+
+4. JSON: ОДИН БЛОК, КІЛЬКА НОТАТОК
+{
+  "id": "note-block-002",
+  "type": "note",
+  "x": 100,
+  "y": 200,
+  "notes": [
+    { "id": "note-01", "text": "Перевірити обладнання" },
+    { "id": "note-02", "text": "Огляд через 6 місяців" }
+  ]
+}
+Кожна вкладена нотатка не потребує окремого DOC_OBJECT, доки вона не має самостійного переміщення, посилань, пошуку за власним ID чи прав доступу.
+
+5. ПОШУК
+У SEARCHABLE_TEXT можна записати нормалізований текст усіх вкладених нотаток. Для довгих текстів (>2000 символів) не обрізати основний OBJECT_JSON; для повнотекстового пошуку в майбутньому розглянути Oracle Text або окрему пошукову проєкцію CLOB.
+
+6. ЗВ'ЯЗКИ
+Якщо блок нотаток прив'язаний до NODE/EDGE, використовувати DOC_OBJECT_LINK з LINK_TYPE='NOTE_ATTACHED_TO' та відповідними SOURCE_OBJECT_ID/TARGET_OBJECT_ID. Не використовувати PARENT_OBJECT_ID для семантичного посилання, якщо це не вкладеність.
+
+7. SQL: ОНОВИТИ CHECK ДЛЯ НОВОГО OBJECT_TYPE
+-- Перед запуском перевірити фактичну назву constraint у USER_CONSTRAINTS.
+ALTER TABLE DOC_OBJECT DROP CONSTRAINT CK_DOC_OBJECT_TYPE;
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPE
+  CHECK (OBJECT_TYPE IN (
+    'NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE',
+    'SPECIFICATION_TABLE','TABLE_ROW','NOTE','OTHER'
+  ));
+
+8. ПРИКЛАД ВИБІРКИ
+SELECT OBJECT_ID, LABEL, SEARCHABLE_TEXT, OBJECT_JSON
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID = :version_id
+  AND OBJECT_TYPE = 'NOTE'
+  AND IS_DELETED = 0;
+
+9. ПАКЕТНЕ ЗБЕРЕЖЕННЯ
+Зберігати нотатки разом з іншими DOC_OBJECT та повним DOC_SNAPSHOT в одній транзакції. При створенні DRAFT копіювати нотатки зі STABLE зі збереженням OBJECT_ID. Не змінювати STABLE/ARCHIVED. Уникайте дублювання тексту як незалежних джерел істини: OBJECT_JSON — повний вміст, SEARCHABLE_TEXT — похідний пошуковий індекс.
+
+10. ПРАКТИЧНИЙ ВИСНОВОК
+Якщо в Zustand є notes = [{id, text, x, y, ...}], кожен елемент масиву може стати одним DOC_OBJECT з OBJECT_TYPE='NOTE'. Якщо в одному елементі є notes: [{id,text}, ...], зберігати їх усередині OBJECT_JSON цього блоку.
