@@ -1,0 +1,219 @@
+ЗБЕРЕЖЕННЯ SHEET У DOC_OBJECT — ОНОВЛЕНЕ РІШЕННЯ
+Oracle 21c + Node.js/Express + Next.js/Konva + Zustand (JavaScript)
+Дата: 2026-11-04
+
+1. ВХІДНА СТРУКТУРА
+
+За наданим скриншотом, ПІСЛЯ видалення notesBlocks, об'єкт sheet містить:
+{
+  "format": "A3",
+  "orientation": "landscape",
+  "scale": 1,
+  "frame": true,
+  "titleBlock": {
+    "albumCode": "A-001",
+    "unit": "ТП-1",
+    "system": "ОВ",
+    "title": "Схема технологічна",
+    "sheetNumber": "1"
+  },
+  "specification": {
+    "visible": true,
+    "height": 220
+  }
+}
+
+notesBlocks у sheet НЕМАЄ. Не потрібно створювати зв'язки SHEET -> NOTES_BLOCK чи копіювати нотатки у sheet.
+Якщо notesBlocks уже зберігаються окремо, їх збереження залишається незалежним.
+
+2. МОДЕЛЬ БД
+
+Один аркуш для однієї DOC_VERSION:
+DOC_OBJECT:
+  DOC_VERSION_ID  = UUID поточної DRAFT
+  OBJECT_ID       = стабільний UUID sheet, той самий у наступних версіях
+  OBJECT_TYPE     = 'SHEET'
+  OBJECT_SUBTYPE  = 'DRAWING_SHEET'
+  LABEL           = sheet.titleBlock.title
+  PARENT_OBJECT_ID= NULL
+  OBJECT_JSON     = повний JSON із розділу 1
+  IS_DELETED      = 0
+
+Не створювати TABLE_ROW, NOTE або LINK для полів sheet. Параметри specification.visible/height — лише параметри відображення.
+
+У наданій моделі DOC_OBJECT має PK (DOC_VERSION_ID, OBJECT_ID), а DOC_VERSION статуси DRAFT/STABLE/ARCHIVED. Зміни лише в DRAFT. DOC_SNAPSHOT зберігається в тій самій транзакції.
+
+3. SQL: ДОДАТИ ТИП SHEET ДО CHECK
+
+ПЕРЕД ВИКОНАННЯМ перевірити фактичне визначення CHECK і перелік використовуваних типів. Не втратити вже додані значення.
+
+SELECT constraint_name, search_condition_vc
+FROM user_constraints
+WHERE table_name = 'DOC_OBJECT' AND constraint_type = 'C';
+
+Приклад для CHECK із вихідного SQL-пакета + типи, що обговорювалися:
+ALTER TABLE DOC_OBJECT DROP CONSTRAINT CK_DOC_OBJECT_TYPE;
+
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPE
+CHECK (OBJECT_TYPE IN (
+  'NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE','OTHER',
+  'ATTACHMENT','NOTE','NOTES_BLOCK','SPECIFICATION_TABLE','TABLE_ROW','SHEET'
+));
+
+УВАГА: це приклад заміни CHECK, а не безумовна міграція. Якщо у фактичній БД є додаткові типи, додати їх до списку.
+
+За вимоги «рівно один SHEET на версію»:
+CREATE UNIQUE INDEX UQ_DOC_ONE_SHEET
+ON DOC_OBJECT (CASE WHEN OBJECT_TYPE = 'SHEET' AND IS_DELETED = 0 THEN DOC_VERSION_ID END);
+
+Цей індекс опціональний. Перед створенням переконатися, що немає дубльованих SHEET; якщо схема може містити кілька аркушів в одній версії — індекс НЕ створювати.
+
+4. ПІДГОТОВКА ДАНИХ НА FRONTEND (JS)
+
+const sheet = useSchemeStore.getState().sheet;
+
+function normalizeSheet(sheet) {
+  if (!sheet) throw new Error('Sheet is missing');
+  const result = {
+    format: sheet.format,
+    orientation: sheet.orientation,
+    scale: sheet.scale,
+    frame: Boolean(sheet.frame),
+    titleBlock: {
+      albumCode: sheet.titleBlock?.albumCode ?? '',
+      unit: sheet.titleBlock?.unit ?? '',
+      system: sheet.titleBlock?.system ?? '',
+      title: sheet.titleBlock?.title ?? '',
+      sheetNumber: String(sheet.titleBlock?.sheetNumber ?? '')
+    },
+    specification: {
+      visible: Boolean(sheet.specification?.visible),
+      height: Number(sheet.specification?.height ?? 0)
+    }
+  };
+  if (!['portrait','landscape'].includes(result.orientation)) throw new Error('Invalid orientation');
+  if (!Number.isFinite(Number(result.scale)) || Number(result.scale) <= 0) throw new Error('Invalid scale');
+  if (!Number.isFinite(result.specification.height) || result.specification.height < 0) throw new Error('Invalid specification height');
+  return result;
+}
+
+ВАЖЛИВО: на скриншоті sheet не має власного id. Створити стабільний sheetId один раз під час створення схеми (crypto.randomUUID()), зберігати його у стані/метаданих документа та переносити в наступні версії. Не генерувати новий ID на кожне збереження. Якщо вже існує стабільний sheetId — використовувати його.
+
+Під час batch-save:
+const payload = {
+  docVersionId,
+  expectedRevision,
+  sheetObject: {
+    objectId: sheetId,
+    objectType: 'SHEET',
+    objectSubtype: 'DRAWING_SHEET',
+    label: sheet.titleBlock?.title ?? '',
+    objectJson: normalizeSheet(sheet)
+  },
+  // інші nodes/edges/attachments тощо — через поточний save flow
+  snapshot: buildFullCanvasSnapshot()
+};
+
+Не робити окремий auto-commit endpoint для SHEET, якщо вже існує пакетне збереження.
+
+5. REPOSITORY: SQL MERGE DOC_OBJECT
+
+// Передавати connection, який уже відкритий у загальній транзакції.
+const sql = `
+MERGE INTO DOC_OBJECT d
+USING (SELECT :docVersionId AS doc_version_id,
+              :objectId AS object_id FROM dual) s
+ON (d.DOC_VERSION_ID = s.doc_version_id AND d.OBJECT_ID = s.object_id)
+WHEN MATCHED THEN UPDATE SET
+  d.OBJECT_TYPE = 'SHEET',
+  d.OBJECT_SUBTYPE = 'DRAWING_SHEET',
+  d.LABEL = :label,
+  d.PARENT_OBJECT_ID = NULL,
+  d.IS_DELETED = 0,
+  d.OBJECT_JSON = :objectJson,
+  d.UPDATED_AT = SYSTIMESTAMP
+WHEN NOT MATCHED THEN INSERT
+  (DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE,
+   LABEL, PARENT_OBJECT_ID, IS_DELETED, OBJECT_JSON)
+VALUES
+  (:docVersionId, :objectId, 'SHEET', 'DRAWING_SHEET',
+   :label, NULL, 0, :objectJson)
+`;
+
+// Приклад методу репозиторію:
+const oracledb = require('oracledb');
+async function upsertSheet(connection, docVersionId, sheetObject) {
+  const binds = {
+    docVersionId,
+    objectId: sheetObject.objectId,
+    label: sheetObject.label || '',
+    objectJson: { val: JSON.stringify(sheetObject.objectJson), type: oracledb.CLOB }
+  };
+  await connection.execute(sql, binds, { autoCommit: false });
+}
+
+ПРИМІТКА: для Oracle MERGE з повторюваними bind-іменами перевірити режим прив'язки драйвера. У node-oracledb named binds для SQL використовуються за назвою. SQL слід виконувати через наявний DBManager/Repository, не створюючи окремий connection для кожного запиту.
+
+6. SERVICE: ЗБЕРЕЖЕННЯ В ОДНІЙ ТРАНЗАКЦІЇ
+
+async function saveDraftScheme({ connection, user, docVersionId, expectedRevision, sheetObject, snapshot }) {
+  // 1. Перевірити EDIT для документа, якому належить версія.
+  // 2. Заблокувати DOC_VERSION/DOC_RESOURCE та перевірити STATUS_CODE='DRAFT'.
+  // 3. Перевірити expectedRevision (optimistic lock).
+  // 4. Перевірити JSON та унікальність objectId.
+  // 5. Викликати upsertSheet(connection, docVersionId, sheetObject).
+  // 6. Зберегти решту DOC_OBJECT, DOC_OBJECT_LINK, DOC_OBJECT_ATTRIBUTE.
+  // 7. Оновити DOC_SNAPSHOT, перевіривши SAVE_REVISION:
+  // UPDATE DOC_SNAPSHOT SET SNAPSHOT_JSON=:snapshotJson,
+  //   SAVE_REVISION=SAVE_REVISION+1, UPDATED_AT=SYSTIMESTAMP,
+  //   UPDATED_BY=:userId
+  // WHERE DOC_VERSION_ID=:docVersionId AND SAVE_REVISION=:expectedRevision;
+  // 8. Якщо rowsAffected !== 1 -> ROLLBACK, HTTP 409.
+  // 9. COMMIT один раз у зовнішньому withTransaction.
+}
+
+Не викликати commit усередині upsertSheet.
+
+7. ЧИТАННЯ
+
+SELECT OBJECT_ID, OBJECT_JSON
+FROM DOC_OBJECT
+WHERE DOC_VERSION_ID = :docVersionId
+  AND OBJECT_TYPE = 'SHEET'
+  AND IS_DELETED = 0;
+
+У node-oracledb CLOB може повертатися як рядок або Lob (залежить від конфігурації). Розпарсити JSON і відновити Zustand sheet. Основне відкриття canvas може й надалі використовувати DOC_SNAPSHOT; читання з DOC_OBJECT потрібне для SQL-пошуку, валідації або окремого API.
+
+8. ПОШУКОВІ АТРИБУТИ: ТІЛЬКИ ЗА ПОТРЕБИ
+
+Якщо треба шукати схеми за кодом альбому чи системою, можна створювати:
+  (DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE='ALBUM_CODE', VALUE_TEXT='A-001')
+  (DOC_VERSION_ID, OBJECT_ID, ATTRIBUTE_CODE='SYSTEM_CODE', VALUE_TEXT='ОВ')
+
+Але це похідна проєкція, її треба оновлювати разом із OBJECT_JSON. Якщо таких пошуків немає — не створювати атрибути.
+
+9. УЗГОДЖЕННЯ З DOC_RESOURCE
+
+У попередньому DDL DOC_RESOURCE має FORMAT_CODE, PAGE_NUMBER, TITLE, SHIFR. Вони можуть частково дублювати sheet.format, sheet.titleBlock.sheetNumber, sheet.titleBlock.title, sheet.titleBlock.albumCode.
+
+Визначити канонічне джерело:
+- формат/номер/назва документа для списків — DOC_RESOURCE (якщо це бізнес-метадані документа);
+- вигляд і реквізити друкованого аркуша в конкретній версії — SHEET.OBJECT_JSON.
+
+Якщо ці значення повинні збігатися, синхронізувати їх у сервісі під час batch-save, а не підтримувати незалежно.
+
+10. DRAFT -> STABLE
+
+При створенні DRAFT із STABLE скопіювати SHEET із тим самим OBJECT_ID і новим DOC_VERSION_ID (разом з іншими DOC_OBJECT). Після затвердження не змінювати SHEET у STABLE. Не створювати новий ID при кожному редагуванні.
+
+11. ВАЖЛИВІ ПЕРЕВІРКИ
+
+- notesBlocks відсутній у SHEET JSON і не копіюється до нього;
+- sheetId стабільний;
+- для однієї версії рівно один активний SHEET, якщо це вимога продукту;
+- немає дублювання повних specificationTable/tableRow у SHEET;
+- JSON + об'єкти збережені в одній транзакції;
+- не перезаписувати STABLE;
+- відновлення через DOC_SNAPSHOT і через DOC_OBJECT дає однакові налаштування аркуша.
+
+КІНЕЦЬ.

@@ -1,0 +1,119 @@
+АРХІТЕКТУРА ATTACHMENTS: ORACLE 21c + NEXT.JS/KONVA + NODE.JS/EXPRESS
+
+1. ПОТОЧНА МОДЕЛЬ
+На знімку attachment має id, kind='attachment', comment, timestamps, source='filesystem', offsetX/Y, attachedTo:{type:'node',id:...}, file:{id,originalName,mimeType,size,storageType,storageKey,previewUrl,downloadUrl,...}.
+
+Рекомендація: DOC_OBJECT (ATTACHMENT) = екземпляр позначки/прив'язки на схемі; FILE_ASSET = незалежний бінарний файл; DOC_ASSET_REF = зв'язок між ними; DOC_OBJECT_LINK = прив'язка позначки до NODE/EDGE. Один NODE/EDGE може мати багато вкладень. Один FILE_ASSET може повторно використовуватися в багатьох версіях/об'єктах.
+
+2. ЗМІНИ СХЕМИ (ПРИКЛАД ДЛЯ ВЖЕ ІСНУЮЧИХ ТАБЛИЦЬ; ПЕРЕВІРИТИ ФАКТИЧНИЙ DDL)
+-- У чинному CREATE-скрипті FILE_ASSET має STORAGE_PROVIDER NOT NULL,
+-- STORAGE_KEY NOT NULL, перевірку значень ('filesystem','s3','blob').
+-- Якщо зберігати у БД як BLOB, варто додати:
+ALTER TABLE FILE_ASSET ADD (FILE_CONTENT BLOB);
+-- Для нових файлів STORAGE_PROVIDER='blob'; STORAGE_KEY можна тимчасово
+-- заповнювати стабільним технічним значенням (наприклад ASSET_ID),
+-- або окремою міграцією зробити STORAGE_KEY nullable для blob.
+-- Після перенесення файлів і перевірки даних:
+-- ALTER TABLE FILE_ASSET ADD CONSTRAINT CK_FILE_ASSET_CONTENT
+-- CHECK ((STORAGE_PROVIDER='blob' AND FILE_CONTENT IS NOT NULL)
+--     OR (STORAGE_PROVIDER<>'blob' AND STORAGE_KEY IS NOT NULL));
+-- При повному переході на DB-only можна спростити FILE_ASSET,
+-- видаливши storage_provider/key після міграції; не обов'язково зараз.
+-- Для SecureFiles BLOB перевірити tablespace/ASSM та LOB storage:
+-- CREATE TABLE ... LOB(FILE_CONTENT) STORE AS SECUREFILE (...);
+-- В існуючій таблиці параметри LOB змінювати тільки після перевірки Oracle DDL.
+
+-- У наданому versioned_schema_changes.txt DOC_OBJECT має CHECK:
+-- OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE','OTHER')
+-- Додати 'ATTACHMENT' до CHECK (drop/recreate constraint із фактичним переліком).
+
+-- DOC_ASSET_REF у versioned_schema_changes.txt:
+-- DOC_VERSION_ID, OBJECT_ID, ASSET_ID, USAGE_TYPE.
+-- Зберігати USAGE_TYPE='attachment'.
+
+3. ПРИКЛАД DOC_OBJECT.OBJECT_JSON
+{
+  "id":"attachment-uuid",
+  "kind":"attachment",
+  "comment":"Паспорт насоса",
+  "offsetX":18.69,
+  "offsetY":16.31,
+  "assetId":"asset-uuid"
+}
+
+attachedTo в Zustand може лишитися для UI, але в SQL його канонічне
+джерело — DOC_OBJECT_LINK. При відновленні стану API збирає attachedTo
+із LINK_TYPE='ATTACHED_TO'. Не зберігати URL як канонічний атрибут:
+GET /api/attachments/:assetId/preview і /download будуються в API.
+
+4. ПРИКЛАД DOC_OBJECT_LINK
+SOURCE_OBJECT_ID = attachment-uuid
+TARGET_OBJECT_ID = node-uuid або edge-uuid
+LINK_TYPE = 'ATTACHED_TO'
+SOURCE_ANCHOR / TARGET_ANCHOR = NULL (якщо не потрібні)
+Валідувати: attachment має одну ціль у межах версії; ціль — NODE/EDGE;
+для кожного прикріпленого файла має існувати DOC_ASSET_REF.
+
+5. ЗАВАНТАЖЕННЯ ЧЕРЕЗ NODE.JS (ПСЕВДОКОД, JS)
+// Multer memoryStorage лише з невеликим fileSize limit; для великих
+// файлів — streaming у BLOB через node-oracledb та LOB APIs.
+// Перед завантаженням перевірити право EDIT для DOC_VERSION/DRAFT.
+// Перевірити MIME за вмістом (не лише розширення), розмір, антивірус.
+// SVG очищати від активного вмісту або віддавати як attachment;
+// не вставляти довільний SVG в DOM через dangerouslySetInnerHTML.
+// Псевдокод:
+// await conn.execute(`INSERT INTO FILE_ASSET
+//   (ID, ORIGINAL_NAME, MIME_TYPE, BYTE_SIZE, STORAGE_PROVIDER,
+//    STORAGE_KEY, SHA256, FILE_CONTENT)
+//   VALUES (:id,:name,:mime,:size,'blob',:id,:sha,:content)`,
+//   {id, name, mime, size, sha, content: file.buffer});
+// INSERT DOC_OBJECT (... OBJECT_TYPE='ATTACHMENT', OBJECT_JSON ...);
+// INSERT DOC_OBJECT_LINK (... LINK_TYPE='ATTACHED_TO' ...);
+// INSERT DOC_ASSET_REF (... USAGE_TYPE='attachment' ...);
+// Оновити DOC_SNAPSHOT у тій самій транзакції, якщо зміна вкладення
+// є частиною save draft. Для upload-first потрібен статус staging
+// та cleanup покинутих assets, або двоетапне підтвердження.
+
+6. ЧИТАННЯ / PREVIEW
+GET /api/attachments/:assetId/preview
+GET /api/attachments/:assetId/download
+Спочатку перевірити READ для документа і наявність посилання на asset
+у доступній версії, потім читати BLOB. Повернути Content-Type,
+Content-Disposition, X-Content-Type-Options:nosniff; для PDF/зображень
+inline лише після валідації; інші файли — attachment. Підтримати
+Range requests для великих PDF, якщо потрібні. Не видавати BLOB без ACL.
+
+7. BACKUP НА ДИСК
+Основне джерело — Oracle FILE_ASSET.FILE_CONTENT.
+Після COMMIT окремий worker пише резервну копію у зовнішній каталог,
+наприклад /srv/backup/attachments/<asset-id> (НЕ у вихідний код,
+НЕ у public/, НЕ всередині Docker image). Перевіряє SHA256 і веде
+стан backup (BACKUP_STATUS, BACKED_UP_AT, BACKUP_ERROR у окремій
+таблиці або в технічних метаданих). Резервне копіювання може бути
+асинхронним; повторні спроби без зміни основної БД.
+Важливо: disk copy на тому самому сервері не замінює незалежний
+backup Oracle (RMAN, offsite, restore tests).
+
+8. ВЕРСІЇ І ВИДАЛЕННЯ
+DOC_OBJECT і DOC_ASSET_REF — по DOC_VERSION_ID.
+При створенні DRAFT із STABLE копіювати DOC_OBJECT / LINKS /
+DOC_ASSET_REF з новим DOC_VERSION_ID, але не дублювати BLOB.
+При видаленні attachment з DRAFT видаляти зв'язок і об'єкт лише
+з DRAFT; FILE_ASSET видаляти лише якщо немає посилань у жодній
+версії і закінчився retention period. STABLE/ARCHIVED immutable.
+
+9. МІГРАЦІЯ ІЗ FILESYSTEM
+(1) Додати FILE_CONTENT BLOB та налаштувати Oracle grants/LOB.
+(2) Прочитати кожен існуючий файл за storageKey з безпечного каталогу.
+(3) Обчислити SHA256, перевірити MIME, розмір, завантажити BLOB.
+(4) Оновити FILE_ASSET; перевірити byte_size/hash та пробне читання.
+(5) Перемкнути API на DB-only read; URL залишити API routes.
+(6) Організувати backup worker на диск; тільки потім прибирати
+    стару файлову систему як джерело для API.
+
+10. КОЛИ НЕ ВАРТО ЗБЕРІГАТИ ВСЕ В ORACLE
+Якщо багато дуже великих PDF/відео, потрібні CDN, дешеве object
+storage або висока інтенсивність видачі, FILE_ASSET може містити
+лише metadata+storage key для S3/MinIO. Але за заданою вимогою
+Oracle BLOB — коректний варіант; протестувати розмір БД, RMAN,
+потоки видачі, redo/undo та продуктивність на реальних файлах.

@@ -1,0 +1,137 @@
+SHEET — ЗБЕРЕЖЕННЯ В DOC_OBJECT + DOC_OBJECT_ATTRIBUTE
+Oracle 21c | Node.js Express | JavaScript
+
+1. ПРИЗНАЧЕННЯ
+SHEET зберігається як один об'єкт DOC_OBJECT (OBJECT_TYPE='SHEET', OBJECT_SUBTYPE='SHEET').
+П'ять полів titleBlock обов'язково індексуються окремими рядками DOC_OBJECT_ATTRIBUTE:
+SYSTEM, TITLE, UNIT, ALBUM_CODE, SHEET_NUMBER.
+notesBlocks не входить у SHEET.
+
+2. ПРИКЛАД ВХІДНОГО SHEET
+{
+  "format": "A3", "orientation": "landscape", "scale": 1, "frame": true,
+  "titleBlock": {
+    "albumCode": "A-001", "unit": "ТП-1", "system": "ОВ",
+    "title": "Схема технологічна", "sheetNumber": "1"
+  },
+  "specification": {"visible": true, "height": 220}
+}
+
+3. DOC_OBJECT
+DOC_VERSION_ID = :docVersionId
+OBJECT_ID = :sheetId (стабільний UUID; генерувати один раз, зберігати між версіями)
+OBJECT_TYPE = 'SHEET'
+OBJECT_SUBTYPE = 'SHEET'
+LABEL = sheet.titleBlock.title
+SEARCHABLE_TEXT = конкатенація albumCode, unit, system, title, sheetNumber (до 2000 символів)
+PARENT_OBJECT_ID = NULL
+OBJECT_JSON = JSON.stringify(sheet)
+IS_DELETED = 0
+
+4. DOC_OBJECT_ATTRIBUTE
+Для кожного SHEET рівно по одному рядку на кожен код:
+SYSTEM       => titleBlock.system       => VALUE_TEXT
+TITLE        => titleBlock.title        => VALUE_TEXT
+UNIT         => titleBlock.unit         => VALUE_TEXT
+ALBUM_CODE   => titleBlock.albumCode    => VALUE_TEXT
+SHEET_NUMBER => titleBlock.sheetNumber  => VALUE_TEXT
+Зберігати номер аркуша текстом, бо можливі значення '1а', '1/2'.
+
+5. SQL: РОЗШИРЕННЯ CHECK (ТІЛЬКИ ЯКЩО НИНІШНЄ ОБМЕЖЕННЯ НЕ МІСТИТЬ SHEET)
+-- Перевірити чинний список типів перед виконанням.
+ALTER TABLE DOC_OBJECT DROP CONSTRAINT CK_DOC_OBJECT_TYPE;
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPE
+ CHECK (OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION','IMAGE','SHAPE','OTHER','SHEET','NOTE','NOTES_BLOCK','SPECIFICATION_TABLE','TABLE_ROW','ATTACHMENT'));
+-- Не замінювати фактичний список дозволених типів сліпо: зберегти всі вже додані значення.
+
+6. ПІДГОТОВКА ДАНИХ (JS)
+function buildSheetProjection(sheet, sheetId, docVersionId) {
+  if (!sheetId || !docVersionId) throw new Error('Missing sheetId/docVersionId');
+  const tb = sheet.titleBlock || {};
+  const attrMap = {
+    SYSTEM: tb.system ?? null,
+    TITLE: tb.title ?? null,
+    UNIT: tb.unit ?? null,
+    ALBUM_CODE: tb.albumCode ?? null,
+    SHEET_NUMBER: tb.sheetNumber ?? null
+  };
+  const attributes = Object.entries(attrMap).map(([code, value]) => ({
+    docVersionId, objectId: sheetId, attributeCode: code,
+    valueText: value == null ? null : String(value)
+  }));
+  const searchableText = Object.values(attrMap).filter(v => v != null).join(' ').slice(0, 2000);
+  return {
+    object: {
+      docVersionId, objectId: sheetId, objectType: 'SHEET', objectSubtype: 'SHEET',
+      label: String(tb.title ?? '').slice(0, 500), searchableText,
+      objectJson: JSON.stringify(sheet)
+    },
+    attributes
+  };
+}
+
+7. REPOSITORY: UPSERT DOC_OBJECT (одне connection, autoCommit:false)
+async function saveSheetObject(connection, object) {
+  await connection.execute(`
+    MERGE INTO DOC_OBJECT d
+    USING (SELECT :docVersionId DOC_VERSION_ID, :objectId OBJECT_ID FROM dual) s
+    ON (d.DOC_VERSION_ID=s.DOC_VERSION_ID AND d.OBJECT_ID=s.OBJECT_ID)
+    WHEN MATCHED THEN UPDATE SET
+      d.OBJECT_TYPE='SHEET', d.OBJECT_SUBTYPE='SHEET', d.LABEL=:label,
+      d.SEARCHABLE_TEXT=:searchableText, d.OBJECT_JSON=:objectJson,
+      d.IS_DELETED=0, d.UPDATED_AT=SYSTIMESTAMP
+    WHEN NOT MATCHED THEN INSERT
+      (DOC_VERSION_ID,OBJECT_ID,OBJECT_TYPE,OBJECT_SUBTYPE,LABEL,SEARCHABLE_TEXT,OBJECT_JSON,IS_DELETED)
+      VALUES (:docVersionId,:objectId,'SHEET','SHEET',:label,:searchableText,:objectJson,0)
+  `, {
+    docVersionId: object.docVersionId, objectId: object.objectId,
+    label: object.label, searchableText: object.searchableText,
+    objectJson: object.objectJson
+  }, {autoCommit: false});
+}
+
+8. REPOSITORY: UPSERT П'ЯТИ АТРИБУТІВ
+async function saveSheetAttributes(connection, attributes) {
+  const sql = `
+    MERGE INTO DOC_OBJECT_ATTRIBUTE a
+    USING (SELECT :docVersionId DOC_VERSION_ID, :objectId OBJECT_ID,
+                  :attributeCode ATTRIBUTE_CODE FROM dual) s
+    ON (a.DOC_VERSION_ID=s.DOC_VERSION_ID AND a.OBJECT_ID=s.OBJECT_ID
+        AND a.ATTRIBUTE_CODE=s.ATTRIBUTE_CODE)
+    WHEN MATCHED THEN UPDATE SET
+      a.VALUE_TEXT=:valueText, a.VALUE_NUMBER=NULL, a.VALUE_DATE=NULL
+    WHEN NOT MATCHED THEN INSERT
+      (DOC_VERSION_ID,OBJECT_ID,ATTRIBUTE_CODE,VALUE_TEXT)
+      VALUES (:docVersionId,:objectId,:attributeCode,:valueText)
+  `;
+  await connection.executeMany(sql, attributes, {autoCommit: false});
+}
+
+9. SERVICE: ОДНА ТРАНЗАКЦІЯ ЗІ SNAPSHOT
+async function saveSheetInExistingTransaction(connection, {sheet, sheetId, docVersionId}) {
+  // Перед викликом: перевірити авторизацію EDIT, статус DOC_VERSION='DRAFT',
+  // ревізію snapshot, коректність sheet та відсутність notesBlocks.
+  const {object, attributes} = buildSheetProjection(sheet, sheetId, docVersionId);
+  await saveSheetObject(connection, object);
+  await saveSheetAttributes(connection, attributes);
+  // У тій самій транзакції зберегти DOC_SNAPSHOT та інші об'єкти схеми.
+  // COMMIT робить зовнішній batch-save service один раз після успіху всіх операцій.
+}
+
+10. ЧИТАННЯ
+SELECT o.OBJECT_ID, o.OBJECT_JSON, a.ATTRIBUTE_CODE, a.VALUE_TEXT
+FROM DOC_OBJECT o
+LEFT JOIN DOC_OBJECT_ATTRIBUTE a
+  ON a.DOC_VERSION_ID=o.DOC_VERSION_ID AND a.OBJECT_ID=o.OBJECT_ID
+WHERE o.DOC_VERSION_ID=:docVersionId AND o.OBJECT_TYPE='SHEET' AND o.IS_DELETED=0;
+
+11. ВАЖЛИВІ ПРАВИЛА
+- DOC_OBJECT_ATTRIBUTE — індексована проєкція значень titleBlock, а не незалежне джерело істини.
+- Не створювати повторні SHEET при кожному save: один сталий sheetId.
+- Не класти notesBlocks у SHEET. Інші NOTES_BLOCK — окремі об'єкти.
+- specification.visible і specification.height залишити в OBJECT_JSON.
+- DOC_RESOURCE.FORMAT_CODE і PAGE_NUMBER можуть дублювати sheet.format/sheetNumber:
+  визначити канонічне джерело та синхронізувати, якщо ці поля використовуються.
+- SQL показаний для DOC_VERSION_ID-моделі з oracle21_versioned_schema_changes.txt.
+- У поточному DDL DOC_OBJECT_ATTRIBUTE.VALUE_TEXT допускає NULL.
+- Перевірити, що objectJson коректний JSON, і що sheet.titleBlock — об'єкт.

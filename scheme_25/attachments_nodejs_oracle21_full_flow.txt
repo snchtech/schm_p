@@ -1,0 +1,687 @@
+ПОВНИЙ ПРИКЛАД: ATTACHMENTS -> NEXT.JS -> EXPRESS -> ORACLE 21c BLOB -> PREVIEW
+JavaScript (без TypeScript), Express route/controller/service/repository, node-oracledb
+04.11.2026
+
+ВАЖЛИВО: це приклад інтеграції з твоїм SQL-пакетом, а не припущення, що всі ALTER уже виконані.
+У твоєму oracle21_versioned_schema_changes.txt DOC_OBJECT та DOC_ASSET_REF прив'язані до DOC_VERSION_ID.
+У вихідному oracle21_final_batch_schema.txt FILE_ASSET має STORAGE_PROVIDER і STORAGE_KEY NOT NULL,
+але не має FILE_CONTENT. Нижче враховано обидві особливості.
+
+====================================================================
+0. ЖИТТЄВИЙ ЦИКЛ
+====================================================================
+1) Відкрити модальне вікно node/edge -> «Додати файл».
+2) Browser POST multipart/form-data до /api/attachments/upload, поля: file, docVersionId.
+3) API перевіряє користувача, право EDIT до DRAFT, формат, розмір.
+4) API вставляє BLOB + метадані у FILE_ASSET і повертає assetId.
+5) UI додає тимчасовий attachment до Zustand та одразу отримує preview через GET.
+6) Під час звичайного batch-save зберігаються DOC_OBJECT (ATTACHMENT), DOC_OBJECT_LINK
+   (ATTACHED_TO), DOC_ASSET_REF (assetId) і DOC_SNAPSHOT В ОДНІЙ ТРАНЗАКЦІЇ.
+7) Після перезавантаження GET схеми повертає attachment з assetId; GET файла читає Oracle.
+8) Неприв'язані FILE_ASSET прибираються окремим плановим cleanup після grace period.
+
+Чому так: немає частково записаної схеми (вкладення в DOC_OBJECT, але відсутнє у snapshot).
+Сам BLOB записується одразу, графічний об'єкт — у вже наявному batch-save.
+
+====================================================================
+1. SQL: ПІДГОТОВКА ORACLE
+====================================================================
+-- Перевір перед виконанням: SELECT column_name FROM user_tab_columns WHERE table_name='FILE_ASSET';
+-- Виконати ОДИН РАЗ, якщо FILE_CONTENT ще немає:
+ALTER TABLE FILE_ASSET ADD (FILE_CONTENT BLOB, UPLOAD_DOC_VERSION_ID VARCHAR2(36));
+ALTER TABLE FILE_ASSET ADD CONSTRAINT FK_FILE_UPLOAD_VERSION
+  FOREIGN KEY (UPLOAD_DOC_VERSION_ID) REFERENCES DOC_VERSION(ID);
+
+-- У вихідному DDL STORAGE_KEY NOT NULL. Не змінюємо цю умову: для BLOB пишемо 'db:' || id.
+-- STORAGE_PROVIDER='blob' уже дозволений CHECK constraint.
+-- Після міграції старих записів можна зробити FILE_CONTENT NOT NULL лише для blob
+-- через CHECK (STORAGE_PROVIDER <> 'blob' OR FILE_CONTENT IS NOT NULL), якщо це відповідає даним.
+ALTER TABLE FILE_ASSET ADD CONSTRAINT CK_FILE_ASSET_BLOB
+  CHECK (STORAGE_PROVIDER <> 'blob' OR FILE_CONTENT IS NOT NULL);
+
+-- Якщо у чинному DOC_OBJECT CHECK забороняє ATTACHMENT, спочатку знайди його ім'я:
+SELECT constraint_name, search_condition_vc
+FROM user_constraints
+WHERE table_name='DOC_OBJECT' AND constraint_type='C';
+
+-- У прикладі з твого DDL constraint називається CK_DOC_OBJECT_TYPE:
+ALTER TABLE DOC_OBJECT DROP CONSTRAINT CK_DOC_OBJECT_TYPE;
+ALTER TABLE DOC_OBJECT ADD CONSTRAINT CK_DOC_OBJECT_TYPE
+ CHECK (OBJECT_TYPE IN ('NODE','EDGE','ZVT','ZVT_BRANCH','ANNOTATION',
+                       'IMAGE','SHAPE','SPECIFICATION_TABLE','TABLE_ROW','NOTE',
+                       'ATTACHMENT','OTHER'));
+-- Увага: узгодь перелік з усіма фактично використовуваними типами.
+
+-- За бажанням, щоб одне вкладення не мало двох однакових прив'язок до того самого файлу:
+-- У DOC_ASSET_REF вже є PK (DOC_VERSION_ID,OBJECT_ID,ASSET_ID).
+
+====================================================================
+2. ВСТАНОВЛЕННЯ ПАКЕТІВ
+====================================================================
+cd api
+npm install express multer oracledb
+# Авторизація у прикладі — адаптер до наявного middleware, а не новий auth-механізм.
+
+Структура:
+src/
+  routes/attachment.routes.js
+  controllers/attachment.controller.js
+  services/attachment.service.js
+  repositories/attachment.repository.js
+  middleware/upload.middleware.js
+  middleware/attachment-auth.js
+  db/oracle.js
+  app.js
+
+====================================================================
+3. db/oracle.js — ПУЛ І З'ЄДНАННЯ
+====================================================================
+// src/db/oracle.js
+const oracledb = require('oracledb');
+
+async function initOracle() {
+  await oracledb.createPool({
+    user: process.env.ORACLE_USER,
+    password: process.env.ORACLE_PASSWORD,
+    connectString: process.env.ORACLE_CONNECT_STRING,
+    poolMin: 1,
+    poolMax: 10,
+    poolIncrement: 1
+  });
+}
+
+async function withConnection(fn) {
+  const conn = await oracledb.getConnection();
+  try { return await fn(conn); }
+  finally { await conn.close(); }
+}
+
+async function withTransaction(fn) {
+  const conn = await oracledb.getConnection();
+  try {
+    const result = await fn(conn);
+    await conn.commit();
+    return result;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    await conn.close();
+  }
+}
+
+module.exports = { oracledb, initOracle, withConnection, withTransaction };
+
+Якщо вже є власний DBManager, НЕ створюй другий пул: адаптуй withConnection/withTransaction
+до нього. Для однієї транзакції всі SQL мають працювати на ОДНОМУ connection.
+
+====================================================================
+4. middleware/upload.middleware.js — MULTIPART
+====================================================================
+// src/middleware/upload.middleware.js
+const multer = require('multer');
+
+const MAX_BYTES = 25 * 1024 * 1024; // 25 MB, налаштуй під вимоги
+const allowed = new Set([
+  'application/pdf', 'image/png', 'image/jpeg', 'image/gif',
+  'image/svg+xml', 'image/webp'
+]);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_BYTES, files: 1, fields: 3 },
+  fileFilter(req, file, cb) {
+    if (!allowed.has(file.mimetype)) {
+      const err = new Error('Непідтримуваний MIME-тип');
+      err.status = 415;
+      return cb(err);
+    }
+    cb(null, true);
+  }
+});
+
+module.exports = { upload, MAX_BYTES };
+
+ВАЖЛИВО: MIME з браузера не є доказом формату. Для production додай перевірку
+magic bytes для PDF/PNG/JPEG/GIF/WebP, окрему санітизацію SVG, AV-сканування,
+ліміти запитів і журналювання. SVG не слід віддавати як активний inline-документ.
+Для файлів >25 MB краще streaming upload з тимчасовим сховищем і BLOB stream,
+а не memoryStorage.
+
+====================================================================
+5. middleware/attachment-auth.js — ПРАВА ДОСТУПУ
+====================================================================
+// src/middleware/attachment-auth.js
+// ЦЕ АДАПТЕР: підключи наявний middleware, що встановлює req.user.
+// Не довіряй userId, який прийшов у formData/body/query.
+function requireLogin(req, res, next) {
+  if (!req.user?.id) return res.status(401).json({ message: 'Unauthorized' });
+  next();
+}
+module.exports = { requireLogin };
+
+У сервісі ОБОВ'ЯЗКОВО перевіряти права в БД:
+- upload: EDIT для docVersionId, і DOC_VERSION.STATUS_CODE='DRAFT';
+- preview/download: READ до документа + наявність прив'язки у доступній версії;
+- preview новозавантаженого asset до batch-save: дозволити тільки його uploader
+  та тільки для того самого DRAFT.
+Нижче реалізовано перевірку власника upload; для інших користувачів —
+перевірка через DOC_ASSET_REF + DOC_VERSION + DOC_ACCESS.
+Цей приклад припускає DOC_ACCESS як точковий дозвіл. Якщо в тебе ролі через
+unit/depart/type, заміни hasDocPermission() на свій централізований permission service.
+
+====================================================================
+6. repositories/attachment.repository.js — SQL ТІЛЬКИ ТУТ
+====================================================================
+// src/repositories/attachment.repository.js
+const { oracledb } = require('../db/oracle');
+
+async function getDraftForEdit(conn, docVersionId, userId) {
+  const result = await conn.execute(`
+    SELECT v.ID, v.DOC_RESOURCE_ID
+      FROM DOC_VERSION v
+      JOIN DOC_ACCESS a ON a.DOC_RESOURCE_ID=v.DOC_RESOURCE_ID
+     WHERE v.ID=:versionId AND v.STATUS_CODE='DRAFT'
+       AND a.USER_ID=:userId AND a.ACCESS_LEVEL IN ('EDIT','ADMIN')
+  `, { versionId: docVersionId, userId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  return result.rows[0] || null;
+}
+
+async function insertFile(conn, asset) {
+  await conn.execute(`
+    INSERT INTO FILE_ASSET
+      (ID, ORIGINAL_NAME, MIME_TYPE, BYTE_SIZE, STORAGE_PROVIDER,
+       STORAGE_KEY, SHA256, FILE_CONTENT, CREATED_BY, UPLOAD_DOC_VERSION_ID)
+    VALUES (:id, :name, :mime, :size, 'blob', :key, :sha, :content, :createdBy, :docVersionId)
+  `, {
+    id: asset.id,
+    name: asset.name,
+    mime: asset.mime,
+    size: asset.buffer.length,
+    key: `db:${asset.id}`,
+    sha: asset.sha256,
+    content: { val: asset.buffer, type: oracledb.BLOB },
+    createdBy: asset.userId,
+    docVersionId: asset.docVersionId
+  }, { autoCommit: false });
+}
+
+async function getFileMeta(conn, assetId) {
+  const result = await conn.execute(`
+    SELECT ID, ORIGINAL_NAME, MIME_TYPE, BYTE_SIZE, CREATED_BY, STORAGE_PROVIDER
+      FROM FILE_ASSET WHERE ID=:id
+  `, { id: assetId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  return result.rows[0] || null;
+}
+
+async function canReadFile(conn, assetId, userId) {
+  // Власник щойно завантаженого файла може його переглянути до batch-save,
+  // але перевіряємо, що файл BLOB і створений саме ним.
+  // UPLOAD_DOC_VERSION_ID прив'язує pending asset до конкретного DRAFT.
+  const r = await conn.execute(`
+    SELECT 1 AS OK FROM FILE_ASSET f
+      JOIN DOC_VERSION v ON v.ID=f.UPLOAD_DOC_VERSION_ID
+      JOIN DOC_ACCESS a ON a.DOC_RESOURCE_ID=v.DOC_RESOURCE_ID
+     WHERE f.ID=:assetId AND f.CREATED_BY=:userId
+       AND f.STORAGE_PROVIDER='blob' AND v.STATUS_CODE='DRAFT'
+       AND a.USER_ID=:userId AND a.ACCESS_LEVEL IN ('EDIT','ADMIN')
+    UNION ALL
+    SELECT 1 AS OK
+      FROM DOC_ASSET_REF r
+      JOIN DOC_VERSION v ON v.ID=r.DOC_VERSION_ID
+      JOIN DOC_ACCESS a ON a.DOC_RESOURCE_ID=v.DOC_RESOURCE_ID
+     WHERE r.ASSET_ID=:assetId AND a.USER_ID=:userId
+       AND a.ACCESS_LEVEL IN ('READ','EDIT','ADMIN')
+       AND v.STATUS_CODE IN ('DRAFT','STABLE','ARCHIVED')
+       AND ROWNUM=1
+  `, { assetId, userId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  return r.rows.length > 0;
+}
+
+async function getBlob(conn, assetId) {
+  const result = await conn.execute(`
+    SELECT FILE_CONTENT FROM FILE_ASSET
+     WHERE ID=:id AND STORAGE_PROVIDER='blob'
+  `, { id: assetId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  return result.rows[0]?.FILE_CONTENT || null;
+}
+
+module.exports = { getDraftForEdit, insertFile, getFileMeta, canReadFile, getBlob };
+
+ЗАУВАЖЕННЯ: canReadFile() — демонстраційний ACL для DOC_ACCESS. Якщо є
+глобальні ролі, unit, department, ACL для архівних версій — інтегруй
+централізований evaluator. Для pending upload використано UPLOAD_DOC_VERSION_ID
+і перевірку, що DRAFT ще активний і користувач має право EDIT.
+
+====================================================================
+7. services/attachment.service.js — БІЗНЕС-ЛОГІКА
+====================================================================
+// src/services/attachment.service.js
+const crypto = require('node:crypto');
+const { withConnection, withTransaction } = require('../db/oracle');
+const repo = require('../repositories/attachment.repository');
+
+function httpError(status, message) {
+  const e = new Error(message); e.status = status; return e;
+}
+
+async function uploadFile({ file, docVersionId, userId }) {
+  if (!file?.buffer?.length) throw httpError(400, 'Файл відсутній');
+  if (!/^[0-9a-f-]{36}$/i.test(docVersionId || '')) {
+    throw httpError(400, 'Некоректний docVersionId');
+  }
+  const assetId = crypto.randomUUID();
+  const sha256 = crypto.createHash('sha256').update(file.buffer).digest('hex');
+  const safeName = (file.originalname || 'file').replace(/[\\/\x00-\x1f]/g, '_').slice(0, 500);
+
+  await withTransaction(async (conn) => {
+    const draft = await repo.getDraftForEdit(conn, docVersionId, userId);
+    if (!draft) throw httpError(403, 'Немає права редагування DRAFT');
+    await repo.insertFile(conn, {
+      id: assetId, name: safeName, mime: file.mimetype,
+      buffer: file.buffer, sha256, userId, docVersionId
+    });
+  });
+
+  return {
+    assetId,
+    originalName: safeName,
+    mimeType: file.mimetype,
+    size: file.buffer.length,
+    previewUrl: `/api/attachments/files/${assetId}?disposition=inline`,
+    downloadUrl: `/api/attachments/files/${assetId}?disposition=attachment`
+  };
+}
+
+async function getReadableFile({ assetId, userId }) {
+  return withConnection(async (conn) => {
+    const meta = await repo.getFileMeta(conn, assetId);
+    if (!meta) throw httpError(404, 'Файл не знайдено');
+    const permitted = await repo.canReadFile(conn, assetId, userId);
+    if (!permitted) throw httpError(403, 'Немає доступу до файла');
+    return meta;
+  });
+}
+
+module.exports = { uploadFile, getReadableFile, httpError };
+
+====================================================================
+8. controllers/attachment.controller.js — UPLOAD + STREAM BLOB
+====================================================================
+// src/controllers/attachment.controller.js
+const { withConnection } = require('../db/oracle');
+const repo = require('../repositories/attachment.repository');
+const service = require('../services/attachment.service');
+
+async function upload(req, res, next) {
+  try {
+    const result = await service.uploadFile({
+      file: req.file,
+      docVersionId: req.body.docVersionId,
+      userId: req.user.id
+    });
+    return res.status(201).json(result);
+  } catch (e) { next(e); }
+}
+
+async function file(req, res, next) {
+  try {
+    const { assetId } = req.params;
+    const meta = await service.getReadableFile({ assetId, userId: req.user.id });
+    // Забороняємо inline для SVG та інших активних/невідомих типів.
+    const safeInline = new Set(['application/pdf','image/png','image/jpeg','image/gif','image/webp']);
+    const inline = req.query.disposition !== 'attachment' && safeInline.has(meta.MIME_TYPE);
+    const disposition = inline ? 'inline' : 'attachment';
+    const filename = (meta.ORIGINAL_NAME || 'file').replace(/[\r\n"\\]/g, '_');
+
+    // Відкриваємо нове з'єднання та тримаємо його до завершення стріму.
+    // Повторна перевірка доступу всередині цього з'єднання захищає від race між перевірками.
+    await withConnection(async (conn) => {
+      if (!await repo.canReadFile(conn, assetId, req.user.id)) {
+        throw service.httpError(403, 'Доступ заборонено');
+      }
+      const blob = await repo.getBlob(conn, assetId);
+      if (!blob) throw service.httpError(404, 'Вміст файла не знайдено');
+
+      res.setHeader('Content-Type', inline ? meta.MIME_TYPE : 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      if (meta.BYTE_SIZE != null) res.setHeader('Content-Length', String(meta.BYTE_SIZE));
+
+      // BLOB із node-oracledb — Readable stream. Чекаємо на його завершення
+      // ДО закриття Oracle connection.
+      const { pipeline } = require('node:stream/promises');
+      try {
+        await pipeline(blob, res);
+      } catch (err) {
+        // Клієнт міг закрити preview; після початку відправки JSON error вже неможливий.
+        if (!res.headersSent) throw err;
+      }
+    });
+  } catch (e) {
+    if (res.headersSent) return res.destroy(e);
+    next(e);
+  }
+}
+
+module.exports = { upload, file };
+
+Примітка: Content-Security-Policy: sandbox може обмежити функції вбудованого PDF viewer.
+Якщо preview PDF у твоєму браузері не працює, краще отримувати Blob через fetch
+і показувати objectURL у sandboxed iframe; не послаблюй політику для SVG.
+
+====================================================================
+9. routes/attachment.routes.js
+====================================================================
+// src/routes/attachment.routes.js
+const express = require('express');
+const { upload } = require('../middleware/upload.middleware');
+const { requireLogin } = require('../middleware/attachment-auth');
+const controller = require('../controllers/attachment.controller');
+const router = express.Router();
+
+router.post('/upload', requireLogin, upload.single('file'), controller.upload);
+router.get('/files/:assetId', requireLogin, controller.file);
+module.exports = router;
+
+// src/app.js (фрагмент)
+const express = require('express');
+const attachmentRoutes = require('./routes/attachment.routes');
+const { initOracle } = require('./db/oracle');
+const app = express();
+
+// Тут має бути твій чинний session/JWT middleware, який встановлює req.user.
+// app.use(existingAuthMiddleware);
+app.use('/api/attachments', attachmentRoutes);
+app.use(express.json({ limit: '10mb' }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : (err.status || 500);
+  res.status(status).json({ message: status === 500 ? 'Server error' : err.message });
+});
+
+// У реальному entrypoint перед app.listen:
+// await initOracle();
+// app.listen(process.env.PORT || 3001);
+
+====================================================================
+10. FRONTEND: POST multipart/form-data
+====================================================================
+// src/features/attachments/api/attachments.api.js
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
+export async function uploadAttachmentFile({ file, docVersionId }) {
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+  formData.append('docVersionId', docVersionId);
+
+  const response = await fetch(`${API_URL}/api/attachments/upload`, {
+    method: 'POST',
+    body: formData,
+    credentials: 'include' // якщо cookie auth; для Bearer додай Authorization
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || 'Не вдалося завантажити файл');
+  return data;
+}
+
+export async function fetchAttachmentBlob(assetId) {
+  const response = await fetch(`${API_URL}/api/attachments/files/${encodeURIComponent(assetId)}?disposition=inline`, {
+    credentials: 'include'
+  });
+  if (!response.ok) throw new Error('Не вдалося відкрити файл');
+  return response.blob();
+}
+
+ВАЖЛИВО: НЕ встановлюй Content-Type: multipart/form-data вручну — браузер
+сам додасть boundary. Для cookie auth між різними доменами потрібні правильні
+CORS credentials, cookie SameSite/Secure, CSRF захист. Не використовуй '*' у CORS origin.
+
+====================================================================
+11. FRONTEND: ПРИКЛАД МОДАЛЬНОГО ВІКНА MUI + PREVIEW
+====================================================================
+// src/features/attachments/ui/AttachmentDialog.jsx
+'use client';
+import { useEffect, useState } from 'react';
+import { Dialog, DialogTitle, DialogContent, DialogActions,
+  Button, Stack, Typography, CircularProgress } from '@mui/material';
+import { uploadAttachmentFile, fetchAttachmentBlob } from '../api/attachments.api';
+
+export default function AttachmentDialog({
+  open, onClose, docVersionId, attachedTo, attachments, onAddAttachment
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState(null);
+  const [objectUrl, setObjectUrl] = useState('');
+
+  useEffect(() => {
+    if (!selected?.assetId || !open) return;
+    let cancelled = false;
+    let url = '';
+    setObjectUrl('');
+    fetchAttachmentBlob(selected.assetId)
+      .then(blob => {
+        url = URL.createObjectURL(blob);
+        if (!cancelled) setObjectUrl(url);
+        else URL.revokeObjectURL(url);
+      })
+      .catch(e => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+  }, [selected?.assetId, open]);
+
+  async function handleFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setBusy(true); setError('');
+    try {
+      const uploaded = await uploadAttachmentFile({ file, docVersionId });
+      const attachment = {
+        id: crypto.randomUUID(),
+        kind: 'attachment',
+        assetId: uploaded.assetId,
+        attachedTo: { type: attachedTo.type, id: attachedTo.id },
+        offsetX: 18, offsetY: 16,
+        comment: '',
+        file: {
+          id: uploaded.assetId,
+          originalName: uploaded.originalName,
+          mimeType: uploaded.mimeType,
+          size: uploaded.size
+        }
+      };
+      // Онови свій Zustand store (onAddAttachment) — це ще НЕ batch-save схеми.
+      onAddAttachment(attachment);
+      setSelected(attachment);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  const type = selected?.file?.mimeType || '';
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>Вкладення об'єкта</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2}>
+          <Button component="label" variant="contained" disabled={busy}>
+            Додати файл
+            <input hidden type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.svg"
+              onChange={handleFileChange} />
+          </Button>
+          {busy && <CircularProgress size={24} />}
+          {error && <Typography color="error">{error}</Typography>}
+          <Stack direction="row" spacing={1} flexWrap="wrap">
+            {(attachments || []).map(a => (
+              <Button key={a.id} onClick={() => setSelected(a)}>
+                {a.file?.originalName || a.id}
+              </Button>
+            ))}
+          </Stack>
+          {selected && <Typography>{selected.file?.originalName}</Typography>}
+          {objectUrl && type.startsWith('image/') && type !== 'image/svg+xml' && (
+            <img src={objectUrl} alt="Перегляд вкладення"
+              style={{ maxWidth: '100%', maxHeight: 500, objectFit: 'contain' }} />
+          )}
+          {objectUrl && type === 'application/pdf' && (
+            <iframe title="Перегляд PDF" src={objectUrl}
+              style={{ width: '100%', height: 520, border: 0 }} />
+          )}
+          {selected && type === 'image/svg+xml' && (
+            <Typography>SVG доступний для завантаження; inline preview вимкнено з міркувань безпеки.</Typography>
+          )}
+          {selected && !objectUrl && <Typography>Завантаження попереднього перегляду...</Typography>}
+        </Stack>
+      </DialogContent>
+      <DialogActions><Button onClick={onClose}>Закрити</Button></DialogActions>
+    </Dialog>
+  );
+}
+
+ПРИМІТКА: attachments проп передавай із Zustand так, щоб він оновлювався після
+onAddAttachment. Для об'єктів із багатьма файлами modal показує всі attachment.
+Для завантаження через JS можна зробити окрему кнопку «Скачати», отримати Blob,
+створити objectURL та клікнути тимчасовий <a download>.
+
+====================================================================
+12. ЯК ЗБЕРЕГТИ ПРИВ'ЯЗКУ В ТВОЄМУ BATCH-SAVE
+====================================================================
+Важливо: НЕ створюй DOC_OBJECT і DOC_OBJECT_LINK в upload endpoint.
+Інакше в Oracle з'явиться нове вкладення, якого ще немає у DOC_SNAPSHOT.
+У твоєму наявному saveDraft сервісі з тієї самої структури attachments
+створи 3 набори записів. Приклад payload з фронта:
+
+{
+  "docVersionId": "uuid-draft-version",
+  "expectedRevision": 8,
+  "snapshot": { "nodes": [], "edges": [], "attachments": [ /* ... */ ] }
+}
+
+Для attachment:
+DOC_OBJECT:
+  DOC_VERSION_ID = draftVersionId
+  OBJECT_ID = attachment.id
+  OBJECT_TYPE = 'ATTACHMENT'
+  OBJECT_SUBTYPE = attachment.kind
+  LABEL = attachment.file.originalName
+  OBJECT_JSON = JSON.stringify(attachment)
+  PARENT_OBJECT_ID = NULL  (це не дерево, а зв'язок із node/edge)
+
+DOC_OBJECT_LINK:
+  LINK_ID = новий UUID
+  DOC_VERSION_ID = draftVersionId
+  SOURCE_OBJECT_ID = attachment.id
+  TARGET_OBJECT_ID = attachment.attachedTo.id
+  LINK_TYPE = 'ATTACHED_TO'
+  SOURCE_ANCHOR = NULL
+  TARGET_ANCHOR = NULL
+
+DOC_ASSET_REF:
+  DOC_VERSION_ID = draftVersionId
+  OBJECT_ID = attachment.id
+  ASSET_ID = attachment.assetId
+  USAGE_TYPE = 'attachment'
+
+ЗАСТЕРЕЖЕННЯ: FK DOC_OBJECT_LINK вимагає, щоб attachedTo.id існував як
+DOC_OBJECT цієї ж версії. Спочатку зберегти NODE/EDGE, ATTACHMENT, потім links.
+
+// src/repositories/attachment-link.repository.js
+async function insertAttachmentProjection(conn, { docVersionId, attachment }) {
+  const a = attachment;
+  if (!a.id || !a.assetId || !a.attachedTo?.id) throw new Error('Invalid attachment');
+  await conn.execute(`
+    INSERT INTO DOC_OBJECT
+      (DOC_VERSION_ID, OBJECT_ID, OBJECT_TYPE, OBJECT_SUBTYPE, LABEL,
+       IS_DELETED, OBJECT_JSON)
+    VALUES (:versionId,:objectId,'ATTACHMENT','FILE',:label,0,:json)
+  `, {
+    versionId: docVersionId, objectId: a.id,
+    label: a.file?.originalName || null,
+    json: JSON.stringify(a)
+  });
+  await conn.execute(`
+    INSERT INTO DOC_OBJECT_LINK
+      (DOC_VERSION_ID,SOURCE_OBJECT_ID,TARGET_OBJECT_ID,LINK_TYPE)
+    VALUES (:versionId,:sourceId,:targetId,'ATTACHED_TO')
+  `, { versionId: docVersionId, sourceId: a.id, targetId: a.attachedTo.id });
+  await conn.execute(`
+    INSERT INTO DOC_ASSET_REF
+      (DOC_VERSION_ID,OBJECT_ID,ASSET_ID,USAGE_TYPE)
+    VALUES (:versionId,:objectId,:assetId,'attachment')
+  `, { versionId: docVersionId, objectId: a.id, assetId: a.assetId });
+}
+module.exports = { insertAttachmentProjection };
+
+Це INSERT для НОВИХ вкладень. Для повторного save потрібен MERGE/UPSERT або
+видалення і відновлення projection у контрольованому порядку:
+  DELETE DOC_ASSET_REF -> DELETE DOC_OBJECT_LINK -> DELETE DOC_OBJECT
+  -> INSERT DOC_OBJECT -> INSERT DOC_OBJECT_LINK -> INSERT DOC_ASSET_REF
+  -> UPDATE DOC_SNAPSHOT (SAVE_REVISION+1 WHERE expectedRevision)
+Усе — в ОДНІЙ транзакції, без autoCommit. Не видаляй FILE_ASSET при видаленні
+одного вкладення: на той самий asset можуть посилатися інші версії.
+
+ПРИКЛАД інтеграції в наявний saveDraft (псевдокод, не заміна твого сервісу):
+
+await db.withTransaction(async conn => {
+  await requireDraftEditAndLock(conn, docVersionId, userId);
+  await verifyRevision(conn, docVersionId, expectedRevision);
+  await validateAllAttachmentsAndOwnership(conn, docVersionId, snapshot.attachments);
+  await saveAllObjects(conn, snapshot); // NODE, EDGE, ATTACHMENT, ...
+  await saveAllLinks(conn, snapshot);   // EDGE_START, EDGE_END, ATTACHED_TO, ...
+  await saveAllAssetRefs(conn, snapshot.attachments);
+  await updateSnapshotWithExpectedRevision(conn, docVersionId, snapshot, expectedRevision);
+});
+
+validateAllAttachmentsAndOwnership обов'язкова: assetId із фронта не можна
+приймати без перевірки, що файл існує, належить користувачу/доступному документу
+та є дозволеним для цієї версії. Інакше можна прив'язати чужий файл.
+
+====================================================================
+13. ЯК ВІДКРИВАТИ ВКЛАДЕННЯ ПІСЛЯ ПЕРЕЗАВАНТАЖЕННЯ
+====================================================================
+GET /api/documents/:docVersionId/snapshot
+-> JSON із attachments (id, assetId, attachedTo, file metadata, offsetX/Y)
+-> set Zustand store
+-> відкрити modal
+-> вибрати attachment
+-> GET /api/attachments/files/:assetId?disposition=inline
+-> API перевіряє READ і повертає BLOB
+-> frontend Blob URL -> img / iframe.
+
+URL preview не треба зберігати у БД: він похідний від assetId і може змінитися.
+У JSON не зберігай Buffer, base64, локальний filesystem path, токени.
+
+====================================================================
+14. BACKUP І CLEANUP
+====================================================================
+- Oracle BLOB — канонічне джерело. Бекап має включати базу та BLOB.
+- Для файлової резервної копії окремий scheduled job читає BLOB із Oracle,
+  записує в /srv/backup/attachments/{assetId}, перевіряє SHA256, веде журнал.
+- Резервні копії мають зберігатися поза основним сервером, з тестом відновлення.
+- Cleanup orphan assets: після 24-72 годин (налаштовується) знаходити FILE_ASSET,
+  на які немає DOC_ASSET_REF, і лише після перевірки pending uploads видаляти.
+- Не видаляти BLOB під час звичайного видалення attachment з DRAFT, якщо він
+  використовується в STABLE/ARCHIVED.
+
+====================================================================
+15. ВАЖЛИВІ ПЕРЕВІРКИ ПЕРЕД PRODUCTION
+====================================================================
+[ ] У твоїй схемі DOC_ASSET_REF використовує DOC_VERSION_ID (не старий DOC_RESOURCE_ID).
+[ ] DOC_OBJECT CHECK дозволяє ATTACHMENT.
+[ ] FILE_ASSET.FILE_CONTENT BLOB існує.
+[ ] Auth middleware встановлює req.user.id; API перевіряє реальні ACL.
+[ ] Перевірка типу файла за вмістом + антивірус + обробка SVG.
+[ ] CORS, cookie, CSRF, max upload size, rate limiting.
+[ ] Preview дозволено тільки для доступних користувачу файлів.
+[ ] Завантаження файла не змінює snapshot до звичайного batch-save.
+[ ] Batch-save пише DOC_OBJECT, DOC_OBJECT_LINK, DOC_ASSET_REF, DOC_SNAPSHOT атомарно.
+[ ] Повторний batch-save не створює дублікати та перевіряє revision.
+[ ] Видалення вкладення не знищує файл з історичних версій.
+[ ] Тест: PDF, PNG, JPEG, SVG download, два файли на NODE, файл на EDGE.
+[ ] Тест: 401, 403, 404, 413, 415, 409; обрив завантаження/скачування.
+[ ] Тест: після перезавантаження модальне вікно відновлює preview з Oracle.
+
+КІНЕЦЬ.
