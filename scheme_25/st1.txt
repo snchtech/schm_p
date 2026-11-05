@@ -1,0 +1,541 @@
+Так, на рівні Node.js + Express API обов’язково потрібно реалізувати перевірку прав доступу, навіть якщо зараз усі запити вже виконуються з токеном.
+
+Але я не рекомендую створювати другу, незалежну систему ролей спеціально для API. У твоєму проєкті має бути одна централізована модель прав в Oracle 21, яку використовують і Next.js, і API.
+
+При цьому відповідальність розподіляється так:
+
+| Рівень                      | За що відповідає                                      |
+| --------------------------- | ----------------------------------------------------- |
+| Токен доступу               | Підтверджує особу користувача                         |
+| `authentication middleware` | Перевіряє токен і визначає `user_id`                  |
+| `authorization middleware`  | Перевіряє загальний дозвіл на операцію                |
+| `service`                   | Перевіряє право на конкретну схему, альбом або об'єкт |
+| `repository`                | Отримує призначення ролей і дані ресурсів з Oracle    |
+| Next.js + Konva             | Відображає доступні дії, але не є межею безпеки       |
+
+Наприклад, користувач може мати роль `editor`, але лише для схем обладнання підрозділу №10. Тому перевірки `roles.includes("editor")` недостатньо: API повинен знати яку саме схему змінюють, її тип, підрозділ і unit.
+
+Особливо важливо захистити endpoint збереження повного JSON схеми. Інакше користувач може обійти всі обмеження Konva, сформувати власний JSON і надіслати його безпосередньо в API.
+
+## 1. Як повинна виглядати архітектура доступів API
+
+Для твоєї архітектури `route → controller → service → repository` я рекомендую таку послідовність:
+
+Next.js + Konva
+
+Запит із Bearer token
+
+Express authentication middleware
+
+Валідація токена → req.auth.userId
+
+Authorization middleware
+
+Перевірка дозволу на операцію
+
+Service + AccessService
+
+Перевірка Scope, типу схеми та її належності
+
+Repository → Oracle 21
+
+ACCESS_ASSIGNMENT, ACCESS_ROLE, ACCESS_PERMISSION, SCHEME
+
+Основна ідея: middleware відповідає за спільні перевірки HTTP-запитів, а `AccessService` — за конкретні правила доступу до ресурсів.
+
+## 2. Звідки API отримуватиме ролі користувача?
+
+Є три поширені підходи.
+
+| Підхід                       | Перевага                                     | Недолік                                              |
+| ---------------------------- | -------------------------------------------- | ---------------------------------------------------- |
+| Ролі всередині JWT           | Не потрібен запит до БД для кожної перевірки | Зміни ролей не застосовуються до вже виданого токена |
+| Ролі з Oracle на кожен запит | Актуальні права                              | Додаткові запити до БД                               |
+| Ролі з Oracle + кеш          | Менше навантаження                           | Потрібне керування актуальністю кешу                 |
+
+Для твого проєкту я рекомендую почати з отримання ролей з Oracle, а кешування додати пізніше.
+
+Причина — у тебе не просто `reader/editor`, а призначення ролей із різними областями доступу.
+
+Наприклад:
+
+```
+{
+  "userId": 125,
+  "assignments": [
+    {
+      "role": "reader",
+      "scopeType": "GLOBAL",
+      "scopeId": null,
+      "schemeType": null
+    },
+    {
+      "role": "editor",
+      "scopeType": "DIVISION",
+      "scopeId": 10,
+      "schemeType": "equipment"
+    }
+  ]
+}
+```
+
+Такий користувач може переглядати всі схеми, але редагувати лише схеми обладнання підрозділу 10.
+
+Важливо: це не обов'язково зберігати в токені. Достатньо отримати з перевіреного токена ідентифікатор користувача, а призначення ролей завантажити з Oracle.
+
+## 3. Authentication middleware: перевірка токена
+
+Припустимо, твій API використовує JWT.
+
+Тоді middleware перевіряє підпис, термін дії, issuer, audience і допустимий алгоритм токена.
+
+Приклад із бібліотекою `jose`:
+
+```
+// middleware/authenticate.js
+
+import { jwtVerify, createRemoteJWKSet } from "jose";
+
+const jwks = createRemoteJWKSet(
+  new URL(process.env.AUTH_JWKS_URL)
+);
+
+export async function authenticate(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+
+    if (!header.startsWith("Bearer ")) {
+      return res.status(401).json({
+        error: "UNAUTHORIZED"
+      });
+    }
+
+    const token = header.slice(7);
+
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: process.env.AUTH_ISSUER,
+      audience: process.env.AUTH_AUDIENCE,
+      algorithms: ["RS256"]
+    });
+
+    if (!payload.sub) {
+      return res.status(401).json({
+        error: "INVALID_TOKEN"
+      });
+    }
+
+    req.auth = {
+      subject: payload.sub
+    };
+
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      error: "INVALID_TOKEN"
+    });
+  }
+}
+```
+
+Цей приклад підходить для JWT, підписаних RS256, коли провайдер авторизації публікує JWKS. Якщо у тебе інший тип токена або власний механізм авторизації, middleware потрібно адаптувати.
+
+Зверни увагу: `sub` — це ідентифікатор користувача в системі авторизації. Він не обов'язково збігається з числовим `USER_ID` в Oracle. Потрібен надійний зв'язок між ними, наприклад через поле `AUTH_SUBJECT` у таблиці користувачів.
+
+## 4. Як отримати ролі з Oracle
+
+Я б виніс це в окремий `AccessRepository`.
+
+Наприклад:
+
+```
+// repositories/AccessRepository.js
+
+export class AccessRepository {
+  constructor(db) {
+    this.db = db;
+  }
+
+  async getAssignments(userId) {
+    const result = await this.db.execute(
+      `
+      SELECT
+        aa.assignment_id,
+        ar.role_code,
+        aa.scope_type,
+        aa.scope_id,
+        ast.type_code AS scheme_type,
+        aa.valid_from,
+        aa.valid_to
+      FROM access_assignment aa
+      JOIN access_role ar
+        ON ar.role_id = aa.role_id
+      LEFT JOIN access_scheme_type ast
+        ON ast.scheme_type_id = aa.scheme_type_id
+      WHERE aa.user_id = :userId
+        AND aa.revoked_at IS NULL
+        AND aa.valid_from <= SYSTIMESTAMP
+        AND (
+          aa.valid_to IS NULL
+          OR aa.valid_to > SYSTIMESTAMP
+        )
+      `,
+      { userId }
+    );
+
+    return result.rows;
+  }
+}
+```
+
+Тут назви `TYPE_CODE`, `VALID_FROM` та інших колонок потрібно звірити з остаточним DDL твоєї Oracle-схеми. Також у реальній реалізації слід врахувати активність користувача й ролі та формат результатів Oracle driver.
+
+Для перевірки конкретних дозволів потрібно отримувати також записи `ACCESS_ROLE_PERMISSION`, а не вважати, що назва ролі сама по собі визначає всі дозволи.
+
+## 5. AccessService — центральна логіка перевірки
+
+Це найважливіший компонент.
+
+Він має відповідати на питання:
+
+> Чи може користувач 125 редагувати схему 500?
+
+Для цього потрібні:
+
+- Ідентифікатор користувача.
+- Запитаний дозвіл, наприклад `scheme.edit`.
+- Призначені користувачу ролі.
+- Дозволи цих ролей.
+- Тип і організаційна належність схеми.
+
+Спрощений приклад:
+
+```
+// services/AccessService.js
+
+export class AccessService {
+  constructor(accessRepository, schemeRepository) {
+    this.accessRepository = accessRepository;
+    this.schemeRepository = schemeRepository;
+  }
+
+  async can(userId, permission, schemeId) {
+    const scheme =
+      await this.schemeRepository.findById(schemeId);
+
+    if (!scheme) {
+      return false;
+    }
+
+    const assignments =
+      await this.accessRepository.getAssignments(userId);
+
+    for (const assignment of assignments) {
+      const hasPermission =
+        await this.accessRepository.roleHasPermission(
+          assignment.ROLE_CODE,
+          permission
+        );
+
+      if (!hasPermission) continue;
+
+      if (
+        assignment.SCHEME_TYPE &&
+        assignment.SCHEME_TYPE !== scheme.schemeType
+      ) {
+        continue;
+      }
+
+      if (this.matchesScope(assignment, scheme)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  matchesScope(assignment, scheme) {
+    const type = assignment.SCOPE_TYPE;
+    const id = Number(assignment.SCOPE_ID);
+
+    switch (type) {
+      case "GLOBAL":
+        return true;
+
+      case "DIVISION":
+        return scheme.divisionId === id;
+
+      case "UNIT":
+        return scheme.unitId === id;
+
+      case "ALBUM":
+        return scheme.albumId === id;
+
+      case "SCHEME":
+        return scheme.id === id;
+
+      default:
+        return false;
+    }
+  }
+}
+```
+
+Це базовий приклад політики. Якщо підрозділ охоплює дочірні unit, перевірка `DIVISION` має використовувати їхню організаційну ієрархію. Якщо схема може належати кільком підрозділам, потрібно врахувати таблицю зв'язків. Для `roleHasPermission` необхідна окрема реалізація в repository.
+
+Важливо, що Scope перевіряється в межах того самого призначення ролі. Не можна комбінувати глобальний Scope від `reader` із дозволом редагування від іншого призначення `editor`.
+
+## 6. Middleware для перевірки дозволів
+
+Тепер можна зробити універсальний middleware.
+
+```
+// middleware/requireSchemePermission.js
+
+export function requireSchemePermission(
+  accessService,
+  permission
+) {
+  return async (req, res, next) => {
+    try {
+      const userId = req.auth.userId;
+      const schemeId = Number(req.params.schemeId);
+
+      if (!Number.isSafeInteger(schemeId) || schemeId <= 0) {
+        return res.status(400).json({
+          error: "INVALID_SCHEME_ID"
+        });
+      }
+
+      const allowed = await accessService.can(
+        userId,
+        permission,
+        schemeId
+      );
+
+      if (!allowed) {
+        return res.status(403).json({
+          error: "FORBIDDEN"
+        });
+      }
+
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+```
+
+Тут `req.auth.userId` має бути встановлений попереднім middleware, який зіставляє перевірений `sub` токена з `USER_ID` в Oracle.
+
+Тоді маршрути стають дуже зрозумілими:
+
+```
+// routes/schemeRoutes.js
+
+router.get(
+  "/:schemeId",
+  authenticate,
+  resolveUser,
+  requireSchemePermission(
+    accessService,
+    "scheme.view"
+  ),
+  schemeController.getScheme
+);
+
+router.put(
+  "/:schemeId",
+  authenticate,
+  resolveUser,
+  requireSchemePermission(
+    accessService,
+    "scheme.edit"
+  ),
+  schemeController.saveScheme
+);
+```
+
+Тобто доступ перевіряється до виконання контролера.
+
+## 7. Чому middleware недостатньо
+
+Тут є важливий нюанс.
+
+Middleware чудово працює для простих маршрутів:
+
+```
+GET /schemes/500
+PUT /schemes/500
+DELETE /schemes/500
+```
+
+Але в тебе є складні операції:
+
+- Збереження JSON усієї схеми.
+- Збереження `nodes`, `edges`, `zvt`, `zvtBranch`.
+- Прикріплення файлів до об'єктів.
+- Копіювання об'єктів між схемами.
+- Переміщення схеми до іншого альбому.
+- Зміна типу або підрозділу схеми.
+
+Наприклад, користувач має право редагувати схему 500, але не має права редагувати схему 600.
+
+Якщо він надсилає:
+
+```
+{
+  "schemeId": 500,
+  "nodes": [
+    {
+      "id": 123,
+      "schemeId": 600,
+      "x": 100,
+      "y": 200
+    }
+  ]
+}
+```
+
+Middleware перевірить `schemeId = 500` і дозволить запит. Але це ще не означає, що всі об'єкти в тілі запиту належать схемі 500.
+
+Тому потрібні додаткові перевірки на рівні service.
+
+```
+async function saveScheme(userId, schemeId, payload) {
+  await accessService.assertCan(
+    userId,
+    "scheme.edit",
+    schemeId
+  );
+
+  validateSchemePayload(schemeId, payload);
+
+  return schemeRepository.saveSnapshot(
+    schemeId,
+    payload
+  );
+}
+```
+
+`assertCan` та `validateSchemePayload` тут — методи, які потрібно реалізувати. Валідація має перевіряти структуру JSON, належність ідентифікаторів, дозволені зміни метаданих і зв'язки між об'єктами.
+
+Для операцій зміни належності ресурсу потрібно окремо перевіряти право на таку зміну. Не слід дозволяти користувачу редагувати `divisionId` чи `schemeType` просто тому, що він має `scheme.edit`.
+
+Також важливо уникнути ситуації, коли права або належність схеми змінюються між перевіркою й записом. Для критичних операцій перевірку та зміну даних варто виконувати в одній транзакції з відповідним блокуванням або контролем версії.
+
+## 8. Як фронтенд дізнається про права користувача
+
+Я рекомендую зробити два API endpoint:
+
+```
+GET /api/access/me
+GET /api/schemes/:schemeId/access
+```
+
+Перший повертає інформацію про поточного користувача та його призначення.
+
+Другий — ефективні дозволи на конкретну схему.
+
+Наприклад:
+
+```
+{
+  "schemeId": 500,
+  "permissions": {
+    "view": true,
+    "edit": true,
+    "delete": false,
+    "manageAccess": false
+  }
+}
+```
+
+Тоді Next.js може використовувати ці дані для кнопок «Переглянути» і «Редагувати».
+
+Але API все одно повторно перевіряє дозвіл під час виконання операції. Результат `/access` потрібен для інтерфейсу, а не як підтвердження прав для наступного запиту.
+
+## 9. Що робити, коли адміністратор змінює ролі
+
+Наприклад, адміністратор відкликає в користувача 125 роль `editor`.
+
+Якщо API кожного разу читає актуальні призначення з Oracle, то наступний запит на редагування буде заборонений.
+
+Якщо ролі кешуються, потрібно інвалідовувати кеш після змін.
+
+Якщо ролі зберігаються лише всередині довгоживучого JWT, користувач може зберігати старі права до завершення дії токена. Саме тому я не рекомендую використовувати JWT як єдине джерело актуальних ролей.
+
+Для твоєї системи важливо також передбачити відкликання доступу в користувача, який уже відкрив редактор. Сервер повинен відхилити його наступний запит збереження, навіть якщо Konva продовжує відображати режим редагування.
+
+## 10. Як розподілити перевірки між middleware та service
+
+| Операція                     | Middleware              | Service                                             |
+| ---------------------------- | ----------------------- | --------------------------------------------------- |
+| Отримати список альбомів     | Авторизація користувача | Фільтрація доступних альбомів                       |
+| Відкрити схему               | `scheme.view`           | Перевірка ресурсу                                   |
+| Зберегти JSON                | `scheme.edit`           | Валідація всіх змін                                 |
+| Видалити схему               | `scheme.delete`         | Перевірка стану, залежностей                        |
+| Завантажити attachment       | Автентифікація          | Доступ до батьківського об'єкта та файлу            |
+| Відкрити інформаційну картку | `scheme.view`           | Доступ до даних картки                              |
+| Призначити роль              | `access.manage`         | Чи може адміністратор видавати саме цю роль і Scope |
+| Відкликати роль              | `access.manage`         | Чи має право відкликати конкретне призначення       |
+
+Для списків схем не варто отримувати всі записи й перевіряти кожен окремим запитом `can()`. Краще сформувати SQL-фільтрацію доступних ресурсів на основі активних призначень користувача, щоб забезпечити і правильну пагінацію, і продуктивність.
+
+## 11. Чи потрібні окремі ролі для API?
+
+Ні, для звичайних користувачів — не потрібні.
+
+Ті самі `reader`, `editor`, `administrator` повинні працювати і для Next.js, і для API.
+
+Але є окрема категорія — технічні інтеграції.
+
+Наприклад, у майбутньому ти можеш захотіти, щоб інший сервіс автоматично отримував схеми або синхронізував обладнання.
+
+Для цього краще передбачити окрему ідентичність сервісу (`service account`) з власними обмеженими дозволами, а не використовувати токен реального користувача або роль `super_administrator`.
+
+## 12. Порядок впровадження у твоєму API
+
+Я б реалізував це в такій послідовності:
+
+1. Перевірити поточну авторизацію. З'ясувати тип токена, звідки береться `user_id` та як зіставляється з Oracle.
+2. Створити `AccessRepository`. Методи отримання активних призначень, дозволів ролей і належності ресурсів.
+3. Створити `AccessService`. Єдина політика `can()` та `assertCan()` з урахуванням Scope і типу схеми.
+4. Додати middleware. `authenticate`, `resolveUser`, `requirePermission`, `requireSchemePermission`.
+5. Захистити критичні endpoint. Почати зі збереження JSON, видалення схем, вкладень і видачі ролей.
+6. Додати фільтрацію списків. Альбоми, схеми та пошук повинні повертати лише доступні користувачу записи.
+7. Додати API ефективних дозволів. Підключити їх до `useAccessStore`, кнопок сторінки альбому та режиму Konva.
+8. Протестувати обхід прав. Спробувати змінити URL, `schemeId`, `unitId`, JSON, викликати API напряму та зберегти схему після відкликання ролі.
+
+### Підсумок для твоєї архітектури
+
+Я рекомендую не розміщувати всю логіку доступів безпосередньо в middleware або контролерах.
+
+Оптимальна структура:
+
+```
+src/
+├── middleware/
+│   ├── authenticate.js
+│   ├── resolveUser.js
+│   └── requirePermission.js
+│
+├── access/
+│   ├── AccessController.js
+│   ├── AccessService.js
+│   ├── AccessRepository.js
+│   └── accessPolicy.js
+│
+├── schemes/
+│   ├── SchemeRoutes.js
+│   ├── SchemeController.js
+│   ├── SchemeService.js
+│   └── SchemeRepository.js
+│
+└── db/
+    └── DBManager.js
+```
+
+Головне правило: `middleware` — це зручна точка входу для перевірок, але `AccessService` має бути єдиним механізмом ухвалення рішень щодо доступу, який можуть викликати й middleware, й бізнес-сервіси.
+
+І ще одне важливе уточнення для наступного етапу: який саме токен ти зараз використовуєш у Node.js API — JWT, який генерує твій сервер, токен зовнішньої системи авторизації чи інший варіант? Від цього залежить реалізація `authenticate`, отримання `user_id` і спосіб безпечного підключення ролей з Oracle.

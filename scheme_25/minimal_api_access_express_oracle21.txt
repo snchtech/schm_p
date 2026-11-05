@@ -1,0 +1,351 @@
+МІНІМАЛЬНА СИСТЕМА ДОСТУПІВ ДЛЯ NODE.JS + EXPRESS + ORACLE 21
+Проєкт «Альбом схем» | JavaScript | Версія 1.0
+
+МЕТА
+- Не створювати другу систему ролей для API: джерело прав — таблиці Oracle ACCESS_*.
+- Використати наявну перевірку токена. Вона повинна встановлювати req.auth.userId із перевіреної особи.
+- Захистити читання/зміну конкретної схеми одним middleware і одним SQL EXISTS.
+- Для списків фільтрувати записи SQL-запитом, а не запускати middleware для кожної схеми.
+- Не завантажувати всі ролі в пам'ять на кожний запит і не кешувати права на старті.
+
+ВАЖЛИВО ПРО СХЕМУ БД
+Наведений код є інтеграційним шаблоном. Перед запуском звір назви колонок з фінальним DDL:
+  ACCESS_ASSIGNMENT(ASSIGNMENT_ID, USER_ID, ROLE_ID, SCOPE_TYPE, SCOPE_ID,
+                    SCHEME_TYPE_ID, VALID_FROM, VALID_TO, REVOKED_AT)
+  ACCESS_ROLE(ROLE_ID, ROLE_CODE)
+  ACCESS_ROLE_PERMISSION(ROLE_ID, PERMISSION_ID)
+  ACCESS_PERMISSION(PERMISSION_ID, PERMISSION_CODE)
+  DOC_SCHEME(ID, ALBUM_ID, DIVISION_ID, UNIT_ID, SCHEME_TYPE_ID)
+Назва DOC_SCHEME та її поля — ПРИКЛАД: заміни на фактичну таблицю схем/її VIEW.
+Якщо у тебе інша ієрархія підрозділів, окремо адаптуй умову DIVISION.
+В усіх SQL використано Oracle bind-параметри, без конкатенації значень користувача.
+
+1. МІНІМАЛЬНА СТРУКТУРА ФАЙЛІВ
+src/
+  middleware/
+    authenticate.js               // вже існує: перевіряє токен
+    requireSchemeAccess.js        // НОВИЙ
+  repositories/
+    AccessRepository.js           // НОВИЙ
+  services/
+    AccessService.js              // НОВИЙ, тонка обгортка
+  routes/
+    schemeRoutes.js               // додати middleware
+  controllers/
+    SchemeController.js           // існуючий
+  repositories/
+    SchemeRepository.js           // існуючий: додати SQL-фільтрацію списків
+
+2. АВТЕНТИФІКАЦІЯ — НЕ ПЕРЕПИСУВАТИ
+Після твого існуючого authenticate має бути:
+
+  req.auth = { userId: 125 };
+
+Важливо: userId береться лише з перевіреного токена або надійного зіставлення
+subject токена з користувачем Oracle. НІКОЛИ не бери userId із req.body,
+req.query або заголовка, який клієнт може довільно змінити.
+
+Якщо authenticate вже ставить req.user.id, можна в requireSchemeAccess
+використовувати req.user.id замість req.auth.userId.
+
+3. repositories/AccessRepository.js
+
+// Підстав свій DBManager: нижче db.execute(sql, binds) повинен повертати
+// { rows: [...] }, де OUT_FORMAT_OBJECT або аналогічний формат.
+// Рядки Oracle мають ключі у ВЕРХНЬОМУ регістрі за замовчуванням.
+
+export class AccessRepository {
+  constructor(db) {
+    this.db = db;
+  }
+
+  async canOnScheme({ userId, schemeId, permission }) {
+    const sql = `
+      SELECT 1 AS ALLOWED
+      FROM dual
+      WHERE EXISTS (
+        SELECT 1
+        FROM doc_scheme s
+        JOIN access_assignment a ON a.user_id = :userId
+        JOIN access_role r ON r.role_id = a.role_id
+        JOIN access_role_permission rp ON rp.role_id = r.role_id
+        JOIN access_permission p ON p.permission_id = rp.permission_id
+        WHERE s.id = :schemeId
+          AND p.permission_code = :permission
+          AND a.revoked_at IS NULL
+          AND (a.valid_from IS NULL OR a.valid_from <= SYSTIMESTAMP)
+          AND (a.valid_to IS NULL OR a.valid_to > SYSTIMESTAMP)
+          AND (a.scheme_type_id IS NULL OR a.scheme_type_id = s.scheme_type_id)
+          AND (
+               a.scope_type = 'GLOBAL'
+            OR (a.scope_type = 'DIVISION' AND a.scope_id = s.division_id)
+            OR (a.scope_type = 'UNIT'     AND a.scope_id = s.unit_id)
+            OR (a.scope_type = 'ALBUM'    AND a.scope_id = s.album_id)
+            OR (a.scope_type = 'SCHEME'   AND a.scope_id = s.id)
+          )
+      )`;
+
+    const result = await this.db.execute(sql, {
+      userId,
+      schemeId,
+      permission
+    });
+    return result.rows.length > 0;
+  }
+}
+
+ПРИМІТКИ ДО SQL:
+- Це одна коротка перевірка EXISTS; ролі/дозволи не витягуються окремо.
+- Права editor -> scheme.view налаштовуються в ACCESS_ROLE_PERMISSION.
+- Якщо схема має декілька власників, заміни умову на таблицю зв'язків.
+- Якщо є стани ACTIVE у ролей/користувачів, додай їхню перевірку.
+- Для невідомої схеми перевірка поверне false (403). За потреби окремо
+  розрізняй 404/403, але не розкривай зайві відомості.
+- У схемі немає явних DENY; дозволи об'єднуються через OR по призначеннях.
+
+4. services/AccessService.js
+
+export class AccessService {
+  constructor(accessRepository) {
+    this.accessRepository = accessRepository;
+  }
+
+  async canOnScheme(input) {
+    return this.accessRepository.canOnScheme(input);
+  }
+
+  async assertOnScheme(input) {
+    const allowed = await this.canOnScheme(input);
+    if (!allowed) {
+      const error = new Error('FORBIDDEN');
+      error.status = 403;
+      throw error;
+    }
+  }
+}
+
+5. middleware/requireSchemeAccess.js
+
+const ALLOWED_PERMISSIONS = new Set([
+  'scheme.view',
+  'scheme.edit',
+  'scheme.delete',
+  'attachment.create',
+  'attachment.delete'
+]);
+
+export function requireSchemeAccess(accessService, permission) {
+  if (!ALLOWED_PERMISSIONS.has(permission)) {
+    throw new Error(`Unknown permission: ${permission}`);
+  }
+
+  return async function (req, res, next) {
+    try {
+      const userId = Number(req.auth?.userId);
+      const schemeId = Number(req.params.schemeId);
+
+      if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+      }
+      if (!Number.isSafeInteger(schemeId) || schemeId <= 0) {
+        return res.status(400).json({ error: 'INVALID_SCHEME_ID' });
+      }
+
+      const allowed = await accessService.canOnScheme({
+        userId,
+        schemeId,
+        permission
+      });
+      if (!allowed) {
+        return res.status(403).json({ error: 'FORBIDDEN' });
+      }
+      next();
+    } catch (error) {
+      next(error); // Помилки Oracle не маскуємо під «немає прав»
+    }
+  };
+}
+
+6. routes/schemeRoutes.js — ЯК ПІДКЛЮЧИТИ
+
+import { Router } from 'express';
+import { requireSchemeAccess } from '../middleware/requireSchemeAccess.js';
+
+export function createSchemeRoutes({ authenticate, accessService, controller }) {
+  const router = Router();
+  router.use(authenticate); // на всі маршрути цього router
+
+  router.get(
+    '/:schemeId',
+    requireSchemeAccess(accessService, 'scheme.view'),
+    controller.getScheme
+  );
+
+  router.put(
+    '/:schemeId',
+    requireSchemeAccess(accessService, 'scheme.edit'),
+    controller.saveScheme
+  );
+
+  router.delete(
+    '/:schemeId',
+    requireSchemeAccess(accessService, 'scheme.delete'),
+    controller.deleteScheme
+  );
+
+  router.get(
+    '/:schemeId/nodes',
+    requireSchemeAccess(accessService, 'scheme.view'),
+    controller.getNodes
+  );
+
+  router.post(
+    '/:schemeId/attachments',
+    requireSchemeAccess(accessService, 'attachment.create'),
+    controller.addAttachment
+  );
+
+  return router;
+}
+
+// Підключення у app.js:
+// app.use('/api/schemes', createSchemeRoutes({
+//   authenticate, accessService, controller: schemeController
+// }));
+
+7. СПИСКИ СХЕМ — НЕ ПЕРЕВІРЯТИ КОЖНУ В JS
+
+Для GET /api/albums/:albumId/schemes використай один SQL з EXISTS.
+Псевдоінтеграція в SchemeRepository.js:
+
+async function findVisibleSchemes(db, { userId, albumId }) {
+  const sql = `
+    SELECT s.id, s.album_id, s.division_id, s.unit_id, s.scheme_type_id
+    FROM doc_scheme s
+    WHERE s.album_id = :albumId
+      AND EXISTS (
+        SELECT 1
+        FROM access_assignment a
+        JOIN access_role_permission rp ON rp.role_id = a.role_id
+        JOIN access_permission p ON p.permission_id = rp.permission_id
+        WHERE a.user_id = :userId
+          AND p.permission_code = 'scheme.view'
+          AND a.revoked_at IS NULL
+          AND (a.valid_from IS NULL OR a.valid_from <= SYSTIMESTAMP)
+          AND (a.valid_to IS NULL OR a.valid_to > SYSTIMESTAMP)
+          AND (a.scheme_type_id IS NULL OR a.scheme_type_id = s.scheme_type_id)
+          AND (
+               a.scope_type = 'GLOBAL'
+            OR (a.scope_type = 'DIVISION' AND a.scope_id = s.division_id)
+            OR (a.scope_type = 'UNIT' AND a.scope_id = s.unit_id)
+            OR (a.scope_type = 'ALBUM' AND a.scope_id = s.album_id)
+            OR (a.scope_type = 'SCHEME' AND a.scope_id = s.id)
+          )
+      )
+    ORDER BY s.id`;
+  return (await db.execute(sql, { userId, albumId })).rows;
+}
+
+У production додай пагінацію OFFSET/FETCH і перевірку доступу до метаданих
+самого альбому, якщо вони мають окрему конфіденційність.
+Для пошуку схем застосовуй той самий EXISTS прямо у SQL пошуку.
+
+8. ОДНА ДОДАТКОВА ПЕРЕВІРКА В SERVICE ДЛЯ ЗБЕРЕЖЕННЯ
+
+Middleware перевіряє право на URL /schemes/:schemeId, але НЕ гарантує,
+що в тілі запиту немає сторонніх schemeId або заборонених змін належності.
+Мінімально додай в SchemeService перед транзакційним збереженням:
+
+function validateSavePayload(schemeId, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    const e = new Error('INVALID_PAYLOAD'); e.status = 400; throw e;
+  }
+  if (payload.schemeId != null && Number(payload.schemeId) !== schemeId) {
+    const e = new Error('SCHEME_ID_MISMATCH'); e.status = 400; throw e;
+  }
+  // Не дозволяй через JSON змінювати власника, divisionId, unitId,
+  // schemeTypeId, albumId — ці поля змінюються окремою захищеною операцією.
+  // Для indexed-таблиць використовуй schemeId із URL/контексту сервера,
+  // а не з кожного node/edge у клієнтському JSON.
+  // Перевір схему JSON валідатором (наприклад Ajv) та ліміти розміру.
+}
+
+// У SchemeService.saveScheme:
+// validateSavePayload(schemeId, payload);
+// await accessService.assertOnScheme({ userId, schemeId, permission: 'scheme.edit' });
+// await repository.saveSnapshotAndIndexedObjectsInTransaction(...);
+
+Під час критичних змін метаданих перевірку прав та запис виконуй узгоджено
+в транзакції (або з контролем версії), щоб уникнути TOCTOU.
+
+9. ЩО РОБИТИ З ADMIN API
+
+Не видавай права лише тому, що в JWT написано administrator.
+Для POST /api/access/assignments і DELETE /api/access/assignments/:id
+використовуй той самий AccessService, але окрему перевірку:
+- чи має виконавець access.manage;
+- чи охоплює його адміністративний Scope цільового користувача/ресурс;
+- чи дозволено видавати конкретну роль та Scope;
+- чи не намагається він самостійно видати super_administrator.
+Ці операції НЕ покриваються requireSchemeAccess; для них потрібен
+окремий guard у AccessService. Не відкривай admin API без цього.
+
+10. ПРОДУКТИВНІСТЬ: МІНІМУМ НАВАНТАЖЕННЯ
+
+- 1 SQL EXISTS на запит до конкретної схеми; немає N+1 SQL за ролями.
+- 1 SQL із EXISTS для списку схем, фільтрація відбувається в Oracle.
+- Не кешуй права на першому етапі: відкликання ролі діє на наступний запит.
+- Не перевіряй права на кожен onDrag/onMouseMove: фронтенд перевіряє
+  локальний режим; API перевіряє лише реальні HTTP-операції.
+- Для індексів (перевірити наявні, не створювати дублікати):
+    ACCESS_ASSIGNMENT(USER_ID, REVOKED_AT, ROLE_ID)
+    ACCESS_ROLE_PERMISSION(ROLE_ID, PERMISSION_ID)
+    ACCESS_PERMISSION(PERMISSION_CODE) — UNIQUE
+    DOC_SCHEME(ALBUM_ID), DOC_SCHEME(DIVISION_ID), DOC_SCHEME(UNIT_ID)
+  Реальний план запиту перевір через DBMS_XPLAN на своїх даних.
+- Якщо навантаження зросте, кешуй на короткий час з інвалідацією
+  після зміни ролей. Не починай з кешу без потреби.
+
+11. ЯК ВПРОВАДЖУВАТИ ПО КРОКАХ
+
+[ ] 1. Звірити DDL ACCESS_* і фактичну таблицю схем із SQL у п.3/7.
+[ ] 2. Переконатися, що authenticate надійно заповнює req.auth.userId.
+[ ] 3. Додати AccessRepository і AccessService.
+[ ] 4. Додати requireSchemeAccess у PUT /schemes/:schemeId.
+[ ] 5. Перевірити reader, editor свого unit, editor чужого unit.
+[ ] 6. Додати guard до GET/DELETE та attachments, експорту, пошуку.
+[ ] 7. Додати SQL-фільтрацію для списків схем.
+[ ] 8. Захистити всі альтернативні маршрути збереження (batch, draft,
+        stable, snapshot, indexed nodes/edges, autosave, імпорт).
+[ ] 9. Захистити admin API окремими правилами делегування.
+[ ] 10. Протестувати 401/403, підміну schemeId, відкликання ролі,
+         доступ до чужих attachments, помилки БД, конкурентні зміни.
+
+12. ТЕСТОВІ СЦЕНАРІЇ
+
+A. reader GLOBAL, GET /schemes/500 -> 200, PUT -> 403.
+B. editor DIVISION 10 equipment, PUT схеми equipment DIVISION 10 -> 200.
+C. Той самий editor, PUT схеми DIVISION 20 -> 403.
+D. Той самий editor, PUT building DIVISION 10 -> 403.
+E. reader GLOBAL + editor UNIT 101: GET усі, PUT тільки UNIT 101.
+F. Токен відсутній/недійсний -> 401.
+G. Роль відкликана -> наступний PUT -> 403.
+H. Підміна ID у body -> 400; сторонні node IDs не повинні змінити чужу схему.
+I. Помилка Oracle -> 500 через централізований error handler, НЕ 403.
+
+13. ЩО НЕ ВАРТО РОБИТИ
+
+- Не покладатися на ?mode=editor, localStorage або роль із тіла запиту.
+- Не робити тільки frontend-перевірки в Konva.
+- Не перевіряти лише roles.includes('editor') без Scope і типу схеми.
+- Не використовувати одного глобального адміністратора для всіх API.
+- Не перевіряти право на один schemeId, а потім змінювати інший із body.
+- Не змішувати Scope різних призначень: кожен EXISTS-запис сам має
+  одночасно задовольняти permission + scheme type + scope.
+
+ПІДСУМОК
+Для першого етапу достатньо 3 нових файлів (AccessRepository,
+AccessService, requireSchemeAccess), підключення до існуючих routes,
+SQL-фільтрації списків і мінімальної валідації в SchemeService.
+Це не повна IAM-платформа, але надійний і відносно легкий фундамент
+для більшості операцій із схемами. Права залишаються в Oracle 21.

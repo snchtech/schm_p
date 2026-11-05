@@ -1,0 +1,430 @@
+Так. У твоєму проєкті Next.js + Konva + Node.js Express + Oracle 21 middleware для доступів працюватиме як своєрідний контрольний пункт між HTTP-запитом і контролером.
+
+Його головне завдання — не допустити виконання операції, якщо користувач не має відповідних прав.
+
+Але тут є важливий нюанс: middleware не обов'язково повинен самостійно перевіряти ролі, підрозділи, unit та типи схем. Краще, щоб він викликав спеціальний `AccessService`, який містить усю логіку доступів.
+
+Покажу на конкретному прикладі твого редактора схем.
+
+## 1. Що відбувається, коли користувач зберігає схему
+
+Припустимо:
+
+- Користувач має `USER_ID = 125`.
+- Йому призначено роль `editor` для схем обладнання підрозділу 10.
+- Він відкрив схему `SCHEME_ID = 500`.
+- Схема належить підрозділу 10 і має тип `equipment`.
+
+Користувач натискає кнопку «Зберегти» в Konva.
+
+Next.js + Konva
+
+PUT /api/schemes/500
+
+Authorization: Bearer token
+
+1\. authenticate middleware
+
+Токен дійсний? Хто користувач?
+
+USER_ID = 125
+
+2\. requireSchemePermission middleware
+
+Чи дозволено `scheme.edit` для схеми 500?
+
+Викликає AccessService.can()
+
+3\. AccessService + Oracle 21
+
+Перевірка ролі, дозволу, Scope та типу схеми
+
+Дозволено
+
+4\. SchemeController → SchemeService
+
+Валідація JSON та збереження в Oracle
+
+Якщо перевірка не пройшла, запит зупиняється до виконання контролера, а API повертає `403 Forbidden`.
+
+## 2. Що таке middleware у Express
+
+У Express middleware — це звичайна JavaScript-функція, яка отримує три аргументи:
+
+```
+function myMiddleware(req, res, next) {
+  // Перевірки
+
+  next();
+}
+```
+
+Де:
+
+- `req` — інформація про запит: токен, параметри URL, тіло запиту.
+- `res` — відповідь, яку API може повернути користувачу.
+- `next()` — передає виконання наступному middleware або контролеру.
+
+Наприклад:
+
+```
+router.put(
+  "/schemes/:schemeId",
+
+  authenticate,
+  requireSchemePermission("scheme.edit"),
+
+  schemeController.save
+);
+```
+
+Express виконає ці функції послідовно.
+
+Якщо `authenticate` викликає `next()`, виконання переходить до `requireSchemePermission`.
+
+Якщо другий middleware також викликає `next()`, виконується `schemeController.save`.
+
+Якщо будь-який middleware повертає відповідь `401` або `403`, наступні функції цього маршруту не виконуються.
+
+## 3. Перший middleware — визначення користувача
+
+Оскільки ти вже використовуєш токен доступу, можливо, ця частина в тебе реалізована.
+
+Після перевірки токена я рекомендую записувати інформацію про користувача в `req.auth`.
+
+Наприклад:
+
+```
+req.auth = {
+  userId: 125,
+  username: "user125"
+};
+```
+
+Це важливо: `userId` має бути отриманий із перевіреного токена або через надійне зіставлення його ідентифікатора з користувачем у БД, а не з `req.body.userId`.
+
+Тепер кожен наступний middleware може використовувати:
+
+```
+const userId = req.auth.userId;
+```
+
+І йому не потрібно повторно розбирати токен.
+
+## 4. Другий middleware — перевірка дозволу
+
+Ось приклад, який я рекомендую використовувати у твоєму API.
+
+```
+// middleware/requireSchemePermission.js
+
+export const requireSchemePermission =
+  (accessService, permission) =>
+  async (req, res, next) => {
+    try {
+      const userId = req.auth?.userId;
+      const schemeId = Number(req.params.schemeId);
+
+      if (!userId) {
+        return res.status(401).json({
+          message: "Користувач не авторизований"
+        });
+      }
+
+      if (
+        !Number.isSafeInteger(schemeId) ||
+        schemeId <= 0
+      ) {
+        return res.status(400).json({
+          message: "Некоректний ID схеми"
+        });
+      }
+
+      const allowed = await accessService.can({
+        userId,
+        permission,
+        schemeId
+      });
+
+      if (!allowed) {
+        return res.status(403).json({
+          message: "Недостатньо прав доступу"
+        });
+      }
+
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+```
+
+Зверни увагу на цей рядок:
+
+```
+const allowed = await accessService.can({
+  userId,
+  permission,
+  schemeId
+});
+```
+
+Саме тут middleware звертається до централізованої системи доступів.
+
+Він не знає, що таке підрозділ 10, unit 101 чи схема обладнання. Це все перевірятиме `AccessService`.
+
+Така архітектура дозволяє змінювати правила доступу без переписування middleware.
+
+## 5. Що робить AccessService
+
+Припустимо, в Oracle є такі призначення:
+
+| USER_ID | ROLE   | SCOPE_TYPE | SCOPE_ID | SCHEME_TYPE |
+| ------- | ------ | ---------- | -------- | ----------- |
+| 125     | reader | GLOBAL     | —        | ALL         |
+| 125     | editor | DIVISION   | 10       | equipment   |
+
+А схема 500 має такі характеристики:
+
+```
+const scheme = {
+  id: 500,
+  divisionId: 10,
+  unitId: 101,
+  schemeType: "equipment"
+};
+```
+
+`AccessService` виконує приблизно такі дії:
+
+1. Отримує метадані схеми 500 із Oracle.
+2. Отримує активні призначення ролей користувача 125.
+3. Перевіряє, чи є в призначеної ролі дозвіл `scheme.edit`.
+4. Перевіряє, чи збігається тип схеми.
+5. Перевіряє, чи поширюється Scope на цю схему.
+6. Повертає `true` або `false`.
+
+Приклад:
+
+```
+// services/AccessService.js
+
+export class AccessService {
+  constructor(accessRepository, schemeRepository) {
+    this.accessRepository = accessRepository;
+    this.schemeRepository = schemeRepository;
+  }
+
+  async can({ userId, permission, schemeId }) {
+    const scheme =
+      await this.schemeRepository.findById(schemeId);
+
+    if (!scheme) return false;
+
+    const assignments =
+      await this.accessRepository.getActiveAssignments(
+        userId
+      );
+
+    for (const assignment of assignments) {
+      const permissions =
+        await this.accessRepository.getRolePermissions(
+          assignment.roleId
+        );
+
+      if (!permissions.includes(permission)) {
+        continue;
+      }
+
+      if (
+        assignment.schemeTypeId !== null &&
+        assignment.schemeTypeId !== scheme.schemeTypeId
+      ) {
+        continue;
+      }
+
+      if (this.matchesScope(assignment, scheme)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  matchesScope(assignment, scheme) {
+    const scopeType = assignment.scopeType;
+    const scopeId = assignment.scopeId;
+
+    switch (scopeType) {
+      case "GLOBAL":
+        return true;
+
+      case "DIVISION":
+        return scopeId === scheme.divisionId;
+
+      case "UNIT":
+        return scopeId === scheme.unitId;
+
+      case "ALBUM":
+        return scopeId === scheme.albumId;
+
+      case "SCHEME":
+        return scopeId === scheme.id;
+
+      default:
+        return false;
+    }
+  }
+}
+```
+
+Це спрощена реалізація. Для production потрібно додати підтримку ієрархії підрозділів, перевірку статусів призначень і ресурсів та узгодити назви полів із реальною схемою Oracle.
+
+## 6. Чому middleware зручний саме для твого проєкту
+
+Уявімо, що в тебе вже є багато маршрутів:
+
+```
+router.get("/schemes/:schemeId", controller.get);
+router.put("/schemes/:schemeId", controller.save);
+router.delete("/schemes/:schemeId", controller.delete);
+router.get("/schemes/:schemeId/nodes", controller.getNodes);
+router.post("/schemes/:schemeId/attachments", controller.addAttachment);
+```
+
+Тобі не потрібно додавати SQL-перевірки всередину кожного контролера.
+
+Можна підключити middleware:
+
+```
+router.get(
+  "/schemes/:schemeId",
+  authenticate,
+  requireSchemePermission(accessService, "scheme.view"),
+  controller.get
+);
+
+router.put(
+  "/schemes/:schemeId",
+  authenticate,
+  requireSchemePermission(accessService, "scheme.edit"),
+  controller.save
+);
+
+router.delete(
+  "/schemes/:schemeId",
+  authenticate,
+  requireSchemePermission(accessService, "scheme.delete"),
+  controller.delete
+);
+
+router.get(
+  "/schemes/:schemeId/nodes",
+  authenticate,
+  requireSchemePermission(accessService, "scheme.view"),
+  controller.getNodes
+);
+
+router.post(
+  "/schemes/:schemeId/attachments",
+  authenticate,
+  requireSchemePermission(accessService, "attachment.create"),
+  controller.addAttachment
+);
+```
+
+Тепер усі ці маршрути використовують одну систему доступів.
+
+Але перевірки на рівні Service все одно потрібні для операцій, що змінюють дані, особливо коли вони можуть торкатися кількох ресурсів або змінювати належність схеми.
+
+## 7. А що робити з API, яке повертає список схем?
+
+Це інша ситуація.
+
+Наприклад:
+
+```
+GET /api/albums/15/schemes
+```
+
+Тут middleware не може перевірити одну конкретну схему, тому що запит повертає цілий список.
+
+Я рекомендую таку логіку:
+
+```
+router.get(
+  "/albums/:albumId/schemes",
+  authenticate,
+  controller.getAlbumSchemes
+);
+```
+
+А вже в `SchemeService`:
+
+```
+async getAlbumSchemes(userId, albumId) {
+  return this.schemeRepository.findAccessibleSchemes({
+    userId,
+    albumId,
+    permission: "scheme.view"
+  });
+}
+```
+
+У repository SQL-запит повинен повертати тільки ті схеми, до яких користувач має доступ.
+
+Це важливо для продуктивності: не потрібно отримувати тисячі схем, а потім перевіряти кожну окремо.
+
+Також необхідно перевіряти доступ до самого альбому, якщо його метадані або вкладення мають окремі обмеження.
+
+## 8. Як поводитиметься система при зміні ролі
+
+Припустимо, користувач відкрив схему в режимі редагування.
+
+Потім адміністратор відкликав у нього роль `editor`.
+
+Користувач натискає «Зберегти».
+
+Стан до відкликання ролі
+
+Дозволено
+
+API перевіряє `scheme.edit` → знаходить активну роль `editor` → збереження дозволене.
+
+Стан після відкликання ролі
+
+403 Forbidden
+
+API повторно перевіряє `scheme.edit` → активного призначення немає → збереження заборонене.
+
+Це працюватиме одразу після відкликання ролі, якщо API читає актуальні права з Oracle. Якщо використовує кеш, потрібно забезпечити його інвалідацію.
+
+Фронтенд може додатково відреагувати на `403`, показати повідомлення та перевести користувача в режим перегляду, не втрачаючи його незбережені зміни без попередження.
+
+## 9. Що я б реалізував першим
+
+Для початку тобі достатньо чотирьох основних компонентів:
+
+| Компонент                    | Завдання                                   |
+| ---------------------------- | ------------------------------------------ |
+| `authenticate.js`            | Перевірка токена та визначення користувача |
+| `requireSchemePermission.js` | Перевірка доступу перед контролером        |
+| `AccessService.js`           | Центральні правила доступів                |
+| `AccessRepository.js`        | Отримання ролей, дозволів і Scope з Oracle |
+
+Після цього ти зможеш поступово підключати перевірки до наявних маршрутів без суттєвих змін у контролерах.
+
+### Важливий момент щодо `reader` та `editor`
+
+Я рекомендую, щоб `editor` мав також дозвіл `scheme.view` через таблицю `ACCESS_ROLE_PERMISSION`.
+
+Тоді користувачу не потрібно окремо призначати `reader` для тієї самої області лише для того, щоб він міг відкривати схему.
+
+Але якщо потрібно переглядати всі схеми, а редагувати тільки свої, тоді видаються два призначення:
+
+- `reader` → `GLOBAL`
+- `editor` → `DIVISION` або `UNIT`
+
+Це відповідає всім сценаріям, які ми раніше обговорювали.
+
+Підсумок: middleware — це механізм, який перехоплює запит і запитує в `AccessService`, чи можна його виконувати. Самі правила зберігаються централізовано, а ролі та їхні області дії отримуються з Oracle 21. Завдяки цьому однакова політика доступів працюватиме для всіх твоїх маршрутів API, незалежно від того, чи запит надійшов із Next.js, іншого застосунку або напряму через HTTP.
